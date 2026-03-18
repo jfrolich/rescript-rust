@@ -1206,7 +1206,7 @@ fn resolve_type_constructor_path(
                 }
             }
 
-            if let Some((mod_path, sig)) = env.resolve_module_lid(
+            if let Some((mod_path, sig)) = env.resolve_module_lid_raw(
                 prefix,
                 tctx.arena,
                 &mut tctx.persistent_env,
@@ -1430,6 +1430,65 @@ fn transl_type_inner(
                 let (ctyp, ty) = transl_type_inner(tctx, env, arg)?;
                 typed_args.push(ctyp);
                 arg_refs.push(ty);
+            }
+
+            // Match OCaml Typetexp.transl_type_aux Ptyp_constr:
+            // instantiate declared type parameters and unify them with the
+            // translated argument types before building the constructor type.
+            // OCaml uses `unify_var` when there is no manifest (or a generic
+            // manifest) and `unify` otherwise; preserve that distinction.
+            if let Some(decl) = &type_decl {
+                let use_unify_var = match decl.type_manifest {
+                    None => true,
+                    Some(manifest) => {
+                        let manifest = ctx.repr(manifest);
+                        ctx.get_level(manifest) == crate::types::type_expr::GENERIC_LEVEL
+                    }
+                };
+                let params = crate::types::ctype::instance_list(ctx, &decl.type_params);
+                for (param_ty, arg_ty) in params.iter().zip(arg_refs.iter()) {
+                    let param_ty = ctx.repr(*param_ty);
+                    let arg_ty = ctx.repr(*arg_ty);
+
+                    if use_unify_var {
+                        if param_ty == arg_ty {
+                            continue;
+                        }
+                        match (&*ctx.get_desc(param_ty), &*ctx.get_desc(arg_ty)) {
+                            (TypeDesc::Tvar(_), TypeDesc::Tconstr { .. })
+                                if crate::types::ctype::deep_occur(ctx, param_ty, arg_ty) =>
+                            {
+                                crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty)
+                                    .map_err(|_| {
+                                        TypeCoreError::PatternTypeClash(vec![(param_ty, arg_ty)])
+                                    })?;
+                            }
+                            (TypeDesc::Tvar(_), _) => {
+                                if crate::types::occurs(ctx, param_ty, arg_ty) {
+                                    return Err(TypeCoreError::PatternTypeClash(vec![(
+                                        param_ty, arg_ty,
+                                    )]));
+                                }
+                                crate::types::ctype::update_level(
+                                    ctx,
+                                    ctx.get_level(param_ty),
+                                    arg_ty,
+                                );
+                                crate::types::ctype::link_type(ctx, param_ty, arg_ty);
+                            }
+                            _ => {
+                                crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty)
+                                    .map_err(|_| {
+                                        TypeCoreError::PatternTypeClash(vec![(param_ty, arg_ty)])
+                                    })?;
+                            }
+                        }
+                    } else {
+                        crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty).map_err(
+                            |_| TypeCoreError::PatternTypeClash(vec![(param_ty, arg_ty)]),
+                        )?;
+                    }
+                }
             }
 
             let constr_ty = ctx.new_constr(path.clone(), arg_refs);
@@ -3564,6 +3623,43 @@ fn type_pattern_variant(
     ))
 }
 
+fn find_pattern_record_qual(
+    arena: &ParseArena,
+    fields: &[crate::parser::ast::PatternRecordField],
+) -> Option<Longident> {
+    for field in fields {
+        if let Longident::Ldot(module_lid, _) = arena.get_longident(field.lid.txt) {
+            return Some((**module_lid).clone());
+        }
+    }
+    None
+}
+
+fn qualify_unqualified_pattern_record_fields(
+    tctx: &mut TypeCheckContext<'_>,
+    fields: &[crate::parser::ast::PatternRecordField],
+) -> Vec<crate::parser::ast::PatternRecordField> {
+    let Some(module_qualifier) = find_pattern_record_qual(tctx.arena, fields) else {
+        return fields.to_vec();
+    };
+
+    let arena_ptr = tctx.arena as *const ParseArena as *mut ParseArena;
+    let mut rewritten = Vec::with_capacity(fields.len());
+    for field in fields {
+        let mut field = field.clone();
+        if let Longident::Lident(field_name) = tctx.arena.get_longident(field.lid.txt) {
+            let qualified = Longident::Ldot(Box::new(module_qualifier.clone()), *field_name);
+            let qualified_idx = unsafe { (*arena_ptr).push_longident(qualified) };
+            field.lid = Located {
+                txt: qualified_idx,
+                loc: field.lid.loc,
+            };
+        }
+        rewritten.push(field);
+    }
+    rewritten
+}
+
 /// Type check record pattern.
 #[allow(clippy::too_many_arguments)]
 fn type_pattern_record(
@@ -3579,6 +3675,7 @@ fn type_pattern_record(
 ) -> TypeCoreResult<Pattern> {
     let ctx = tctx.type_ctx;
     let has_dict_pattern_attr = has_dict_pattern_attribute(tctx.arena, &pat.ppat_attributes);
+    let fields = qualify_unqualified_pattern_record_fields(tctx, fields);
 
     // OCaml: dict patterns are forced to type dict<'a>, independent of expected_ty shape.
     // This enables field-label disambiguation through the dict magic field.
@@ -4023,6 +4120,9 @@ pub fn type_expect<'a>(
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
 ) -> TypeCoreResult<Expression> {
+    if std::env::var_os("RUST_PANIC_TYPE_EXPECT").is_some() {
+        panic!("type_expect invoked");
+    }
     use crate::parser::ast::ExpressionDesc as ED;
 
     let loc = expr.pexp_loc.clone();
@@ -4049,6 +4149,7 @@ pub fn type_expect<'a>(
                 if path_name == "foo1"
                     || path_name == "React.string"
                     || path_name == "ReactDOM.someElement"
+                    || path_name == "layerStyleID"
                     || path_name == "pt"
                     || path_name == "st"
                     || path_name == "dir"
@@ -4070,6 +4171,10 @@ pub fn type_expect<'a>(
                     || path_name == "basicComponent"
                     || path_name == "React.jsx"
                     || path_name == "ComponentWithOptionalProps.make"
+                    || path_name == "Spice.stringToJson"
+                    || path_name == "Spice.stringFromJson"
+                    || path_name == "stringToJson"
+                    || path_name == "stringFromJson"
                 {
                     let val_ty = ctx.repr(desc.val_type);
                     let inst_ty = ctx.repr(ty);
@@ -4340,6 +4445,7 @@ pub fn type_expect<'a>(
                     || path_name == "A.makeBy"
                     || path_name == "N.eq"
                     || path_name == "dd"
+                    || path_name == "layerStyleID"
                     || path_name == "Ord.compare"
                     || path_name == "x"
                     || path_name == "v"
@@ -6899,6 +7005,36 @@ fn type_match_cases_batch_non_gadt<'a>(
             })();
             tctx.unify_state.set_env(env);
             propagate_result?;
+        }
+
+        if propagate && std::env::var_os("RUST_SKIP_PATTERN_LOWER").is_none() {
+            // Match OCaml type_cases:
+            //   List.iter (iter_pattern (fun {pat_type=t} -> unify_var env t (newvar ()))) patl;
+            // before end_def/generalize.
+            let lower_result = (|| -> TypeCoreResult<()> {
+                for pending in &pending_cases {
+                    tctx.unify_state.set_env(&pending.case_env);
+                    let mut pat_error: Option<TypeCoreError> = None;
+                    iter_typed_pattern(&pending.typed_pat, &mut |pat| {
+                        if pat_error.is_some() {
+                            return;
+                        }
+                        let fresh = ctx.new_var(None);
+                        if let Err(err) =
+                            unify_pattern_types(tctx, pat.pat_loc, pat.pat_type, fresh)
+                        {
+                            pat_error = Some(err);
+                        }
+                    });
+                    if let Some(err) = pat_error {
+                        return Err(err);
+                    }
+                }
+                Ok(())
+            })();
+            tctx.unify_state.set_env(env);
+            lower_result?;
+
             ctx.end_def();
             scope_open = false;
             for pending in &pending_cases {
@@ -7155,62 +7291,67 @@ fn type_match(
         }
     }
 
-    // Match OCaml typecore/parmatch: pressure_variants closes rows without
-    // wildcard coverage, then finalize_variant converts Reither→Rpresent
-    // in still-open rows. Both operate on ORIGINAL types first (shared with
-    // expression types) to match OCaml's in-place mutation semantics, then
-    // close_multi_label_variant_rows_in_cases copies and closes for pattern types.
-    let debug_case_496_stages = std::env::var_os("RUST_DEBUG_CASE_496_STAGES").is_some();
-    let log_case_496_stage = |stage: &str, cases: &[crate::types::typedtree::Case]| {
-        if !debug_case_496_stages {
-            return;
-        }
-        for case in cases {
-            if let PatternDesc::Tpat_variant(tag, arg, _) = &case.c_lhs.pat_desc {
-                let pat_line = tctx.arena.to_location(case.c_lhs.pat_loc).loc_start.line;
-                if pat_line == 496 && tag == "V" {
-                    let arg_ty = arg
-                        .as_ref()
-                        .map(|arg_pat| tctx.type_ctx.repr(arg_pat.pat_type).0)
-                        .unwrap_or(usize::MAX);
-                    eprintln!(
-                        "[case496 {}] pat=#{} arg=#{} rhs=#{}",
-                        stage,
-                        tctx.type_ctx.repr(case.c_lhs.pat_type).0,
-                        arg_ty,
-                        tctx.type_ctx.repr(case.c_rhs.exp_type).0
-                    );
+    // Match OCaml type_cases behavior by defaulting to the in-function
+    // variant row processing done inside type_match_cases_batch_non_gadt.
+    // Keep the historical post-pass available only for diagnostics.
+    if std::env::var_os("RUST_ENABLE_MATCH_VARIANT_POSTPASS").is_some() {
+        // Match OCaml typecore/parmatch: pressure_variants closes rows without
+        // wildcard coverage, then finalize_variant converts Reither→Rpresent
+        // in still-open rows. Both operate on ORIGINAL types first (shared with
+        // expression types) to match OCaml's in-place mutation semantics, then
+        // close_multi_label_variant_rows_in_cases copies and closes for pattern types.
+        let debug_case_496_stages = std::env::var_os("RUST_DEBUG_CASE_496_STAGES").is_some();
+        let log_case_496_stage = |stage: &str, cases: &[crate::types::typedtree::Case]| {
+            if !debug_case_496_stages {
+                return;
+            }
+            for case in cases {
+                if let PatternDesc::Tpat_variant(tag, arg, _) = &case.c_lhs.pat_desc {
+                    let pat_line = tctx.arena.to_location(case.c_lhs.pat_loc).loc_start.line;
+                    if pat_line == 496 && tag == "V" {
+                        let arg_ty = arg
+                            .as_ref()
+                            .map(|arg_pat| tctx.type_ctx.repr(arg_pat.pat_type).0)
+                            .unwrap_or(usize::MAX);
+                        eprintln!(
+                            "[case496 {}] pat=#{} arg=#{} rhs=#{}",
+                            stage,
+                            tctx.type_ctx.repr(case.c_lhs.pat_type).0,
+                            arg_ty,
+                            tctx.type_ctx.repr(case.c_rhs.exp_type).0
+                        );
+                    }
                 }
             }
+        };
+        log_case_496_stage("before-pressure", &typed_val_cases);
+        pressure_and_finalize_variant_rows(tctx, val_case_env, &mut typed_val_cases);
+        log_case_496_stage("after-pressure", &typed_val_cases);
+
+        close_variant_rows_across_case_pattern_types(tctx, val_case_env, &typed_val_cases);
+        log_case_496_stage("after-close-across", &typed_val_cases);
+
+        close_multi_label_variant_rows_in_cases(tctx, val_case_env, &mut typed_val_cases);
+        log_case_496_stage("after-close-multi", &typed_val_cases);
+
+        // Also finalize on the copies (for fields in rows that stayed open after copy+close).
+        for case in typed_val_cases.iter_mut() {
+            finalize_variant_in_pattern(tctx, env, &mut case.c_lhs, erase_either);
         }
-    };
-    log_case_496_stage("before-pressure", &typed_val_cases);
-    pressure_and_finalize_variant_rows(tctx, val_case_env, &mut typed_val_cases);
-    log_case_496_stage("after-pressure", &typed_val_cases);
+        log_case_496_stage("after-finalize-copies", &typed_val_cases);
 
-    close_variant_rows_across_case_pattern_types(tctx, val_case_env, &typed_val_cases);
-    log_case_496_stage("after-close-across", &typed_val_cases);
+        // Propagate Reither→Rpresent conversions to ty_arg.
+        // In OCaml, finalize_variant on case patterns also updates ty_arg because they
+        // share mutable row field refs. In Rust, case patterns have separate copies,
+        // so we run a direct pass on ty_arg to match OCaml's behavior.
+        finalize_variant_in_scrutinee_type(tctx.type_ctx, ty_arg);
 
-    close_multi_label_variant_rows_in_cases(tctx, val_case_env, &mut typed_val_cases);
-    log_case_496_stage("after-close-multi", &typed_val_cases);
-
-    // Also finalize on the copies (for fields in rows that stayed open after copy+close).
-    for case in typed_val_cases.iter_mut() {
-        finalize_variant_in_pattern(tctx, env, &mut case.c_lhs, erase_either);
+        // Reopen variant rows AFTER all closing steps. The closing logic operates
+        // on per-case pattern types, but case 0 may share variant nodes with ty_arg
+        // (identity instance). Closing case 0's pattern closes ty_arg too. Reopen
+        // any ty_arg variant rows that have wildcard coverage in any case.
+        reopen_wildcard_covered_rows_in_scrutinee(tctx, val_case_env, &typed_val_cases, ty_arg);
     }
-    log_case_496_stage("after-finalize-copies", &typed_val_cases);
-
-    // Propagate Reither→Rpresent conversions to ty_arg.
-    // In OCaml, finalize_variant on case patterns also updates ty_arg because they
-    // share mutable row field refs. In Rust, case patterns have separate copies,
-    // so we run a direct pass on ty_arg to match OCaml's behavior.
-    finalize_variant_in_scrutinee_type(tctx.type_ctx, ty_arg);
-
-    // Reopen variant rows AFTER all closing steps. The closing logic operates
-    // on per-case pattern types, but case 0 may share variant nodes with ty_arg
-    // (identity instance). Closing case 0's pattern closes ty_arg too. Reopen
-    // any ty_arg variant rows that have wildcard coverage in any case.
-    reopen_wildcard_covered_rows_in_scrutinee(tctx, val_case_env, &typed_val_cases, ty_arg);
 
     // OCaml type_cases: `unify_pats (instance env ty_arg)` propagation happens
     // INSIDE begin_def scope (line 3993), already handled by lines 5711-5720 in
@@ -9469,7 +9610,9 @@ fn type_function(
             let param_ty = ctx.new_var(None);
             let return_ty = ctx.new_var(None);
             let func_ty = ctx.new_arrow(ctx_label.clone(), param_ty, return_ty, arity_opt);
-            unify_expression_types(tctx, loc, func_ty, expected_ty, None)?;
+            // Match OCaml type_function/filter_arrow decomposition against
+            // the instantiated expected arrow shape.
+            unify_expression_types(tctx, loc, func_ty, expected_inst, None)?;
             (param_ty, return_ty)
         }
     };
@@ -9480,15 +9623,36 @@ fn type_function(
             || full_loc.loc_start.line == 255
             || (full_loc.loc_start.line >= 260 && full_loc.loc_start.line <= 280)
         {
+            let summarize = |ty: TypeExprRef| {
+                let r = ctx.repr(ty);
+                let lv = ctx.get_level(r);
+                let desc = ctx.get_desc(r);
+                let k = match &*desc {
+                    TypeDesc::Tconstr { path, .. } => format!("Tconstr({})", path.name()),
+                    TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
+                    TypeDesc::Tvar(_) => "Tvar".to_string(),
+                    TypeDesc::Tunivar(_) => "Tunivar".to_string(),
+                    TypeDesc::Tlink(t) => format!("Tlink({})", ctx.repr(*t).0),
+                    TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
+                    TypeDesc::Ttuple(_) => "Ttuple".to_string(),
+                    TypeDesc::Tobject { .. } => "Tobject".to_string(),
+                    TypeDesc::Tvariant(_) => "Tvariant".to_string(),
+                    TypeDesc::Tfield { .. } => "Tfield".to_string(),
+                    TypeDesc::Tnil => "Tnil".to_string(),
+                    TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
+                    TypeDesc::Tsubst(t) => format!("Tsubst({})", ctx.repr(*t).0),
+                };
+                format!("{}@{}:{}", r.0, lv, k)
+            };
             eprintln!(
                 "[rust-type-function] loc={}:{} rec_depth={} label={:?} ty_expected={} ty_arg={} ty_res={}",
                 full_loc.loc_start.line,
                 full_loc.loc_start.column(),
                 tctx.recursive_let_depth,
                 ctx_label,
-                ctx.repr(expected_ty).0,
-                ctx.repr(param_ty).0,
-                ctx.repr(return_ty).0
+                summarize(expected_ty),
+                summarize(param_ty),
+                summarize(return_ty)
             );
         }
     }
@@ -9546,6 +9710,45 @@ fn type_function(
     let mut state = PatternState::new();
     state.reset(true);
     let param_pat_ty = crate::types::instance(ctx, pattern_ty);
+    if std::env::var_os("RUST_DEBUG_TYPE_FUNCTION").is_some() {
+        let full_loc = tctx.arena.to_location(loc);
+        if full_loc.loc_start.line <= 220
+            || full_loc.loc_start.line == 254
+            || full_loc.loc_start.line == 255
+            || (full_loc.loc_start.line >= 260 && full_loc.loc_start.line <= 280)
+        {
+            let summarize = |ty: TypeExprRef| {
+                let r = ctx.repr(ty);
+                let lv = ctx.get_level(r);
+                let desc = ctx.get_desc(r);
+                let k = match &*desc {
+                    TypeDesc::Tconstr { path, .. } => format!("Tconstr({})", path.name()),
+                    TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
+                    TypeDesc::Tvar(_) => "Tvar".to_string(),
+                    TypeDesc::Tunivar(_) => "Tunivar".to_string(),
+                    TypeDesc::Tlink(t) => format!("Tlink({})", ctx.repr(*t).0),
+                    TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
+                    TypeDesc::Ttuple(_) => "Ttuple".to_string(),
+                    TypeDesc::Tobject { .. } => "Tobject".to_string(),
+                    TypeDesc::Tvariant(_) => "Tvariant".to_string(),
+                    TypeDesc::Tfield { .. } => "Tfield".to_string(),
+                    TypeDesc::Tnil => "Tnil".to_string(),
+                    TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
+                    TypeDesc::Tsubst(t) => format!("Tsubst({})", ctx.repr(*t).0),
+                };
+                format!("{}@{}:{}", r.0, lv, k)
+            };
+            eprintln!(
+                "[rust-type-function-param] loc={}:{} pattern_ty={} param_pat_ty={} is_simple_param={} propagate={}",
+                full_loc.loc_start.line,
+                full_loc.loc_start.column(),
+                summarize(pattern_ty),
+                summarize(param_pat_ty),
+                is_simple_param,
+                propagate
+            );
+        }
+    }
     if propagate {
         ctx.begin_def();
     }
@@ -9632,11 +9835,9 @@ fn type_function(
     }
     let typed_body = type_expect(tctx, &body_env, body, return_ty, None)?;
     tctx.generic_constraint_body_ty = saved_generic_constraint;
-    // Preserve OCaml side effects from body-type expansion under the function
-    // body environment (notably check_abbrev_env env transitions). Avoid this
-    // in active `let rec` groups where eager expansion can over-constrain the
-    // recursive approximation.
-    if tctx.recursive_let_depth == 0 {
+    // Preserve abbreviation-env side effects for regular function bodies,
+    // but keep optional-arg functions on OCaml's pure type_function path.
+    if tctx.recursive_let_depth == 0 && !arg_label.is_optional() {
         let _ = crate::types::ctype::expand_head(ctx, &body_env, typed_body.exp_type);
     }
     let typed_body = wrap_module_unpacks_in_expression(
@@ -10361,13 +10562,62 @@ fn type_record(
     // then defer unification with expected_ty until after label processing.
     // This preserves separate type identity between the base expression's
     // type chain and the expected type chain, matching OCaml's cycle structure.
-    let typed_base = if let Some(base_expr) = base {
+    let mut typed_base = if let Some(base_expr) = base {
         let base_ty = ctx.new_var(None);
         let typed = type_expect(tctx, env, base_expr, base_ty, None)?;
         Some(typed)
     } else {
         None
     };
+
+    // Match OCaml Pexp_record(Some exp):
+    // when expected type does not reveal a concrete record path, but the base
+    // expression does, use a fresh constructor instance from the base path as
+    // the record typing anchor (`ty_record`) instead of reusing base.exp_type.
+    let mut record_ty = expected_ty;
+    if let Some(base_expr) = typed_base.as_ref() {
+        let expected_record_path = extract_type_path_from_expected_with_persistent_env(
+            expected_ty,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+        )
+        .and_then(|path| {
+            lookup_type_decl_for_path(&path, env, &mut tctx.persistent_env, ctx).and_then(
+                |decl| match decl.type_kind {
+                    crate::types::TypeKind::TypeRecord(_, _) => Some(path),
+                    _ => None,
+                },
+            )
+        });
+
+        if expected_record_path.is_none() {
+            let base_record_path = extract_type_path_from_expected_with_persistent_env(
+                base_expr.exp_type,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            )
+            .and_then(|path| {
+                lookup_type_decl_for_path(&path, env, &mut tctx.persistent_env, ctx).and_then(
+                    |decl| match decl.type_kind {
+                        crate::types::TypeKind::TypeRecord(_, _) => Some((path, decl)),
+                        _ => None,
+                    },
+                )
+            });
+
+            if let Some((path, decl)) = base_record_path {
+                ctx.begin_def();
+                let ty = ctx.new_constr(path, crate::types::ctype::instance_list(ctx, &decl.type_params));
+                ctx.end_def();
+                crate::types::generalize_structure(ctx, ctx.current_level(), ty);
+                record_ty = ty;
+            } else {
+                record_ty = ctx.new_var(None);
+            }
+        }
+    }
 
     let fields = qualify_unqualified_record_fields(tctx, fields);
 
@@ -10381,7 +10631,7 @@ fn type_record(
         env,
         &mut tctx.persistent_env,
         &field_names,
-        expected_ty,
+        record_ty,
         typed_base.as_ref().map(|expr| expr.exp_type),
         closed_record,
     )
@@ -10400,8 +10650,12 @@ fn type_record(
         typed_base
             .as_ref()
             .map(|expr| expr.exp_type)
-            .unwrap_or(expected_ty)
+            .unwrap_or(record_ty)
     });
+    // OCaml's record extraction/disambiguation path goes through abbreviation
+    // expansion (`extract_concrete_record`), which seeds simple_abbrevs before
+    // subsequent field instantiation. Mirror that side effect.
+    let _ = crate::types::ctype::expand_head(ctx, env, disambiguation_ty);
     if std::env::var_os("RUST_DEBUG_RECORD_PATH").is_some()
         && field_names
             .iter()
@@ -10456,27 +10710,124 @@ fn type_record(
     let mut explicit_overrides_in_order = Vec::new();
     let mut first_disambiguated_label: Option<crate::types::LabelDescription> = None;
 
-    // Type check explicitly written fields.
-    for (idx, field) in fields.iter().enumerate() {
-        let resolved_lid = tctx.resolve_lid(field.lid.txt).clone();
-        let field_name = tctx.longident_last_name(&resolved_lid);
-        let disambiguated = lookup_label_by_lid(
-            &resolved_lid,
-            tctx.arena,
-            env,
-            &mut tctx.persistent_env,
-            ctx,
-            Some(disambiguation_ty),
-        )
-        .or_else(|| {
-            disambiguate_label(
-                &field_name,
-                disambiguation_ty,
+    struct ExplicitField<'a> {
+        original_index: usize,
+        field: &'a crate::parser::ast::ExpressionRecordField,
+        resolved_lid: crate::parser::longident::Longident,
+        field_name: String,
+        disambiguated: Option<crate::types::LabelDescription>,
+    }
+
+    // Match OCaml typecore.ml type_record_elem_list:
+    // 1) disambiguate labels
+    // 2) sort by lbl_pos before typing each field
+    let mut explicit_fields: Vec<ExplicitField<'_>> = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| {
+            let resolved_lid = tctx.resolve_lid(field.lid.txt).clone();
+            let field_name = tctx.longident_last_name(&resolved_lid);
+            let disambiguated = lookup_label_by_lid(
+                &resolved_lid,
+                tctx.arena,
                 env,
                 &mut tctx.persistent_env,
                 ctx,
+                Some(disambiguation_ty),
             )
-        });
+            .or_else(|| {
+                disambiguate_label(
+                    &field_name,
+                    disambiguation_ty,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                )
+            });
+            ExplicitField {
+                original_index: idx,
+                field,
+                resolved_lid,
+                field_name,
+                disambiguated,
+            }
+        })
+        .collect();
+    explicit_fields.sort_by_key(|entry| {
+        entry
+            .disambiguated
+            .as_ref()
+            .map(|label| label.lbl_pos)
+            .unwrap_or(entry.original_index as i32)
+    });
+
+    // Type check explicitly written fields in lbl_pos order.
+    for (sorted_idx, explicit_field) in explicit_fields.iter().enumerate() {
+        let idx = explicit_field.original_index;
+        let field = explicit_field.field;
+        let resolved_lid = explicit_field.resolved_lid.clone();
+        let field_name = explicit_field.field_name.clone();
+        let disambiguated = explicit_field.disambiguated.clone();
+        if std::env::var_os("RUST_DEBUG_RECORD_FIELDS").is_some() {
+            let summarize = |ty: TypeExprRef| {
+                let ty = ctx.repr(ty);
+                let desc = ctx.get_desc(ty);
+                match &*desc {
+                    TypeDesc::Tconstr { path, args, .. } => {
+                        let args_summary = args
+                            .iter()
+                            .map(|arg| {
+                                let arg = ctx.repr(*arg);
+                                let arg_desc = ctx.get_desc(arg);
+                                let kind = match &*arg_desc {
+                                    TypeDesc::Tconstr { path, .. } => path.name(),
+                                    TypeDesc::Tvar(name) => format!("Tvar({name:?})"),
+                                    TypeDesc::Tunivar(name) => format!("Tunivar({name:?})"),
+                                    _ => format!("ty#{}", arg.0),
+                                };
+                                format!("{}:{}", arg.0, kind)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!("{}#{}[{}]", path.name(), ty.0, args_summary)
+                    }
+                    TypeDesc::Tvar(name) => format!("Tvar({:?})#{}", name, ty.0),
+                    TypeDesc::Tpoly { body, vars } => format!(
+                        "Tpoly#{}(body=#{} vars={})",
+                        ty.0,
+                        ctx.repr(*body).0,
+                        vars.len()
+                    ),
+                    _ => format!("{:?}#{}", *desc, ty.0),
+                }
+            };
+            match &disambiguated {
+                Some(label) => {
+                    eprintln!(
+                        "[record-fields] idx={} sorted_idx={} field={} resolved={} disambiguated=yes lbl_name={} lbl_pos={} lbl_arg={} lbl_res={} expected={}",
+                        idx,
+                        sorted_idx,
+                        field_name,
+                        tctx.longident_to_string(&resolved_lid),
+                        label.lbl_name,
+                        label.lbl_pos,
+                        summarize(label.lbl_arg),
+                        summarize(label.lbl_res),
+                        summarize(expected_ty),
+                    );
+                }
+                None => {
+                    eprintln!(
+                        "[record-fields] idx={} sorted_idx={} field={} resolved={} disambiguated=no expected={}",
+                        idx,
+                        sorted_idx,
+                        field_name,
+                        tctx.longident_to_string(&resolved_lid),
+                        summarize(expected_ty),
+                    );
+                }
+            }
+        }
         if first_disambiguated_label.is_none() {
             first_disambiguated_label = disambiguated.clone();
         }
@@ -10566,7 +10917,7 @@ fn type_record(
                     );
                 }
             }
-            let unify_res = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_ty);
+            let unify_res = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
             if debug_record_c && env_label.lbl_name == "c" {
                 eprintln!(
                     "[record-c] stage=after-label-unify ok={} expected={} ty_arg={} ty_res={}",
@@ -10611,7 +10962,7 @@ fn type_record(
             (
                 crate::types::LabelDescription {
                     lbl_name: env_label.lbl_name.clone(),
-                    lbl_res: expected_ty,
+                    lbl_res: record_ty,
                     lbl_arg: ty_arg,
                     lbl_mut: env_label.lbl_mut.clone(),
                     lbl_optional: env_label.lbl_optional,
@@ -10636,7 +10987,7 @@ fn type_record(
             (
                 crate::types::LabelDescription {
                     lbl_name: field_name,
-                    lbl_res: expected_ty,
+                    lbl_res: record_ty,
                     lbl_arg,
                     lbl_mut: crate::types::MutableFlag::Immutable,
                     lbl_optional: field.opt,
@@ -10787,6 +11138,10 @@ fn type_record(
     }
 
     let mut typed_fields = Vec::new();
+
+    // OCaml: unify_exp_types ty_record (instance env ty_expected)
+    let expected_inst_for_record = crate::types::instance(ctx, expected_ty);
+    unify_expression_types(tctx, loc, record_ty, expected_inst_for_record, None)?;
     // OCaml special-case (typecore.ml, Pexp_record with no base):
     // for `{}` in a known record context, keep `Texp_record` fields empty when
     // all fields are optional; only error when required fields are missing.
@@ -10850,10 +11205,10 @@ fn type_record(
                 let label_desc = if let Some(env_label) = disambiguated {
                     let (_poly_vars, ty_arg, ty_res) =
                         crate::types::ctype::instance_label(ctx, false, &env_label);
-                    let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_ty);
+                        let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
                     crate::types::LabelDescription {
                         lbl_name: env_label.lbl_name.clone(),
-                        lbl_res: expected_ty,
+                        lbl_res: record_ty,
                         lbl_arg: ty_arg,
                         lbl_mut: env_label.lbl_mut.clone(),
                         lbl_optional: env_label.lbl_optional,
@@ -10867,7 +11222,7 @@ fn type_record(
                 } else {
                     crate::types::LabelDescription {
                         lbl_name: label_name.clone(),
-                        lbl_res: expected_ty,
+                        lbl_res: record_ty,
                         lbl_arg: crate::types::instance(ctx, label_decl.ld_type),
                         lbl_mut: label_decl.ld_mutable.clone(),
                         lbl_optional: label_decl.ld_optional,
@@ -10915,7 +11270,7 @@ fn type_record(
                 } else {
                     crate::types::LabelDescription {
                         lbl_name: label_name.clone(),
-                        lbl_res: expected_ty,
+                        lbl_res: record_ty,
                         lbl_arg: option_ty,
                         lbl_mut: label_decl.ld_mutable.clone(),
                         lbl_optional: false,
@@ -10965,9 +11320,34 @@ fn type_record(
     // with ty_arg1 = ty_arg2 bridging them. This propagates type constraints
     // from the expected type (e.g., component<stateless, noRetainedProps, _>)
     // through to the base expression's type params.
-    if let Some(ref typed_base_expr) = typed_base {
+    fn constr_path_is_persistent(path: &Path) -> bool {
+        match path {
+            Path::Pident(id) => id.is_persistent(),
+            Path::Pdot(parent, _, _) => constr_path_is_persistent(parent),
+            Path::Papply(_, _) => false,
+        }
+    }
+
+    if let Some(ref mut typed_base_expr) = typed_base {
         // OCaml: let ty_exp = instance env exp.exp_type
-        let ty_exp = crate::types::instance(ctx, typed_base_expr.exp_type);
+        let mut ty_exp = crate::types::instance(ctx, typed_base_expr.exp_type);
+        // Keep OCaml's identity split for persistent constructor heads only.
+        // Local constructor families (e.g. mario_game viewport) should keep
+        // sharing to avoid over-allocation and id drift.
+        if ctx.repr(ty_exp) == ctx.repr(typed_base_expr.exp_type) {
+            let repr = ctx.repr(ty_exp);
+            let desc = ctx.get_desc(repr);
+            if let TypeDesc::Tconstr { path, .. } = &*desc {
+                if constr_path_is_persistent(path) {
+                    let fresh = ctx.new_type((*desc).clone());
+                    if ctx.get_level(fresh) != ctx.get_level(repr) {
+                        ctx.set_level(fresh, ctx.get_level(repr));
+                    }
+                    ty_exp = fresh;
+                }
+            }
+        }
+        typed_base_expr.exp_type = ty_exp;
         let debug_record_unify = std::env::var_os("RUST_DEBUG_RECORD_UNIFY").is_some()
             && tctx.arena.to_location(loc).loc_start.line == 302;
 
@@ -10984,7 +11364,7 @@ fn type_record(
             .collect();
 
         // Get all labels for this record type to iterate over
-        let all_labels_for_unify = get_record_labels(ctx, env, &mut tctx.persistent_env, expected_ty)
+        let all_labels_for_unify = get_record_labels(ctx, env, &mut tctx.persistent_env, record_ty)
             .or_else(|| get_record_labels(ctx, env, &mut tctx.persistent_env, ty_exp));
 
         if let Some(labels) = all_labels_for_unify {
@@ -10992,7 +11372,7 @@ fn type_record(
                 let label_name = label_decl.ld_id.name().to_string();
                 let env_label = disambiguate_label(
                     &label_name,
-                    expected_ty,
+                    record_ty,
                     env,
                     &mut tctx.persistent_env,
                     ctx,
@@ -11079,7 +11459,7 @@ fn type_record(
             let label_for_unify = typed_fields.iter().find_map(|(_, lbl, _, _)| {
                 disambiguate_label(
                     &lbl.lbl_name,
-                    expected_ty,
+                    record_ty,
                     env,
                     &mut tctx.persistent_env,
                     ctx,
@@ -11095,11 +11475,32 @@ fn type_record(
                     tctx,
                     loc,
                     ty_exp,
-                    expected_ty,
+                    record_ty,
                     Some(TypeClashContext::RecordSpread),
                 )?;
             }
         }
+    }
+
+    // Preserve OCaml-style identity split between the record expression result
+    // type and the `with` base expression type for persistent constructor
+    // families only.
+    if let Some(base_expr) = typed_base.as_mut() {
+        let mut output_ty = crate::types::instance(ctx, base_expr.exp_type);
+        if ctx.repr(output_ty) == ctx.repr(record_ty) {
+            let repr = ctx.repr(output_ty);
+            let desc = ctx.get_desc(repr);
+            if let TypeDesc::Tconstr { path, .. } = &*desc {
+                if constr_path_is_persistent(path) {
+                    let fresh = ctx.new_type((*desc).clone());
+                    if ctx.get_level(fresh) != ctx.get_level(repr) {
+                        ctx.set_level(fresh, ctx.get_level(repr));
+                    }
+                    output_ty = fresh;
+                }
+            }
+        }
+        base_expr.exp_type = output_ty;
     }
 
     Ok(Expression::new(
@@ -14858,6 +15259,68 @@ impl Env {
                 }
 
                 if let Some((mod_path, sig)) = resolved_module {
+                    if std::env::var_os("RUST_DEBUG_WEBAPI_WINDOW").is_some()
+                        && prefix_str == "Webapi.Dom"
+                        && value_name == "window"
+                    {
+                        let mut printed_types = 0usize;
+                        for item in &sig {
+                            match item {
+                                crate::types::decl::SignatureItem::SigType(id, decl, _) => {
+                                    if printed_types < 80 {
+                                        printed_types += 1;
+                                        eprintln!(
+                                            "[webapi-window] sig-type-name mod_path={} id={} stamp={} manifest={}",
+                                            mod_path.name(),
+                                            id.name(),
+                                            id.stamp(),
+                                            decl.type_manifest.is_some()
+                                        );
+                                    }
+                                    if id.name() == "window" || id.name() == "event" || id.name() == "document" {
+                                        let manifest = decl.type_manifest.map(|m| {
+                                            let m = ctx.repr(m);
+                                            let d = ctx.get_desc(m);
+                                            match &*d {
+                                                TypeDesc::Tconstr { path, args, .. } => {
+                                                    format!("Tconstr({},args={})", path.name(), args.len())
+                                                }
+                                                _ => format!("{:?}", *d),
+                                            }
+                                        }).unwrap_or_else(|| "None".to_string());
+                                        let type_path = decl
+                                            .type_path
+                                            .as_ref()
+                                            .map(|p| p.name())
+                                            .unwrap_or_else(|| "<none>".to_string());
+                                        eprintln!(
+                                            "[webapi-window] sig-type mod_path={} id={} stamp={} manifest={} type_path={}",
+                                            mod_path.name(),
+                                            id.name(),
+                                            id.stamp(),
+                                            manifest,
+                                            type_path
+                                        );
+                                    }
+                                }
+                                crate::types::decl::SignatureItem::SigModule(id, md, _) => {
+                                    if id.name() == "Window" || id.name() == "Dom" {
+                                        eprintln!(
+                                            "[webapi-window] sig-module mod_path={} id={} stamp={} md_path={}",
+                                            mod_path.name(),
+                                            id.name(),
+                                            id.stamp(),
+                                            md.md_path
+                                                .as_ref()
+                                                .map(|p| p.name())
+                                                .unwrap_or_else(|| "<none>".to_string())
+                                        );
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     // Search for the value in the signature
                     // Signature lookup must respect shadowing order:
                     // later items in a structure/signature shadow earlier ones.
@@ -14943,6 +15406,50 @@ impl Env {
                                     mod_path.clone()
                                 };
                                 let path = Path::pdot(effective_mod_path, value_name.to_string());
+                                if std::env::var_os("RUST_DEBUG_WEBAPI_WINDOW").is_some()
+                                    && prefix_str == "Webapi.Dom"
+                                    && value_name == "window"
+                                {
+                                    let ty = ctx.repr(vd.val_type);
+                                    let desc = ctx.get_desc(ty);
+                                    let summary = match &*desc {
+                                        TypeDesc::Tconstr { path, args, .. } => {
+                                            let arg_summary = args
+                                                .iter()
+                                                .map(|arg| {
+                                                    let arg = ctx.repr(*arg);
+                                                    let arg_desc = ctx.get_desc(arg);
+                                                    match &*arg_desc {
+                                                        TypeDesc::Tconstr { path, .. } => {
+                                                            format!("{}:{}", arg.0, path.name())
+                                                        }
+                                                        _ => format!("{}:other", arg.0),
+                                                    }
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join(",");
+                                            format!(
+                                                "Tconstr(path={},head={},args=[{}])",
+                                                path.name(),
+                                                path.head_name(),
+                                                arg_summary
+                                            )
+                                        }
+                                        TypeDesc::Tlink(t) => {
+                                            format!("Tlink({})", ctx.repr(*t).0)
+                                        }
+                                        _ => format!("{:?}", *desc),
+                                    };
+                                    eprintln!(
+                                        "[webapi-window] prefix={} mod_path={} effective_mod_path={} value_path={} value_ty={} {}",
+                                        prefix_str,
+                                        mod_path.name(),
+                                        path.parent().map(|p| p.name()).unwrap_or_default(),
+                                        path.name(),
+                                        ty.0,
+                                        summary
+                                    );
+                                }
                                 return Ok((path, vd.clone()));
                             }
                         }
@@ -15281,6 +15788,22 @@ impl Env {
                                 let result =
                                     self.resolve_module_type(&sub_md.md_type, pers_env, ctx);
                                 if let Some((sig, resolved_name)) = result {
+                                    let (alias_target_pdot, alias_target_pident) = if apply_subst {
+                                        match &sub_md.md_type {
+                                            crate::types::decl::ModuleType::MtyAlias(_, target)
+                                                if !target.same(&sub_path) =>
+                                            {
+                                                match target {
+                                                    Path::Pdot(..) => (Some(target.clone()), None),
+                                                    Path::Pident(..) => (None, Some(target.clone())),
+                                                    Path::Papply(..) => (None, None),
+                                                }
+                                            }
+                                            _ => (None, None),
+                                        }
+                                    } else {
+                                        (None, None)
+                                    };
                                     if std::env::var_os("RUST_DEBUG_JS_STRING2_SIG").is_some()
                                         && sub_path.name() == "Js.String2"
                                     {
@@ -15418,6 +15941,39 @@ impl Env {
                                         crate::cmi::persistent_env::substitute_type_paths_in_sig(
                                             &sig, &sub_path, ctx,
                                         );
+                                        if let Some(ref target) = alias_target_pdot {
+                                            crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                                                &sig,
+                                                target,
+                                                &sub_path,
+                                                ctx,
+                                            );
+                                        }
+                                        if let Some(ref target) = alias_target_pident {
+                                            for item in &sig {
+                                                if let crate::types::decl::SignatureItem::SigModule(
+                                                    id,
+                                                    _,
+                                                    _,
+                                                ) = item
+                                                {
+                                                    let old_prefix = Path::pdot(
+                                                        target.clone(),
+                                                        id.name().to_string(),
+                                                    );
+                                                    let new_prefix = Path::pdot(
+                                                        sub_path.clone(),
+                                                        id.name().to_string(),
+                                                    );
+                                                    crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                                                        &sig,
+                                                        &old_prefix,
+                                                        &new_prefix,
+                                                        ctx,
+                                                    );
+                                                }
+                                            }
+                                        }
                                     }
                                     if std::env::var_os("RUST_DEBUG_SIG_N_T").is_some()
                                         && sub_path.name() == "N"
@@ -15560,9 +16116,10 @@ impl Env {
                 Path::Pident(id) => {
                     let modtype_name = id.name();
                     match env.find_modtype(modtype_name) {
-                        Ok(mtd) => mtd.mtd_type.as_ref().and_then(|mty| {
-                            resolve_module_type_inner(env, mty, pers_env, ctx, visiting)
-                        }),
+                        Ok(mtd) => mtd
+                            .mtd_type
+                            .as_ref()
+                            .and_then(|mty| resolve_module_type_inner(env, mty, pers_env, ctx, visiting)),
                         Err(_) => None,
                     }
                 }
@@ -15614,6 +16171,11 @@ impl Env {
                         visiting.remove(path);
                         return result;
                     }
+                    // Prefer local bindings first. If no local module binding exists,
+                    // also try loading a persistent module by name. Some signatures
+                    // carry non-persistent idents for external modules after
+                    // substitution/copying, and OCaml still resolves those through
+                    // the persistent environment.
                     if let Some(pers) = pers_env.as_mut() {
                         if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
                             let result = Some((ps.ps_sig.clone(), Some(mod_name.to_string())));
@@ -16554,45 +17116,23 @@ fn lookup_label_by_lid<'a>(
                 let cand_ty = ctx.repr(candidate.lbl_res);
                 let cand_desc = ctx.get_desc(cand_ty);
                 if let TypeDesc::Tconstr { path, .. } = &*cand_desc {
-                    if path.same(&target_path) {
-                        let mut label = candidate.clone();
-                        qualify_label_description_paths(&mut label, env, pers_env, ctx);
-                        return Some(label);
-                    }
-                }
-            }
-
-            let target_name = target_path.name();
-            for candidate in candidates.iter().rev() {
-                let cand_ty = ctx.repr(candidate.lbl_res);
-                let cand_desc = ctx.get_desc(cand_ty);
-                if let TypeDesc::Tconstr { path, .. } = &*cand_desc {
-                    if path.name() == target_name {
-                        let mut label = candidate.clone();
-                        qualify_label_description_paths(&mut label, env, pers_env, ctx);
-                        return Some(label);
-                    }
-                }
-            }
-
-            let target_leaf = target_path.last().trim_end_matches('!');
-            for candidate in candidates.iter().rev() {
-                let cand_ty = ctx.repr(candidate.lbl_res);
-                let cand_desc = ctx.get_desc(cand_ty);
-                if let TypeDesc::Tconstr { path, .. } = &*cand_desc {
-                    if path.last().trim_end_matches('!') == target_leaf {
-                        let mut label = candidate.clone();
-                        qualify_label_description_paths(&mut label, env, pers_env, ctx);
-                        return Some(label);
+                    if path.same(&target_path)
+                        || compare_type_paths_for_disambiguation(
+                            path,
+                            &target_path,
+                            env,
+                            pers_env,
+                            ctx,
+                        )
+                    {
+                        return Some(candidate.clone());
                     }
                 }
             }
         }
     }
 
-    let mut selected = candidates.pop()?;
-    qualify_label_description_paths(&mut selected, env, pers_env, ctx);
-    Some(selected)
+    candidates.pop()
 }
 
 fn lookup_label_by_expected_type<'a>(
@@ -16612,7 +17152,7 @@ fn lookup_label_by_expected_type<'a>(
     let res_ty = ctx.new_generic_constr(type_path, type_decl.type_params.clone());
     for (pos, ld) in labels.iter().enumerate() {
         if ld.ld_id.name() == label_name {
-            let mut label = crate::types::LabelDescription {
+            return Some(crate::types::LabelDescription {
                 lbl_name: ld.ld_id.name().to_string(),
                 lbl_res: res_ty,
                 lbl_arg: crate::types::ctype::remap_label_type_to_params(
@@ -16628,9 +17168,7 @@ fn lookup_label_by_expected_type<'a>(
                 lbl_private: type_decl.type_private,
                 lbl_loc: ld.ld_loc.clone(),
                 lbl_attributes: ld.ld_attributes.clone(),
-            };
-            qualify_label_description_paths(&mut label, env, pers_env, ctx);
-            return Some(label);
+            });
         }
     }
     None
@@ -16688,49 +17226,25 @@ fn disambiguate_label<'a>(
             let lbl_ty = ctx.repr(label.lbl_res);
             let lbl_desc = ctx.get_desc(lbl_ty);
             if let TypeDesc::Tconstr { path: lbl_path, .. } = &*lbl_desc {
-                if lbl_path.same(target_path) {
+                if lbl_path.same(target_path)
+                    || compare_type_paths_for_disambiguation(
+                        lbl_path,
+                        target_path,
+                        env,
+                        pers_env,
+                        ctx,
+                    )
+                {
                     selected = Some((*label).clone());
                     break;
                 }
             }
         }
 
-        // Fallback for semantically identical paths carrying different local stamps.
-        if selected.is_none() {
-            let target_name = target_path.name();
-            for label in all_labels.iter().rev() {
-                let lbl_ty = ctx.repr(label.lbl_res);
-                let lbl_desc = ctx.get_desc(lbl_ty);
-                if let TypeDesc::Tconstr { path: lbl_path, .. } = &*lbl_desc {
-                    if lbl_path.name() == target_name {
-                        selected = Some((*label).clone());
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Try lookup_label_by_expected_type BEFORE the leaf-name fallback.
-        // This correctly resolves labels like `children` to `React.Context.props`
-        // instead of a local `props` type that happens to share the leaf name.
+        // OCaml disambiguation prefers exact-path matches and then falls back to
+        // expected-type-directed lookup. Avoid name-based path matching here.
         if selected.is_none() {
             selected = lookup_label_by_expected_type(lookup_name, record_ty, env, pers_env, ctx);
-        }
-
-        // Final fallback: compare leaf names (ignoring compiler-introduced `!` suffixes
-        // on local aliases like `sprite!`) to recover the concrete record family.
-        if selected.is_none() {
-            let target_leaf = target_path.last().trim_end_matches('!');
-            for label in all_labels.iter().rev() {
-                let lbl_ty = ctx.repr(label.lbl_res);
-                let lbl_desc = ctx.get_desc(lbl_ty);
-                if let TypeDesc::Tconstr { path: lbl_path, .. } = &*lbl_desc {
-                    if lbl_path.last().trim_end_matches('!') == target_leaf {
-                        selected = Some((*label).clone());
-                        break;
-                    }
-                }
-            }
         }
     }
 

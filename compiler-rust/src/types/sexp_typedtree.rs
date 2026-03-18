@@ -454,6 +454,36 @@ fn sexp_type_expr(
 
     // Serialize the type body
     let desc = ctx.get_desc(te);
+    let debug_type_ids = std::env::var_os("RUST_DEBUG_TYPED_SEXP_IDS").is_some();
+    if debug_type_ids && idx < 80 {
+        let summary = match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => {
+                format!("Tconstr({}) args={}", path.name(), args.len())
+            }
+            TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
+            TypeDesc::Ttuple(types) => format!("Ttuple len={}", types.len()),
+            TypeDesc::Tvar(name) => format!("Tvar({name:?})"),
+            TypeDesc::Tunivar(name) => format!("Tunivar({name:?})"),
+            TypeDesc::Tvariant(_) => "Tvariant".to_string(),
+            TypeDesc::Tpoly { vars, .. } => format!("Tpoly vars={}", vars.len()),
+            TypeDesc::Tpackage { path, args, .. } => {
+                format!("Tpackage({}) args={}", path.name(), args.len())
+            }
+            TypeDesc::Tobject { .. } => "Tobject".to_string(),
+            TypeDesc::Tfield { name, .. } => format!("Tfield({name})"),
+            TypeDesc::Tnil => "Tnil".to_string(),
+            TypeDesc::Tlink(target) => format!("Tlink({})", target.0),
+            TypeDesc::Tsubst(target) => format!("Tsubst({})", target.0),
+        };
+        eprintln!(
+            "[typed-sexp-id] idx={} te={} level={} key={} summary={}",
+            idx,
+            te.0,
+            ctx.get_level(te),
+            dedup_key.0,
+            summary
+        );
+    }
     let sexp = match &*desc {
         TypeDesc::Tvar(name) => Sexp::list(vec![Sexp::atom("Tvar"), opt_string(name)]),
         TypeDesc::Tarrow {

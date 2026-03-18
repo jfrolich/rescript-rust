@@ -644,39 +644,7 @@ pub fn substitute_type_paths_in_child_sig(
     parent_module_path: &Path,
     ctx: &TypeContext<'_>,
 ) {
-    fn should_add_parent_type_name_fallback(name: &str) -> bool {
-        !matches!(
-            name,
-            "t"
-                | "int"
-                | "string"
-                | "float"
-                | "bool"
-                | "unit"
-                | "char"
-                | "array"
-                | "list"
-                | "option"
-                | "result"
-                | "promise"
-                | "lazy_t"
-                | "exn"
-        )
-    }
-
-    let mut parent_maps = build_subst_maps(parent_sig, parent_module_path);
-    // Child signatures can carry parent type idents with erased stamps.
-    // Add a conservative name fallback for non-persistent parent-defined types.
-    for item in parent_sig {
-        if let SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) = item {
-            if id.stamp() != 0 && should_add_parent_type_name_fallback(id.name()) {
-                parent_maps
-                    .type_name_map
-                    .entry(id.name().to_string())
-                    .or_insert_with(|| Path::pdot(parent_module_path.clone(), id.name()));
-            }
-        }
-    }
+    let parent_maps = build_subst_maps(parent_sig, parent_module_path);
     substitute_type_paths_in_sig_with_maps(child_sig, &parent_maps, ctx);
 }
 
@@ -1897,12 +1865,117 @@ pub fn add_signature_to_env(
     // This matches OCaml's `prefix_idents` + `Subst.type_path` mechanism.
     substitute_type_paths_in_sig(sig_items, module_path, ctx);
 
+    fn collect_target_constr_nodes(
+        ctx: &TypeContext<'_>,
+        ty: TypeExprRef,
+        out: &mut Vec<(TypeExprRef, String)>,
+        seen: &mut HashSet<TypeExprRef>,
+    ) {
+        let ty = ctx.repr(ty);
+        if !seen.insert(ty) {
+            return;
+        }
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => {
+                let path_name = path.name();
+                if path_name == "React.element"
+                    || path_name == "Jsx.element"
+                    || path.last() == "element"
+                    || path.last() == "someElement"
+                {
+                    out.push((ty, path_name));
+                }
+                for arg in args {
+                    collect_target_constr_nodes(ctx, *arg, out, seen);
+                }
+            }
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                collect_target_constr_nodes(ctx, arg.typ, out, seen);
+                collect_target_constr_nodes(ctx, *ret, out, seen);
+            }
+            TypeDesc::Ttuple(items) => {
+                for item in items {
+                    collect_target_constr_nodes(ctx, *item, out, seen);
+                }
+            }
+            TypeDesc::Tobject { fields, name } => {
+                collect_target_constr_nodes(ctx, *fields, out, seen);
+                if let Some((_path, args)) = name {
+                    for arg in args {
+                        collect_target_constr_nodes(ctx, *arg, out, seen);
+                    }
+                }
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                collect_target_constr_nodes(ctx, *typ, out, seen);
+                collect_target_constr_nodes(ctx, *rest, out, seen);
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                collect_target_constr_nodes(ctx, *body, out, seen);
+                for var in vars {
+                    collect_target_constr_nodes(ctx, *var, out, seen);
+                }
+            }
+            TypeDesc::Tvariant(row) => {
+                collect_target_constr_nodes(ctx, row.row_more, out, seen);
+                for (_label, field) in &row.row_fields {
+                    match field {
+                        crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
+                            collect_target_constr_nodes(ctx, *ty, out, seen);
+                        }
+                        crate::types::type_expr::RowField::Reither { types, .. } => {
+                            for ty in types {
+                                collect_target_constr_nodes(ctx, *ty, out, seen);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TypeDesc::Tpackage { args, .. } => {
+                for arg in args {
+                    collect_target_constr_nodes(ctx, *arg, out, seen);
+                }
+            }
+            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+                collect_target_constr_nodes(ctx, *target, out, seen);
+            }
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        }
+    }
+
     for item in sig_items {
         match item {
             SignatureItem::SigValue(id, desc) => {
                 // Add value binding with qualified path
                 let mut desc = desc.clone();
                 desc.val_path = Some(Path::pdot(module_path.clone(), id.name()));
+                if std::env::var_os("RUST_DEBUG_OPEN_SIG_VALUES").is_some()
+                    && (id.name() == "someElement"
+                        || id.name() == "element"
+                        || id.name() == "stringToJson"
+                        || id.name() == "stringFromJson"
+                        || module_path.last() == "ReactDOM")
+                {
+                    let mut seen = HashSet::new();
+                    let mut nodes = Vec::new();
+                    collect_target_constr_nodes(ctx, desc.val_type, &mut nodes, &mut seen);
+                    let refs = nodes
+                        .iter()
+                        .map(|(ty, path_name)| {
+                            let repr = ctx.repr(*ty);
+                            format!("{}#{}@{}", path_name, repr.0, ctx.get_level(repr))
+                        })
+                        .collect::<Vec<_>>();
+                    eprintln!(
+                        "[open-sig-value] module={} id={} val_type={} refs={}",
+                        module_path.name(),
+                        id.name(),
+                        ctx.repr(desc.val_type).0,
+                        refs.join(",")
+                    );
+                }
                 if as_opened {
                     env.add_opened_value(id.clone(), desc);
                 } else {

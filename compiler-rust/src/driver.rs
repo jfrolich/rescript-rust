@@ -445,11 +445,7 @@ pub fn compile_source_to_js_with_options(
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
-        if structure_needs_jsx_rewrite(&structure, parser.arena()) {
-            jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
-        } else {
-            structure
-        }
+        jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
     } else {
         structure
     };
@@ -511,6 +507,15 @@ pub fn compile_source_to_js_with_options(
             &typed_structure,
             &mut stderr,
         );
+    }
+
+    // Typedtree parity runs only need typechecking output.
+    // Skipping Lambda/JS lowering avoids unrelated downstream failures
+    // (timeouts/crashes) from obscuring typedtree parity results.
+    if (options.dump_typed_sexp || options.dump_typed_sexp_locs)
+        && std::env::var_os("RUST_TYPEDTREE_ONLY").is_some()
+    {
+        return Ok(String::new());
     }
 
     // Typedtree -> Lambda
@@ -729,11 +734,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
 
         let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
         let structure = if let Some(jsx_version) = jsx_version {
-            if structure_needs_jsx_rewrite(&structure, parser.arena()) {
-                jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
-            } else {
-                structure
-            }
+            jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
         } else {
             structure
         };
@@ -1227,11 +1228,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
 
     let jsx_version = jsx_version_for_structure(&structure, options, &arena);
     let structure = if let Some(jsx_version) = jsx_version {
-        if structure_needs_jsx_rewrite(&structure, &arena) {
-            jsx_ppx::transform_structure(structure, jsx_version, &mut arena)
-        } else {
-            structure
-        }
+        jsx_ppx::transform_structure(structure, jsx_version, &mut arena)
     } else {
         structure
     };

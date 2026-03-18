@@ -235,12 +235,21 @@ impl<T: Clone> BindingTable<T> {
     pub fn find_by_ident(&self, id: &Ident) -> Option<&T> {
         let stamp = id.stamp();
         if stamp == 0 {
-            // All persistent idents share stamp=0, so by_stamp would
-            // return the last-inserted type. Use by_name instead.
-            self.by_name
-                .get(id.name())
-                .and_then(|entries| entries.last())
-                .map(|(_, v, _)| v)
+            // All persistent idents share stamp=0, so by_stamp cannot
+            // distinguish them. For persistent queries, prefer the most
+            // recent persistent binding with that name; this mirrors OCaml's
+            // `find_ident` behavior where persistent paths resolve through
+            // persistent structures rather than opened/local shadowing.
+            self.by_name.get(id.name()).and_then(|entries| {
+                if id.is_persistent() {
+                    return entries
+                        .iter()
+                        .rev()
+                        .find(|(entry_id, _, _)| entry_id.is_persistent())
+                        .map(|(_, value, _)| value);
+                }
+                entries.last().map(|(_, value, _)| value)
+            })
         } else {
             self.by_stamp.get(&stamp)
         }
@@ -527,7 +536,6 @@ impl Env {
             Path::Pident(id) => self
                 .types
                 .find_by_ident(id)
-                .or_else(|| self.types.find_by_name(id.name()))
                 .map(|t| t.as_ref())
                 .ok_or_else(|| EnvError::TypeNotFound(id.name().to_string())),
             Path::Pdot(_, name, _) => self.find_type(name),

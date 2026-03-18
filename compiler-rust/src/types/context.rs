@@ -29,6 +29,9 @@ use crate::ident::Ident;
 use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static SIMPLE_ABBREVS_DEBUG_EVENTS: AtomicUsize = AtomicUsize::new(0);
 
 /// Snapshot wrapper for a type descriptor.
 ///
@@ -102,6 +105,9 @@ pub struct TypeContext<'a> {
 
     /// Abbreviation memo storage
     abbrevs: RefCell<Vec<RefCell<AbbrevMemo>>>,
+    /// Refs that have been written via memorize_abbrev_expansion since the
+    /// last cleanup. Mirrors OCaml btype.ml `memo` list used by cleanup_abbrev.
+    memoized_abbrev_refs: RefCell<Vec<AbbrevMemoRef>>,
 
     /// Row field storage
     row_fields: RefCell<Vec<RefCell<Option<RowField>>>>,
@@ -188,6 +194,7 @@ impl<'a> TypeContext<'a> {
                 RefCell::new(AbbrevMemo::Mnil),
                 RefCell::new(AbbrevMemo::Mnil),
             ]),
+            memoized_abbrev_refs: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             commutables: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
@@ -559,19 +566,34 @@ impl<'a> TypeContext<'a> {
     pub fn check_abbrev_env(&self, env: &crate::types::env::Env) {
         let env_id = env.id();
         if env_id != self.previous_env_id.get() {
-            let value_after_type_env_change = matches!(
-                env.summary(),
-                crate::types::env::EnvSummary::Value(parent, _, _)
-                    if matches!(parent.as_ref(), crate::types::env::EnvSummary::Type(_, _, _))
-            );
-            if value_after_type_env_change {
-                // Rust's typing pipeline temporarily wraps a type-declaration env
-                // with synthetic value bindings. Treat that as the same abbrev
-                // cache scope and keep previous_env_id unchanged.
-                return;
+            if std::env::var_os("RUST_DEBUG_ABBREV_ENV").is_some() {
+                let simple = self.simple_abbrevs.get();
+                let simple_before = self.get_abbrev_memo(simple);
+                eprintln!(
+                    "[abbrev-env] clear env_change old_env_id={} new_env_id={} simple_before={:?}",
+                    self.previous_env_id.get(),
+                    env_id,
+                    simple_before
+                );
+                if std::env::var_os("RUST_DEBUG_ABBREV_ENV_BT").is_some() {
+                    eprintln!(
+                        "[abbrev-env] clear-bt old_env_id={} new_env_id={}\n{:?}",
+                        self.previous_env_id.get(),
+                        env_id,
+                        std::backtrace::Backtrace::capture()
+                    );
+                }
             }
             self.clear_abbrev_memos();
             self.previous_env_id.set(env_id);
+            if std::env::var_os("RUST_DEBUG_ABBREV_ENV").is_some() {
+                let simple = self.simple_abbrevs.get();
+                eprintln!(
+                    "[abbrev-env] clear-done env_id={} simple_after={:?}",
+                    env_id,
+                    self.get_abbrev_memo(simple)
+                );
+            }
         }
     }
 
@@ -585,17 +607,42 @@ impl<'a> TypeContext<'a> {
     pub fn clear_simple_abbrevs(&self) {
         let simple = self.simple_abbrevs.get();
         if simple != AbbrevMemoRef::nil() {
+            if std::env::var_os("RUST_DEBUG_SIMPLE_ABBREVS").is_some() {
+                let before = self.get_abbrev_memo(simple);
+                if !matches!(before, AbbrevMemo::Mnil) {
+                    let event = SIMPLE_ABBREVS_DEBUG_EVENTS.fetch_add(1, Ordering::Relaxed);
+                    if event < 200 {
+                        eprintln!(
+                            "[simple-abbrevs] clear event={} memo={:?}",
+                            event, before
+                        );
+                        if std::env::var_os("RUST_DEBUG_SIMPLE_ABBREVS_BT").is_some()
+                            && event < 20
+                        {
+                            eprintln!(
+                                "[simple-abbrevs] clear-bt event={}\n{:?}",
+                                event,
+                                std::backtrace::Backtrace::capture()
+                            );
+                        }
+                    }
+                }
+            }
             self.clear_abbrev_memo(simple);
         }
     }
 
     /// Clear all per-node abbreviation memo chains (OCaml cleanup_abbrev).
     pub fn clear_abbrev_memos(&self) {
+        let refs = self.memoized_abbrev_refs.borrow().clone();
         let abbrevs = self.abbrevs.borrow();
-        for cell in abbrevs.iter() {
-            *cell.borrow_mut() = AbbrevMemo::Mnil;
+        for memo in refs {
+            if let Some(cell) = abbrevs.get(memo.0) {
+                *cell.borrow_mut() = AbbrevMemo::Mnil;
+            }
         }
-        self.current_abbreviations.set(AbbrevMemoRef::nil());
+        drop(abbrevs);
+        self.memoized_abbrev_refs.borrow_mut().clear();
     }
 
     /// Get the current abbreviation context (set during subst_with_memo).
@@ -662,6 +709,7 @@ impl<'a> TypeContext<'a> {
             match node {
                 AbbrevMemo::Mnil => return None,
                 AbbrevMemo::Mcons {
+                    private_flag: cached_private,
                     path: cached_path,
                     abbrev,
                     next,
@@ -713,28 +761,63 @@ impl<'a> TypeContext<'a> {
         if memo == AbbrevMemoRef::nil() {
             return;
         }
-
-        let mut abbrevs = self.abbrevs.borrow_mut();
-        if memo.0 >= abbrevs.len() {
-            return;
-        }
-
-        let previous = abbrevs[memo.0].borrow().clone();
-        let next = if matches!(previous, AbbrevMemo::Mnil) {
-            AbbrevMemoRef::nil()
+        let debug_simple = std::env::var_os("RUST_DEBUG_SIMPLE_ABBREVS").is_some()
+            && memo == self.simple_abbrevs.get();
+        let debug_path_name = if debug_simple {
+            Some(path.name())
         } else {
-            let idx = abbrevs.len();
-            abbrevs.push(RefCell::new(previous));
-            AbbrevMemoRef(idx)
+            None
         };
 
-        *abbrevs[memo.0].borrow_mut() = AbbrevMemo::Mcons {
-            private_flag,
-            path,
-            abbrev,
-            expansion,
-            next,
+        let wrote = {
+            let mut abbrevs = self.abbrevs.borrow_mut();
+            if memo.0 >= abbrevs.len() {
+                return;
+            }
+
+            let previous = abbrevs[memo.0].borrow().clone();
+            let next = if matches!(previous, AbbrevMemo::Mnil) {
+                AbbrevMemoRef::nil()
+            } else {
+                let idx = abbrevs.len();
+                abbrevs.push(RefCell::new(previous));
+                AbbrevMemoRef(idx)
+            };
+
+            *abbrevs[memo.0].borrow_mut() = AbbrevMemo::Mcons {
+                private_flag,
+                path,
+                abbrev,
+                expansion,
+                next,
+            };
+            true
         };
+        if wrote {
+            if debug_simple {
+                let event = SIMPLE_ABBREVS_DEBUG_EVENTS.fetch_add(1, Ordering::Relaxed);
+                if event < 200 {
+                    eprintln!(
+                        "[simple-abbrevs] memoize event={} path={} private={:?} abbrev={} expansion={}",
+                        event,
+                        debug_path_name.as_deref().unwrap_or("<unknown>"),
+                        private_flag,
+                        abbrev.0,
+                        expansion.0
+                    );
+                    if std::env::var_os("RUST_DEBUG_SIMPLE_ABBREVS_BT").is_some()
+                        && event < 20
+                    {
+                        eprintln!(
+                            "[simple-abbrevs] memoize-bt event={}\n{:?}",
+                            event,
+                            std::backtrace::Backtrace::capture()
+                        );
+                    }
+                }
+            }
+            self.memoized_abbrev_refs.borrow_mut().push(memo);
+        }
     }
 
     // ========================================================================

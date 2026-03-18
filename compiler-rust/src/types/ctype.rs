@@ -301,16 +301,16 @@ fn lookup_type_decl_for_path(
         return Some(decl.clone());
     }
 
-    // Try direct env lookup. For qualified paths, only accept exact matches:
-    // Env.lookup_type may fall back to a same-leaf declaration from another
-    // scope, so require decl.type_path to match the queried path.
+    // Try direct env lookup. For qualified paths, only accept exact
+    // identity matches (`Path.same`) to mirror OCaml's stamp-based lookup.
+    // Name-only equality can pick declarations from different scopes.
     if let Ok(decl) = env.lookup_type(path) {
         let exact_lookup = match path {
             Path::Pident(_) => true,
             _ => decl
                 .type_path
                 .as_ref()
-                .is_some_and(|decl_path| decl_path.same(path) || decl_path.name() == path.name()),
+                .is_some_and(|decl_path| decl_path.same(path)),
         };
         if exact_lookup {
             if let Some(path_name) = &path_name {
@@ -1063,6 +1063,11 @@ fn resolve_module_signature_through_cmi<'a>(
 
     let result = match module_path {
         Path::Pident(id) => {
+            // Match OCaml Env.find_module path semantics: only persistent
+            // identifiers can fall back to loading a .cmi by name.
+            if !id.is_persistent() {
+                return None;
+            }
             let full_path = find_cmi_file(load_paths, id.name())?;
             let cmi = cmi_format::read_cmi(&full_path).ok()?;
             let mut sig_ctx = SigReadContext::new(ctx);
@@ -1241,6 +1246,11 @@ fn resolve_module_type_through_env_path<'a>(
             } else if let Ok(mtd) = env.find_modtype(name) {
                 mtd.mtd_type.clone()
             } else {
+                // Match OCaml Env.find_module: only persistent identifiers
+                // may resolve through the persistent environment.
+                if !id.is_persistent() {
+                    return None;
+                }
                 let load_paths = ctx.load_paths();
                 if load_paths.is_empty() {
                     None
@@ -1486,14 +1496,16 @@ fn try_expand_head<'a>(
     ty: TypeExprRef,
 ) -> Option<TypeExprRef> {
     let debug_image_alias = std::env::var_os("RUST_DEBUG_IMAGE_ALIAS").is_some();
-    // OCaml ctype.ml: expand_abbrev_gen starts with check_abbrev_env env.
-    // This keeps simple_abbrevs scoped to the current env identity.
-    ctx.check_abbrev_env(env);
-
     let ty = ctx.repr(ty);
     let desc = ctx.get_desc(ty);
     match &*desc {
         TypeDesc::Tconstr { path, args, abbrev } => {
+            // OCaml runs check_abbrev_env from expand_abbrev_gen, which is only
+            // reached for Tconstr heads (try_expand_once pattern-matches first).
+            // Matching that behavior avoids clearing simple_abbrevs on non-constr
+            // expand_head calls.
+            ctx.check_abbrev_env(env);
+
             let args = args.clone();
             let path = path.clone();
             let orig_abbrev = *abbrev;
@@ -2053,9 +2065,14 @@ fn try_expand_head<'a>(
                         forbid_fallback_manifest_expansion = true;
                     }
                 } else if debug_expand {
+                    let type_path = decl
+                        .type_path
+                        .as_ref()
+                        .map(|p| p.name())
+                        .unwrap_or_else(|| "<none>".to_string());
                     eprintln!(
-                        "[expand] path={} resolve_type_through_env authoritative no-manifest",
-                        path_name
+                        "[expand] path={} resolve_type_through_env authoritative no-manifest type_path={} private={:?} kind={:?}",
+                        path_name, type_path, decl.type_private, decl.type_kind
                     );
                 }
             }
@@ -7487,6 +7504,8 @@ fn copy_type_cached(
                             || full_path_name.as_deref() == Some("int")
                             || full_path_name.as_deref() == Some("string")
                             || full_path_name.as_deref() == Some("option")
+                            || full_path_name.as_deref() == Some("N.t")
+                            || full_path_name.as_deref() == Some("Belt.MutableSet.Int.t")
                             || full_path_name.as_deref() == Some("LayerStyleID.ID.t")
                             || full_path_name.as_deref() == Some("Layout.Types.t")
                             || full_path_name.as_deref() == Some("Jsx.element")
@@ -7506,8 +7525,14 @@ fn copy_type_cached(
                         // Rust keeps source nodes immutable during copy, so we must
                         // project through the local copy cache to recover the same
                         // representative.
-                        let found_cached = cache.nodes.get(&found_source).copied();
-                        let found_repr = found_cached.unwrap_or(found_source);
+                        let found_cached = cache
+                            .nodes
+                            .get(&found_ty)
+                            .copied()
+                            .or_else(|| cache.nodes.get(&found_source).copied());
+                        let found_repr = found_cached.unwrap_or(found_ty);
+                        let found_ty_level = ctx.get_level(found_ty);
+                        let found_source_level = ctx.get_level(found_source);
                         let stale_local_generic_hit = matches!(
                             &path,
                             Path::Pident(id) if !id.is_persistent()
@@ -7515,18 +7540,24 @@ fn copy_type_cached(
                             && ctx.get_level(found_source) == GENERIC_LEVEL;
                         if let Some(path_name) = &debug_path_name {
                             eprintln!(
-                                "[copy-constr] hit path={} ty={} level={} head_stamp={} lookup={:?} found_source={} found_repr={} stale_local_generic_hit={}",
+                                "[copy-constr] hit path={} ty={} level={} head_stamp={} lookup={:?} found_ty={} found_ty_level={} found_source={} found_source_level={} found_repr={} found_cached={} stale_local_generic_hit={}",
                                 path_name,
                                 ty.0,
                                 level,
                                 path.head().stamp(),
                                 lookup_abbrevs,
+                                found_ty.0,
+                                found_ty_level,
                                 found_source.0,
+                                found_source_level,
                                 found_repr.0,
+                                found_cached.is_some(),
                                 stale_local_generic_hit
                             );
                             if debug_copy_constr_bt
-                                && path_name == "React.element"
+                                && (path_name == "React.element"
+                                    || path_name == "Stdlib.JSON.t"
+                                    || path_name == "JSON.t")
                             {
                                 let event =
                                     COPY_CONSTR_DEBUG_EVENTS.fetch_add(1, Ordering::Relaxed);
@@ -7560,7 +7591,9 @@ fn copy_type_cached(
                             memo_state
                         );
                         if debug_copy_constr_bt
-                            && path_name == "React.element"
+                            && (path_name == "React.element"
+                                || path_name == "Stdlib.JSON.t"
+                                || path_name == "JSON.t")
                         {
                             let event = COPY_CONSTR_DEBUG_EVENTS.fetch_add(1, Ordering::Relaxed);
                             if event < 40 {
