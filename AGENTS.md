@@ -230,6 +230,10 @@ python3 scripts/parity_analyzer.py trace ticker 11 --compiler rust
 # Find extra/missing/duplicated type nodes
 python3 scripts/parity_analyzer.py extra chn_test
 
+# Detect polymorphic-variant row-order mismatches (same labels, different order)
+python3 scripts/parity_analyzer.py row-order DBScript__MigrationLayoutsRounding
+python3 scripts/parity_analyzer.py row-order DBScript__MigrationLayoutsRounding --contains Layer
+
 # Find first divergence point between preambles with cascade analysis
 python3 scripts/parity_analyzer.py divergence chn_test
 ```
@@ -265,12 +269,28 @@ python3 scripts/parity_analyzer.py summary
 python3 scripts/parity_analyzer.py divergence <file-key>
 python3 scripts/parity_analyzer.py extra <file-key>
 python3 scripts/parity_analyzer.py trace <file-key> <type-id>
+python3 scripts/parity_analyzer.py row-order <file-key>
 # 5) Inspect copy-sharing imbalances for path+id drift
 python3 scripts/parity_analyzer.py sharing <file-key>
 python3 scripts/parity_analyzer.py sharing <file-key> --contains <type-or-path>
 # 6) Aggregate copy-sharing motifs across all current failures
 python3 scripts/parity_analyzer.py sharing-summary --top 20
 python3 scripts/parity_analyzer.py sharing-summary --contains <type-or-path>
+```
+
+Guardrails for every tella iteration:
+1. Always re-check non-tella parity first: `./scripts/test_typedtree_parity.sh --no-build`
+2. Non-tella must stay at `657/657` before accepting a tella fix
+3. If non-tella regresses, revert the candidate change and re-baseline cache
+
+Tella file-key tips for analyzer commands:
+- Tella cached diff keys are underscore-encoded absolute paths, e.g. `_Users_jake_dev_tella-fusion_packages_core_webapp_src_backend_Service__PublicVideo.res`
+- You can still pass short fuzzy names (`Service__PublicVideo`) to analyzer commands; confirm resolution from command output
+- For high-volume files, start with:
+```bash
+python3 scripts/parity_analyzer.py divergence <file-key>
+python3 scripts/parity_analyzer.py sharing <file-key>
+python3 scripts/parity_analyzer.py extra <file-key>
 ```
 
 Iteration loop after each candidate fix:

@@ -11,6 +11,7 @@ Commands:
     trace <file> <id>    Trace a type through both compilers
     extra <file>         Find extra/missing type nodes
     sharing <file>       Copy-sharing imbalance analysis
+    row-order <file>     Polymorphic variant row-order mismatches
     sharing-summary      Aggregate sharing imbalances across failing files
     divergence <file>    First divergence analysis
     insertion [file]     First insertion/resync analysis
@@ -255,6 +256,61 @@ def type_summary(node: SexpNode) -> str:
         else:
             return tag
     return sexp_to_str(node)[:60]
+
+
+def parse_tvariant(node: SexpNode) -> Optional[Tuple[List[Tuple[str, SexpNode]], str, str]]:
+    """Parse (Tvariant ((label field)...) closed|open fixed|not_fixed)."""
+    if not isinstance(node, SexpList) or not node.children:
+        return None
+    head = node.children[0]
+    if not isinstance(head, SexpAtom) or head.value != "Tvariant":
+        return None
+    if len(node.children) < 4:
+        return None
+
+    fields_node = node.children[1]
+    closed_node = node.children[2]
+    fixed_node = node.children[3]
+    if not isinstance(fields_node, SexpList):
+        return None
+    if not isinstance(closed_node, SexpAtom) or not isinstance(fixed_node, SexpAtom):
+        return None
+
+    fields: List[Tuple[str, SexpNode]] = []
+    for entry in fields_node.children:
+        if not isinstance(entry, SexpList) or len(entry.children) < 2:
+            continue
+        label_node = entry.children[0]
+        field_node = entry.children[1]
+        if isinstance(label_node, SexpAtom):
+            label = label_node.value.strip('"')
+            fields.append((label, field_node))
+    return fields, closed_node.value, fixed_node.value
+
+
+def variant_order_entry(
+    type_id: int,
+    node: SexpNode,
+    types: Dict[int, SexpNode],
+    memo: Dict[int, str],
+) -> Optional[Tuple[Tuple[str, str, Tuple[Tuple[str, str], ...]], Tuple[str, ...], int]]:
+    parsed = parse_tvariant(node)
+    if parsed is None:
+        return None
+    fields, closed, fixed = parsed
+    if not fields:
+        return None
+
+    # Canonicalize by label + normalized field payload (order-independent key).
+    canonical_fields: List[Tuple[str, str]] = []
+    for label, field_node in fields:
+        normalized = _expand_refs(field_node, types, depth=0, memo=memo)
+        canonical_fields.append((label, normalized))
+    canonical_fields.sort(key=lambda x: x[0])
+
+    canonical_key = (closed, fixed, tuple(canonical_fields))
+    order = tuple(label for label, _ in fields)
+    return canonical_key, order, type_id
 
 
 def match_types(ocaml_types: dict[int, SexpNode],
@@ -1636,6 +1692,84 @@ def cmd_sharing_summary(args, root: str):
         print(dim(f"  ... {len(rows) - len(shown)} more motifs (increase --top to see more)"))
 
 
+def cmd_row_order(args, root: str):
+    """Find polymorphic variant rows with same content but different label order."""
+    name = resolve_file(args.file, root)
+    ocaml_sf, rust_sf = require_sexp_files(name, root)
+
+    short_name = name.replace("tests_tests_src_", "")
+    print(bold(f"Row Order Mismatch: {short_name}"))
+    print()
+
+    ocaml_memo: Dict[int, str] = {}
+    rust_memo: Dict[int, str] = {}
+    ocaml_groups: Dict[Tuple[str, str, Tuple[Tuple[str, str], ...]], Dict[Tuple[str, ...], List[int]]] = {}
+    rust_groups: Dict[Tuple[str, str, Tuple[Tuple[str, str], ...]], Dict[Tuple[str, ...], List[int]]] = {}
+
+    for tid, node in ocaml_sf.types.items():
+        entry = variant_order_entry(tid, node, ocaml_sf.types, ocaml_memo)
+        if entry is None:
+            continue
+        key, order, type_id = entry
+        ocaml_groups.setdefault(key, {}).setdefault(order, []).append(type_id)
+
+    for tid, node in rust_sf.types.items():
+        entry = variant_order_entry(tid, node, rust_sf.types, rust_memo)
+        if entry is None:
+            continue
+        key, order, type_id = entry
+        rust_groups.setdefault(key, {}).setdefault(order, []).append(type_id)
+
+    mismatches = []
+    for key in set(ocaml_groups.keys()) & set(rust_groups.keys()):
+        ocaml_orders = ocaml_groups[key]
+        rust_orders = rust_groups[key]
+        if ocaml_orders == rust_orders:
+            continue
+
+        labels = [label for label, _ in key[2]]
+        label_text = ", ".join(labels)
+        if args.contains:
+            needle = args.contains.lower()
+            if needle not in label_text.lower():
+                continue
+
+        ocaml_total = sum(len(v) for v in ocaml_orders.values())
+        rust_total = sum(len(v) for v in rust_orders.values())
+        order_count_delta = abs(len(ocaml_orders) - len(rust_orders))
+        volume = ocaml_total + rust_total
+        mismatches.append((volume, order_count_delta, labels, key, ocaml_orders, rust_orders))
+
+    if not mismatches:
+        if args.contains:
+            print(green(f'  No row-order mismatches matched "{args.contains}".'))
+        else:
+            print(green("  No row-order mismatches found."))
+        return
+
+    mismatches.sort(key=lambda x: (-x[0], -x[1], len(x[2]), x[2]))
+    shown = mismatches[:args.top]
+
+    print(f"  Found {bold(str(len(mismatches)))} mismatched row-order keys; showing top {bold(str(len(shown)))}.")
+    print()
+
+    for idx, (_volume, _order_delta, labels, _key, ocaml_orders, rust_orders) in enumerate(shown, 1):
+        print(bold(f"  {idx:>2}. Labels: {', '.join(labels)}"))
+
+        ocaml_total = sum(len(v) for v in ocaml_orders.values())
+        rust_total = sum(len(v) for v in rust_orders.values())
+        print(f"      Counts: OCaml={ocaml_total} Rust={rust_total}")
+
+        print("      OCaml orders:")
+        for order, ids in sorted(ocaml_orders.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+            print(f"        {cyan(' | '.join(order))}  x{len(ids)}  ids={_format_id_list(sorted(ids), args.ids)}")
+
+        print("      Rust orders:")
+        for order, ids in sorted(rust_orders.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+            print(f"        {cyan(' | '.join(order))}  x{len(ids)}  ids={_format_id_list(sorted(ids), args.ids)}")
+        print()
+
+
 def _key_to_summary(key: str) -> str:
     """Convert a content key to a short summary."""
     key = key.strip()
@@ -1853,6 +1987,7 @@ Examples:
   %(prog)s trace ticker 11
   %(prog)s extra more_poly_variant_test
   %(prog)s sharing Service__PublicVideo --contains transcriptStatus
+  %(prog)s row-order DBScript__MigrationLayoutsRounding
   %(prog)s sharing-summary --top 20
   %(prog)s divergence bs_set_int_test
   %(prog)s insertion
@@ -1903,6 +2038,18 @@ Examples:
     sub_sharing.add_argument('--contains', type=str, default=None,
                              help='Only show entries containing this text')
 
+    # row-order
+    sub_row_order = subparsers.add_parser(
+        'row-order', help='Polymorphic variant row-order mismatch analysis'
+    )
+    sub_row_order.add_argument('file', help='File name or short name')
+    sub_row_order.add_argument('--top', type=int, default=15,
+                               help='How many mismatch keys to show (default: 15)')
+    sub_row_order.add_argument('--ids', type=int, default=4,
+                               help='Max ids shown per order bucket (default: 4)')
+    sub_row_order.add_argument('--contains', type=str, default=None,
+                               help='Only include rows with labels containing this text')
+
     # sharing-summary
     sub_sharing_summary = subparsers.add_parser(
         'sharing-summary', help='Aggregate sharing imbalances across failing files'
@@ -1947,6 +2094,7 @@ Examples:
         'trace': cmd_trace,
         'extra': cmd_extra,
         'sharing': cmd_sharing,
+        'row-order': cmd_row_order,
         'sharing-summary': cmd_sharing_summary,
         'divergence': cmd_divergence,
         'insertion': cmd_insertion,
