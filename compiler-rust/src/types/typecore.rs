@@ -1206,7 +1206,7 @@ fn resolve_type_constructor_path(
                 }
             }
 
-            if let Some((mod_path, sig)) = env.resolve_module_lid_raw(
+            if let Some((mod_path, sig)) = env.resolve_module_lid(
                 prefix,
                 tctx.arena,
                 &mut tctx.persistent_env,
@@ -11668,6 +11668,37 @@ fn type_field(
     let (label_desc, field_ty, ty_res) = if let Some(env_label) = env_label {
         let (_poly_vars, ty_arg, ty_res) =
             crate::types::ctype::instance_label(tctx.type_ctx, false, &env_label);
+        let module_access_path = {
+            let ty_res_repr = tctx.type_ctx.repr(ty_res);
+            let ty_res_desc = tctx.type_ctx.get_desc(ty_res_repr);
+            let path = if let TypeDesc::Tconstr { path, .. } = &*ty_res_desc {
+                path.parent()
+            } else {
+                None
+            };
+            drop(ty_res_desc);
+            path
+        };
+        if let Some(module_path) = module_access_path {
+            let mut visited_arg = HashSet::new();
+            qualify_module_local_type_paths_in_place(
+                tctx.type_ctx,
+                env,
+                &mut tctx.persistent_env,
+                ty_arg,
+                &module_path,
+                &mut visited_arg,
+            );
+            let mut visited_res = HashSet::new();
+            qualify_module_local_type_paths_in_place(
+                tctx.type_ctx,
+                env,
+                &mut tctx.persistent_env,
+                ty_res,
+                &module_path,
+                &mut visited_res,
+            );
+        }
         if std::env::var_os("RUST_DEBUG_FIELD_INST").is_some() {
             let name = env_label.lbl_name.as_str();
             if name == "bbox_offset" || name == "bbox_size" {
@@ -11789,6 +11820,37 @@ fn type_setfield(
     let (label_desc, field_ty) = if let Some(env_label) = env_label {
         let (_poly_vars, ty_arg, ty_res) =
             crate::types::ctype::instance_label(ctx, false, &env_label);
+        let module_access_path = {
+            let ty_res_repr = ctx.repr(ty_res);
+            let ty_res_desc = ctx.get_desc(ty_res_repr);
+            let path = if let TypeDesc::Tconstr { path, .. } = &*ty_res_desc {
+                path.parent()
+            } else {
+                None
+            };
+            drop(ty_res_desc);
+            path
+        };
+        if let Some(module_path) = module_access_path {
+            let mut visited_arg = HashSet::new();
+            qualify_module_local_type_paths_in_place(
+                ctx,
+                env,
+                &mut tctx.persistent_env,
+                ty_arg,
+                &module_path,
+                &mut visited_arg,
+            );
+            let mut visited_res = HashSet::new();
+            qualify_module_local_type_paths_in_place(
+                ctx,
+                env,
+                &mut tctx.persistent_env,
+                ty_res,
+                &module_path,
+                &mut visited_res,
+            );
+        }
         unify_expression_types(tctx, loc, ty_res, record_ty, None)?;
         (env_label, ty_arg)
     } else {
@@ -15677,6 +15739,14 @@ impl Env {
                                 );
                             }
                             if let Some(ref target) = alias_target_pident {
+                                if let Path::Pident(alias_id) = target {
+                                    crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                                        &sig,
+                                        alias_id.name(),
+                                        &path,
+                                        ctx,
+                                    );
+                                }
                                 for item in &sig {
                                     if let crate::types::decl::SignatureItem::SigModule(id, _, _) =
                                         item
@@ -15950,6 +16020,14 @@ impl Env {
                                             );
                                         }
                                         if let Some(ref target) = alias_target_pident {
+                                            if let Path::Pident(alias_id) = target {
+                                                crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                                                    &sig,
+                                                    alias_id.name(),
+                                                    &sub_path,
+                                                    ctx,
+                                                );
+                                            }
                                             for item in &sig {
                                                 if let crate::types::decl::SignatureItem::SigModule(
                                                     id,
@@ -17286,6 +17364,31 @@ fn disambiguate_label<'a>(
         }
     }
 
+    // Preserve OCaml-style alias paths in typed output: when disambiguation
+    // succeeds via path-equivalence (same semantic type, different path id),
+    // keep the expected alias path in lbl_res instead of the fully-qualified
+    // candidate path.
+    if let (Some(target_path), Some(label)) = (opath.as_ref(), selected.as_mut()) {
+        let lbl_res = ctx.repr(label.lbl_res);
+        let lbl_desc = ctx.get_desc(lbl_res);
+        if let TypeDesc::Tconstr { path, args, .. } = &*lbl_desc {
+            if !path.same(target_path)
+                && compare_type_paths_for_disambiguation(path, target_path, env, pers_env, ctx)
+            {
+                let rewritten = ctx.new_constr(target_path.clone(), args.clone());
+                let level = ctx.get_level(lbl_res);
+                if ctx.get_level(rewritten) != level {
+                    ctx.set_level(rewritten, level);
+                }
+                label.lbl_res = rewritten;
+            }
+        }
+    }
+
+    if let Some(label) = selected.as_mut() {
+        qualify_label_description_paths(label, env, pers_env, ctx);
+    }
+
     if std::env::var_os("RUST_DEBUG_LABEL_INTL").is_some()
         && matches!(label_name, "compactDisplay" | "currency" | "useGrouping")
     {
@@ -18094,15 +18197,27 @@ fn resolve_module_signature_for_path<'a>(
                         ctx,
                     );
                 }
-                // Apply alias prefix rewriting for module aliases to nested modules
-                // (e.g., module J = Js.Json where target is Pdot).
-                // Skip for Pident targets (e.g., Date -> Stdlib_Date) — those are
-                // handled by existing substitution mechanisms.
                 if let crate::types::decl::ModuleType::MtyAlias(_, ref target) = md.md_type {
-                    if matches!(target, Path::Pdot(..)) && !target.same(&access_path) {
-                        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                            &sig, target, &access_path, ctx,
-                        );
+                    if !target.same(&access_path) {
+                        match target {
+                            Path::Pdot(..) => {
+                                crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                                    &sig,
+                                    target,
+                                    &access_path,
+                                    ctx,
+                                );
+                            }
+                            Path::Pident(alias_id) => {
+                                crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                                    &sig,
+                                    alias_id.name(),
+                                    &access_path,
+                                    ctx,
+                                );
+                            }
+                            Path::Papply(_, _) => {}
+                        }
                     }
                 }
                 crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &access_path, ctx);
@@ -18155,6 +18270,30 @@ fn resolve_module_signature_for_path<'a>(
                                 &access_path,
                                 ctx,
                             );
+                        }
+                        if let crate::types::decl::ModuleType::MtyAlias(_, ref target) = md.md_type
+                        {
+                            if !target.same(&access_path) {
+                                match target {
+                                    Path::Pdot(..) => {
+                                        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                                            &sig,
+                                            target,
+                                            &access_path,
+                                            ctx,
+                                        );
+                                    }
+                                    Path::Pident(alias_id) => {
+                                        crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                                            &sig,
+                                            alias_id.name(),
+                                            &access_path,
+                                            ctx,
+                                        );
+                                    }
+                                    Path::Papply(_, _) => {}
+                                }
+                            }
                         }
                         crate::cmi::persistent_env::substitute_type_paths_in_sig(
                             &sig,
