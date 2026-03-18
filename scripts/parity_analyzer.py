@@ -6,13 +6,16 @@ reach 100% parity. Works with files in .parity-cache/tests/.
 
 Commands:
     summary              Overview of all failures
+    motifs               Hunk-level motif classification across diffs
     preamble <file>      Aligned type preamble comparison
     trace <file> <id>    Trace a type through both compilers
     extra <file>         Find extra/missing type nodes
     divergence <file>    First divergence analysis
+    insertion [file]     First insertion/resync analysis
 """
 
 import argparse
+from collections import Counter
 import os
 import re
 import sys
@@ -398,8 +401,12 @@ def load_sexp(compiler: str, name: str, root: str) -> Optional[SexpFile]:
     path = get_sexp_path(compiler, name, root)
     if not os.path.exists(path):
         return None
-    with open(path) as f:
-        return SexpFile.parse(f.read())
+    # Some cached sexp files may include non-UTF8 bytes or partial writes.
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            return SexpFile.parse(f.read())
+    except Exception:
+        return None
 
 
 def require_sexp_files(name: str, root: str) -> tuple[SexpFile, SexpFile]:
@@ -536,6 +543,305 @@ def count_preamble_types(diff_text: str) -> tuple[int, int]:
     return len(ocaml_ids), len(rust_ids)
 
 
+# ─── Motif Helpers ───────────────────────────────────────────────────────────
+
+PATH_DOT_RE = re.compile(r'\(Pdot\s+\(Pident\s+"?([^) "]+)"?\)\s+"?([^) "]+)"?\)')
+PATH_IDENT_RE = re.compile(r'\(Pident\s+"?([^) "]+)"?\)')
+TYPE_ID_RE = re.compile(r'^#\d+$')
+
+
+def iter_diff_hunks(diff_text: str) -> List[List[str]]:
+    """Return unified-diff hunk blocks (each starting with @@ ...)."""
+    hunks: List[List[str]] = []
+    current: Optional[List[str]] = None
+
+    for line in diff_text.splitlines():
+        if line.startswith('@@'):
+            if current:
+                hunks.append(current)
+            current = [line]
+        elif current is not None:
+            current.append(line)
+
+    if current:
+        hunks.append(current)
+    return hunks
+
+
+def _canonicalize_ident_path(ident: str) -> str:
+    """Convert flattened alias names to dotted form for rough path matching."""
+    return ident.replace('__', '.')
+
+
+def _canonical_paths_from_text(text: str) -> set[str]:
+    paths: set[str] = set()
+    for m, label in PATH_DOT_RE.findall(text):
+        paths.add(f"{m}.{label}")
+    for ident in PATH_IDENT_RE.findall(text):
+        paths.add(_canonicalize_ident_path(ident))
+    return paths
+
+
+def _normalize_type_refs(line: str) -> str:
+    return re.sub(r'#\d+', '#N', line)
+
+
+def _extract_path_terms(text: str) -> List[str]:
+    """Extract canonicalized path terms from a line/block."""
+    terms: List[str] = []
+    for m, label in PATH_DOT_RE.findall(text):
+        terms.append(f"{m}.{label}")
+    for ident in PATH_IDENT_RE.findall(text):
+        terms.append(_canonicalize_ident_path(ident))
+    return terms
+
+
+def _extract_path_transitions(minus_lines: List[str], plus_lines: List[str]) -> List[Tuple[str, str]]:
+    """Infer path transitions from paired line edits and from set-level diffs."""
+    transitions: List[Tuple[str, str]] = []
+    seen: set[Tuple[str, str]] = set()
+
+    # Pass 1: pair minus/plus lines at same relative position.
+    for m_line, p_line in zip(minus_lines, plus_lines):
+        if m_line == p_line:
+            continue
+        m_terms = [t for t in _extract_path_terms(m_line) if '.' in t]
+        p_terms = [t for t in _extract_path_terms(p_line) if '.' in t]
+        for src in m_terms:
+            src_tail = src.split('.')[-1]
+            for dst in p_terms:
+                if src == dst or src_tail != dst.split('.')[-1]:
+                    continue
+                pair = (src, dst)
+                if pair not in seen:
+                    transitions.append(pair)
+                    seen.add(pair)
+
+    # Pass 2: fallback using set differences across the whole hunk.
+    minus_paths = _canonical_paths_from_text("\n".join(minus_lines))
+    plus_paths = _canonical_paths_from_text("\n".join(plus_lines))
+    removed = sorted(minus_paths - plus_paths)
+    added = sorted(plus_paths - minus_paths)
+    for src in removed:
+        src_tail = src.split('.')[-1]
+        for dst in added:
+            if src == dst or src_tail != dst.split('.')[-1]:
+                continue
+            pair = (src, dst)
+            if pair not in seen:
+                transitions.append(pair)
+                seen.add(pair)
+            break
+
+    return transitions
+
+
+def _extract_hunk_path_delta(minus_lines: List[str], plus_lines: List[str]) -> tuple[set[str], set[str]]:
+    minus_terms = {t for t in _extract_path_terms("\n".join(minus_lines)) if '.' in t}
+    plus_terms = {t for t in _extract_path_terms("\n".join(plus_lines)) if '.' in t}
+    return minus_terms - plus_terms, plus_terms - minus_terms
+
+
+def classify_hunk_motifs(hunk_lines: List[str]) -> tuple[set[str], List[Tuple[str, str]]]:
+    """Return motif set for a single diff hunk plus inferred path transitions."""
+    minus = [line[1:].strip() for line in hunk_lines if line.startswith('-') and not line.startswith('---')]
+    plus = [line[1:].strip() for line in hunk_lines if line.startswith('+') and not line.startswith('+++')]
+    minus_text = "\n".join(minus)
+    plus_text = "\n".join(plus)
+    motifs: set[str] = set()
+
+    if not minus and not plus:
+        return motifs, []
+
+    minus_has_path = ('Pdot' in minus_text) or ('Pident' in minus_text)
+    plus_has_path = ('Pdot' in plus_text) or ('Pident' in plus_text)
+    has_path = minus_has_path or plus_has_path
+    has_refs = ('#' in minus_text) or ('#' in plus_text)
+
+    minus_flat = {_canonicalize_ident_path(i) for i in PATH_IDENT_RE.findall(minus_text) if '__' in i}
+    plus_flat = {_canonicalize_ident_path(i) for i in PATH_IDENT_RE.findall(plus_text) if '__' in i}
+    minus_dot = {f"{m}.{label}" for m, label in PATH_DOT_RE.findall(minus_text)}
+    plus_dot = {f"{m}.{label}" for m, label in PATH_DOT_RE.findall(plus_text)}
+
+    if (minus_flat & plus_dot) or (plus_flat & minus_dot):
+        motifs.add("path_flattened_vs_dotted")
+
+    minus_simple = {i for i in PATH_IDENT_RE.findall(minus_text) if '__' not in i}
+    plus_simple = {i for i in PATH_IDENT_RE.findall(plus_text) if '__' not in i}
+    minus_dot_tails = {label for _, label in PATH_DOT_RE.findall(minus_text)}
+    plus_dot_tails = {label for _, label in PATH_DOT_RE.findall(plus_text)}
+    if (minus_dot_tails & plus_simple) or (plus_dot_tails & minus_simple):
+        motifs.add("path_qualification_flip")
+
+    transitions = _extract_path_transitions(minus, plus) if has_path else []
+    if any(set(src.split('.')) == set(dst.split('.')) and src != dst for src, dst in transitions):
+        motifs.add("path_head_reassociation")
+
+    if has_path and has_refs:
+        motifs.add("path_plus_id")
+
+    id_norm_matches = 0
+    for m_line, p_line in zip(minus, plus):
+        if m_line != p_line and _normalize_type_refs(m_line) == _normalize_type_refs(p_line):
+            if '#' in m_line or '#' in p_line or TYPE_ID_RE.match(m_line) or TYPE_ID_RE.match(p_line):
+                id_norm_matches += 1
+    if id_norm_matches:
+        motifs.add("id_ref_shift")
+
+    minus_num_ids = sum(1 for l in minus if l.isdigit())
+    plus_num_ids = sum(1 for l in plus if l.isdigit())
+    if minus_num_ids != plus_num_ids:
+        motifs.add("preamble_id_imbalance")
+
+    if (('Reither' in minus_text and 'Rpresent' in plus_text) or
+            ('Rpresent' in minus_text and 'Reither' in plus_text)):
+        motifs.add("row_reither_rpresent")
+
+    if (('open' in minus_text and 'closed' in plus_text) or
+            ('closed' in minus_text and 'open' in plus_text)):
+        motifs.add("row_open_closed_flip")
+
+    if any(tok in minus_text or tok in plus_text for tok in ['Tvariant', 'Tfield', 'Tobject']):
+        motifs.add("variant_or_object_area")
+
+    if not motifs:
+        motifs.add("other")
+
+    return motifs, transitions
+
+
+# ─── Insertion/Resync Helpers ────────────────────────────────────────────────
+
+@dataclass
+class InsertionResult:
+    divergence_idx: Optional[int]
+    matching_prefix: int
+    reason: str
+    ocaml_id: Optional[int]
+    rust_id: Optional[int]
+    shift: Optional[int] = None
+    run_len: int = 0
+    resync_ocaml_pos: Optional[int] = None
+    resync_rust_pos: Optional[int] = None
+
+
+def _compute_ordered_type_keys(sf: SexpFile) -> tuple[List[int], List[str]]:
+    ids = sorted(sf.types.keys())
+    memo: dict[int, str] = {}
+    keys = [content_key(tid, sf.types, memo=memo) for tid in ids]
+    return ids, keys
+
+
+def _find_first_divergence(
+    ocaml_ids: List[int],
+    rust_ids: List[int],
+    ocaml_keys: List[str],
+    rust_keys: List[str],
+) -> tuple[Optional[int], int, str]:
+    max_len = max(len(ocaml_ids), len(rust_ids))
+    matching_prefix = 0
+    for i in range(max_len):
+        if i >= len(ocaml_ids) or i >= len(rust_ids):
+            return i, matching_prefix, "length"
+        if ocaml_ids[i] != rust_ids[i]:
+            return i, matching_prefix, "id"
+        if ocaml_keys[i] != rust_keys[i]:
+            return i, matching_prefix, "content"
+        matching_prefix += 1
+    return None, matching_prefix, "none"
+
+
+def _find_resync_window(
+    ocaml_keys: List[str],
+    rust_keys: List[str],
+    start: int,
+    lookahead: int,
+    min_run: int,
+) -> Optional[Tuple[int, int, int]]:
+    """Find a stable matching window after divergence.
+
+    Returns (ocaml_pos, rust_pos, run_len) for the best resync candidate.
+    """
+    if start >= len(ocaml_keys) or start >= len(rust_keys):
+        return None
+
+    o_end = min(len(ocaml_keys), start + lookahead)
+    r_end = min(len(rust_keys), start + lookahead)
+
+    rust_positions_by_key: dict[str, List[int]] = {}
+    for r in range(start, r_end):
+        rust_positions_by_key.setdefault(rust_keys[r], []).append(r)
+
+    best: Optional[Tuple[int, int, int]] = None
+    for o in range(start, o_end):
+        for r in rust_positions_by_key.get(ocaml_keys[o], []):
+            run = 0
+            while o + run < len(ocaml_keys) and r + run < len(rust_keys):
+                if ocaml_keys[o + run] != rust_keys[r + run]:
+                    break
+                run += 1
+            if run < min_run:
+                continue
+
+            if best is None:
+                best = (o, r, run)
+                continue
+
+            b_o, b_r, b_run = best
+            cand_dist = max(o - start, r - start)
+            best_dist = max(b_o - start, b_r - start)
+            cand_delta = abs(r - o)
+            best_delta = abs(b_r - b_o)
+            if (run > b_run or
+                    (run == b_run and cand_dist < best_dist) or
+                    (run == b_run and cand_dist == best_dist and cand_delta < best_delta) or
+                    (run == b_run and cand_dist == best_dist and cand_delta == best_delta and (o, r) < (b_o, b_r))):
+                best = (o, r, run)
+
+    return best
+
+
+def analyze_insertion(
+    ocaml_sf: SexpFile,
+    rust_sf: SexpFile,
+    lookahead: int = 200,
+    min_run: int = 4,
+) -> InsertionResult:
+    ocaml_ids, ocaml_keys = _compute_ordered_type_keys(ocaml_sf)
+    rust_ids, rust_keys = _compute_ordered_type_keys(rust_sf)
+
+    div_idx, matching_prefix, reason = _find_first_divergence(ocaml_ids, rust_ids, ocaml_keys, rust_keys)
+    if div_idx is None:
+        return InsertionResult(
+            divergence_idx=None,
+            matching_prefix=matching_prefix,
+            reason=reason,
+            ocaml_id=None,
+            rust_id=None,
+        )
+
+    ocaml_id = ocaml_ids[div_idx] if div_idx < len(ocaml_ids) else None
+    rust_id = rust_ids[div_idx] if div_idx < len(rust_ids) else None
+    result = InsertionResult(
+        divergence_idx=div_idx,
+        matching_prefix=matching_prefix,
+        reason=reason,
+        ocaml_id=ocaml_id,
+        rust_id=rust_id,
+    )
+
+    resync = _find_resync_window(ocaml_keys, rust_keys, div_idx, lookahead, min_run)
+    if resync is None:
+        return result
+
+    resync_o, resync_r, run_len = resync
+    result.resync_ocaml_pos = resync_o
+    result.resync_rust_pos = resync_r
+    result.run_len = run_len
+    result.shift = resync_r - resync_o
+    return result
+
+
 # ─── Structure Reference Finder ──────────────────────────────────────────────
 
 def find_refs_in_structure(structure: SexpNode, target_id: int,
@@ -596,7 +902,7 @@ def cmd_summary(args, root: str):
 
     for f in diff_files:
         path = os.path.join(diff_dir, f)
-        with open(path) as fh:
+        with open(path, encoding='utf-8', errors='replace') as fh:
             diff_text = fh.read()
 
         info = analyze_diff(diff_text)
@@ -632,6 +938,245 @@ def cmd_summary(args, root: str):
 
     print()
     print(f"  Total: {bold(str(total_hunks))} hunks across {bold(str(len(entries)))} files")
+
+
+def cmd_motifs(args, root: str):
+    """Classify repeated hunk motifs across one or all diff files."""
+    diff_dir = os.path.join(root, '.parity-cache', 'tests', 'diffs')
+    if not os.path.isdir(diff_dir):
+        print(red("No diffs directory found. Run the parity test first:"))
+        print("  ./scripts/test_typedtree_parity.sh")
+        return
+
+    if args.file:
+        name = resolve_file(args.file, root)
+        diff_files = [name + '.diff']
+    else:
+        diff_files = sorted(f for f in os.listdir(diff_dir) if f.endswith('.diff'))
+
+    if not diff_files:
+        print(green("No failures! All tests pass."))
+        return
+
+    motif_hunk_counts: Counter[str] = Counter()
+    motif_file_sets: dict[str, set[str]] = {}
+    transition_counts: Counter[str] = Counter()
+    transition_file_sets: dict[str, set[str]] = {}
+    removed_path_counts: Counter[str] = Counter()
+    added_path_counts: Counter[str] = Counter()
+    removed_path_file_sets: dict[str, set[str]] = {}
+    added_path_file_sets: dict[str, set[str]] = {}
+    total_hunks = 0
+
+    for diff_file in diff_files:
+        path = os.path.join(diff_dir, diff_file)
+        if not os.path.exists(path):
+            print(red(f"Diff file not found: {path}"))
+            continue
+
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            diff_text = fh.read()
+
+        base = diff_file.replace('.diff', '').replace('tests_tests_src_', '')
+        hunks = iter_diff_hunks(diff_text)
+        for hunk in hunks:
+            motifs, transitions = classify_hunk_motifs(hunk)
+            total_hunks += 1
+            for motif in motifs:
+                motif_hunk_counts[motif] += 1
+                motif_file_sets.setdefault(motif, set()).add(base)
+            for src, dst in transitions:
+                transition = f"{src} -> {dst}"
+                transition_counts[transition] += 1
+                transition_file_sets.setdefault(transition, set()).add(base)
+
+            minus_lines = [line[1:].strip() for line in hunk if line.startswith('-') and not line.startswith('---')]
+            plus_lines = [line[1:].strip() for line in hunk if line.startswith('+') and not line.startswith('+++')]
+            removed_paths, added_paths = _extract_hunk_path_delta(minus_lines, plus_lines)
+            for term in removed_paths:
+                removed_path_counts[term] += 1
+                removed_path_file_sets.setdefault(term, set()).add(base)
+            for term in added_paths:
+                added_path_counts[term] += 1
+                added_path_file_sets.setdefault(term, set()).add(base)
+
+    if total_hunks == 0:
+        print(yellow("No hunks found in selected diff files."))
+        return
+
+    print(bold(f"Motif Analysis: {len(diff_files)} files, {total_hunks} hunks"))
+    print()
+    print(f"  {'Motif':<30} {'Hunks':>7} {'Files':>7} {'Share':>8}")
+    print(f"  {'─'*30} {'─'*7} {'─'*7} {'─'*8}")
+
+    for motif, count in motif_hunk_counts.most_common(args.top):
+        file_count = len(motif_file_sets.get(motif, set()))
+        share = (count / total_hunks) * 100.0
+        print(f"  {motif:<30} {count:>7} {file_count:>7} {share:>7.1f}%")
+
+    if transition_counts:
+        print()
+        print(bold(f"Top Path Transitions (tail-matched, top {args.transitions})"))
+        print(f"  {'Transition':<62} {'Hunks':>7} {'Files':>7}")
+        print(f"  {'─'*62} {'─'*7} {'─'*7}")
+        for transition, count in transition_counts.most_common(args.transitions):
+            file_count = len(transition_file_sets.get(transition, set()))
+            print(f"  {transition[:62]:<62} {count:>7} {file_count:>7}")
+
+    if removed_path_counts or added_path_counts:
+        print()
+        print(bold(f"Top Removed Path Terms (top {args.paths})"))
+        print(f"  {'Path':<62} {'Hunks':>7} {'Files':>7}")
+        print(f"  {'─'*62} {'─'*7} {'─'*7}")
+        for term, count in removed_path_counts.most_common(args.paths):
+            file_count = len(removed_path_file_sets.get(term, set()))
+            print(f"  {term[:62]:<62} {count:>7} {file_count:>7}")
+
+        print()
+        print(bold(f"Top Added Path Terms (top {args.paths})"))
+        print(f"  {'Path':<62} {'Hunks':>7} {'Files':>7}")
+        print(f"  {'─'*62} {'─'*7} {'─'*7}")
+        for term, count in added_path_counts.most_common(args.paths):
+            file_count = len(added_path_file_sets.get(term, set()))
+            print(f"  {term[:62]:<62} {count:>7} {file_count:>7}")
+
+
+def _print_candidate_extra_ids(
+    label: str,
+    ids: List[int],
+    sf: SexpFile,
+    limit: int = 8,
+) -> None:
+    if not ids:
+        return
+    print(f"  Candidate {label} IDs near divergence:")
+    for tid in ids[:limit]:
+        print(f"    #{tid}: {type_summary(sf.types[tid])}")
+    if len(ids) > limit:
+        print(f"    ... and {len(ids) - limit} more")
+
+
+def cmd_insertion(args, root: str):
+    """Analyze first divergence and estimate insertion/shift cascades."""
+    if args.file:
+        name = resolve_file(args.file, root)
+        ocaml_sf, rust_sf = require_sexp_files(name, root)
+        result = analyze_insertion(
+            ocaml_sf,
+            rust_sf,
+            lookahead=args.lookahead,
+            min_run=args.min_run,
+        )
+
+        short_name = name.replace("tests_tests_src_", "")
+        print(bold(f"Insertion Analysis: {short_name}"))
+        print(f"  Matching prefix: {result.matching_prefix} type(s)")
+
+        if result.divergence_idx is None:
+            print(green("  No divergence in preamble content."))
+            return
+
+        print(f"  First divergence: position {result.divergence_idx} "
+              f"(reason: {result.reason}, OCaml #{result.ocaml_id}, Rust #{result.rust_id})")
+
+        if result.shift is None:
+            print(yellow("  No stable resync found in lookahead window; likely multi-cause divergence."))
+            return
+
+        print(f"  Resync window: OCaml pos {result.resync_ocaml_pos}, Rust pos {result.resync_rust_pos}, "
+              f"run={result.run_len}, shift={result.shift:+d}")
+        if result.shift > 0:
+            print(red(f"  Rust likely inserted ~{result.shift} extra type node(s) before resync."))
+        elif result.shift < 0:
+            print(red(f"  OCaml likely inserted ~{-result.shift} extra type node(s) before resync."))
+        else:
+            print(yellow("  Shift is 0; divergence is likely content/path mismatch rather than insertion count."))
+
+        ocaml_ids, _ = _compute_ordered_type_keys(ocaml_sf)
+        rust_ids, _ = _compute_ordered_type_keys(rust_sf)
+        div = result.divergence_idx
+        if div is not None and result.shift and result.shift > 0:
+            extras = rust_ids[div: min(len(rust_ids), div + result.shift)]
+            _print_candidate_extra_ids("Rust", extras, rust_sf)
+        elif div is not None and result.shift and result.shift < 0:
+            extras = ocaml_ids[div: min(len(ocaml_ids), div + (-result.shift))]
+            _print_candidate_extra_ids("OCaml", extras, ocaml_sf)
+        return
+
+    diff_dir = os.path.join(root, '.parity-cache', 'tests', 'diffs')
+    if not os.path.isdir(diff_dir):
+        print(red("No diffs directory found. Run the parity test first:"))
+        print("  ./scripts/test_typedtree_parity.sh")
+        return
+
+    diff_files = sorted(f for f in os.listdir(diff_dir) if f.endswith('.diff'))
+    if not diff_files:
+        print(green("No failures! All tests pass."))
+        return
+
+    records: List[Tuple[str, InsertionResult]] = []
+    missing_sexp = 0
+    for diff_file in diff_files:
+        name = diff_file[:-5]
+        ocaml_sf = load_sexp('ocaml', name, root)
+        rust_sf = load_sexp('rust', name, root)
+        if ocaml_sf is None or rust_sf is None:
+            missing_sexp += 1
+            continue
+        result = analyze_insertion(
+            ocaml_sf,
+            rust_sf,
+            lookahead=args.lookahead,
+            min_run=args.min_run,
+        )
+        short_name = name.replace("tests_tests_src_", "")
+        records.append((short_name, result))
+
+    if not records:
+        print(red("No analyzable files with both OCaml and Rust sexp outputs."))
+        print("Run parity test first to populate .parity-cache/tests/{ocaml,rust}.")
+        return
+
+    perfect = [(n, r) for n, r in records if r.divergence_idx is None]
+    unresolved = [(n, r) for n, r in records if r.divergence_idx is not None and r.shift is None]
+    shifted = [(n, r) for n, r in records if r.shift is not None and r.shift != 0]
+    zero_shift = [(n, r) for n, r in records if r.shift == 0]
+    rust_extra = [(n, r) for n, r in shifted if r.shift is not None and r.shift > 0]
+    ocaml_extra = [(n, r) for n, r in shifted if r.shift is not None and r.shift < 0]
+    total_rust_extra = sum(r.shift for _, r in rust_extra if r.shift is not None)
+    total_ocaml_extra = sum(-r.shift for _, r in ocaml_extra if r.shift is not None)
+
+    print(bold("Insertion Analysis (all cached failing files)"))
+    print(f"  Files analyzed: {len(records)}"
+          f"{f' ({missing_sexp} missing sexp skipped)' if missing_sexp else ''}")
+    print(f"  Perfect preamble match: {len(perfect)}")
+    print(f"  Shift detected: {len(shifted)} (Rust-extra: {len(rust_extra)}, OCaml-extra: {len(ocaml_extra)}, zero-shift: {len(zero_shift)})")
+    print(f"  Unresolved (no resync window): {len(unresolved)}")
+    print(f"  Estimated extra nodes: Rust +{total_rust_extra}, OCaml +{total_ocaml_extra}")
+
+    if shifted:
+        print()
+        print(bold(f"Top Shift Files (top {args.top})"))
+        print(f"  {'File':<42} {'Shift':>7} {'Run':>5} {'DivPos':>7} {'IDs'}")
+        print(f"  {'─'*42} {'─'*7} {'─'*5} {'─'*7} {'─'*18}")
+        ranked = sorted(
+            shifted,
+            key=lambda item: (abs(item[1].shift or 0), item[1].run_len, -(item[1].divergence_idx or 0)),
+            reverse=True,
+        )
+        for file_name, result in ranked[:args.top]:
+            ids = f"#{result.ocaml_id}/#{result.rust_id}"
+            shift_str = f"{result.shift:+d}" if result.shift is not None else "?"
+            div_str = str(result.divergence_idx) if result.divergence_idx is not None else "-"
+            print(f"  {file_name:<42} {shift_str:>7} {result.run_len:>5} {div_str:>7} {ids}")
+
+    if unresolved:
+        print()
+        print(bold(f"Earliest Unresolved Divergences (top {args.top})"))
+        unresolved_sorted = sorted(unresolved, key=lambda item: item[1].divergence_idx or 999999)
+        for file_name, result in unresolved_sorted[:args.top]:
+            div_str = str(result.divergence_idx) if result.divergence_idx is not None else "-"
+            print(f"  {file_name:<42} div={div_str:<6} reason={result.reason:<8} ids=#{result.ocaml_id}/#{result.rust_id}")
 
 
 def cmd_preamble(args, root: str):
@@ -1096,10 +1641,14 @@ def main():
         epilog="""
 Examples:
   %(prog)s summary
+  %(prog)s motifs
+  %(prog)s motifs Service__PublicVideo --top 15
   %(prog)s preamble ticker
   %(prog)s trace ticker 11
   %(prog)s extra more_poly_variant_test
   %(prog)s divergence bs_set_int_test
+  %(prog)s insertion
+  %(prog)s insertion ticker
         """)
 
     parser.add_argument('--no-color', action='store_true', help='Disable colored output')
@@ -1108,6 +1657,15 @@ Examples:
 
     # summary
     sub_summary = subparsers.add_parser('summary', help='Overview of all failures')
+
+    # motifs
+    sub_motifs = subparsers.add_parser('motifs', help='Hunk-level motif classification')
+    sub_motifs.add_argument('file', nargs='?', help='Optional file name/short name for single-file analysis')
+    sub_motifs.add_argument('--top', type=int, default=12, help='Number of motifs to show (default: 12)')
+    sub_motifs.add_argument('--transitions', type=int, default=12,
+                            help='Number of path transitions to show (default: 12)')
+    sub_motifs.add_argument('--paths', type=int, default=12,
+                            help='Number of removed/added path terms to show (default: 12)')
 
     # preamble
     sub_preamble = subparsers.add_parser('preamble', help='Aligned type preamble comparison')
@@ -1129,6 +1687,16 @@ Examples:
     sub_divergence = subparsers.add_parser('divergence', help='First divergence analysis')
     sub_divergence.add_argument('file', help='File name or short name')
 
+    # insertion
+    sub_insertion = subparsers.add_parser('insertion', help='First insertion/resync analysis')
+    sub_insertion.add_argument('file', nargs='?', help='Optional file name or short name')
+    sub_insertion.add_argument('--lookahead', type=int, default=200,
+                               help='Max positions to scan for resync window (default: 200)')
+    sub_insertion.add_argument('--min-run', type=int, default=4,
+                               help='Minimum consecutive matches to accept a resync (default: 4)')
+    sub_insertion.add_argument('--top', type=int, default=12,
+                               help='Rows to show in aggregated tables (default: 12)')
+
     args = parser.parse_args()
 
     global USE_COLOR
@@ -1143,10 +1711,12 @@ Examples:
 
     commands = {
         'summary': cmd_summary,
+        'motifs': cmd_motifs,
         'preamble': cmd_preamble,
         'trace': cmd_trace,
         'extra': cmd_extra,
         'divergence': cmd_divergence,
+        'insertion': cmd_insertion,
     }
 
     commands[args.command](args, root)
