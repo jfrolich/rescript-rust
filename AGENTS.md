@@ -208,6 +208,14 @@ The `scripts/parity_analyzer.py` tool provides structured analysis of parity dif
 # Overview of all failures (works from diffs alone, no sexp files needed)
 python3 scripts/parity_analyzer.py summary
 
+# Hunk motif classification across all failures (or one file)
+python3 scripts/parity_analyzer.py motifs
+python3 scripts/parity_analyzer.py motifs ticker --top 20 --transitions 20 --paths 20
+
+# First insertion/resync analysis to estimate shift cascades
+python3 scripts/parity_analyzer.py insertion
+python3 scripts/parity_analyzer.py insertion ticker --lookahead 300 --min-run 6 --top 20
+
 # Aligned type preamble comparison (requires sexp files)
 python3 scripts/parity_analyzer.py preamble ticker
 python3 scripts/parity_analyzer.py preamble ticker --diff   # only show non-matching types
@@ -225,7 +233,11 @@ python3 scripts/parity_analyzer.py divergence chn_test
 
 **File resolution:** Short names like `ticker` auto-resolve to `tests_tests_src_ticker.res`. Fuzzy matching is supported.
 
+**Global flag:** `--no-color` is a global parser flag and must be placed before the subcommand, e.g. `python3 scripts/parity_analyzer.py --no-color motifs`.
+
 **Sexp files:** The `summary` command works with diffs only. Other commands need sexp files — the tool will tell you how to generate them if missing. The parity script saves sexp files to `.parity-cache/tests/{ocaml,rust}/` for failing tests.
+
+**Malformed cache files:** The analyzer reads cached sexp/diff files with tolerant decoding (`errors='replace'`) so one bad byte does not crash analysis.
 
 ### Running bsc Directly
 
