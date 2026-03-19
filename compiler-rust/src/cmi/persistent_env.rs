@@ -149,7 +149,14 @@ impl PersistentEnv {
         // - Pdot(Pdot(Pident("Stdlib_JSON"), "Classify"), "t") gets rewritten
         //   to Pdot(Pdot(Pdot(Pident("Stdlib"), "JSON"), "Classify"), "t")
         if let Some(qualified_path) = self.alias_prefix_rewrites.get(name).cloned() {
-            rewrite_deep_prefix_in_sig(&signature, name, &qualified_path, ctx);
+            // Skip rewriting for hyphenated module names (e.g., "Stream-NodeJs",
+            // "Crypto-NodeJs"). OCaml does NOT rewrite these at CMI load time.
+            // The rewriting would modify shared type nodes in OTHER modules'
+            // types (like Decipher.cmi referencing Crypto-NodeJs.KeyObject.t),
+            // producing wrong paths.
+            if !name.contains('-') {
+                rewrite_deep_prefix_in_sig(&signature, name, &qualified_path, ctx);
+            }
         }
 
         // Collect alias submodule mappings: when a module has submodules declared
