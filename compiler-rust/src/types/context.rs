@@ -737,7 +737,9 @@ impl<'a> TypeContext<'a> {
                     next,
                     ..
                 } => {
-                    if path.same(&cached_path) {
+                    // Match OCaml find_repr: only public memo entries participate
+                    // in repr reuse during copy.
+                    if cached_private == PrivateFlag::Public && path.same(&cached_path) {
                         return Some(abbrev);
                     }
                     current = next;

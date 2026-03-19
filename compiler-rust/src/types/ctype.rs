@@ -1071,7 +1071,19 @@ fn resolve_module_signature_through_cmi<'a>(
             let full_path = find_cmi_file(load_paths, id.name())?;
             let cmi = cmi_format::read_cmi(&full_path).ok()?;
             let mut sig_ctx = SigReadContext::new(ctx);
-            Some(sig_ctx.read_signature(&cmi.cmi_sign))
+            let sig = sig_ctx.read_signature(&cmi.cmi_sign);
+            // Apply path substitution to qualify internal types with the
+            // module path, matching persistent_env::load_module behavior.
+            // Without this, types have bare Pident paths that cause
+            // incorrect path qualification through resolve_module_lid_impl.
+            crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                &sig, module_path, ctx,
+            );
+            // Also recursively substitute submodule paths.
+            crate::cmi::persistent_env::substitute_submodule_paths_pub(
+                &sig, module_path, ctx,
+            );
+            Some(sig)
         }
         Path::Pdot(parent, module_name, _) => {
             let parent_sig =

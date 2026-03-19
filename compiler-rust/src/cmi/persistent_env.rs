@@ -1570,6 +1570,15 @@ pub fn rewrite_sig_by_path_prefix(
     }
 }
 
+/// Public wrapper for substitute_submodule_paths.
+pub fn substitute_submodule_paths_pub(
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    substitute_submodule_paths(sig_items, module_path, ctx);
+}
+
 /// Recursively substitute type paths in sub-module signatures.
 /// For a module like Belt with sub-modules Array, Map, etc.,
 /// the types in Belt.Array should have paths like Pdot(Pdot(Pident "Belt") "Array") "t"
