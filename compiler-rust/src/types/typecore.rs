@@ -6080,6 +6080,63 @@ fn type_application(
         ExpressionDesc::Texp_ident(_, _, desc)
             if matches!(&desc.val_kind, crate::types::ValueKind::ValPrim(prim) if prim.prim_name == "%ignore")
     );
+    let debug_apply_name = match &typed_funct.exp_desc {
+        ExpressionDesc::Texp_ident(path, _, _) => Some(path.name()),
+        _ => None,
+    };
+    let debug_apply_line = std::env::var("RUST_DEBUG_APPLY_LINE")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok());
+    let debug_apply_eq = if std::env::var_os("RUST_DEBUG_APPLY_TRACE_ALL").is_some() {
+        true
+    } else {
+        std::env::var_os("RUST_DEBUG_APPLY_TRACE").is_some()
+            && {
+                let full_loc = tctx.arena.to_location(loc);
+                debug_apply_line.is_some_and(|line| full_loc.loc_start.line == line)
+                    || full_loc.loc_start.line == 35
+                    || matches!(
+                        debug_apply_name.as_deref(),
+                        Some("N.eq") | Some("basicComponent")
+                    )
+            }
+    };
+    let summarize_apply_endpoint = |ty: TypeExprRef| -> String {
+        let ty = ctx.repr(ty);
+        let level = ctx.get_level(ty);
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tarrow { .. } => format!("arrow#{}@{}", ty.0, level),
+            TypeDesc::Ttuple(_) => format!("tuple#{}@{}", ty.0, level),
+            TypeDesc::Tconstr { path, args, .. } => {
+                let args = args
+                    .iter()
+                    .map(|a| ctx.repr(*a).0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{}#{}@{}({})", path.name(), ty.0, level, args)
+            }
+            TypeDesc::Tvar(_) => format!("tvar#{}@{}", ty.0, level),
+            TypeDesc::Tlink(t) => format!("tlink#{}@{}->{}", ty.0, level, ctx.repr(*t).0),
+            TypeDesc::Tsubst(t) => format!("tsubst#{}@{}->{}", ty.0, level, ctx.repr(*t).0),
+            _ => format!("other#{}@{}", ty.0, level),
+        }
+    };
+    let summarize_apply_ty = |ty: TypeExprRef| -> String {
+        let ty = ctx.repr(ty);
+        let level = ctx.get_level(ty);
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tarrow { arg, ret, .. } => format!(
+                "arrow#{}@{}({}->{})",
+                ty.0,
+                level,
+                summarize_apply_endpoint(arg.typ),
+                summarize_apply_endpoint(*ret)
+            ),
+            _ => summarize_apply_endpoint(ty),
+        }
+    };
 
     // Match labels by name (OCaml's extract_label) instead of consuming call args strictly
     // left-to-right.
@@ -6162,6 +6219,19 @@ fn type_application(
                     enforce_optional: fn_label.is_optional() && !call_is_optional,
                     skip_post_unify: is_ignore_fn,
                 });
+                if debug_apply_eq {
+                    let full_loc = tctx.arena.to_location(loc);
+                    eprintln!(
+                        "[apply-step] fn={} loc={}:{} arg_index={} label={:?} expected_ret={} unify_ret={}",
+                        debug_apply_name.as_deref().unwrap_or("<non-ident>"),
+                        full_loc.loc_start.line,
+                        full_loc.loc_start.column(),
+                        pending_args.len() - 1,
+                        fn_label,
+                        summarize_apply_ty(ret_ty),
+                        summarize_apply_ty(ret_ty0)
+                    );
+                }
                 if std::env::var_os("RUST_DEBUG_REACTDOM_APPLY").is_some()
                     && matches!(
                         &typed_funct.exp_desc,
@@ -6335,50 +6405,6 @@ fn type_application(
             break;
         }
     }
-
-    let debug_apply_name = match &typed_funct.exp_desc {
-        ExpressionDesc::Texp_ident(path, _, _) => Some(path.name()),
-        _ => None,
-    };
-    let debug_apply_eq = if std::env::var_os("RUST_DEBUG_APPLY_TRACE_ALL").is_some() {
-        true
-    } else {
-        std::env::var_os("RUST_DEBUG_APPLY_TRACE").is_some()
-            && {
-                let full_loc = tctx.arena.to_location(loc);
-                full_loc.loc_start.line == 35
-                    || matches!(
-                        debug_apply_name.as_deref(),
-                        Some("N.eq") | Some("basicComponent")
-                    )
-            }
-    };
-    let summarize_apply_ty = |ty: TypeExprRef| -> String {
-        let ty = ctx.repr(ty);
-        let level = ctx.get_level(ty);
-        let desc = ctx.get_desc(ty);
-        match &*desc {
-            TypeDesc::Tarrow { arg, ret, .. } => format!(
-                "arrow#{}@{}({}->{})",
-                ty.0,
-                level,
-                ctx.repr(arg.typ).0,
-                ctx.repr(*ret).0
-            ),
-            TypeDesc::Tconstr { path, args, .. } => {
-                let args = args
-                    .iter()
-                    .map(|a| ctx.repr(*a).0.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!("{}#{}@{}({})", path.name(), ty.0, level, args)
-            }
-            TypeDesc::Tvar(_) => format!("tvar#{}@{}", ty.0, level),
-            TypeDesc::Tlink(t) => format!("tlink#{}@{}->{}", ty.0, level, ctx.repr(*t).0),
-            TypeDesc::Tsubst(t) => format!("tsubst#{}@{}->{}", ty.0, level, ctx.repr(*t).0),
-            _ => format!("other#{}@{}", ty.0, level),
-        }
-    };
 
     let mut typed_args = Vec::with_capacity(pending_args.len());
     for (arg_index, pending_arg) in pending_args.into_iter().enumerate() {
@@ -7527,6 +7553,18 @@ fn type_match_cases_batch_non_gadt<'a>(
             }
 
             let body_expr = tctx.arena.get_expr(pending.parsed_case.pc_rhs);
+            if std::env::var_os("RUST_DEBUG_CASE_BODY_TYPES").is_some() {
+                let body_loc = tctx.arena.to_location(body_expr.pexp_loc);
+                eprintln!(
+                    "[case-body-types] line={} col={} case_body_ty={}@{} body_ty={}@{}",
+                    body_loc.loc_start.line,
+                    body_loc.loc_start.column(),
+                    ctx.repr(case_body_ty).0,
+                    ctx.get_level(ctx.repr(case_body_ty)),
+                    ctx.repr(body_ty).0,
+                    ctx.get_level(ctx.repr(body_ty)),
+                );
+            }
             let typed_body = type_expect(tctx, &pending.case_env, body_expr, case_body_ty, None)?;
             let typed_body = wrap_module_unpacks_in_expression(
                 tctx,
@@ -11104,10 +11142,6 @@ fn type_record(
             .map(|expr| expr.exp_type)
             .unwrap_or(record_ty)
     });
-    // OCaml's record extraction/disambiguation path goes through abbreviation
-    // expansion (`extract_concrete_record`), which seeds simple_abbrevs before
-    // subsequent field instantiation. Mirror that side effect.
-    let _ = crate::types::ctype::expand_head(ctx, env, disambiguation_ty);
     if std::env::var_os("RUST_DEBUG_RECORD_PATH").is_some()
         && field_names
             .iter()
@@ -11539,6 +11573,25 @@ fn type_record(
         } else {
             typed_expr
         };
+        if std::env::var_os("RUST_DEBUG_RECORD_FIELD_TYPES").is_some()
+            && label_desc.lbl_name == "status"
+        {
+            let field_loc = tctx.arena.to_location(tctx.arena.get_expr(field.expr).pexp_loc);
+            eprintln!(
+                "[record-field-types] stage=before-final-instance line={} col={} field={} expected={}@{} record={}@{} field_input={}@{} typed_expr={}@{}",
+                field_loc.loc_start.line,
+                field_loc.loc_start.column(),
+                label_desc.lbl_name,
+                ctx.repr(expected_ty).0,
+                ctx.get_level(ctx.repr(expected_ty)),
+                ctx.repr(record_ty).0,
+                ctx.get_level(ctx.repr(record_ty)),
+                ctx.repr(field_input_ty).0,
+                ctx.get_level(ctx.repr(field_input_ty)),
+                ctx.repr(final_expr.exp_type).0,
+                ctx.get_level(ctx.repr(final_expr.exp_type)),
+            );
+        }
         // OCaml `type_label_exp` returns `{arg with exp_type = instance env arg.exp_type}`.
         let final_expr = Expression::new(
             final_expr.exp_desc.clone(),
@@ -11547,6 +11600,23 @@ fn type_record(
             final_expr.exp_env,
             final_expr.exp_attributes.clone(),
         );
+        if std::env::var_os("RUST_DEBUG_RECORD_FIELD_TYPES").is_some()
+            && label_desc.lbl_name == "status"
+        {
+            let field_loc = tctx.arena.to_location(tctx.arena.get_expr(field.expr).pexp_loc);
+            eprintln!(
+                "[record-field-types] stage=after-final-instance line={} col={} field={} expected={}@{} record={}@{} final_expr={}@{}",
+                field_loc.loc_start.line,
+                field_loc.loc_start.column(),
+                label_desc.lbl_name,
+                ctx.repr(expected_ty).0,
+                ctx.get_level(ctx.repr(expected_ty)),
+                ctx.repr(record_ty).0,
+                ctx.get_level(ctx.repr(record_ty)),
+                ctx.repr(final_expr.exp_type).0,
+                ctx.get_level(ctx.repr(final_expr.exp_type)),
+            );
+        }
 
         let entry = (
             field.lid.clone(),
@@ -11593,7 +11663,39 @@ fn type_record(
 
     // OCaml: unify_exp_types ty_record (instance env ty_expected)
     let expected_inst_for_record = crate::types::instance(ctx, expected_ty);
+    if std::env::var_os("RUST_DEBUG_RECORD_FINAL_UNIFY").is_some()
+        && field_names.iter().any(|name| name == "status")
+    {
+        let full_loc = tctx.arena.to_location(loc);
+        eprintln!(
+            "[rust-record-final-unify] stage=before line={} col={} record_ty={}@{} expected_ty={}@{} expected_inst={}@{}",
+            full_loc.loc_start.line,
+            full_loc.loc_start.column(),
+            ctx.repr(record_ty).0,
+            ctx.get_level(ctx.repr(record_ty)),
+            ctx.repr(expected_ty).0,
+            ctx.get_level(ctx.repr(expected_ty)),
+            ctx.repr(expected_inst_for_record).0,
+            ctx.get_level(ctx.repr(expected_inst_for_record)),
+        );
+    }
     unify_expression_types(tctx, loc, record_ty, expected_inst_for_record, None)?;
+    if std::env::var_os("RUST_DEBUG_RECORD_FINAL_UNIFY").is_some()
+        && field_names.iter().any(|name| name == "status")
+    {
+        let full_loc = tctx.arena.to_location(loc);
+        eprintln!(
+            "[rust-record-final-unify] stage=after line={} col={} record_ty={}@{} expected_ty={}@{} expected_inst={}@{}",
+            full_loc.loc_start.line,
+            full_loc.loc_start.column(),
+            ctx.repr(record_ty).0,
+            ctx.get_level(ctx.repr(record_ty)),
+            ctx.repr(expected_ty).0,
+            ctx.get_level(ctx.repr(expected_ty)),
+            ctx.repr(expected_inst_for_record).0,
+            ctx.get_level(ctx.repr(expected_inst_for_record)),
+        );
+    }
     // OCaml special-case (typecore.ml, Pexp_record with no base):
     // for `{}` in a known record context, keep `Texp_record` fields empty when
     // all fields are optional; only error when required fields are missing.

@@ -3169,6 +3169,43 @@ fn unify_types<'a>(
     t1: TypeExprRef,
     t2: TypeExprRef,
 ) -> TypeResult<()> {
+    let t1 = ctx.repr(t1);
+    let t2 = ctx.repr(t2);
+    if t1 == t2 {
+        return Ok(());
+    }
+
+    {
+        let desc1 = ctx.get_desc(t1);
+        let desc2 = ctx.get_desc(t2);
+        if let (
+            TypeDesc::Tconstr {
+                path: path1,
+                args: args1,
+                abbrev: abbrev1,
+            },
+            TypeDesc::Tconstr {
+                path: path2,
+                args: args2,
+                abbrev: abbrev2,
+            },
+        ) = (&*desc1, &*desc2)
+        {
+            let same_nullary_no_cached_expansion = args1.is_empty()
+                && args2.is_empty()
+                && path1.same(path2)
+                && !(has_cached_expansion(ctx, path1, *abbrev1)
+                    || has_cached_expansion(ctx, path2, *abbrev2));
+            if same_nullary_no_cached_expansion {
+                drop(desc1);
+                drop(desc2);
+                update_level(ctx, ctx.get_level(t1), t2);
+                link_type(ctx, t1, t2);
+                return Ok(());
+            }
+        }
+    }
+
     // OCaml unify2 (ctype.ml:2283-2292): before structural unification,
     // update levels of both sides. This triggers expansion+linking for
     // Tconstr types whose binding time exceeds the target level,
@@ -3639,20 +3676,16 @@ fn unify_types<'a>(
             let args2 = args2.clone();
             let path_name = path1.head_name().to_string();
             let path_full = path1.name();
-            let skip_nullary_fast_link = args1.is_empty()
-                && (has_cached_expansion(ctx, path1, *abbrev1)
-                    || has_cached_expansion(ctx, path2, *abbrev2));
             if std::env::var_os("RUST_DEBUG_UNIFY_REACT_ELEMENT").is_some()
                 && path_full == "React.element"
                 && args1.is_empty()
             {
                 eprintln!(
-                    "[unify-react-element] t1={}@{} t2={}@{} skip_nullary_fast_link={} abbrev1={:?} memo1={:?} abbrev2={:?} memo2={:?}",
+                    "[unify-react-element] t1={}@{} t2={}@{} abbrev1={:?} memo1={:?} abbrev2={:?} memo2={:?}",
                     t1.0,
                     ctx.get_level(t1),
                     t2.0,
                     ctx.get_level(t2),
-                    skip_nullary_fast_link,
                     abbrev1,
                     ctx.get_abbrev_memo(*abbrev1),
                     abbrev2,
@@ -3699,8 +3732,6 @@ fn unify_types<'a>(
                 vec![]
             };
 
-            let all_phantom = !phantom_mask.is_empty() && phantom_mask.iter().all(|&p| p);
-
             let pairs: Vec<_> = args1
                 .iter()
                 .zip(args2.iter())
@@ -3708,70 +3739,34 @@ fn unify_types<'a>(
                 .map(|(i, (&a, &b))| (i, a, b))
                 .collect();
 
-            // OCaml's unify2 expands abbreviations (expand_head_unif) on
-            // both sides BEFORE calling unify3. unify3's catch-all does
-            // `link_type t1' t2` where t1' is the EXPANDED form.
-            // When expansion produces a DIFFERENT node (e.g. path
-            // normalization: Ticker_map.t -> Belt_MapString.t), the
-            // expansion node (t1') gets linked to the other ORIGINAL (t2),
-            // leaving BOTH originals (t1, t2) un-linked and thus separate.
-            // This is critical for cycle detection: if we link t1->t2
-            // directly, both positions resolve to the same repr node,
-            // causing false <cycle> markers in the sexp serializer.
-            //
-            // For types where ALL params are phantom, OCaml's expansion
-            // hides those params entirely, so neither original is linked.
-            if !all_phantom && !(args1.is_empty() && skip_nullary_fast_link) {
-                // OCaml's unify2 expands both sides via expand_head_unif
-                // BEFORE calling unify3. unify3 does `link_type t1' t2`
-                // where t1' is the EXPANDED form. For expandable types
-                // (with manifest), t1' is a DIFFERENT node from t1, so
-                // the original t1 stays unlinked. For abstract types,
-                // t1' == t1, so t1 IS linked to t2.
-                //
-                // Match this by trying to expand t1 for parameterized
-                // types: if expansion succeeds, link the expansion node
-                // (not the original) to t2. For nullary types, link
-                // t1 directly (OCaml fast-path in unify).
-                let link_source = if !args1.is_empty() {
-                    if let Some(env) = state.env() {
-                        let desc = ctx.get_desc(t1);
-                        if let TypeDesc::Tconstr { path, args, abbrev: _ } = &*desc {
-                            let path_norm = normalize_path_full(ctx, env, path);
-                            if path_norm != *path {
-                                // Path changed: create normalized node
-                                let new_node = ctx.new_constr(path_norm, args.clone());
-                                drop(desc);
-                                new_node
-                            } else {
-                                drop(desc);
-                                // Same path: try expanding t1 like OCaml's
-                                // expand_head_unif. If expansion succeeds,
-                                // the expanded node serves as t1' (different
-                                // from t1), so link_type links the expansion
-                                // to t2, leaving original t1 unlinked.
-                                match try_expand_head(ctx, env, t1) {
-                                    Some(expanded) if ctx.repr(expanded) != t1 => expanded,
-                                    _ => t1, // Abstract: link original
-                                }
-                            }
-                        } else {
-                            drop(desc);
-                            t1
-                        }
-                    } else {
-                        t1
-                    }
-                } else {
-                    t1
-                };
-                link_type(ctx, link_source, t2);
-            }
-
             for (i, a, b) in pairs {
                 // Skip phantom params — OCaml's expansion hides them.
                 if !phantom_mask.get(i).copied().unwrap_or(false) {
                     unify(ctx, state, a, b)?;
+                }
+            }
+
+            if state.mode != crate::types::UnifyMode::Pattern {
+                let mut link_source = t1;
+                if let Some(env) = state.env() {
+                    let desc = ctx.get_desc(t1);
+                    if let TypeDesc::Tconstr { path, args, .. } = &*desc {
+                        let path_norm = normalize_path_full(ctx, env, path);
+                        if path_norm != *path {
+                            link_source = ctx.new_constr(path_norm, args.clone());
+                        } else if let Some(expanded) = try_expand_head(ctx, env, t1) {
+                            let expanded = ctx.repr(expanded);
+                            if expanded != t1 {
+                                link_source = expanded;
+                            }
+                        }
+                    }
+                    drop(desc);
+                }
+                let source = ctx.repr(link_source);
+                let target = ctx.repr(t2);
+                if source != target && !deep_occur(ctx, source, target) {
+                    link_type(ctx, source, target);
                 }
             }
 
@@ -7287,6 +7282,7 @@ fn copy_type_cached(
 ) -> TypeExprRef {
     let ty = ctx.repr(ty);
     let debug_copy_constr = std::env::var_os("RUST_DEBUG_COPY_CONSTR").is_some();
+    let debug_copy_path = std::env::var("RUST_DEBUG_COPY_PATH").ok();
 
     // OCaml Ctype.copy marker precedence:
     // if `more.desc` is temporarily `Tsubst(Ttuple [more'; t])`,
@@ -7359,10 +7355,14 @@ fn copy_type_cached(
     // Determine action based on type level and descriptor.
     let action = {
         let desc = ctx.get_desc(ty);
-        if debug_copy_constr {
+        if debug_copy_constr || debug_copy_path.is_some() {
             if let TypeDesc::Tconstr { path, .. } = &*desc {
                 let name = path.name();
-                if name == "ticker"
+                let path_match = debug_copy_path
+                    .as_deref()
+                    .is_some_and(|needle| name.contains(needle));
+                if path_match
+                    || name == "ticker"
                     || name == "Ticker_map.t"
                     || name == "Belt.List.t"
                     || name == "list"
@@ -7398,9 +7398,14 @@ fn copy_type_cached(
                 // Tconstr: OCaml's copy returns identity for ALL non-generic types.
                 // Match that behavior: return self for all non-generic Tconstr.
                 TypeDesc::Tconstr { path, .. } => {
-                    if debug_copy_constr {
+                    let path_name = path.name();
+                    let path_match = debug_copy_path
+                        .as_deref()
+                        .is_some_and(|needle| path_name.contains(needle));
+                    if debug_copy_constr || path_match {
                         let name = path.name();
-                        if name == "ticker"
+                        if path_match
+                            || name == "ticker"
                             || name == "Ticker_map.t"
                             || name == "Belt.List.t"
                             || name == "list"
@@ -7438,9 +7443,14 @@ fn copy_type_cached(
                 },
                 TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
                 TypeDesc::Tconstr { path, args, .. } => {
-                    if debug_copy_constr {
+                    let path_name = path.name();
+                    let path_match = debug_copy_path
+                        .as_deref()
+                        .is_some_and(|needle| path_name.contains(needle));
+                    if debug_copy_constr || path_match {
                         let name = path.name();
-                        if name == "ticker"
+                        if path_match
+                            || name == "ticker"
                             || name == "Ticker_map.t"
                             || name == "Belt.List.t"
                             || name == "list"
@@ -7557,13 +7567,16 @@ fn copy_type_cached(
                     let debug_copy_constr = std::env::var_os("RUST_DEBUG_COPY_CONSTR").is_some();
                     let debug_copy_constr_bt =
                         std::env::var_os("RUST_DEBUG_COPY_CONSTR_BT").is_some();
-                    let full_path_name = if debug_copy_constr {
+                    let full_path_name = if debug_copy_constr || debug_copy_path.is_some() {
                         Some(path.name())
                     } else {
                         None
                     };
-                    let debug_path_name = if debug_copy_constr
-                        && (path.last() == "value"
+                    let debug_path_name = if (debug_copy_constr || debug_copy_path.is_some())
+                        && (debug_copy_path
+                            .as_deref()
+                            .is_some_and(|needle| path.name().contains(needle))
+                            || path.last() == "value"
                             || path.last() == "xy"
                             || path.last() == "imageElement"
                             || path.last() == "key"

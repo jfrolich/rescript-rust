@@ -913,23 +913,42 @@ let rec copy ?env ?partial ?keep_names ty =
       if forget <> generic_level then newty2 forget (Tvar None)
       else
         let desc = ty.desc in
-        save_desc ty desc;
-        let t = newvar () in
-        (* Stub *)
+      save_desc ty desc;
+      let t = newvar () in
+      (* Stub *)
         (match env with
         | Some env when Env.has_local_constraints env -> (
           match Env.gadt_instance_level env ty with
           | Some lv -> Env.add_gadt_instances env lv [t]
           | None -> ())
         | _ -> ());
-        ty.desc <- Tsubst t;
-        t.desc <-
-          (match desc with
+      ty.desc <- Tsubst t;
+      t.desc <-
+        (match desc with
           | Tconstr (p, tl, _) -> (
+            let debug_copy_path = Sys.getenv_opt "OCAML_DEBUG_COPY_PATH" in
+            let path_name = Path.name p in
+            let should_debug =
+              match debug_copy_path with
+              | Some needle ->
+                String.length needle > 0
+                && (path_name = needle || Path.last p = needle)
+              | None -> false
+            in
             let abbrevs = proper_abbrevs p tl !abbreviations in
             match find_repr p !abbrevs with
-            | Some ty when repr ty != t -> Tlink ty
+            | Some ty when repr ty != t ->
+              if should_debug then
+                Format.eprintf
+                  "[ocaml-copy-path] action=hit path=%s ty=%d@%d t=%d@%d found=%d@%d repr_found=%d@%d@."
+                  path_name ty.id ty.level t.id t.level ty.id ty.level
+                  (repr ty).id (repr ty).level;
+              Tlink ty
             | _ ->
+              if should_debug then
+                Format.eprintf
+                  "[ocaml-copy-path] action=copy path=%s ty=%d@%d t=%d@%d@."
+                  path_name ty.id ty.level t.id t.level;
               (*
              One must allocate a new reference, so that abbrevia-
              tions belonging to different branches of a type are
