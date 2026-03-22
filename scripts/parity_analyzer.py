@@ -10,6 +10,7 @@ Commands:
     preamble <file>      Aligned type preamble comparison
     trace <file> <id>    Trace a type through both compilers
     extra <file>         Find extra/missing type nodes
+    extra-summary        Aggregate extra/missing type motifs across failing files
     sharing <file>       Copy-sharing imbalance analysis
     row-order <file>     Polymorphic variant row-order mismatches
     sharing-summary      Aggregate sharing imbalances across failing files
@@ -639,6 +640,51 @@ def _canonical_paths_from_text(text: str) -> set[str]:
     for ident in PATH_IDENT_RE.findall(text):
         paths.add(_canonicalize_ident_path(ident))
     return paths
+
+
+def _extract_paths_from_sexp(node: SexpNode) -> set[str]:
+    if isinstance(node, SexpAtom):
+        return set()
+    if not node.children:
+        return set()
+
+    head = node.children[0]
+    if isinstance(head, SexpAtom):
+        if head.value == "Pident" and len(node.children) >= 2:
+            ident = node.children[1]
+            if isinstance(ident, SexpAtom):
+                return {_canonicalize_ident_path(ident.value.strip('"'))}
+        if head.value == "Pdot" and len(node.children) >= 3:
+            parent_paths = _extract_paths_from_sexp(node.children[1])
+            label = node.children[2]
+            if isinstance(label, SexpAtom):
+                label_value = label.value.strip('"')
+                if parent_paths:
+                    return {f"{parent}.{label_value}" for parent in parent_paths}
+                return {label_value}
+
+    paths: set[str] = set()
+    for child in node.children:
+        paths.update(_extract_paths_from_sexp(child))
+    return paths
+
+
+def _path_hint_from_key(key: str, limit: int = 2) -> str:
+    try:
+        parsed = parse_sexp_file(key)
+    except Exception:
+        return ""
+    if not parsed:
+        return ""
+
+    paths = sorted(path for path in _extract_paths_from_sexp(parsed[0]) if '.' in path)
+    if not paths:
+        return ""
+    shown = paths[:limit]
+    hint = ", ".join(shown)
+    if len(paths) > limit:
+        hint += ", ..."
+    return hint
 
 
 def _normalize_type_refs(line: str) -> str:
@@ -1443,58 +1489,176 @@ def cmd_extra(args, root: str):
         r_ids = rust_counts.get(key, [])
         o_count = len(o_ids)
         r_count = len(r_ids)
+        summary = _key_to_summary(key)
+
+        if not _matches_key_filters(
+            key,
+            summary,
+            contains=args.contains,
+            paths_only=args.paths_only,
+        ):
+            continue
 
         if o_count > 0 and r_count == 0:
-            extra_ocaml.append((key, o_ids, r_ids))
+            extra_ocaml.append((summary, o_ids, r_ids))
         elif r_count > 0 and o_count == 0:
-            extra_rust.append((key, o_ids, r_ids))
+            extra_rust.append((summary, o_ids, r_ids))
         elif o_count > r_count:
-            duplicated_ocaml.append((key, o_ids, r_ids))
+            duplicated_ocaml.append((summary, o_ids, r_ids))
         elif r_count > o_count:
-            duplicated_rust.append((key, o_ids, r_ids))
+            duplicated_rust.append((summary, o_ids, r_ids))
 
     # Report
     if extra_ocaml:
         print(red(bold(f"  Types only in OCaml ({len(extra_ocaml)}):")))
-        for key, o_ids, _ in extra_ocaml:
+        for summary, o_ids, _ in extra_ocaml:
             ids_str = ", ".join(f"#{i}" for i in sorted(o_ids))
-            summary = _key_to_summary(key)
             print(f"    {cyan(ids_str):>20}  {summary}")
         print()
 
     if extra_rust:
         print(red(bold(f"  Types only in Rust ({len(extra_rust)}):")))
-        for key, _, r_ids in extra_rust:
+        for summary, _, r_ids in extra_rust:
             ids_str = ", ".join(f"#{i}" for i in sorted(r_ids))
-            summary = _key_to_summary(key)
             print(f"    {cyan(ids_str):>20}  {summary}")
         print()
 
     if duplicated_ocaml:
         print(yellow(bold(f"  More copies in OCaml ({len(duplicated_ocaml)}):")))
-        for key, o_ids, r_ids in duplicated_ocaml:
+        for summary, o_ids, r_ids in duplicated_ocaml:
             o_str = ", ".join(f"#{i}" for i in sorted(o_ids))
             r_str = ", ".join(f"#{i}" for i in sorted(r_ids))
-            summary = _key_to_summary(key)
             print(f"    OCaml: {cyan(o_str)}  Rust: {cyan(r_str)}")
             print(f"    {dim(summary)}")
         print()
 
     if duplicated_rust:
         print(yellow(bold(f"  More copies in Rust ({len(duplicated_rust)}):")))
-        for key, o_ids, r_ids in duplicated_rust:
+        for summary, o_ids, r_ids in duplicated_rust:
             o_str = ", ".join(f"#{i}" for i in sorted(o_ids))
             r_str = ", ".join(f"#{i}" for i in sorted(r_ids))
-            summary = _key_to_summary(key)
             print(f"    OCaml: {cyan(o_str)}  Rust: {cyan(r_str)}")
             print(f"    {dim(summary)}")
         print()
 
     if not (extra_ocaml or extra_rust or duplicated_ocaml or duplicated_rust):
-        print(green("  No extra or missing types! Differences are in ID assignment only."))
+        if args.contains or args.paths_only:
+            print(green("  No content differences matched the requested filters."))
+        else:
+            print(green("  No extra or missing types! Differences are in ID assignment only."))
     else:
         total_diff = len(extra_ocaml) + len(extra_rust) + len(duplicated_ocaml) + len(duplicated_rust)
         print(f"  Total content differences: {bold(str(total_diff))}")
+
+
+def cmd_extra_summary(args, root: str):
+    """Aggregate extra/missing type motifs across all failing files."""
+    diff_dir = os.path.join(root, '.parity-cache', 'tests', 'diffs')
+    if not os.path.isdir(diff_dir):
+        print(red("No diffs directory found. Run the parity test first:"))
+        print("  ./scripts/test_typedtree_parity.sh")
+        return
+
+    diff_files = sorted(f for f in os.listdir(diff_dir) if f.endswith('.diff'))
+    if not diff_files:
+        print(green("No failures! All tests pass."))
+        return
+
+    grouped: Dict[Tuple[str, str], Dict[str, Union[int, List[str]]]] = {}
+    scanned = 0
+    skipped = 0
+
+    for diff_file in diff_files:
+        name = diff_file.replace('.diff', '')
+        ocaml_sf = load_sexp('ocaml', name, root)
+        rust_sf = load_sexp('rust', name, root)
+        if ocaml_sf is None or rust_sf is None:
+            skipped += 1
+            continue
+
+        scanned += 1
+        seen_buckets_in_file: set[Tuple[str, str]] = set()
+        ocaml_memo: dict = {}
+        rust_memo: dict = {}
+        ocaml_counts: dict[str, list[int]] = {}
+        rust_counts: dict[str, list[int]] = {}
+
+        for tid in ocaml_sf.types:
+            key = content_key(tid, ocaml_sf.types, memo=ocaml_memo)
+            ocaml_counts.setdefault(key, []).append(tid)
+        for tid in rust_sf.types:
+            key = content_key(tid, rust_sf.types, memo=rust_memo)
+            rust_counts.setdefault(key, []).append(tid)
+
+        for key in set(ocaml_counts.keys()) | set(rust_counts.keys()):
+            o_ids = ocaml_counts.get(key, [])
+            r_ids = rust_counts.get(key, [])
+            if o_ids and r_ids:
+                continue
+
+            summary = _key_to_summary(key)
+            if not _matches_key_filters(
+                key,
+                summary,
+                contains=args.contains,
+                paths_only=args.paths_only,
+            ):
+                continue
+
+            side = "OCaml" if o_ids else "Rust"
+            copies = len(o_ids) if o_ids else len(r_ids)
+            bucket = (side, summary)
+            entry = grouped.setdefault(bucket, {"files": 0, "copies": 0, "examples": []})
+            if bucket not in seen_buckets_in_file:
+                entry["files"] = int(entry["files"]) + 1
+                seen_buckets_in_file.add(bucket)
+            entry["copies"] = int(entry["copies"]) + copies
+            examples = entry["examples"]
+            if isinstance(examples, list) and name not in examples and len(examples) < args.examples:
+                examples.append(name)
+
+    if not grouped:
+        if args.contains or args.paths_only:
+            print(green("No aggregate extra/missing motifs matched the requested filters."))
+        else:
+            print(green("No aggregate extra/missing motifs found."))
+        return
+
+    rows = []
+    for (side, summary), info in grouped.items():
+        rows.append((
+            int(info["files"]),
+            int(info["copies"]),
+            side,
+            summary,
+            info["examples"] if isinstance(info["examples"], list) else [],
+        ))
+
+    rows.sort(key=lambda r: (-r[0], -r[1], r[2], r[3]))
+    shown = rows[:args.top]
+
+    title = "Extra/Missing Type Summary"
+    if args.paths_only:
+        title += " (path-only)"
+
+    print(bold(title))
+    print()
+    print(f"  Scanned files with sexp cache: {bold(str(scanned))}  (skipped: {skipped})")
+    print(f"  Distinct motifs: {bold(str(len(rows)))}")
+    print()
+    print(f"  {'Side':<6} {'Files':>5} {'Copies':>6}  {'Type Summary'}")
+    print(f"  {'─'*6} {'─'*5} {'─'*6}  {'─'*60}")
+
+    for files_count, copies, side, summary, examples in shown:
+        side_colored = red(side)
+        print(f"  {side_colored:<6} {files_count:>5} {copies:>6}  {summary}")
+        if examples:
+            ex = ", ".join(str(e).replace('tests_tests_src_', '') for e in examples[:args.examples])
+            print(f"          {dim('examples: ' + ex)}")
+
+    if len(rows) > len(shown):
+        print()
+        print(dim(f"  ... {len(rows) - len(shown)} more motifs (increase --top to see more)"))
 
 
 def _format_id_list(ids: List[int], limit: int) -> str:
@@ -1503,6 +1667,25 @@ def _format_id_list(ids: List[int], limit: int) -> str:
     if len(ids) > limit:
         txt += f", ... (+{len(ids) - limit})"
     return txt
+
+
+def _content_key_has_path(key: str) -> bool:
+    return bool(_path_hint_from_key(key))
+
+
+def _matches_key_filters(
+    key: str,
+    summary: str,
+    contains: Optional[str] = None,
+    paths_only: bool = False,
+) -> bool:
+    if paths_only and not _content_key_has_path(key):
+        return False
+    if contains:
+        needle = contains.lower()
+        if needle not in summary.lower() and needle not in key.lower():
+            return False
+    return True
 
 
 def cmd_sharing(args, root: str):
@@ -1783,6 +1966,9 @@ def _key_to_summary(key: str) -> str:
             parsed = parse_sexp_file(key)
             if parsed:
                 summary = type_summary(parsed[0])
+                path_hint = _path_hint_from_key(key)
+                if path_hint and summary in {"Tarrow", "Ttuple", "Tvariant", "Tpoly", "Tobject", "Tfield"}:
+                    summary = f"{summary} [{path_hint}]"
                 if len(summary) > 120:
                     return summary[:117] + "..."
                 return summary
@@ -2120,6 +2306,8 @@ Examples:
   %(prog)s preamble ticker
   %(prog)s trace ticker 11
   %(prog)s extra more_poly_variant_test
+  %(prog)s extra jsx_preserve_test --paths-only
+  %(prog)s extra-summary --paths-only
   %(prog)s sharing Service__PublicVideo --contains transcriptStatus
   %(prog)s row-order DBScript__MigrationLayoutsRounding
   %(prog)s sharing-summary --top 20
@@ -2159,6 +2347,23 @@ Examples:
     # extra
     sub_extra = subparsers.add_parser('extra', help='Find extra/missing type nodes')
     sub_extra.add_argument('file', help='File name or short name')
+    sub_extra.add_argument('--contains', type=str, default=None,
+                           help='Only show entries containing this text')
+    sub_extra.add_argument('--paths-only', action='store_true',
+                           help='Only show entries whose content includes paths')
+
+    # extra-summary
+    sub_extra_summary = subparsers.add_parser(
+        'extra-summary', help='Aggregate extra/missing type motifs across failing files'
+    )
+    sub_extra_summary.add_argument('--top', type=int, default=20,
+                                   help='How many motifs to show (default: 20)')
+    sub_extra_summary.add_argument('--examples', type=int, default=3,
+                                   help='How many example files per motif (default: 3)')
+    sub_extra_summary.add_argument('--contains', type=str, default=None,
+                                   help='Only include motifs containing this text')
+    sub_extra_summary.add_argument('--paths-only', action='store_true',
+                                   help='Only include motifs whose content includes paths')
 
     # sharing
     sub_sharing = subparsers.add_parser('sharing', help='Copy-sharing imbalance analysis')
@@ -2241,6 +2446,7 @@ Examples:
         'preamble': cmd_preamble,
         'trace': cmd_trace,
         'extra': cmd_extra,
+        'extra-summary': cmd_extra_summary,
         'sharing': cmd_sharing,
         'row-order': cmd_row_order,
         'sharing-summary': cmd_sharing_summary,
