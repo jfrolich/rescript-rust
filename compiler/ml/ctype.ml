@@ -112,6 +112,42 @@ exception Recursive_abbrev
 (* GADT: recursive abbrevs can appear as a result of local constraints *)
 exception Unification_recursive_abbrev of type_pairs
 
+let debug_unify_row_filter () =
+  match Sys.getenv_opt "OCAML_DEBUG_UNIFY_ROWS" with
+  | None -> None
+  | Some raw ->
+    let labels =
+      raw |> String.split_on_char ','
+      |> List.map String.trim
+      |> List.filter (fun label -> label <> "")
+    in
+    if labels = [] then None else Some labels
+
+let debug_row_labels fields = List.map fst fields
+
+let debug_unify_rows_enabled filter row1 row2 r1 r2 pairs =
+  let labels =
+    debug_row_labels row1.row_fields
+    @ debug_row_labels row2.row_fields
+    @ debug_row_labels r1 @ debug_row_labels r2
+    @ List.map (fun (label, _, _) -> label) pairs
+  in
+  List.for_all (fun needle -> List.mem needle labels) filter
+
+let debug_unify_rows_log stage row1 row2 r1 r2 pairs =
+  Format.eprintf
+    "[unify-rows %s] row1={closed:%b fixed:%b labels=[%s]} row2={closed:%b fixed:%b labels=[%s]} r1=[%s] r2=[%s] pairs=[%s]@."
+    stage
+    row1.row_closed
+    (row_fixed row1)
+    (String.concat "," (debug_row_labels row1.row_fields))
+    row2.row_closed
+    (row_fixed row2)
+    (String.concat "," (debug_row_labels row2.row_fields))
+    (String.concat "," (debug_row_labels r1))
+    (String.concat "," (debug_row_labels r2))
+    (String.concat "," (List.map (fun (label, _, _) -> label) pairs))
+
 (**** Type level management ****)
 
 let current_level = ref 0
@@ -2541,6 +2577,12 @@ and unify_row env row1 row2 =
   if unify_eq rm1 rm2 then ()
   else
     let r1, r2, pairs = merge_row_fields row1.row_fields row2.row_fields in
+    let debug_rows =
+      match debug_unify_row_filter () with
+      | Some filter -> debug_unify_rows_enabled filter row1 row2 r1 r2 pairs
+      | None -> false
+    in
+    if debug_rows then debug_unify_rows_log "start" row1 row2 r1 r2 pairs;
     let fixed1 = row_fixed row1 and fixed2 = row_fixed row2 in
     let more =
       if fixed1 then rm1
@@ -2595,6 +2637,13 @@ and unify_row env row1 row2 =
       let rest =
         if closed then filter_row_fields row.row_closed rest else rest
       in
+      if debug_rows then
+        Format.eprintf
+          "[unify-rows set-more] target={closed:%b fixed:%b labels=[%s]} rest=[%s]@."
+          row.row_closed
+          (row_fixed row)
+          (String.concat "," (debug_row_labels row.row_fields))
+          (String.concat "," (debug_row_labels rest));
       (if
          (rest <> [] && (row.row_closed || row_fixed row))
          || (closed && row_fixed row && not row.row_closed)
@@ -2621,6 +2670,7 @@ and unify_row env row1 row2 =
       set_more row1 r2;
       List.iter
         (fun (l, f1, f2) ->
+          if debug_rows then Format.eprintf "[unify-rows field] label=%s@." l;
           try unify_row_field env fixed1 fixed2 more l f1 f2
           with Unify trace ->
             raise

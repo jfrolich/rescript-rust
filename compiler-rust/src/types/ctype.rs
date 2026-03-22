@@ -85,6 +85,60 @@ pub enum SubtypeContext {
 /// Result type for type operations.
 pub type TypeResult<T> = Result<T, TypeError>;
 
+fn debug_unify_row_filter(env_var: &str) -> Option<Vec<String>> {
+    std::env::var(env_var).ok().and_then(|raw| {
+        let labels: Vec<String> = raw
+            .split(',')
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.to_string())
+            .collect();
+        (!labels.is_empty()).then_some(labels)
+    })
+}
+
+fn debug_row_labels(fields: &[(String, RowField)]) -> Vec<String> {
+    fields.iter().map(|(label, _)| label.clone()).collect()
+}
+
+fn debug_unify_rows_enabled(
+    filter: &[String],
+    row1: &RowDesc,
+    row2: &RowDesc,
+    r1: &[(String, RowField)],
+    r2: &[(String, RowField)],
+    pairs: &[(String, RowField, RowField)],
+) -> bool {
+    let mut labels = debug_row_labels(&row1.row_fields);
+    labels.extend(debug_row_labels(&row2.row_fields));
+    labels.extend(debug_row_labels(r1));
+    labels.extend(debug_row_labels(r2));
+    labels.extend(pairs.iter().map(|(label, _, _)| label.clone()));
+    filter.iter().all(|needle| labels.iter().any(|label| label == needle))
+}
+
+fn debug_unify_rows_log(
+    stage: &str,
+    row1: &RowDesc,
+    row2: &RowDesc,
+    r1: &[(String, RowField)],
+    r2: &[(String, RowField)],
+    pairs: &[(String, RowField, RowField)],
+) {
+    eprintln!(
+        "[unify-rows {stage}] row1={{closed:{} fixed:{} labels={:?}}} row2={{closed:{} fixed:{} labels={:?}}} r1={:?} r2={:?} pairs={:?}",
+        row1.row_closed,
+        row1.row_fixed,
+        debug_row_labels(&row1.row_fields),
+        row2.row_closed,
+        row2.row_fixed,
+        debug_row_labels(&row2.row_fields),
+        debug_row_labels(r1),
+        debug_row_labels(r2),
+        pairs.iter().map(|(label, _, _)| label).collect::<Vec<_>>(),
+    );
+}
+
 // ============================================================================
 // Unification Mode
 // ============================================================================
@@ -1378,14 +1432,11 @@ fn resolve_type_through_env<'a>(
     let module_mty = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)?;
     let module_sig =
         resolve_signature_through_env_module_type(ctx, env, &module_mty, &mut visiting)?;
-    // Match OCaml behavior for persistent signatures loaded from CMI files:
-    // rewrite intra-signature references (`ID.t`) to qualified access paths
-    // rooted at the module path (`LayerStyleID.ID.t`).
-    // Keep local module signatures untouched to preserve local typedtree
-    // identity paths (`t`, `props`, etc.).
-    if module_path.head().is_persistent() {
-        crate::cmi::persistent_env::substitute_type_paths_in_sig(&module_sig, module_path, ctx);
-    }
+    let module_sig = crate::types::typecore::copy_lookup_signature_for_subst(&module_sig, ctx);
+    // Match OCaml Env.components_of_module path lookup behavior: when resolving
+    // `M.t`, operate on a path-qualified copy of `M`'s signature so sibling
+    // references inside manifests are rewritten through the access path.
+    crate::cmi::persistent_env::substitute_type_paths_in_sig(&module_sig, module_path, ctx);
     // For alias modules, expansion should expose the alias target path
     // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
     let alias_target_for_strengthening = if strengthen_alias_types {
@@ -4141,6 +4192,11 @@ fn merge_rf(
         i2 += 1;
     }
 
+    // OCaml's merge_rf prepends matched pairs during recursion and does not
+    // reverse them at the end, so the final pair order is the reverse of the
+    // sorted traversal order.
+    pairs.reverse();
+
     (r1, r2, pairs)
 }
 
@@ -4182,36 +4238,42 @@ fn unify_rows<'a>(
     let row2 = row_repr(ctx, row2);
 
     let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
+    let debug_filter = debug_unify_row_filter("RUST_DEBUG_UNIFY_ROWS");
+    let debug_rows = debug_filter
+        .as_ref()
+        .is_some_and(|filter| debug_unify_rows_enabled(filter, &row1, &row2, &r1, &r2, &pairs));
+    if debug_rows {
+        debug_unify_rows_log("start", &row1, &row2, &r1, &r2, &pairs);
+    }
 
     let fixed1 = row_fixed(ctx, &row1);
     let fixed2 = row_fixed(ctx, &row2);
-
     let closed = row1.row_closed || row2.row_closed;
+    let empty = |fields: &[(String, RowField)]| {
+        fields
+            .iter()
+            .all(|(_, f)| matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent))
+    };
 
-    // Check for invalid field presence (matching OCaml's set_more error checks)
     if closed {
-        // If both are closed and one side has fields the other doesn't, error
-        let empty = |fields: &[(String, RowField)]| {
-            fields.iter().all(|(_, f)| matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent))
-        };
-        if (empty(&r1) || row2.row_closed) && (empty(&r2) || row1.row_closed) {
-            let all_absent = pairs.iter().all(|(_, f1, f2)| {
-                matches!(super::btype::row_field_repr(ctx, f1), RowField::Rabsent)
-                    || matches!(super::btype::row_field_repr(ctx, f2), RowField::Rabsent)
-            });
-            if all_absent {
-                return Err(TypeError::Unify(vec![]));
-            }
+        let all_absent = pairs.iter().all(|(_, f1, f2)| {
+            matches!(super::btype::row_field_repr(ctx, f1), RowField::Rabsent)
+                || matches!(super::btype::row_field_repr(ctx, f2), RowField::Rabsent)
+        });
+        if (empty(&r1) || row2.row_closed) && (empty(&r2) || row1.row_closed) && all_absent {
+            return Err(TypeError::Unify(vec![]));
         }
     }
 
     // Check that non-empty r1/r2 are valid (matching OCaml's set_more checks)
     if row2.row_closed {
         let non_absent_r1: Vec<_> = if closed {
-            r1.iter().filter(|(_, f)| {
-                let fr = super::btype::row_field_repr(ctx, f);
-                !matches!(fr, RowField::Rabsent)
-            }).collect()
+            r1.iter()
+                .filter(|(_, f)| {
+                    let fr = super::btype::row_field_repr(ctx, f);
+                    !matches!(fr, RowField::Rabsent)
+                })
+                .collect()
         } else {
             r1.iter().collect()
         };
@@ -4221,10 +4283,12 @@ fn unify_rows<'a>(
     }
     if row1.row_closed {
         let non_absent_r2: Vec<_> = if closed {
-            r2.iter().filter(|(_, f)| {
-                let fr = super::btype::row_field_repr(ctx, f);
-                !matches!(fr, RowField::Rabsent)
-            }).collect()
+            r2.iter()
+                .filter(|(_, f)| {
+                    let fr = super::btype::row_field_repr(ctx, f);
+                    !matches!(fr, RowField::Rabsent)
+                })
+                .collect()
         } else {
             r2.iter().collect()
         };
@@ -4240,7 +4304,10 @@ fn unify_rows<'a>(
 
     // Unify paired fields
     let unified_more = ctx.repr(more2);
-    for (_l, f1, f2) in &pairs {
+    for (label, f1, f2) in &pairs {
+        if debug_rows {
+            eprintln!("[unify-rows field] label={label}");
+        }
         match unify_row_field(ctx, state, fixed1, fixed2, unified_more, f1, f2) {
             Ok(()) => {}
             Err(_e) => {
@@ -4250,9 +4317,6 @@ fn unify_rows<'a>(
     }
 
     // Determine the row_name (matching OCaml logic at ctype.ml:2572-2583)
-    let empty = |fields: &[(String, RowField)]| {
-        fields.iter().all(|(_, f)| matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent))
-    };
     let name = if row1.row_name.is_some() && (row1.row_closed || empty(&r2)) {
         row1.row_name.clone()
     } else if row2.row_name.is_some() && (row2.row_closed || empty(&r1)) {
@@ -4263,7 +4327,7 @@ fn unify_rows<'a>(
 
     // Build merged fields preserving row2's original field order, then appending
     // row1's surplus. This matches OCaml's unify_row behavior:
-    // - unify(body_type, expected_type) → row1=body(new), row2=accumulated
+    // - unify(body_type, expected_type) -> row1=body(new), row2=accumulated
     // - OCaml's set_more row2 r1 appends r1 to row2's chain
     // - row_repr produces: row2's accumulated fields (definition order), then r1
     let prefer_field = |f1: &RowField, f2: &RowField| -> RowField {
@@ -4276,10 +4340,9 @@ fn unify_rows<'a>(
         }
     };
 
-    // Build a lookup of paired fields (label → (f1, f2))
-    let pair_map: HashMap<&str, (&RowField, &RowField)> = pairs.iter()
-        .map(|(l, f1, f2)| (l.as_str(), (f1, f2)))
-        .collect();
+    // Build a lookup of paired fields (label -> (f1, f2))
+    let pair_map: HashMap<&str, (&RowField, &RowField)> =
+        pairs.iter().map(|(l, f1, f2)| (l.as_str(), (f1, f2))).collect();
 
     // Walk row2's fields in their original order (accumulated/expected side),
     // resolving pairs in-place

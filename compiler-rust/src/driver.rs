@@ -1336,14 +1336,19 @@ fn normalize_signature_types(
                         // matching OCaml's normalize_signature_item(Sig_value).
                         let mut names = Vec::new();
                         collect_bound_names(&b.vb_pat, &mut names);
+                        let mut normalized_from_env = false;
                         for name in &names {
                             if let Ok(vd) = env.find_value(name) {
                                 normalize_type(ctx, vd.val_type);
+                                normalized_from_env = true;
                             }
                         }
-                        // Fallback: if no bound names found (shouldn't happen),
-                        // normalize the pattern type directly.
-                        if names.is_empty() {
+                        // Module-local generated bindings are not visible through
+                        // the outer env threaded into nested structures. When no
+                        // lookup succeeds, fall back to the binding pattern type
+                        // so recursively reachable function/variant types still
+                        // get normalized before typedtree sexp printing.
+                        if !normalized_from_env {
                             normalize_type(ctx, b.vb_pat.pat_type);
                         }
                     }

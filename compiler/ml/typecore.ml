@@ -398,6 +398,94 @@ let has_variants p =
     false
   with Exit -> true
 
+let debug_variant_row_filter () =
+  match Sys.getenv_opt "OCAML_DEBUG_VARIANT_ROWS" with
+  | None -> None
+  | Some raw ->
+    let labels =
+      raw |> String.split_on_char ','
+      |> List.map String.trim
+      |> List.filter (fun label -> label <> "")
+    in
+    if labels = [] then None else Some labels
+
+let debug_loc_string loc =
+  let start = loc.Location.loc_start in
+  let stop = loc.Location.loc_end in
+  Printf.sprintf
+    "%d:%d-%d:%d"
+    start.Lexing.pos_lnum
+    (start.Lexing.pos_cnum - start.Lexing.pos_bol)
+    stop.Lexing.pos_lnum
+    (stop.Lexing.pos_cnum - stop.Lexing.pos_bol)
+
+let debug_variant_row_type stage label env ty seen filter =
+  match expand_head env ty with
+  | {desc = Tvariant row; id} ->
+    let row = row_repr row in
+    let labels = List.map fst row.row_fields in
+    if
+      List.for_all (fun needle -> List.mem needle labels) filter
+      && not (List.mem id !seen)
+    then (
+      seen := id :: !seen;
+      Format.eprintf
+        "[variant-row %s] %s repr=#%d closed=%b fixed=%b labels=[%s]@."
+        stage label id row.row_closed (row_fixed row)
+        (String.concat "," labels))
+  | _ -> ()
+
+let rec debug_variant_rows_in_pattern stage label pat seen filter =
+  let label = Printf.sprintf "%s@%s" label (debug_loc_string pat.pat_loc) in
+  debug_variant_row_type stage label pat.pat_env pat.pat_type seen filter;
+  match pat.pat_desc with
+  | Tpat_variant (_, Some arg, _) -> debug_variant_rows_in_pattern stage label arg seen filter
+  | Tpat_alias (inner, _, _) -> debug_variant_rows_in_pattern stage label inner seen filter
+  | Tpat_or (left, right, _) ->
+    debug_variant_rows_in_pattern stage label left seen filter;
+    debug_variant_rows_in_pattern stage label right seen filter
+  | Tpat_tuple items -> List.iter (fun item -> debug_variant_rows_in_pattern stage label item seen filter) items
+  | Tpat_construct (_, _, args) ->
+    List.iter (fun arg -> debug_variant_rows_in_pattern stage label arg seen filter) args
+  | Tpat_record (fields, _) ->
+    List.iter
+      (fun (_, _, field_pat, _) -> debug_variant_rows_in_pattern stage label field_pat seen filter)
+      fields
+  | Tpat_array items ->
+    List.iter (fun item -> debug_variant_rows_in_pattern stage label item seen filter) items
+  | Tpat_variant (_, None, _) | Tpat_any | Tpat_var _ | Tpat_constant _ -> ()
+
+let debug_case_loc_string ({pc_guard; pc_rhs; _} : Parsetree.case) =
+  let loc =
+    let open Location in
+    match pc_guard with
+    | None -> pc_rhs.pexp_loc
+    | Some guard -> {pc_rhs.pexp_loc with loc_start = guard.pexp_loc.loc_start}
+  in
+  debug_loc_string loc
+
+let debug_variant_match_state stage env ty_arg ty_arg' pat_env_list caselist =
+  match debug_variant_row_filter () with
+  | None -> ()
+  | Some filter ->
+    let seen = ref [] in
+    let match_loc =
+      match caselist with
+      | case :: _ -> debug_case_loc_string case
+      | [] -> "unknown"
+    in
+    debug_variant_row_type stage (Printf.sprintf "ty_arg@%s" match_loc) env ty_arg seen filter;
+    debug_variant_row_type stage (Printf.sprintf "ty_arg'@%s" match_loc) env ty_arg' seen filter;
+    List.iteri
+      (fun index ((pat, _), case) ->
+        debug_variant_rows_in_pattern
+          stage
+          (Printf.sprintf "case[%d]@%s" index (debug_case_loc_string case))
+          pat
+          seen
+          filter)
+      (List.combine pat_env_list caselist)
+
 (* pattern environment *)
 let pattern_variables =
   ref
@@ -3982,15 +4070,26 @@ and type_cases ~(call_context : [`LetUnwrap | `Switch | `Function | `Try])
     List.iter (fun (pat, (ext_env, _)) -> unify_pat ext_env pat ty) pat_env_list
   in
   unify_pats ty_arg';
+  debug_variant_match_state "after-unify-pats" env ty_arg ty_arg' pat_env_list caselist;
   (* Check for polymorphic variants to close *)
   let patl = List.map fst pat_env_list in
   if List.exists has_variants patl then (
     Parmatch.pressure_variants env patl;
     List.iter (iter_pattern finalize_variant) patl);
+  debug_variant_match_state "after-finalize" env ty_arg ty_arg' pat_env_list caselist;
   (* `Contaminating' unifications start here *)
   List.iter (fun f -> f ()) !pattern_force;
   (* Post-processing and generalization *)
-  if propagate || erase_either then unify_pats (instance env ty_arg);
+  if propagate || erase_either then (
+    let propagated = instance env ty_arg in
+    unify_pats propagated;
+    debug_variant_match_state
+      "after-propagate"
+      env
+      propagated
+      ty_arg'
+      pat_env_list
+      caselist);
   if propagate then (
     List.iter
       (iter_pattern (fun {pat_type = t} -> unify_var env t (newvar ())))

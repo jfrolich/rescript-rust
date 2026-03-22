@@ -592,7 +592,41 @@ fn sexp_row_desc(
     dedup: &mut TypeDedupTable,
     row: &RowDesc,
 ) -> Sexp {
+    fn debug_row_filter(env_var: &str) -> Option<Vec<String>> {
+        std::env::var(env_var).ok().and_then(|raw| {
+            let labels: Vec<String> = raw
+                .split(',')
+                .map(|part| part.trim())
+                .filter(|part| !part.is_empty())
+                .map(|part| part.to_string())
+                .collect();
+            (!labels.is_empty()).then_some(labels)
+        })
+    }
+
+    fn raw_row_blocks(ctx: &TypeContext<'_>, row: &RowDesc) -> Vec<Vec<String>> {
+        let mut blocks = vec![row.row_fields.iter().map(|(label, _)| label.clone()).collect()];
+        let more = ctx.repr(row.row_more);
+        if let TypeDesc::Tvariant(inner) = &*ctx.get_desc(more) {
+            blocks.extend(raw_row_blocks(ctx, inner));
+        }
+        blocks
+    }
+
+    let raw_blocks = raw_row_blocks(ctx, row);
     let row = btype::row_repr(ctx, row);
+    if let Some(filter) = debug_row_filter("RUST_DEBUG_SEXP_ROWS") {
+        let flat_labels: Vec<String> = row.row_fields.iter().map(|(label, _)| label.clone()).collect();
+        if filter.iter().all(|needle| flat_labels.iter().any(|label| label == needle)) {
+            eprintln!(
+                "[sexp-row] raw={:?} flat={:?} closed={} fixed={}",
+                raw_blocks,
+                flat_labels,
+                row.row_closed,
+                row.row_fixed
+            );
+        }
+    }
     let mut field_sexps = Vec::new();
     for (l, rf) in row.row_fields.iter() {
         let rf_sexp = sexp_row_field(arena, ctx, dedup, rf);

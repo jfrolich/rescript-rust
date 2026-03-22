@@ -7533,6 +7533,90 @@ fn type_structure_item<'a>(
                     None => eprintln!("[module-type] module={} kind=none", mod_name),
                 }
             }
+            if std::env::var_os("RUST_DEBUG_CSV_MODULE_SIG").is_some() && mod_name_str == "Csv" {
+                if let Some(crate::types::decl::ModuleType::MtySignature(sig)) = &final_mod_type {
+                    eprintln!("[csv-module-sig] raw module=Csv items={}", sig.len());
+                    for item in sig {
+                        match item {
+                            crate::types::decl::SignatureItem::SigType(id, decl, _) => {
+                                let manifest = decl.type_manifest.map(|ty| {
+                                    let ty = tctx.type_ctx.repr(ty);
+                                    let desc = tctx.type_ctx.get_desc(ty);
+                                    match &*desc {
+                                        crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
+                                            path.name()
+                                        }
+                                        crate::types::type_expr::TypeDesc::Tvariant(row) => {
+                                            let mut fields = Vec::new();
+                                            for (label, field) in &row.row_fields {
+                                                let entry = match field {
+                                                    crate::types::type_expr::RowField::Rpresent(Some(arg)) => {
+                                                        let arg = tctx.type_ctx.repr(*arg);
+                                                        let arg_desc = tctx.type_ctx.get_desc(arg);
+                                                        match &*arg_desc {
+                                                            crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
+                                                                format!("{}:{}", label, path.name())
+                                                            }
+                                                            other => format!("{}:{:?}", label, other),
+                                                        }
+                                                    }
+                                                    crate::types::type_expr::RowField::Rpresent(None) => {
+                                                        format!("{}:None", label)
+                                                    }
+                                                    other => format!("{}:{:?}", label, other),
+                                                };
+                                                fields.push(entry);
+                                            }
+                                            format!("Tvariant[{}]", fields.join(","))
+                                        }
+                                        other => format!("{:?}", other),
+                                    }
+                                }).unwrap_or_else(|| "None".to_string());
+                                eprintln!(
+                                    "[csv-module-sig] raw type name={} type_path={} manifest={}",
+                                    id.name(),
+                                    decl.type_path
+                                        .as_ref()
+                                        .map(|p| p.name())
+                                        .unwrap_or_else(|| "<none>".to_string()),
+                                    manifest
+                                );
+                            }
+                            crate::types::decl::SignatureItem::SigValue(id, vd) => {
+                                if id.name() == "success" {
+                                    let mut cursor = tctx.type_ctx.repr(vd.val_type);
+                                    let mut parts = Vec::new();
+                                    for _ in 0..8 {
+                                        let desc = tctx.type_ctx.get_desc(cursor);
+                                        match &*desc {
+                                            crate::types::type_expr::TypeDesc::Tarrow { arg, ret, .. } => {
+                                                let arg = tctx.type_ctx.repr(arg.typ);
+                                                let arg_desc = tctx.type_ctx.get_desc(arg);
+                                                let arg_summary = match &*arg_desc {
+                                                    crate::types::type_expr::TypeDesc::Tconstr { path, .. } => path.name(),
+                                                    other => format!("{:?}", other),
+                                                };
+                                                parts.push(format!("arg:{}", arg_summary));
+                                                cursor = tctx.type_ctx.repr(*ret);
+                                            }
+                                            crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
+                                                parts.push(format!("ret:{}", path.name()));
+                                                break;
+                                            }
+                                            other => {
+                                                parts.push(format!("ret:{:?}", other));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    eprintln!("[csv-module-sig] raw value success {}", parts.join(" -> "));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
             let mut new_env = env.clone();
             if let Some(decl_mod_type) = final_mod_type {
                 if let crate::types::decl::ModuleType::MtySignature(sig) = &decl_mod_type {

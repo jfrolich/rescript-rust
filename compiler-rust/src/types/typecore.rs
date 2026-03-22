@@ -6878,6 +6878,360 @@ struct PendingMatchCase<'a> {
     unpacks: Vec<PatternVariable>,
 }
 
+fn debug_variant_row_filter(env_var: &str) -> Option<Vec<String>> {
+    std::env::var(env_var).ok().and_then(|raw| {
+        let labels: Vec<String> = raw
+            .split(',')
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.to_string())
+            .collect();
+        (!labels.is_empty()).then_some(labels)
+    })
+}
+
+fn debug_case_loc_string(arena: &ParseArena, case: &crate::parser::ast::Case) -> String {
+    let loc = if let Some(guard) = case.pc_guard {
+        let mut loc = arena.to_location(arena.get_expr(case.pc_rhs).pexp_loc);
+        loc.loc_start = arena.to_location(arena.get_expr(guard).pexp_loc).loc_start;
+        loc
+    } else {
+        arena.to_location(arena.get_expr(case.pc_rhs).pexp_loc)
+    };
+    debug_loc_string(&loc)
+}
+
+fn debug_loc_string(loc: &Location) -> String {
+    let start_col = loc.loc_start.column();
+    let end_col = loc.loc_end.column();
+    format!(
+        "{}:{}-{}:{}",
+        loc.loc_start.line, start_col, loc.loc_end.line, end_col
+    )
+}
+
+fn debug_variant_row_type(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    stage: &str,
+    label: &str,
+    ty: TypeExprRef,
+    filter: &[String],
+    seen: &mut HashSet<usize>,
+) {
+    let ctx = tctx.type_ctx;
+    let expanded = crate::types::ctype::expand_head(ctx, env, ty);
+    let repr = ctx.repr(expanded);
+    let desc = ctx.get_desc(repr);
+    let row = match &*desc {
+        TypeDesc::Tvariant(row) => crate::types::btype::row_repr(ctx, row),
+        _ => return,
+    };
+    drop(desc);
+    let labels: Vec<String> = row.row_fields.iter().map(|(name, _)| name.clone()).collect();
+    if filter.iter().all(|needle| labels.iter().any(|label| label == needle)) && seen.insert(repr.0)
+    {
+        eprintln!(
+            "[variant-row {}] {} repr=#{} closed={} fixed={} labels={:?}",
+            stage,
+            label,
+            repr.0,
+            row.row_closed,
+            row.row_fixed,
+            labels
+        );
+    }
+}
+
+fn debug_variant_rows_in_pattern(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    stage: &str,
+    label: &str,
+    pat: &Pattern,
+    filter: &[String],
+    seen: &mut HashSet<usize>,
+) {
+    let pat_loc = tctx.arena.to_location(pat.pat_loc);
+    let label = format!("{}@{}", label, debug_loc_string(&pat_loc));
+    debug_variant_row_type(tctx, env, stage, &label, pat.pat_type, filter, seen);
+    match &pat.pat_desc {
+        PatternDesc::Tpat_variant(_, arg, _) => {
+            if let Some(arg_pat) = arg {
+                debug_variant_rows_in_pattern(
+                    tctx,
+                    env,
+                    stage,
+                    &label,
+                    arg_pat,
+                    filter,
+                    seen,
+                );
+            }
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            debug_variant_rows_in_pattern(tctx, env, stage, &label, inner, filter, seen);
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            debug_variant_rows_in_pattern(tctx, env, stage, &label, left, filter, seen);
+            debug_variant_rows_in_pattern(tctx, env, stage, &label, right, filter, seen);
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                debug_variant_rows_in_pattern(tctx, env, stage, &label, item, filter, seen);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                debug_variant_rows_in_pattern(tctx, env, stage, &label, arg, filter, seen);
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                debug_variant_rows_in_pattern(tctx, env, stage, &label, field_pat, filter, seen);
+            }
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
+    }
+}
+
+fn debug_variant_match_state(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    stage: &str,
+    ty_arg: TypeExprRef,
+    ty_arg_prime: TypeExprRef,
+    pending_cases: &[PendingMatchCase<'_>],
+) {
+    let Some(filter) = debug_variant_row_filter("RUST_DEBUG_VARIANT_ROWS") else {
+        return;
+    };
+    let mut seen = HashSet::new();
+    let match_loc = pending_cases
+        .first()
+        .map(|pending| debug_case_loc_string(tctx.arena, pending.parsed_case))
+        .unwrap_or_else(|| "unknown".to_string());
+    let ty_arg_label = format!("ty_arg@{match_loc}");
+    let ty_arg_prime_label = format!("ty_arg_prime@{match_loc}");
+    debug_variant_row_type(tctx, env, stage, &ty_arg_label, ty_arg, &filter, &mut seen);
+    debug_variant_row_type(
+        tctx,
+        env,
+        stage,
+        &ty_arg_prime_label,
+        ty_arg_prime,
+        &filter,
+        &mut seen,
+    );
+    for (index, pending) in pending_cases.iter().enumerate() {
+        let label = format!(
+            "case[{index}]@{}",
+            debug_case_loc_string(tctx.arena, pending.parsed_case)
+        );
+        debug_variant_rows_in_pattern(
+            tctx,
+            env,
+            stage,
+            &label,
+            &pending.typed_pat,
+            &filter,
+            &mut seen,
+        );
+    }
+}
+
+#[derive(Clone, Default)]
+struct VariantPathAlternative {
+    variant_paths: HashSet<Vec<String>>,
+    wildcard_paths: HashSet<Vec<String>>,
+}
+
+fn merge_variant_path_alternatives(
+    current: Vec<VariantPathAlternative>,
+    child: Vec<VariantPathAlternative>,
+) -> Vec<VariantPathAlternative> {
+    if child.is_empty() {
+        return current;
+    }
+    let mut merged = Vec::new();
+    for alt in current {
+        for child_alt in &child {
+            let mut combined = alt.clone();
+            combined
+                .variant_paths
+                .extend(child_alt.variant_paths.iter().cloned());
+            combined
+                .wildcard_paths
+                .extend(child_alt.wildcard_paths.iter().cloned());
+            merged.push(combined);
+        }
+    }
+    merged
+}
+
+fn collect_variant_path_alternatives_in_pattern(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &Pattern,
+    path: &[String],
+    row_keys_by_path: &mut HashMap<Vec<String>, HashSet<usize>>,
+    variant_labels_by_path: &mut HashMap<Vec<String>, HashSet<String>>,
+    row_label_count_by_path: &mut HashMap<Vec<String>, usize>,
+) -> Vec<VariantPathAlternative> {
+    let mut base = VariantPathAlternative::default();
+
+    match &pat.pat_desc {
+        PatternDesc::Tpat_variant(label, _, _) => {
+            if let Some(row_key) = variant_row_key_for_pat_type(tctx, env, pat.pat_type) {
+                let path_vec = path.to_vec();
+                base.variant_paths.insert(path_vec.clone());
+                row_keys_by_path.entry(path_vec).or_default().insert(row_key);
+                variant_labels_by_path
+                    .entry(path.to_vec())
+                    .or_default()
+                    .insert(label.clone());
+                if let Some(row) = variant_row_desc_for_pat_type(tctx, env, pat.pat_type) {
+                    row_label_count_by_path
+                        .entry(path.to_vec())
+                        .or_insert_with(|| {
+                            row.row_fields
+                                .iter()
+                                .filter(|(_, field)| {
+                                    !matches!(
+                                        crate::types::btype::row_field_repr(tctx.type_ctx, field),
+                                        crate::types::type_expr::RowField::Rabsent
+                                    )
+                                })
+                                .count()
+                        });
+                }
+            }
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
+            base.wildcard_paths.insert(path.to_vec());
+        }
+        _ => {}
+    }
+
+    match &pat.pat_desc {
+        PatternDesc::Tpat_variant(label, arg, _) => {
+            if let Some(arg_pat) = arg {
+                let mut child_path = path.to_vec();
+                child_path.push(format!("variant:{label}"));
+                merge_variant_path_alternatives(
+                    vec![base],
+                    collect_variant_path_alternatives_in_pattern(
+                        tctx,
+                        env,
+                        arg_pat,
+                        &child_path,
+                        row_keys_by_path,
+                        variant_labels_by_path,
+                        row_label_count_by_path,
+                    ),
+                )
+            } else {
+                vec![base]
+            }
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            let child_alts = collect_variant_path_alternatives_in_pattern(
+                tctx,
+                env,
+                inner,
+                path,
+                row_keys_by_path,
+                variant_labels_by_path,
+                row_label_count_by_path,
+            );
+            merge_variant_path_alternatives(vec![base], child_alts)
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            let mut alts = Vec::new();
+            alts.extend(collect_variant_path_alternatives_in_pattern(
+                tctx,
+                env,
+                left,
+                path,
+                row_keys_by_path,
+                variant_labels_by_path,
+                row_label_count_by_path,
+            ));
+            alts.extend(collect_variant_path_alternatives_in_pattern(
+                tctx,
+                env,
+                right,
+                path,
+                row_keys_by_path,
+                variant_labels_by_path,
+                row_label_count_by_path,
+            ));
+            if base.variant_paths.is_empty() && base.wildcard_paths.is_empty() {
+                alts
+            } else {
+                merge_variant_path_alternatives(vec![base], alts)
+            }
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            let mut alts = vec![base];
+            for (index, item) in items.iter().enumerate() {
+                let mut child_path = path.to_vec();
+                child_path.push(format!("tuple:{index}"));
+                let child_alts = collect_variant_path_alternatives_in_pattern(
+                    tctx,
+                    env,
+                    item,
+                    &child_path,
+                    row_keys_by_path,
+                    variant_labels_by_path,
+                    row_label_count_by_path,
+                );
+                alts = merge_variant_path_alternatives(alts, child_alts);
+            }
+            alts
+        }
+        PatternDesc::Tpat_construct(_, cstr_desc, args) => {
+            let mut alts = vec![base];
+            for (index, arg) in args.iter().enumerate() {
+                let mut child_path = path.to_vec();
+                child_path.push(format!("construct:{}:{index}", cstr_desc.cstr_name));
+                let child_alts = collect_variant_path_alternatives_in_pattern(
+                    tctx,
+                    env,
+                    arg,
+                    &child_path,
+                    row_keys_by_path,
+                    variant_labels_by_path,
+                    row_label_count_by_path,
+                );
+                alts = merge_variant_path_alternatives(alts, child_alts);
+            }
+            alts
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            let mut alts = vec![base];
+            for (_, label_desc, field_pat, _) in fields {
+                let mut child_path = path.to_vec();
+                child_path.push(format!("record:{}", label_desc.lbl_name));
+                let child_alts = collect_variant_path_alternatives_in_pattern(
+                    tctx,
+                    env,
+                    field_pat,
+                    &child_path,
+                    row_keys_by_path,
+                    variant_labels_by_path,
+                    row_label_count_by_path,
+                );
+                alts = merge_variant_path_alternatives(alts, child_alts);
+            }
+            alts
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {
+            vec![base]
+        }
+    }
+}
+
 fn type_match_cases_batch_non_gadt<'a>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -6997,32 +7351,50 @@ fn type_match_cases_batch_non_gadt<'a>(
         })();
         tctx.unify_state.set_env(env);
         unify_pats_result?;
+        debug_variant_match_state(tctx, env, "after-unify-pats", ty_arg, ty_arg_prime, &pending_cases);
 
         // Match OCaml type_cases ordering: pressure_variants + finalize_variant
         // happen before the propagation unification pass.
-        let mut labels_by_row: HashMap<usize, Vec<String>> = HashMap::new();
-        let mut rows_with_wildcards: HashSet<usize> = HashSet::new();
+        let mut row_keys_by_path: HashMap<Vec<String>, HashSet<usize>> = HashMap::new();
+        let mut variant_labels_by_path: HashMap<Vec<String>, HashSet<String>> = HashMap::new();
+        let mut row_label_count_by_path: HashMap<Vec<String>, usize> = HashMap::new();
+        let mut alternatives = Vec::new();
         for pending in pending_cases.iter() {
-            collect_variant_row_labels_in_pattern(
+            alternatives.extend(collect_variant_path_alternatives_in_pattern(
                 tctx,
                 env,
                 &pending.typed_pat,
-                &mut labels_by_row,
-            );
-            collect_rows_with_wildcard_coverage(
-                tctx,
-                env,
-                &pending.typed_pat,
-                &mut rows_with_wildcards,
-            );
+                &[],
+                &mut row_keys_by_path,
+                &mut variant_labels_by_path,
+                &mut row_label_count_by_path,
+            ));
         }
-        if !labels_by_row.is_empty() {
-            normalize_wildcard_coverage_by_labels(tctx, &labels_by_row, &mut rows_with_wildcards);
-            let rows_to_close: HashSet<usize> = labels_by_row
+        if !row_keys_by_path.is_empty() && !alternatives.is_empty() {
+            let mut wildcard_counts: HashMap<Vec<String>, usize> = HashMap::new();
+
+            for alt in &alternatives {
+                for path in &alt.wildcard_paths {
+                    *wildcard_counts.entry(path.clone()).or_insert(0) += 1;
+                }
+            }
+
+            let rows_to_close: HashSet<usize> = row_keys_by_path
                 .iter()
-                .filter_map(|(row_key, labels)| {
-                    (!labels.is_empty() && !rows_with_wildcards.contains(row_key)).then_some(*row_key)
+                .filter(|(path, _)| {
+                    let saw_all_labels = variant_labels_by_path
+                        .get(*path)
+                        .map(|labels| labels.len())
+                        == row_label_count_by_path.get(*path).copied();
+                    let wildcard_on_path = wildcard_counts.get(*path).copied().unwrap_or(0) > 0;
+                    let wildcard_on_ancestor = wildcard_counts.iter().any(|(wild_path, count)| {
+                        *count > 0
+                            && wild_path.len() < path.len()
+                            && path.starts_with(wild_path)
+                    });
+                    saw_all_labels && !wildcard_on_path && !wildcard_on_ancestor
                 })
+                .flat_map(|(_, row_keys)| row_keys.iter().copied())
                 .collect();
             if !rows_to_close.is_empty() {
                 for pending in pending_cases.iter_mut() {
@@ -7038,6 +7410,7 @@ fn type_match_cases_batch_non_gadt<'a>(
                 finalize_variant_in_pattern(tctx, env, &mut pending.typed_pat, false);
             }
         }
+        debug_variant_match_state(tctx, env, "after-finalize", ty_arg, ty_arg_prime, &pending_cases);
 
         if propagate || erase_either {
             let propagated_ty = if erase_either {
@@ -7059,6 +7432,14 @@ fn type_match_cases_batch_non_gadt<'a>(
             })();
             tctx.unify_state.set_env(env);
             propagate_result?;
+            debug_variant_match_state(
+                tctx,
+                env,
+                "after-propagate",
+                propagated_ty,
+                ty_arg_prime,
+                &pending_cases,
+            );
         }
 
         if propagate && std::env::var_os("RUST_SKIP_PATTERN_LOWER").is_none() {
@@ -7566,6 +7947,23 @@ fn variant_row_key_for_pat_type(
     if is_variant { Some(repr.0) } else { None }
 }
 
+fn variant_row_desc_for_pat_type(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat_type: TypeExprRef,
+) -> Option<crate::types::type_expr::RowDesc> {
+    let ctx = tctx.type_ctx;
+    let expanded = crate::types::ctype::expand_head(ctx, env, pat_type);
+    let repr = ctx.repr(expanded);
+    let desc = ctx.get_desc(repr);
+    let row = match &*desc {
+        TypeDesc::Tvariant(row) => Some(crate::types::btype::row_repr(ctx, row)),
+        _ => None,
+    };
+    drop(desc);
+    row
+}
+
 fn collect_variant_row_labels_in_pattern(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -7884,7 +8282,7 @@ fn close_variant_row_for_pat_type(
     drop(desc);
 
     let mut row = crate::types::btype::row_repr(ctx, &row);
-    if !row.row_closed {
+    if !row.row_closed && !row.row_fixed {
         row.row_closed = true;
         ctx.set_desc(repr, TypeDesc::Tvariant(row));
     }
@@ -14508,6 +14906,15 @@ fn type_let_bindings(
             }
         }
 
+        // Match OCaml typecore.ml `type_let`: close/finalize polymorphic variant
+        // rows in let patterns before typing RHS expressions.
+        for typed_pat in typed_patterns.iter_mut() {
+            pressure_variant_rows_in_let_pattern(tctx, env, typed_pat);
+        }
+        for typed_pat in typed_patterns.iter_mut() {
+            finalize_variant_in_pattern(tctx, env, typed_pat, false);
+        }
+
         // Type check expressions after recursive approximation unification.
         // OCaml typecore.ml type_let lines 4189-4211
         let mut typed_bindings = Vec::new();
@@ -14616,16 +15023,6 @@ fn type_let_bindings(
             iter_typed_pattern(&binding.vb_pat, &mut |pat| {
                 crate::types::generalize(ctx, pat.pat_type);
             });
-        }
-
-        // Finalize variant patterns in let bindings (matches OCaml typecore.ml:4117-4121)
-        // First, pressure_variants to close variant rows (OCaml: Parmatch.pressure_variants env [pat])
-        for binding in typed_bindings.iter_mut() {
-            pressure_variant_rows_in_let_pattern(tctx, env, &mut binding.vb_pat);
-        }
-        // Then, finalize Reither→Rpresent in still-open rows (OCaml: iter_pattern finalize_variant pat)
-        for binding in typed_bindings.iter_mut() {
-            finalize_variant_in_pattern(tctx, env, &mut binding.vb_pat, false);
         }
 
         // Build final environment from all collected pattern variables.
@@ -15237,7 +15634,7 @@ fn copy_lookup_signature(
         .collect()
 }
 
-fn copy_lookup_signature_for_subst(
+pub(crate) fn copy_lookup_signature_for_subst(
     sig_items: &[crate::types::decl::SignatureItem],
     ctx: &TypeContext<'_>,
 ) -> crate::types::decl::Signature {
@@ -15375,6 +15772,95 @@ impl Env {
                 }
 
                 if let Some((mod_path, sig)) = resolved_module {
+                    if std::env::var_os("RUST_DEBUG_CSV_LOOKUP").is_some()
+                        && prefix_str == "Csv"
+                        && value_name == "success"
+                    {
+                        eprintln!(
+                            "[csv-lookup] resolved prefix={} mod_path={} items={}",
+                            prefix_str,
+                            mod_path.name(),
+                            sig.len()
+                        );
+                        for item in &sig {
+                            match item {
+                                crate::types::decl::SignatureItem::SigType(id, decl, _) => {
+                                    eprintln!(
+                                        "[csv-lookup] type name={} type_path={} manifest={}",
+                                        id.name(),
+                                        decl.type_path
+                                            .as_ref()
+                                            .map(|p| p.name())
+                                            .unwrap_or_else(|| "<none>".to_string()),
+                                        decl.type_manifest
+                                            .map(|ty| {
+                                                let ty = ctx.repr(ty);
+                                                let desc = ctx.get_desc(ty);
+                                                match &*desc {
+                                                    TypeDesc::Tconstr { path, .. } => path.name(),
+                                                    TypeDesc::Tvariant(row) => {
+                                                        let mut fields = Vec::new();
+                                                        for (label, field) in &row.row_fields {
+                                                            let entry = match field {
+                                                                crate::types::type_expr::RowField::Rpresent(Some(arg)) => {
+                                                                    let arg = ctx.repr(*arg);
+                                                                    let arg_desc = ctx.get_desc(arg);
+                                                                    match &*arg_desc {
+                                                                        TypeDesc::Tconstr { path, .. } => {
+                                                                            format!("{}:{}", label, path.name())
+                                                                        }
+                                                                        other => format!("{}:{:?}", label, other),
+                                                                    }
+                                                                }
+                                                                crate::types::type_expr::RowField::Rpresent(None) => {
+                                                                    format!("{}:None", label)
+                                                                }
+                                                                other => format!("{}:{:?}", label, other),
+                                                            };
+                                                            fields.push(entry);
+                                                        }
+                                                        format!("Tvariant[{}]", fields.join(","))
+                                                    }
+                                                    other => format!("{:?}", other),
+                                                }
+                                            })
+                                            .unwrap_or_else(|| "None".to_string())
+                                    );
+                                }
+                                crate::types::decl::SignatureItem::SigValue(id, vd)
+                                    if id.name() == "success" =>
+                                {
+                                    let mut cursor = ctx.repr(vd.val_type);
+                                    let mut parts = Vec::new();
+                                    for _ in 0..8 {
+                                        let desc = ctx.get_desc(cursor);
+                                        match &*desc {
+                                            TypeDesc::Tarrow { arg, ret, .. } => {
+                                                let arg = ctx.repr(arg.typ);
+                                                let arg_desc = ctx.get_desc(arg);
+                                                let arg_summary = match &*arg_desc {
+                                                    TypeDesc::Tconstr { path, .. } => path.name(),
+                                                    other => format!("{:?}", other),
+                                                };
+                                                parts.push(format!("arg:{}", arg_summary));
+                                                cursor = ctx.repr(*ret);
+                                            }
+                                            TypeDesc::Tconstr { path, .. } => {
+                                                parts.push(format!("ret:{}", path.name()));
+                                                break;
+                                            }
+                                            other => {
+                                                parts.push(format!("ret:{:?}", other));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    eprintln!("[csv-lookup] value success {}", parts.join(" -> "));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     if std::env::var_os("RUST_DEBUG_WEBAPI_WINDOW").is_some()
                         && prefix_str == "Webapi.Dom"
                         && value_name == "window"
