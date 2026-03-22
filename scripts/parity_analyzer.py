@@ -14,6 +14,7 @@ Commands:
     row-order <file>     Polymorphic variant row-order mismatches
     sharing-summary      Aggregate sharing imbalances across failing files
     divergence <file>    First divergence analysis
+    divergence-summary   Aggregate first-divergence + insertion signatures
     insertion [file]     First insertion/resync analysis
 """
 
@@ -1906,6 +1907,138 @@ def cmd_divergence(args, root: str):
     _analyze_cascade(ocaml_sf, rust_sf, ocaml_ids, rust_ids, first_diverge, ocaml_memo, rust_memo)
 
 
+def cmd_divergence_summary(args, root: str):
+    """Aggregate first-divergence and insertion signatures across all failing files."""
+    diff_dir = os.path.join(root, '.parity-cache', 'tests', 'diffs')
+    if not os.path.isdir(diff_dir):
+        print(red("No diffs directory found. Run the parity test first:"))
+        print("  ./scripts/test_typedtree_parity.sh")
+        return
+
+    diff_files = sorted(f for f in os.listdir(diff_dir) if f.endswith('.diff'))
+    if not diff_files:
+        print(green("No failures! All tests pass."))
+        return
+
+    reason_counts: Counter[str] = Counter()
+    shift_counts: Counter[int] = Counter()
+    rust_extra_types: Counter[str] = Counter()
+    ocaml_extra_types: Counter[str] = Counter()
+
+    scanned = 0
+    skipped = 0
+    perfect = 0
+    unresolved = 0
+    rows: List[Tuple[str, InsertionResult]] = []
+
+    for diff_file in diff_files:
+        name = diff_file[:-5]
+        ocaml_sf = load_sexp('ocaml', name, root)
+        rust_sf = load_sexp('rust', name, root)
+        if ocaml_sf is None or rust_sf is None:
+            skipped += 1
+            continue
+
+        scanned += 1
+        result = analyze_insertion(
+            ocaml_sf,
+            rust_sf,
+            lookahead=args.lookahead,
+            min_run=args.min_run,
+        )
+        if result.divergence_idx is None:
+            perfect += 1
+            continue
+
+        short_name = name.replace("tests_tests_src_", "")
+        rows.append((short_name, result))
+        reason_counts[result.reason] += 1
+
+        if result.shift is None:
+            unresolved += 1
+            continue
+
+        shift_counts[result.shift] += 1
+        div = result.divergence_idx or 0
+        if result.shift > 0:
+            rust_ids, _ = _compute_ordered_type_keys(rust_sf)
+            extras = rust_ids[div:min(len(rust_ids), div + result.shift)]
+            for tid in extras:
+                rust_extra_types[type_summary(rust_sf.types[tid])] += 1
+        elif result.shift < 0:
+            ocaml_ids, _ = _compute_ordered_type_keys(ocaml_sf)
+            extras = ocaml_ids[div:min(len(ocaml_ids), div + (-result.shift))]
+            for tid in extras:
+                ocaml_extra_types[type_summary(ocaml_sf.types[tid])] += 1
+
+    if scanned == 0:
+        print(red("No analyzable files with both OCaml and Rust sexp outputs."))
+        print("Run parity test first to populate .parity-cache/tests/{ocaml,rust}.")
+        return
+
+    resolved = sum(shift_counts.values())
+
+    print(bold("Divergence Summary"))
+    print()
+    print(f"  Files analyzed: {bold(str(scanned))}"
+          f"{f' ({skipped} missing sexp skipped)' if skipped else ''}")
+    print(f"  Perfect preamble match: {perfect}")
+    print(f"  Diverged files: {len(rows)}")
+    print(f"  Resolved shift windows: {resolved}")
+    print(f"  Unresolved divergence windows: {unresolved}")
+
+    if reason_counts:
+        print()
+        print(bold("  Divergence Reasons"))
+        print(f"  {'Reason':<10} {'Files':>5}")
+        print(f"  {'─'*10} {'─'*5}")
+        for reason, count in reason_counts.most_common():
+            print(f"  {reason:<10} {count:>5}")
+
+    if shift_counts:
+        print()
+        print(bold("  Shift Histogram"))
+        print(f"  {'Shift':>7} {'Files':>5}")
+        print(f"  {'─'*7} {'─'*5}")
+        for shift, count in sorted(shift_counts.items(), key=lambda kv: (-abs(kv[0]), kv[0])):
+            print(f"  {shift:+7d} {count:>5}")
+
+    if rust_extra_types:
+        print()
+        print(bold(f"  Top Rust Extra Type Summaries (top {args.types})"))
+        print(f"  {'Type':<60} {'Hits':>5}")
+        print(f"  {'─'*60} {'─'*5}")
+        for summary, count in rust_extra_types.most_common(args.types):
+            print(f"  {summary[:60]:<60} {count:>5}")
+
+    if ocaml_extra_types:
+        print()
+        print(bold(f"  Top OCaml Extra Type Summaries (top {args.types})"))
+        print(f"  {'Type':<60} {'Hits':>5}")
+        print(f"  {'─'*60} {'─'*5}")
+        for summary, count in ocaml_extra_types.most_common(args.types):
+            print(f"  {summary[:60]:<60} {count:>5}")
+
+    if rows:
+        print()
+        print(bold(f"  Earliest Divergence Files (top {args.top})"))
+        print(f"  {'File':<42} {'DivPos':>7} {'Shift':>7} {'Reason':<8} {'IDs'}")
+        print(f"  {'─'*42} {'─'*7} {'─'*7} {'─'*8} {'─'*18}")
+        ranked = sorted(
+            rows,
+            key=lambda item: (
+                item[1].divergence_idx if item[1].divergence_idx is not None else 999999,
+                abs(item[1].shift) if item[1].shift is not None else 999999,
+                item[0],
+            ),
+        )
+        for file_name, result in ranked[:args.top]:
+            div = result.divergence_idx if result.divergence_idx is not None else -1
+            shift = "?" if result.shift is None else f"{result.shift:+d}"
+            ids = f"#{result.ocaml_id}/#{result.rust_id}"
+            print(f"  {file_name[:42]:<42} {div:>7} {shift:>7} {result.reason:<8} {ids}")
+
+
 def _show_string_diff(a: str, b: str):
     """Show where two strings first differ."""
     for i in range(min(len(a), len(b))):
@@ -1983,6 +2116,7 @@ Examples:
   %(prog)s summary
   %(prog)s motifs
   %(prog)s motifs Service__PublicVideo --top 15
+  %(prog)s divergence-summary --top 20 --types 20
   %(prog)s preamble ticker
   %(prog)s trace ticker 11
   %(prog)s extra more_poly_variant_test
@@ -2065,6 +2199,20 @@ Examples:
     sub_divergence = subparsers.add_parser('divergence', help='First divergence analysis')
     sub_divergence.add_argument('file', help='File name or short name')
 
+    # divergence-summary
+    sub_divergence_summary = subparsers.add_parser(
+        'divergence-summary',
+        help='Aggregate first-divergence and insertion signatures across failing files',
+    )
+    sub_divergence_summary.add_argument('--lookahead', type=int, default=200,
+                                        help='Max positions to scan for resync window (default: 200)')
+    sub_divergence_summary.add_argument('--min-run', type=int, default=4,
+                                        help='Minimum consecutive matches to accept a resync (default: 4)')
+    sub_divergence_summary.add_argument('--top', type=int, default=20,
+                                        help='Rows to show in earliest-divergence table (default: 20)')
+    sub_divergence_summary.add_argument('--types', type=int, default=20,
+                                        help='Type summaries to show in extra-type tables (default: 20)')
+
     # insertion
     sub_insertion = subparsers.add_parser('insertion', help='First insertion/resync analysis')
     sub_insertion.add_argument('file', nargs='?', help='Optional file name or short name')
@@ -2097,6 +2245,7 @@ Examples:
         'row-order': cmd_row_order,
         'sharing-summary': cmd_sharing_summary,
         'divergence': cmd_divergence,
+        'divergence-summary': cmd_divergence_summary,
         'insertion': cmd_insertion,
     }
 
