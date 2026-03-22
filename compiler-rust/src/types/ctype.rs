@@ -139,6 +139,44 @@ fn debug_unify_rows_log(
     );
 }
 
+fn debug_unify_row_field_enabled(label: &str) -> bool {
+    std::env::var("RUST_DEBUG_UNIFY_ROW_FIELD")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(|part| part.trim())
+                .filter(|part| !part.is_empty())
+                .any(|needle| needle == label)
+        })
+        .unwrap_or(false)
+}
+
+fn debug_unify_row_types(ctx: &TypeContext<'_>, tys: &[TypeExprRef]) -> String {
+    tys.iter()
+        .map(|ty| {
+            let repr = ctx.repr(*ty);
+            let desc = ctx.get_desc(repr);
+            let summary = match &*desc {
+                TypeDesc::Ttuple(items) => format!(
+                    "Ttuple({})",
+                    items.iter()
+                        .map(|item| ctx.repr(*item).0.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                TypeDesc::Tvar(_) => "Tvar".to_string(),
+                TypeDesc::Tunivar(_) => "Tunivar".to_string(),
+                TypeDesc::Tconstr { path, .. } => format!("Tconstr({})", path.name()),
+                TypeDesc::Tvariant(_) => "Tvariant".to_string(),
+                TypeDesc::Tlink(target) => format!("Tlink({})", ctx.repr(*target).0),
+                _ => format!("{:?}", &*desc),
+            };
+            format!("{}:{}", repr.0, summary)
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 // ============================================================================
 // Unification Mode
 // ============================================================================
@@ -212,7 +250,7 @@ impl UnifyState {
 
     /// Set the environment snapshot for type alias expansion.
     pub fn set_env(&mut self, env: &Env) {
-        self.env = Some(env.clone());
+        self.env = Some(env.clone_preserve_id());
     }
 
     /// Get the environment reference, if set.
@@ -834,6 +872,52 @@ pub fn type_contains_variant(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool {
 pub fn link_type(ctx: &TypeContext<'_>, t1: TypeExprRef, t2: TypeExprRef) {
     let t1_repr = ctx.repr(t1);
     let t2_repr = ctx.repr(t2);
+    if let Some(needle) = std::env::var("RUST_DEBUG_LINK_PATH").ok() {
+        let summarize = |ty: TypeExprRef| {
+            let ty = ctx.repr(ty);
+            let desc = ctx.get_desc(ty);
+            match &*desc {
+                TypeDesc::Tconstr { path, .. } => format!("{}@{}", path.name(), ctx.get_level(ty)),
+                TypeDesc::Tvar(_) => format!("Tvar@{}", ctx.get_level(ty)),
+                TypeDesc::Tarrow { .. } => format!("Tarrow@{}", ctx.get_level(ty)),
+                TypeDesc::Ttuple(_) => format!("Ttuple@{}", ctx.get_level(ty)),
+                TypeDesc::Tunivar(_) => format!("Tunivar@{}", ctx.get_level(ty)),
+                TypeDesc::Tpoly { .. } => format!("Tpoly@{}", ctx.get_level(ty)),
+                TypeDesc::Tpackage { .. } => format!("Tpackage@{}", ctx.get_level(ty)),
+                TypeDesc::Tvariant(_) => format!("Tvariant@{}", ctx.get_level(ty)),
+                TypeDesc::Tobject { .. } => format!("Tobject@{}", ctx.get_level(ty)),
+                TypeDesc::Tfield { .. } => format!("Tfield@{}", ctx.get_level(ty)),
+                TypeDesc::Tnil => format!("Tnil@{}", ctx.get_level(ty)),
+                TypeDesc::Tlink(target) => {
+                    format!("Tlink({})@{}", ctx.repr(*target).0, ctx.get_level(ty))
+                }
+                TypeDesc::Tsubst(target) => {
+                    format!("Tsubst({})@{}", ctx.repr(*target).0, ctx.get_level(ty))
+                }
+            }
+        };
+        let matches = |ty: TypeExprRef| {
+            let ty = ctx.repr(ty);
+            match &*ctx.get_desc(ty) {
+                TypeDesc::Tconstr { path, .. } => {
+                    let name = path.name();
+                    name == needle || path.last() == needle || name.contains(&needle)
+                }
+                _ => false,
+            }
+        };
+        if matches(t1_repr) || matches(t2_repr) {
+            eprintln!(
+                "[link-type] source={} repr={} desc={} target={} repr={} desc={}",
+                t1.0,
+                t1_repr.0,
+                summarize(t1_repr),
+                t2.0,
+                t2_repr.0,
+                summarize(t2_repr)
+            );
+        }
+    }
     let source_name = {
         let desc = ctx.get_desc(t1_repr);
         match &*desc {
@@ -1760,6 +1844,14 @@ fn try_expand_head<'a>(
                         ctx.get_level(manifest_repr),
                         arg_dump
                     );
+                    if std::env::var_os("RUST_DEBUG_EXPAND_TARGET_BT").is_some() {
+                        eprintln!(
+                            "[expand-bt] path={} ty={}\n{:?}",
+                            path_name,
+                            ty.0,
+                            std::backtrace::Backtrace::capture()
+                        );
+                    }
                 }
                 if std::env::var_os("RUST_DEBUG_EXPAND_COMPARE").is_some()
                     && path_name == "Comparable.compare"
@@ -2757,7 +2849,6 @@ fn subst_with_memo(
     }
 
     // 3. Set global abbreviations context so copy_type_cached can use find_repr
-    let old_abbrevs = ctx.current_abbreviations();
     ctx.set_current_abbreviations(memo_ref);
 
     let (fresh_params, fresh_body) = instance_parameterized_type(ctx, params, body);
@@ -2787,9 +2878,10 @@ fn subst_with_memo(
         );
     }
 
-    // 5. Restore global abbreviations (but keep current_level at tconstr_level
-    // through the unifications below, matching OCaml subst).
-    ctx.set_current_abbreviations(old_abbrevs);
+    // 5. Clear instantiation abbreviations before the unifications below.
+    // OCaml sets the global `abbreviations` ref back to `ref Mnil` here rather
+    // than restoring any previous outer context.
+    ctx.set_current_abbreviations(AbbrevMemoRef::nil());
 
     // 6. Unify stub with body (OCaml: !unify' env body0 body')
     let mut unify_state = UnifyState::new();
@@ -3832,11 +3924,7 @@ fn unify_types<'a>(
             // OCaml links t1'→t2 BEFORE recursing into children
             link_type(ctx, t1, t2);
 
-            let merged_row = unify_rows(ctx, state, &row1, &row2)?;
-            // Keep the unified representative row shape (OCaml `unify_row` merges
-            // disjoint labels through row-more links, so the resulting repr exposes
-            // the union of labels rather than whichever side happened to be linked).
-            ctx.set_desc(t2, TypeDesc::Tvariant(merged_row));
+            unify_rows(ctx, state, &row1, &row2)?;
             Ok(())
         }
 
@@ -4228,7 +4316,7 @@ fn unify_rows<'a>(
     state: &mut UnifyState,
     row1: &RowDesc,
     row2: &RowDesc,
-) -> TypeResult<RowDesc> {
+) -> TypeResult<()> {
     let row1 = row_repr(ctx, row1);
     let row2 = row_repr(ctx, row2);
 
@@ -4241,9 +4329,44 @@ fn unify_rows<'a>(
         debug_unify_rows_log("start", &row1, &row2, &r1, &r2, &pairs);
     }
 
+    let rm1 = row_more(ctx, &row1);
+    let rm2 = row_more(ctx, &row2);
+    if rm1 == rm2 {
+        return Ok(());
+    }
+
     let fixed1 = row_fixed(ctx, &row1);
     let fixed2 = row_fixed(ctx, &row2);
+    let more = if fixed1 {
+        rm1
+    } else if fixed2 {
+        rm2
+    } else {
+        let more = ctx.new_var(None);
+        let level = std::cmp::min(ctx.get_level(rm1), ctx.get_level(rm2));
+        ctx.set_level(more, level);
+        more
+    };
+    let fixed = fixed1 || fixed2;
     let closed = row1.row_closed || row2.row_closed;
+
+    let filter_row_fields = |erase: bool, fields: &[(String, RowField)]| -> Vec<(String, RowField)> {
+        let mut filtered = Vec::new();
+        for (label, field) in fields {
+            match super::btype::row_field_repr(ctx, field) {
+                RowField::Rabsent => {}
+                RowField::Reither {
+                    matched: false,
+                    link,
+                    ..
+                } if erase => {
+                    ctx.set_row_field(link, RowField::Rabsent);
+                }
+                _ => filtered.push((label.clone(), field.clone())),
+            }
+        }
+        filtered
+    };
     let empty = |fields: &[(String, RowField)]| {
         fields
             .iter()
@@ -4260,115 +4383,120 @@ fn unify_rows<'a>(
         }
     }
 
-    // Check that non-empty r1/r2 are valid (matching OCaml's set_more checks)
-    if row2.row_closed {
-        let non_absent_r1: Vec<_> = if closed {
-            r1.iter()
-                .filter(|(_, f)| {
-                    let fr = super::btype::row_field_repr(ctx, f);
-                    !matches!(fr, RowField::Rabsent)
-                })
-                .collect()
-        } else {
-            r1.iter().collect()
-        };
-        if !non_absent_r1.is_empty() && (row2.row_closed || row_fixed(ctx, &row2)) {
-            return Err(TypeError::Unify(vec![]));
-        }
-    }
-    if row1.row_closed {
-        let non_absent_r2: Vec<_> = if closed {
-            r2.iter()
-                .filter(|(_, f)| {
-                    let fr = super::btype::row_field_repr(ctx, f);
-                    !matches!(fr, RowField::Rabsent)
-                })
-                .collect()
-        } else {
-            r2.iter().collect()
-        };
-        if !non_absent_r2.is_empty() && (row1.row_closed || row_fixed(ctx, &row1)) {
-            return Err(TypeError::Unify(vec![]));
-        }
-    }
-
-    // Unify the "more" types
-    let more1 = row_more(ctx, &row1);
-    let more2 = row_more(ctx, &row2);
-    unify(ctx, state, more1, more2)?;
-
-    // Unify paired fields
-    let unified_more = ctx.repr(more2);
-    for (label, f1, f2) in &pairs {
-        if debug_rows {
-            eprintln!("[unify-rows field] label={label}");
-        }
-        match unify_row_field(ctx, state, fixed1, fixed2, unified_more, f1, f2) {
-            Ok(()) => {}
-            Err(_e) => {
-                return Err(TypeError::Unify(vec![]));
-            }
-        }
-    }
-
-    // Determine the row_name (matching OCaml logic at ctype.ml:2572-2583)
-    let name = if row1.row_name.is_some() && (row1.row_closed || empty(&r2)) {
+    let keep = |swap: bool| {
+        pairs.iter().all(|(_, f1, f2)| {
+            let (left, right) = if swap { (f2, f1) } else { (f1, f2) };
+            matches!(super::btype::row_field_repr(ctx, left), RowField::Rabsent)
+                || !matches!(super::btype::row_field_repr(ctx, right), RowField::Rabsent)
+        })
+    };
+    let name = if row1.row_name.is_some()
+        && (row1.row_closed || empty(&r2))
+        && (!row2.row_closed || (keep(false) && empty(&r1)))
+    {
         row1.row_name.clone()
-    } else if row2.row_name.is_some() && (row2.row_closed || empty(&r1)) {
+    } else if row2.row_name.is_some()
+        && (row2.row_closed || empty(&r1))
+        && (!row1.row_closed || (keep(true) && empty(&r2)))
+    {
         row2.row_name.clone()
     } else {
         None
     };
-
-    // Build merged fields preserving row2's original field order, then appending
-    // row1's surplus. This matches OCaml's unify_row behavior:
-    // - unify(body_type, expected_type) -> row1=body(new), row2=accumulated
-    // - OCaml's set_more row2 r1 appends r1 to row2's chain
-    // - row_repr produces: row2's accumulated fields (definition order), then r1
-    let prefer_field = |f1: &RowField, f2: &RowField| -> RowField {
-        match (f1, f2) {
-            (RowField::Rpresent(_), _) => f1.clone(),
-            (_, RowField::Rpresent(_)) => f2.clone(),
-            // For Reither/Reither, keep the representative-side field (right/row2).
-            (RowField::Reither { .. }, RowField::Reither { .. }) => f2.clone(),
-            _ => f1.clone(),
-        }
+    let row0 = RowDesc {
+        row_fields: vec![],
+        row_more: more,
+        row_closed: closed,
+        row_fixed: fixed,
+        row_name: name,
     };
 
-    // Build a lookup of paired fields (label -> (f1, f2))
-    let pair_map: HashMap<&str, (&RowField, &RowField)> =
-        pairs.iter().map(|(l, f1, f2)| (l.as_str(), (f1, f2))).collect();
+    let set_more = |ctx: &'a TypeContext<'a>,
+                    state: &mut UnifyState,
+                    row: &RowDesc,
+                    rest: &[(String, RowField)]|
+     -> TypeResult<()> {
+        let row_is_fixed = row_fixed(ctx, row);
+        let rest = if closed {
+            filter_row_fields(row.row_closed, rest)
+        } else {
+            rest.to_vec()
+        };
+        if debug_rows {
+            eprintln!(
+                "[unify-rows set-more] target={{closed:{} fixed:{} labels=[{}]}} rest=[{}]",
+                row.row_closed,
+                row_is_fixed,
+                row.row_fields
+                    .iter()
+                    .map(|(label, _)| label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                rest.iter()
+                    .map(|(label, _)| label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+        if (!rest.is_empty() && (row.row_closed || row_is_fixed))
+            || (closed && row_is_fixed && !row.row_closed)
+        {
+            return Err(TypeError::Unify(vec![]));
+        }
+        let rm = row_more(ctx, row);
+        if row_is_fixed {
+            if more == rm {
+                return Ok(());
+            }
+            if super::btype::is_tvar(ctx, rm) {
+                link_type(ctx, rm, more);
+                return Ok(());
+            }
+            return unify(ctx, state, rm, more);
+        }
 
-    // Walk row2's fields in their original order (accumulated/expected side),
-    // resolving pairs in-place
-    let mut merged_fields: Vec<(String, RowField)> = Vec::new();
-    let mut seen = HashSet::new();
-    for (l, f2) in &row2.row_fields {
-        if seen.insert(l.clone()) {
-            if let Some((pf1, pf2)) = pair_map.get(l.as_str()) {
-                merged_fields.push((l.clone(), prefer_field(pf1, pf2)));
-            } else {
-                merged_fields.push((l.clone(), f2.clone()));
+        let ty = ctx.new_generic_type(TypeDesc::Tvariant(RowDesc {
+            row_fields: rest,
+            ..row0.clone()
+        }));
+        update_level(ctx, ctx.get_level(rm), ty);
+        link_type(ctx, rm, ty);
+        Ok(())
+    };
+
+    let md1 = {
+        let desc = ctx.get_desc(rm1);
+        (*desc).clone()
+    };
+    let md2 = {
+        let desc = ctx.get_desc(rm2);
+        (*desc).clone()
+    };
+    let result = (|| -> TypeResult<()> {
+        set_more(ctx, state, &row2, &r1)?;
+        set_more(ctx, state, &row1, &r2)?;
+        for (label, f1, f2) in &pairs {
+            if debug_rows {
+                eprintln!("[unify-rows field] label={label}");
+            }
+            unify_row_field(ctx, state, fixed1, fixed2, more, label, f1, f2)?;
+        }
+        if super::btype::static_row(ctx, &row1) {
+            let rm = row_more(ctx, &row1);
+            if super::btype::is_tvar(ctx, rm) {
+                let nil = ctx.new_type(TypeDesc::Tnil);
+                ctx.set_level(nil, ctx.get_level(rm));
+                link_type(ctx, rm, nil);
             }
         }
+        Ok(())
+    })();
+    if let Err(err) = result {
+        ctx.set_desc(rm1, md1.clone());
+        ctx.set_desc(rm2, md2.clone());
+        return Err(err);
     }
-
-    // Append surplus from row1 in their original order (matching OCaml's
-    // set_more row2 r1 which appends r1 fields to row2's chain)
-    let row1_surplus: HashSet<&str> = r1.iter().map(|(l, _)| l.as_str()).collect();
-    for (l, f) in &row1.row_fields {
-        if row1_surplus.contains(l.as_str()) && seen.insert(l.clone()) {
-            merged_fields.push((l.clone(), f.clone()));
-        }
-    }
-
-    Ok(RowDesc {
-        row_fields: merged_fields,
-        row_more: ctx.repr(more2),
-        row_closed: closed,
-        row_fixed: row1.row_fixed || row2.row_fixed,
-        row_name: name,
-    })
+    Ok(())
 }
 
 /// Unify two row fields.
@@ -4379,12 +4507,14 @@ fn unify_row_field<'a>(
     fixed1: bool,
     fixed2: bool,
     more: TypeExprRef,
+    label: &str,
     field1: &RowField,
     field2: &RowField,
 ) -> TypeResult<()> {
     // Follow links before matching, like OCaml does
     let f1 = super::btype::row_field_repr(ctx, field1);
     let f2 = super::btype::row_field_repr(ctx, field2);
+    let debug_field = debug_unify_row_field_enabled(label);
     match (&f1, &f2) {
         (RowField::Rpresent(Some(t1)), RowField::Rpresent(Some(t2))) => unify(ctx, state, *t1, *t2),
         (RowField::Rpresent(None), RowField::Rpresent(None)) => Ok(()),
@@ -4405,7 +4535,26 @@ fn unify_row_field<'a>(
                 ..
             },
         ) => {
+            if debug_field {
+                eprintln!(
+                    "[unify-row-field enter] label={} fixed=({}, {}) c=({}, {}) m=({}, {}) e=({}, {}) tl1=[{}] tl2=[{}]",
+                    label,
+                    fixed1,
+                    fixed2,
+                    c1,
+                    c2,
+                    m1,
+                    m2,
+                    e1.0,
+                    e2.0,
+                    debug_unify_row_types(ctx, types1),
+                    debug_unify_row_types(ctx, types2),
+                );
+            }
             if e1 == e2 {
+                if debug_field {
+                    eprintln!("[unify-row-field short-circuit] label={} same-link", label);
+                }
                 return Ok(());
             }
 
@@ -4422,6 +4571,14 @@ fn unify_row_field<'a>(
                 ctx.set_row_field(*e2, shared);
                 for (t1, t2) in types1.iter().zip(types2.iter()) {
                     unify(ctx, state, *t1, *t2)?;
+                }
+                if debug_field {
+                    eprintln!(
+                        "[unify-row-field fixed-fast] label={} tl1=[{}] tl2=[{}]",
+                        label,
+                        debug_unify_row_types(ctx, types1),
+                        debug_unify_row_types(ctx, types2),
+                    );
                 }
                 return Ok(());
             }
@@ -4446,7 +4603,16 @@ fn unify_row_field<'a>(
                     let has_existing_link =
                         ctx.get_row_field(*e1).is_some() || ctx.get_row_field(*e2).is_some();
                     if has_existing_link {
-                        return unify_row_field(ctx, state, fixed1, fixed2, more, &f1, &f2);
+                        if debug_field {
+                            eprintln!(
+                                "[unify-row-field redo] label={} all=[{}] e1_linked={} e2_linked={}",
+                                label,
+                                debug_unify_row_types(ctx, &all_types),
+                                ctx.get_row_field(*e1).is_some(),
+                                ctx.get_row_field(*e2).is_some(),
+                            );
+                        }
+                        return unify_row_field(ctx, state, fixed1, fixed2, more, label, &f1, &f2);
                     }
                 }
             }
@@ -4463,6 +4629,19 @@ fn unify_row_field<'a>(
             };
             let tl2_prime = remq(&tl2, &tl1);
             let tl1_prime = remq(&tl1, &tl2);
+            let tl1_prime_debug = debug_field.then(|| debug_unify_row_types(ctx, &tl1_prime));
+            let tl2_prime_debug = debug_field.then(|| debug_unify_row_types(ctx, &tl2_prime));
+
+            if debug_field {
+                eprintln!(
+                    "[unify-row-field remq] label={} tl1=[{}] tl2=[{}] tl1'=[{}] tl2'=[{}]",
+                    label,
+                    debug_unify_row_types(ctx, &tl1),
+                    debug_unify_row_types(ctx, &tl2),
+                    tl1_prime_debug.as_deref().unwrap_or(""),
+                    tl2_prime_debug.as_deref().unwrap_or(""),
+                );
+            }
 
             let more_level = ctx.get_level(ctx.repr(more));
             for ty in tl1_prime.iter().chain(tl2_prime.iter()) {
@@ -4484,6 +4663,16 @@ fn unify_row_field<'a>(
             };
             ctx.set_row_field(*e1, f1_prime);
             ctx.set_row_field(*e2, f2_prime);
+            if debug_field {
+                eprintln!(
+                    "[unify-row-field set] label={} e1={} e2={} tl1'=[{}] tl2'=[{}]",
+                    label,
+                    e1.0,
+                    e2.0,
+                    tl1_prime_debug.as_deref().unwrap_or(""),
+                    tl2_prime_debug.as_deref().unwrap_or(""),
+                );
+            }
             Ok(())
         }
 
@@ -4505,12 +4694,15 @@ fn unify_row_field<'a>(
             },
             RowField::Rpresent(Some(t2)),
         ) if !fixed1 => {
+            ctx.set_row_field(*e1, f2.clone());
             let more_level = ctx.get_level(ctx.repr(more));
             update_level(ctx, more_level, *t2);
             for t1 in types {
-                unify(ctx, state, *t1, *t2)?;
+                if let Err(err) = unify(ctx, state, *t1, *t2) {
+                    ctx.clear_row_field(*e1);
+                    return Err(err);
+                }
             }
-            ctx.set_row_field(*e1, f2.clone());
             Ok(())
         }
         (
@@ -4522,12 +4714,15 @@ fn unify_row_field<'a>(
                 ..
             },
         ) if !fixed2 => {
+            ctx.set_row_field(*e2, f1.clone());
             let more_level = ctx.get_level(ctx.repr(more));
             update_level(ctx, more_level, *t1);
             for t2 in types {
-                unify(ctx, state, *t1, *t2)?;
+                if let Err(err) = unify(ctx, state, *t1, *t2) {
+                    ctx.clear_row_field(*e2);
+                    return Err(err);
+                }
             }
-            ctx.set_row_field(*e2, f1.clone());
             Ok(())
         }
 
@@ -6968,12 +7163,26 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
 /// Used in type_newtype to ensure replace_newtype_path doesn't corrupt
 /// shared pattern types.
 pub fn subst_identity_copy(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+    subst_identity_copy_with_partial(ctx, ty, false)
+}
+
+pub fn subst_identity_copy_with_partial(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+    reopen_closed_variant_rows: bool,
+) -> TypeExprRef {
     let mut seen = std::collections::HashMap::new();
     // OCaml Subst.typexp uses a temporary `row_more.desc <- Tsubst(Ttuple [...])`
     // marker window to preserve recursive row sharing while copying.
     // Keep the same lifetime semantics in a scoped side table.
     let mut row_more_markers = std::collections::HashMap::new();
-    subst_identity_copy_rec(ctx, ty, &mut seen, &mut row_more_markers)
+    subst_identity_copy_rec(
+        ctx,
+        ty,
+        reopen_closed_variant_rows,
+        &mut seen,
+        &mut row_more_markers,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -6985,6 +7194,7 @@ struct SubstRowMoreMarker {
 fn subst_identity_copy_rec(
     ctx: &TypeContext<'_>,
     ty: TypeExprRef,
+    reopen_closed_variant_rows: bool,
     seen: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>,
     row_more_markers: &mut std::collections::HashMap<TypeExprRef, SubstRowMoreMarker>,
 ) -> TypeExprRef {
@@ -7022,7 +7232,13 @@ fn subst_identity_copy_rec(
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
                     let target = *target;
                     drop(desc);
-                    return subst_identity_copy_rec(ctx, target, seen, row_more_markers);
+                    return subst_identity_copy_rec(
+                        ctx,
+                        target,
+                        reopen_closed_variant_rows,
+                        seen,
+                        row_more_markers,
+                    );
                 }
                 TypeDesc::Tarrow { arg, ret, arity, .. } => {
                     let arg_typ = arg.typ;
@@ -7030,8 +7246,20 @@ fn subst_identity_copy_rec(
                     let ret = *ret;
                     let arity = *arity;
                     drop(desc);
-                    let arg_copy = subst_identity_copy_rec(ctx, arg_typ, seen, row_more_markers);
-                    let ret_copy = subst_identity_copy_rec(ctx, ret, seen, row_more_markers);
+                    let arg_copy = subst_identity_copy_rec(
+                        ctx,
+                        arg_typ,
+                        reopen_closed_variant_rows,
+                        seen,
+                        row_more_markers,
+                    );
+                    let ret_copy = subst_identity_copy_rec(
+                        ctx,
+                        ret,
+                        reopen_closed_variant_rows,
+                        seen,
+                        row_more_markers,
+                    );
                     TypeDesc::Tarrow {
                         arg: crate::types::type_expr::TypeArg {
                             lbl: arg_lbl,
@@ -7047,7 +7275,15 @@ fn subst_identity_copy_rec(
                     drop(desc);
                     let types_copy: Vec<_> = types
                         .iter()
-                        .map(|t| subst_identity_copy_rec(ctx, *t, seen, row_more_markers))
+                        .map(|t| {
+                            subst_identity_copy_rec(
+                                ctx,
+                                *t,
+                                reopen_closed_variant_rows,
+                                seen,
+                                row_more_markers,
+                            )
+                        })
                         .collect();
                     TypeDesc::Ttuple(types_copy)
                 }
@@ -7057,7 +7293,15 @@ fn subst_identity_copy_rec(
                     drop(desc);
                     let args_copy: Vec<_> = args
                         .iter()
-                        .map(|t| subst_identity_copy_rec(ctx, *t, seen, row_more_markers))
+                        .map(|t| {
+                            subst_identity_copy_rec(
+                                ctx,
+                                *t,
+                                reopen_closed_variant_rows,
+                                seen,
+                                row_more_markers,
+                            )
+                        })
                         .collect();
                     TypeDesc::Tconstr {
                         path,
@@ -7069,13 +7313,25 @@ fn subst_identity_copy_rec(
                     let fields = *fields;
                     let name = name.clone();
                     drop(desc);
-                    let fields_copy = subst_identity_copy_rec(ctx, fields, seen, row_more_markers);
+                    let fields_copy = subst_identity_copy_rec(
+                        ctx,
+                        fields,
+                        reopen_closed_variant_rows,
+                        seen,
+                        row_more_markers,
+                    );
                     let name_copy = name.map(|(path, args)| {
                         (
                             path,
                             args.iter()
                                 .map(|t| {
-                                    subst_identity_copy_rec(ctx, *t, seen, row_more_markers)
+                                    subst_identity_copy_rec(
+                                        ctx,
+                                        *t,
+                                        reopen_closed_variant_rows,
+                                        seen,
+                                        row_more_markers,
+                                    )
                                 })
                                 .collect(),
                         )
@@ -7092,11 +7348,23 @@ fn subst_identity_copy_rec(
                     let typ = *typ;
                     let rest = *rest;
                     drop(desc);
-                    let rest_copy = subst_identity_copy_rec(ctx, rest, seen, row_more_markers);
+                    let rest_copy = subst_identity_copy_rec(
+                        ctx,
+                        rest,
+                        reopen_closed_variant_rows,
+                        seen,
+                        row_more_markers,
+                    );
                     if is_absent {
                         TypeDesc::Tlink(rest_copy)
                     } else {
-                        let typ_copy = subst_identity_copy_rec(ctx, typ, seen, row_more_markers);
+                        let typ_copy = subst_identity_copy_rec(
+                            ctx,
+                            typ,
+                            reopen_closed_variant_rows,
+                            seen,
+                            row_more_markers,
+                        );
                         TypeDesc::Tfield {
                             name,
                             kind,
@@ -7109,10 +7377,24 @@ fn subst_identity_copy_rec(
                     let body = *body;
                     let vars = vars.clone();
                     drop(desc);
-                    let body_copy = subst_identity_copy_rec(ctx, body, seen, row_more_markers);
+                    let body_copy = subst_identity_copy_rec(
+                        ctx,
+                        body,
+                        reopen_closed_variant_rows,
+                        seen,
+                        row_more_markers,
+                    );
                     let vars_copy: Vec<_> = vars
                         .iter()
-                        .map(|t| subst_identity_copy_rec(ctx, *t, seen, row_more_markers))
+                        .map(|t| {
+                            subst_identity_copy_rec(
+                                ctx,
+                                *t,
+                                reopen_closed_variant_rows,
+                                seen,
+                                row_more_markers,
+                            )
+                        })
                         .collect();
                     TypeDesc::Tpoly {
                         body: body_copy,
@@ -7122,7 +7404,7 @@ fn subst_identity_copy_rec(
                 TypeDesc::Tvariant(row) => {
                     let row = row.clone();
                     drop(desc);
-                    let row = row_repr(ctx, &row);
+                    let mut row = row_repr(ctx, &row);
                     let more = ctx.repr(row.row_more);
                     if let Some(marker) = row_more_markers.get(&more).copied() {
                         // OCaml Subst.typexp fast-path:
@@ -7132,7 +7414,8 @@ fn subst_identity_copy_rec(
                         seen.insert(ty, marker.variant);
                         TypeDesc::Tlink(marker.variant)
                     } else {
-                    let (dup, more_copy) = {
+                    let keep = ctx.get_level(more) != GENERIC_LEVEL;
+                    let (dup, mut more_copy) = {
                         let more_desc = ctx.get_desc(more).clone();
                         let more_is_constr = matches!(&more_desc, TypeDesc::Tconstr { .. });
                         let dup = ctx.get_level(more) == GENERIC_LEVEL
@@ -7141,7 +7424,13 @@ fn subst_identity_copy_rec(
                         let more_copy = match more_desc {
                             TypeDesc::Tsubst(target) => target,
                             TypeDesc::Tconstr { .. } | TypeDesc::Tnil => {
-                                subst_identity_copy_rec(ctx, more, seen, row_more_markers)
+                                subst_identity_copy_rec(
+                                    ctx,
+                                    more,
+                                    reopen_closed_variant_rows,
+                                    seen,
+                                    row_more_markers,
+                                )
                             }
                             TypeDesc::Tunivar(_) => more,
                             TypeDesc::Tvar(name) => {
@@ -7152,12 +7441,48 @@ fn subst_identity_copy_rec(
                                 }
                             }
                             TypeDesc::Tlink(target) => {
-                                subst_identity_copy_rec(ctx, target, seen, row_more_markers)
+                                subst_identity_copy_rec(
+                                    ctx,
+                                    target,
+                                    reopen_closed_variant_rows,
+                                    seen,
+                                    row_more_markers,
+                                )
                             }
                             _ => panic!("unexpected row_more in subst_identity_copy_rec"),
                         };
                         (dup, more_copy)
                     };
+                    if reopen_closed_variant_rows {
+                        let has_reither = row.row_fields.iter().any(|(_, field)| {
+                            matches!(
+                                super::btype::row_field_repr(ctx, field),
+                                crate::types::type_expr::RowField::Reither { .. }
+                            )
+                        });
+                        if row.row_closed && !row.row_fixed && has_reither {
+                            if more == ctx.repr(more_copy) {
+                                let fresh = ctx.new_var(None);
+                                let lv = if keep {
+                                    ctx.get_level(more)
+                                } else {
+                                    ctx.current_level()
+                                };
+                                ctx.set_level(fresh, lv);
+                                more_copy = fresh;
+                            }
+                            row.row_fields.retain(|(_, field)| {
+                                !matches!(
+                                    super::btype::row_field_repr(ctx, field),
+                                    crate::types::type_expr::RowField::Reither { .. }
+                                )
+                            });
+                            row.row_more = more_copy;
+                            row.row_closed = false;
+                            row.row_fixed = false;
+                            row.row_name = None;
+                        }
+                    }
                     let marker_tuple =
                         ctx.new_generic_type(TypeDesc::Ttuple(vec![more_copy, placeholder]));
                     // OCaml Subst.typexp keeps `more.desc <- Tsubst(Ttuple [...])`
@@ -7183,6 +7508,7 @@ fn subst_identity_copy_rec(
                                         Some(subst_identity_copy_rec(
                                             ctx,
                                             ty,
+                                            reopen_closed_variant_rows,
                                             seen,
                                             row_more_markers,
                                         )),
@@ -7204,6 +7530,7 @@ fn subst_identity_copy_rec(
                                             subst_identity_copy_rec(
                                                 ctx,
                                                 *t,
+                                                reopen_closed_variant_rows,
                                                 seen,
                                                 row_more_markers,
                                             )
@@ -7231,6 +7558,7 @@ fn subst_identity_copy_rec(
                                     subst_identity_copy_rec(
                                         ctx,
                                         *t,
+                                        reopen_closed_variant_rows,
                                         seen,
                                         row_more_markers,
                                     )
@@ -7255,7 +7583,15 @@ fn subst_identity_copy_rec(
                     drop(desc);
                     let args_copy: Vec<_> = args
                         .iter()
-                        .map(|t| subst_identity_copy_rec(ctx, *t, seen, row_more_markers))
+                        .map(|t| {
+                            subst_identity_copy_rec(
+                                ctx,
+                                *t,
+                                reopen_closed_variant_rows,
+                                seen,
+                                row_more_markers,
+                            )
+                        })
                         .collect();
                     TypeDesc::Tpackage {
                         path,
@@ -7606,6 +7942,8 @@ fn copy_type_cached(
                         None
                     };
 
+                    let is_local_nonpersistent =
+                        matches!(&path, Path::Pident(id) if !id.is_persistent());
                     if let Some(found_ty) = ctx.find_abbrev_repr(lookup_abbrevs, &path) {
                         let found_source = ctx.repr(found_ty);
                         // OCaml copy() mutates source nodes to Tsubst stubs while
@@ -7618,13 +7956,15 @@ fn copy_type_cached(
                             .get(&found_ty)
                             .copied()
                             .or_else(|| cache.nodes.get(&found_source).copied());
-                        let found_repr = found_cached.unwrap_or(found_ty);
+                        let found_repr = found_cached.unwrap_or(if is_local_nonpersistent {
+                            found_source
+                        } else {
+                            found_ty
+                        });
                         let found_ty_level = ctx.get_level(found_ty);
                         let found_source_level = ctx.get_level(found_source);
-                        let stale_local_generic_hit = matches!(
-                            &path,
-                            Path::Pident(id) if !id.is_persistent()
-                        ) && found_cached.is_none()
+                        let stale_local_generic_hit = is_local_nonpersistent
+                            && found_cached.is_none()
                             && ctx.get_level(found_source) == GENERIC_LEVEL;
                         if let Some(path_name) = &debug_path_name {
                             eprintln!(
@@ -7706,6 +8046,24 @@ fn copy_type_cached(
                         AbbrevMemo::Mcons { .. } => ctx.alloc_abbrev(AbbrevMemo::Mlink(abbrevs)),
                         memo => ctx.alloc_abbrev(memo),
                     };
+                    if let Some(path_name) = &debug_path_name {
+                        let args_dump = args_copy
+                            .iter()
+                            .map(|arg| {
+                                let arg = ctx.repr(*arg);
+                                format!("{}@{}", arg.0, ctx.get_level(arg))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        eprintln!(
+                            "[copy-constr] fresh path={} source_ty={} placeholder={} level={} args=[{}]",
+                            path_name,
+                            ty.0,
+                            placeholder.0,
+                            ctx.get_level(placeholder),
+                            args_dump
+                        );
+                    }
 
                     TypeDesc::Tconstr {
                         path,
@@ -7802,8 +8160,7 @@ fn copy_type_cached(
                             variant: placeholder,
                         },
                     );
-                    let fixed = super::btype::is_tvar(ctx, ctx.repr(more_copy));
-                    let mut row_copy = copy_row_cached(ctx, &row, fixed, keep, more_copy, cache);
+                    let mut row_copy = copy_row_cached(ctx, &row, true, keep, more_copy, cache);
                     match prev_marker {
                         Some(prev) => {
                             cache.row_more_markers.insert(more, prev);

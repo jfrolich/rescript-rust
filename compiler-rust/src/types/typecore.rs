@@ -2463,6 +2463,56 @@ fn type_pattern_inner(
             let tuple_ty = ctx.new_tuple(elem_types.clone());
             unify_pattern_types(tctx, loc, tuple_ty, expected_ty)?;
 
+            if let Ok(raw_lines) = std::env::var("RUST_DEBUG_TUPLE_PAT_LINE") {
+                let full_loc = tctx.arena.to_location(loc);
+                let should_debug = raw_lines
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<i32>().ok())
+                    .any(|line| line == full_loc.loc_start.line);
+                if should_debug {
+                    let summarize = |ty: TypeExprRef| {
+                        let repr = ctx.repr(ty);
+                        let desc = ctx.get_desc(repr);
+                        match &*desc {
+                            TypeDesc::Ttuple(items) => format!(
+                                "Ttuple#{}({})",
+                                repr.0,
+                                items.iter()
+                                    .map(|item| ctx.repr(*item).0.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            ),
+                            TypeDesc::Tvar(_) => format!("Tvar#{}", repr.0),
+                            TypeDesc::Tconstr { path, args, .. } => format!(
+                                "{}#{}({})",
+                                path.name(),
+                                repr.0,
+                                args.iter()
+                                    .map(|item| ctx.repr(*item).0.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            ),
+                            TypeDesc::Tlink(target) => {
+                                format!("Tlink#{}->{}", repr.0, ctx.repr(*target).0)
+                            }
+                            _ => format!("{:?}#{}", &*desc, repr.0),
+                        }
+                    };
+                    eprintln!(
+                        "[tuple-pat-debug] line={} col={} expected={} tuple={} elems=[{}]",
+                        full_loc.loc_start.line,
+                        full_loc.loc_start.column(),
+                        summarize(expected_ty),
+                        summarize(tuple_ty),
+                        elem_types
+                            .iter()
+                            .map(|ty| summarize(*ty))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            }
+
             if std::env::var_os("RUST_DEBUG_TUPLE_PAT").is_some() {
                 let full_loc = tctx.arena.to_location(loc);
                 if full_loc.loc_start.line >= 1098 && full_loc.loc_start.line <= 1110 {
@@ -3607,6 +3657,83 @@ fn type_pattern_variant(
     });
     unify_pattern_types(tctx, loc, variant_ty, expected_ty)?;
 
+    if let Ok(raw_lines) = std::env::var("RUST_DEBUG_VARIANT_PAT_LINE") {
+        let full_loc = tctx.arena.to_location(loc);
+        let should_debug = raw_lines
+            .split(',')
+            .filter_map(|s| s.trim().parse::<i32>().ok())
+            .any(|line| line == full_loc.loc_start.line);
+        if should_debug {
+            let summarize = |ty: TypeExprRef| {
+                let repr = ctx.repr(ty);
+                let desc = ctx.get_desc(repr);
+                match &*desc {
+                    TypeDesc::Tvariant(row) => {
+                        let row = crate::types::btype::row_repr(ctx, row);
+                        let fields = row
+                            .row_fields
+                            .iter()
+                            .map(|(name, field)| {
+                                let field = crate::types::btype::row_field_repr(ctx, field);
+                                match field {
+                                    crate::types::type_expr::RowField::Rpresent(Some(inner)) => {
+                                        format!("{}=Rpresent({})", name, ctx.repr(inner).0)
+                                    }
+                                    crate::types::type_expr::RowField::Rpresent(None) => {
+                                        format!("{name}=Rpresent_none")
+                                    }
+                                    crate::types::type_expr::RowField::Reither {
+                                        constant,
+                                        types,
+                                        matched,
+                                        ..
+                                    } => format!(
+                                        "{}=Reither(const={} matched={} types=[{}])",
+                                        name,
+                                        constant,
+                                        matched,
+                                        types.iter()
+                                            .map(|inner| ctx.repr(*inner).0.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join(",")
+                                    ),
+                                    crate::types::type_expr::RowField::Rabsent => {
+                                        format!("{name}=Rabsent")
+                                    }
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("Tvariant#{} {{{}}}", repr.0, fields)
+                    }
+                    TypeDesc::Tvar(_) => format!("Tvar#{}", repr.0),
+                    TypeDesc::Ttuple(items) => format!(
+                        "Ttuple#{}({})",
+                        repr.0,
+                        items.iter()
+                            .map(|item| ctx.repr(*item).0.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                    TypeDesc::Tlink(target) => format!("Tlink#{}->{}", repr.0, ctx.repr(*target).0),
+                    _ => format!("{:?}#{}", &*desc, repr.0),
+                }
+            };
+            let arg_summary = arg_ty
+                .map(summarize)
+                .unwrap_or_else(|| "<none>".to_string());
+            eprintln!(
+                "[variant-pat-debug] line={} col={} label={} expected={} variant={} arg_ty={}",
+                full_loc.loc_start.line,
+                full_loc.loc_start.column(),
+                label,
+                summarize(expected_ty),
+                summarize(variant_ty),
+                arg_summary
+            );
+        }
+    }
+
     let typed_arg = match (arg, arg_ty) {
         (Some(arg_pat), Some(arg_ty)) => Some(Box::new(type_pattern_inner(
             tctx, env, arg_pat, arg_ty, mode, state, 0,
@@ -4144,9 +4271,11 @@ pub fn type_expect<'a>(
             )?;
 
             let ty = crate::types::instance(ctx, desc.val_type);
+            let mut debug_ident = None;
             if std::env::var_os("RUST_DEBUG_IDENT_TRACE").is_some() {
                 let path_name = path.name();
-                if matches!(
+                let debug_match = std::env::var("RUST_DEBUG_IDENT_MATCH").ok();
+                let should_debug = matches!(
                     path_name.as_str(),
                     "f"
                         | "eq"
@@ -4160,7 +4289,11 @@ pub fn type_expect<'a>(
                         | "N.make"
                         | "N.fromArray"
                         | "N.eq"
-                ) {
+                ) || debug_match.as_deref().is_some_and(|needle| {
+                    path_name == needle || path.last() == needle || path_name.contains(needle)
+                });
+                if should_debug {
+                    debug_ident = Some(path_name.clone());
                     let loc = tctx.arena.to_location(expr.pexp_loc);
                     let ty_repr = ctx.repr(ty);
                     let summary = {
@@ -4659,6 +4792,20 @@ pub fn type_expect<'a>(
                 }
             }
             rue_unify(tctx, loc, ty, expected_ty, context)?;
+            if let Some(path_name) = debug_ident.as_deref() {
+                let loc = tctx.arena.to_location(expr.pexp_loc);
+                eprintln!(
+                    "[ident-trace-post] line={} col={} env={} name={} path={} desc_repr={} inst_repr={} expected_repr={}",
+                    loc.loc_start.line,
+                    loc.loc_start.column(),
+                    env.id(),
+                    path.last(),
+                    path_name,
+                    ctx.repr(desc.val_type).0,
+                    ctx.repr(ty).0,
+                    ctx.repr(expected_ty).0,
+                );
+            }
 
             Ok(Expression::new(
                 ExpressionDesc::Texp_ident(path, lid.clone(), desc),
@@ -5712,10 +5859,9 @@ fn instance_if_generic(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     }
 }
 
-/// OCaml's `rue` mechanism: instance the expected type if generic before unifying.
-/// When expected_ty is generic (from type_constraint/type_argument), `instance` goes
-/// through `copy` which checks `simple_abbrevs` for nullary Tconstr sharing, creating
-/// Tlink nodes that produce physical sharing in the typed tree.
+/// OCaml's `rue` mechanism: always instance the expected type before unifying.
+/// This matters even for monomorphic expected types, because OCaml still copies
+/// the top-level node and preserves distinct physical identities in the typed tree.
 fn rue_unify(
     tctx: &mut TypeCheckContext<'_>,
     loc: LocIdx,
@@ -5723,17 +5869,22 @@ fn rue_unify(
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
 ) -> TypeCoreResult<()> {
-    let inst = instance_if_generic(tctx.type_ctx, expected_ty);
+    let inst = crate::types::instance(tctx.type_ctx, expected_ty);
     if std::env::var_os("RUST_DEBUG_TYPE_PACK").is_some() {
         let expected_repr = tctx.type_ctx.repr(expected_ty);
         let inst_repr = tctx.type_ctx.repr(inst);
+        let full_loc = tctx.arena.to_location(loc);
         eprintln!(
-            "[rue-unify] loc={:?} expected={}@{} inst={}@{} instanced={}",
+            "[rue-unify] loc={:?} line={} col={} expected={}@{} inst={}@{} exp={}@{} instanced={}",
             loc.0,
+            full_loc.loc_start.line,
+            full_loc.loc_start.column(),
             expected_repr.0,
             tctx.type_ctx.get_level(expected_repr),
             inst_repr.0,
             tctx.type_ctx.get_level(inst_repr),
+            tctx.type_ctx.repr(exp_ty).0,
+            tctx.type_ctx.get_level(tctx.type_ctx.repr(exp_ty)),
             expected_repr != inst_repr
         );
     }
@@ -7033,14 +7184,48 @@ fn debug_variant_row_type(
     let labels: Vec<String> = row.row_fields.iter().map(|(name, _)| name.clone()).collect();
     if filter.iter().all(|needle| labels.iter().any(|label| label == needle)) && seen.insert(repr.0)
     {
+        let field_dump = row
+            .row_fields
+            .iter()
+            .map(|(name, field)| {
+                let field = crate::types::btype::row_field_repr(ctx, field);
+                match field {
+                    crate::types::type_expr::RowField::Rpresent(Some(inner)) => {
+                        format!("{}=Rpresent({})", name, ctx.repr(inner).0)
+                    }
+                    crate::types::type_expr::RowField::Rpresent(None) => {
+                        format!("{name}=Rpresent_none")
+                    }
+                    crate::types::type_expr::RowField::Reither {
+                        constant,
+                        types,
+                        matched,
+                        ..
+                    } => format!(
+                        "{}=Reither(const={} matched={} types=[{}])",
+                        name,
+                        constant,
+                        matched,
+                        types.iter()
+                            .map(|inner| ctx.repr(*inner).0.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                    crate::types::type_expr::RowField::Rabsent => format!("{name}=Rabsent"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         eprintln!(
-            "[variant-row {}] {} repr=#{} closed={} fixed={} labels={:?}",
+            "[variant-row {}] {} repr=#{} closed={} fixed={} labels={:?} fields={}",
             stage,
             label,
             repr.0,
             row.row_closed,
             row.row_fixed,
             labels
+                ,
+            field_dump
         );
     }
 }
@@ -7139,6 +7324,863 @@ fn debug_variant_match_state(
             &filter,
             &mut seen,
         );
+    }
+}
+
+fn debug_scrutinee_case_row(
+    tctx: &mut TypeCheckContext<'_>,
+    stage: &str,
+    line: i32,
+    label: &str,
+    ty: TypeExprRef,
+) {
+    let Ok(raw_lines) = std::env::var("RUST_DEBUG_MATCH_CASE_SCRUT_LINE") else {
+        return;
+    };
+    let should_debug = raw_lines
+        .split(',')
+        .filter_map(|s| s.trim().parse::<i32>().ok())
+        .any(|needle| needle == line);
+    if !should_debug {
+        return;
+    }
+
+    let ctx = tctx.type_ctx;
+    let repr = ctx.repr(ty);
+    let desc = ctx.get_desc(repr);
+    match &*desc {
+        TypeDesc::Tvariant(row) => {
+            let row = crate::types::btype::row_repr(ctx, row);
+            let fields = row
+                .row_fields
+                .iter()
+                .map(|(name, field)| {
+                    let field = crate::types::btype::row_field_repr(ctx, field);
+                    match field {
+                        crate::types::type_expr::RowField::Rpresent(Some(inner)) => {
+                            format!("{}=Rpresent({})", name, ctx.repr(inner).0)
+                        }
+                        crate::types::type_expr::RowField::Rpresent(None) => {
+                            format!("{name}=Rpresent_none")
+                        }
+                        crate::types::type_expr::RowField::Reither {
+                            constant,
+                            types,
+                            matched,
+                            link,
+                        } => format!(
+                            "{}=Reither(const={} matched={} link={} types=[{}])",
+                            name,
+                            constant,
+                            matched,
+                            link.0,
+                            types.iter()
+                                .map(|inner| ctx.repr(*inner).0.to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ),
+                        crate::types::type_expr::RowField::Rabsent => format!("{name}=Rabsent"),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!(
+                "[match-case-scrut] stage={} line={} {} repr={} level={} more={} fields={}",
+                stage,
+                line,
+                label,
+                repr.0,
+                ctx.get_level(repr),
+                ctx.repr(row.row_more).0,
+                fields
+            );
+        }
+        _ => {
+            eprintln!(
+                "[match-case-scrut] stage={} line={} {} repr={} level={} desc={:?}",
+                stage,
+                line,
+                label,
+                repr.0,
+                ctx.get_level(repr),
+                &*desc
+            );
+        }
+    }
+}
+
+fn debug_match_entry_type(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    label: &str,
+    ty: TypeExprRef,
+) {
+    if std::env::var_os("RUST_DEBUG_MATCH_ENTRY").is_none() {
+        return;
+    }
+    let ctx = tctx.type_ctx;
+    let full_loc = tctx.arena.to_location(loc);
+    let expanded = crate::types::ctype::expand_head(ctx, env, ty);
+    let repr = ctx.repr(expanded);
+    let desc = ctx.get_desc(repr);
+    match &*desc {
+        TypeDesc::Tvariant(row) => {
+            let row = crate::types::btype::row_repr(ctx, row);
+            let labels: Vec<&str> = row.row_fields.iter().map(|(name, _)| name.as_str()).collect();
+            eprintln!(
+                "[match-entry] {} loc={}:{} repr=#{} kind=Tvariant closed={} fixed={} labels={:?}",
+                label,
+                full_loc.loc_start.line,
+                full_loc.loc_start.column(),
+                repr.0,
+                row.row_closed,
+                crate::types::btype::row_fixed(ctx, &row),
+                labels
+            );
+        }
+        other => {
+            let kind = match other {
+                TypeDesc::Tconstr { path, .. } => format!("Tconstr({})", path.name()),
+                TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
+                TypeDesc::Tvar(_) => "Tvar".to_string(),
+                TypeDesc::Tunivar(_) => "Tunivar".to_string(),
+                TypeDesc::Tlink(target) => format!("Tlink({})", ctx.repr(*target).0),
+                TypeDesc::Tsubst(target) => format!("Tsubst({})", ctx.repr(*target).0),
+                TypeDesc::Ttuple(items) => format!("Ttuple({})", items.len()),
+                TypeDesc::Tobject { .. } => "Tobject".to_string(),
+                TypeDesc::Tfield { .. } => "Tfield".to_string(),
+                TypeDesc::Tnil => "Tnil".to_string(),
+                TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
+                TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
+                TypeDesc::Tvariant(_) => unreachable!(),
+            };
+            eprintln!(
+                "[match-entry] {} loc={}:{} repr=#{} kind={}",
+                label,
+                full_loc.loc_start.line,
+                full_loc.loc_start.column(),
+                repr.0,
+                kind
+            );
+        }
+    }
+}
+
+fn pressure_matrix_omega_pat() -> Pattern {
+    Pattern::new(
+        PatternDesc::Tpat_any,
+        LocIdx(0),
+        TypeExprRef::null(),
+        EnvRef(0),
+        Attributes::default(),
+    )
+}
+
+fn pressure_matrix_zero_pat() -> Pattern {
+    Pattern::new(
+        PatternDesc::Tpat_constant(Constant::Int(0)),
+        LocIdx(0),
+        TypeExprRef::null(),
+        EnvRef(0),
+        Attributes::default(),
+    )
+}
+
+fn pressure_matrix_omega_list(len: usize) -> Vec<Pattern> {
+    (0..len).map(|_| pressure_matrix_omega_pat()).collect()
+}
+
+fn pressure_matrix_normalize_pat(pat: &Pattern) -> Pattern {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => pat.clone(),
+        PatternDesc::Tpat_var(_, _) => {
+            let mut normalized = pat.clone();
+            normalized.pat_desc = PatternDesc::Tpat_any;
+            normalized
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => pressure_matrix_normalize_pat(inner),
+        PatternDesc::Tpat_tuple(items) => {
+            let mut normalized = pat.clone();
+            normalized.pat_desc = PatternDesc::Tpat_tuple(pressure_matrix_omega_list(items.len()));
+            normalized
+        }
+        PatternDesc::Tpat_construct(lid, cstr, args) => {
+            let mut normalized = pat.clone();
+            normalized.pat_desc = PatternDesc::Tpat_construct(
+                lid.clone(),
+                cstr.clone(),
+                pressure_matrix_omega_list(args.len()),
+            );
+            normalized
+        }
+        PatternDesc::Tpat_variant(label, arg, row) => {
+            let mut normalized = pat.clone();
+            normalized.pat_desc = PatternDesc::Tpat_variant(
+                label.clone(),
+                arg.as_ref().map(|_| Box::new(pressure_matrix_omega_pat())),
+                *row,
+            );
+            normalized
+        }
+        PatternDesc::Tpat_array(items) => {
+            let mut normalized = pat.clone();
+            normalized.pat_desc = PatternDesc::Tpat_array(pressure_matrix_omega_list(items.len()));
+            normalized
+        }
+        PatternDesc::Tpat_record(fields, closed) => {
+            let mut normalized = pat.clone();
+            normalized.pat_desc = PatternDesc::Tpat_record(
+                fields
+                    .iter()
+                    .map(|(lid, lbl, _, opt)| {
+                        (
+                            lid.clone(),
+                            lbl.clone(),
+                            pressure_matrix_omega_pat(),
+                            *opt,
+                        )
+                    })
+                    .collect(),
+                *closed,
+            );
+            normalized
+        }
+        PatternDesc::Tpat_or(_, _, _) => unreachable!("or-patterns must be expanded first"),
+    }
+}
+
+fn pressure_matrix_simple_match(left: &Pattern, right: &Pattern) -> bool {
+    match (&left.pat_desc, &right.pat_desc) {
+        (PatternDesc::Tpat_construct(_, c1, _), PatternDesc::Tpat_construct(_, c2, _)) => {
+            c1.cstr_tag == c2.cstr_tag
+        }
+        (PatternDesc::Tpat_variant(l1, _, _), PatternDesc::Tpat_variant(l2, _, _)) => l1 == l2,
+        (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => c1 == c2,
+        (PatternDesc::Tpat_record(_, _), PatternDesc::Tpat_record(_, _)) => true,
+        (PatternDesc::Tpat_tuple(a), PatternDesc::Tpat_tuple(b))
+        | (PatternDesc::Tpat_array(a), PatternDesc::Tpat_array(b)) => a.len() == b.len(),
+        (_, PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _)) => true,
+        _ => false,
+    }
+}
+
+type PressureRecordField = (
+    crate::types::typedtree::Loc<LidentIdx>,
+    crate::types::LabelDescription,
+    Pattern,
+    bool,
+);
+
+fn pressure_matrix_record_arg(pat: &Pattern) -> Vec<PressureRecordField> {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_any => vec![],
+        PatternDesc::Tpat_record(fields, _) => fields.clone(),
+        _ => panic!("Parmatch.record_arg"),
+    }
+}
+
+fn pressure_matrix_extract_fields(
+    omegas: &[PressureRecordField],
+    args: &[PressureRecordField],
+) -> Vec<Pattern> {
+    omegas
+        .iter()
+        .map(|(_, lbl, _, _)| {
+            args.iter()
+                .find(|(_, field_lbl, _, _)| lbl.lbl_pos == field_lbl.lbl_pos)
+                .map(|(_, _, field_pat, _)| field_pat.clone())
+                .unwrap_or_else(pressure_matrix_omega_pat)
+        })
+        .collect()
+}
+
+fn pressure_matrix_simple_match_args(left: &Pattern, right: &Pattern) -> Vec<Pattern> {
+    match &right.pat_desc {
+        PatternDesc::Tpat_alias(inner, _, _) => pressure_matrix_simple_match_args(left, inner),
+        PatternDesc::Tpat_construct(_, _, args) => args.clone(),
+        PatternDesc::Tpat_variant(_, Some(arg), _) => vec![(*arg.clone())],
+        PatternDesc::Tpat_tuple(args) => args.clone(),
+        PatternDesc::Tpat_record(args, _) => {
+            pressure_matrix_extract_fields(&pressure_matrix_record_arg(left), args)
+        }
+        PatternDesc::Tpat_array(args) => args.clone(),
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => match &left.pat_desc {
+            PatternDesc::Tpat_construct(_, _, args)
+            | PatternDesc::Tpat_tuple(args)
+            | PatternDesc::Tpat_array(args) => pressure_matrix_omega_list(args.len()),
+            PatternDesc::Tpat_variant(_, Some(_), _) => vec![pressure_matrix_omega_pat()],
+            PatternDesc::Tpat_record(args, _) => pressure_matrix_omega_list(args.len()),
+            _ => vec![],
+        },
+        _ => vec![],
+    }
+}
+
+fn pressure_matrix_simplify_head_pat(pat: &Pattern, out: &mut Vec<Pattern>) {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_alias(inner, _, _) => pressure_matrix_simplify_head_pat(inner, out),
+        PatternDesc::Tpat_var(_, _) => out.push(pressure_matrix_omega_pat()),
+        PatternDesc::Tpat_or(left, right, _) => {
+            pressure_matrix_simplify_head_pat(left, out);
+            pressure_matrix_simplify_head_pat(right, out);
+        }
+        _ => out.push(pat.clone()),
+    }
+}
+
+fn pressure_matrix_simplified_first_col(rows: &[Vec<Pattern>]) -> Vec<Pattern> {
+    let mut column = Vec::new();
+    for row in rows {
+        if let Some(head) = row.first() {
+            pressure_matrix_simplify_head_pat(head, &mut column);
+        }
+    }
+    column
+}
+
+fn pressure_matrix_constant_kind(constant: &Constant) -> usize {
+    match constant {
+        Constant::Int(_) => 0,
+        Constant::Char(_) => 1,
+        Constant::String(_, _) => 2,
+        Constant::Float(_) => 3,
+        Constant::BigInt(_, _) => 4,
+    }
+}
+
+fn pressure_matrix_coherent_heads(left: &Pattern, right: &Pattern) -> bool {
+    match (&left.pat_desc, &right.pat_desc) {
+        (PatternDesc::Tpat_construct(_, c1, _), PatternDesc::Tpat_construct(_, c2, _)) => {
+            c1.cstr_consts == c2.cstr_consts && c1.cstr_nonconsts == c2.cstr_nonconsts
+        }
+        (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => {
+            pressure_matrix_constant_kind(c1) == pressure_matrix_constant_kind(c2)
+        }
+        (PatternDesc::Tpat_tuple(a), PatternDesc::Tpat_tuple(b)) => a.len() == b.len(),
+        (PatternDesc::Tpat_record(a, _), PatternDesc::Tpat_record(b, _)) => {
+            a.is_empty() || b.is_empty() || a.len() == b.len()
+        }
+        (PatternDesc::Tpat_any, _)
+        | (_, PatternDesc::Tpat_any)
+        | (PatternDesc::Tpat_variant(_, _, _), PatternDesc::Tpat_variant(_, _, _))
+        | (PatternDesc::Tpat_array(_), PatternDesc::Tpat_array(_)) => true,
+        _ => false,
+    }
+}
+
+fn pressure_matrix_all_coherent(column: &[Pattern]) -> bool {
+    let Some(discriminant) = column.iter().find(|pat| !matches!(pat.pat_desc, PatternDesc::Tpat_any)) else {
+        return true;
+    };
+    column
+        .iter()
+        .all(|pat| pressure_matrix_coherent_heads(discriminant, pat))
+}
+
+fn pressure_matrix_discr_pat(q: &Pattern, rows: &[Vec<Pattern>]) -> Pattern {
+    fn acc_pat(mut acc: Pattern, rows: &[Vec<Pattern>]) -> Pattern {
+        let mut stack: Vec<Vec<Pattern>> = rows.to_vec();
+        while let Some(row) = stack.pop() {
+            let Some((head, tail)) = row.split_first() else {
+                continue;
+            };
+            match &head.pat_desc {
+                PatternDesc::Tpat_alias(inner, _, _) => {
+                    let mut expanded = vec![(**inner).clone()];
+                    expanded.extend_from_slice(tail);
+                    stack.push(expanded);
+                }
+                PatternDesc::Tpat_or(left, right, _) => {
+                    let mut left_row = vec![(**left).clone()];
+                    left_row.extend_from_slice(tail);
+                    stack.push(left_row);
+                    let mut right_row = vec![(**right).clone()];
+                    right_row.extend_from_slice(tail);
+                    stack.push(right_row);
+                }
+                PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {}
+                PatternDesc::Tpat_tuple(_) => return pressure_matrix_normalize_pat(head),
+                PatternDesc::Tpat_record(fields, closed) => {
+                    let existing = pressure_matrix_record_arg(&acc);
+                    let mut merged = existing.clone();
+                    for (lid, lbl, _, opt) in fields.iter().rev() {
+                        if !merged.iter().any(|(_, seen_lbl, _, _)| seen_lbl.lbl_pos == lbl.lbl_pos)
+                        {
+                            merged.insert(
+                                0,
+                                (
+                                    lid.clone(),
+                                    lbl.clone(),
+                                    pressure_matrix_omega_pat(),
+                                    *opt,
+                                ),
+                            );
+                        }
+                    }
+                    let mut updated = head.clone();
+                    updated.pat_desc = PatternDesc::Tpat_record(merged, *closed);
+                    acc = updated;
+                }
+                _ => {}
+            }
+        }
+        acc
+    }
+
+    let normalized = pressure_matrix_normalize_pat(q);
+    match normalized.pat_desc {
+        PatternDesc::Tpat_any | PatternDesc::Tpat_record(_, _) => acc_pat(normalized, rows),
+        _ => normalized,
+    }
+}
+
+fn pressure_matrix_filter_one(q: &Pattern, rows: &[Vec<Pattern>]) -> Vec<Vec<Pattern>> {
+    let mut out = Vec::new();
+    let mut stack: Vec<Vec<Pattern>> = rows.to_vec();
+    while let Some(row) = stack.pop() {
+        let Some((head, tail)) = row.split_first() else {
+            continue;
+        };
+        match &head.pat_desc {
+            PatternDesc::Tpat_alias(inner, _, _) => {
+                let mut expanded = vec![(**inner).clone()];
+                expanded.extend_from_slice(tail);
+                stack.push(expanded);
+            }
+            PatternDesc::Tpat_or(left, right, _) => {
+                let mut left_row = vec![(**left).clone()];
+                left_row.extend_from_slice(tail);
+                stack.push(left_row);
+                let mut right_row = vec![(**right).clone()];
+                right_row.extend_from_slice(tail);
+                stack.push(right_row);
+            }
+            _ => {
+                if pressure_matrix_simple_match(q, head) {
+                    let mut specialized = pressure_matrix_simple_match_args(q, head);
+                    specialized.extend_from_slice(tail);
+                    out.push(specialized);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn pressure_matrix_filter_extra(rows: &[Vec<Pattern>]) -> Vec<Vec<Pattern>> {
+    let mut out = Vec::new();
+    let mut stack: Vec<Vec<Pattern>> = rows.to_vec();
+    while let Some(row) = stack.pop() {
+        let Some((head, tail)) = row.split_first() else {
+            continue;
+        };
+        match &head.pat_desc {
+            PatternDesc::Tpat_alias(inner, _, _) => {
+                let mut expanded = vec![(**inner).clone()];
+                expanded.extend_from_slice(tail);
+                stack.push(expanded);
+            }
+            PatternDesc::Tpat_or(left, right, _) => {
+                let mut left_row = vec![(**left).clone()];
+                left_row.extend_from_slice(tail);
+                stack.push(left_row);
+                let mut right_row = vec![(**right).clone()];
+                right_row.extend_from_slice(tail);
+                stack.push(right_row);
+            }
+            PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => out.push(tail.to_vec()),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn pressure_matrix_filter_all(
+    pat0: &Pattern,
+    rows: &[Vec<Pattern>],
+) -> Vec<(Pattern, Vec<Vec<Pattern>>)> {
+    fn insert(
+        pat: &Pattern,
+        tail: &[Pattern],
+        env: &mut Vec<(Pattern, Vec<Vec<Pattern>>)>,
+    ) {
+        let normalized = pressure_matrix_normalize_pat(pat);
+        if let Some((_, matrices)) = env
+            .iter_mut()
+            .find(|(existing, _)| pressure_matrix_simple_match(existing, pat))
+        {
+            let mut specialized = pressure_matrix_simple_match_args(&normalized, pat);
+            specialized.extend_from_slice(tail);
+            matrices.push(specialized);
+        } else {
+            let mut specialized = pressure_matrix_simple_match_args(&normalized, pat);
+            specialized.extend_from_slice(tail);
+            env.push((normalized, vec![specialized]));
+        }
+    }
+
+    let mut env = match pat0.pat_desc {
+        PatternDesc::Tpat_record(_, _) | PatternDesc::Tpat_tuple(_) => vec![(pat0.clone(), vec![])],
+        _ => vec![],
+    };
+
+    let mut stack: Vec<Vec<Pattern>> = rows.to_vec();
+    while let Some(row) = stack.pop() {
+        let Some((head, tail)) = row.split_first() else {
+            continue;
+        };
+        match &head.pat_desc {
+            PatternDesc::Tpat_alias(inner, _, _) => {
+                let mut expanded = vec![(**inner).clone()];
+                expanded.extend_from_slice(tail);
+                stack.push(expanded);
+            }
+            PatternDesc::Tpat_or(left, right, _) => {
+                let mut left_row = vec![(**left).clone()];
+                left_row.extend_from_slice(tail);
+                stack.push(left_row);
+                let mut right_row = vec![(**right).clone()];
+                right_row.extend_from_slice(tail);
+                stack.push(right_row);
+            }
+            PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {}
+            _ => insert(head, tail, &mut env),
+        }
+    }
+
+    let mut stack: Vec<Vec<Pattern>> = rows.to_vec();
+    while let Some(row) = stack.pop() {
+        let Some((head, tail)) = row.split_first() else {
+            continue;
+        };
+        match &head.pat_desc {
+            PatternDesc::Tpat_alias(inner, _, _) => {
+                let mut expanded = vec![(**inner).clone()];
+                expanded.extend_from_slice(tail);
+                stack.push(expanded);
+            }
+            PatternDesc::Tpat_or(left, right, _) => {
+                let mut left_row = vec![(**left).clone()];
+                left_row.extend_from_slice(tail);
+                stack.push(left_row);
+                let mut right_row = vec![(**right).clone()];
+                right_row.extend_from_slice(tail);
+                stack.push(right_row);
+            }
+            PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
+                for (q, matrices) in env.iter_mut() {
+                    let mut specialized =
+                        pressure_matrix_simple_match_args(q, &pressure_matrix_omega_pat());
+                    specialized.extend_from_slice(tail);
+                    matrices.push(specialized);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    env
+}
+
+fn pressure_matrix_mark_partial(rows: &[Vec<Pattern>]) -> Vec<Vec<Pattern>> {
+    rows.iter()
+        .flat_map(|row| {
+            let Some((head, tail)) = row.split_first() else {
+                return vec![vec![]];
+            };
+            match &head.pat_desc {
+                PatternDesc::Tpat_alias(inner, _, _) => {
+                    let mut expanded = vec![(**inner).clone()];
+                    expanded.extend_from_slice(tail);
+                    pressure_matrix_mark_partial(&[expanded])
+                }
+                PatternDesc::Tpat_or(left, right, _) => {
+                    let mut left_row = vec![(**left).clone()];
+                    left_row.extend_from_slice(tail);
+                    let mut right_row = vec![(**right).clone()];
+                    right_row.extend_from_slice(tail);
+                    let mut out = pressure_matrix_mark_partial(&[left_row]);
+                    out.extend(pressure_matrix_mark_partial(&[right_row]));
+                    out
+                }
+                PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => vec![row.clone()],
+                _ => {
+                    let mut updated = row.clone();
+                    if let Some(last) = updated.last_mut() {
+                        *last = pressure_matrix_zero_pat();
+                    }
+                    vec![updated]
+                }
+            }
+        })
+        .collect()
+}
+
+fn pressure_matrix_row_of_pat<'a>(
+    tctx: &'a mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &Pattern,
+) -> Option<crate::types::type_expr::RowDesc> {
+    let expanded = crate::types::ctype::expand_head(tctx.type_ctx, env, pat.pat_type);
+    let repr = tctx.type_ctx.repr(expanded);
+    let desc = tctx.type_ctx.get_desc(repr);
+    let row = match &*desc {
+        TypeDesc::Tvariant(row) => Some(crate::types::btype::row_repr(tctx.type_ctx, row)),
+        _ => None,
+    };
+    drop(desc);
+    row
+}
+
+fn pressure_matrix_close_variant_type(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+) {
+    let ctx = tctx.type_ctx;
+    let expanded = crate::types::ctype::expand_head(ctx, env, ty);
+    let repr = ctx.repr(expanded);
+    let desc = ctx.get_desc(repr);
+    let row = match &*desc {
+        TypeDesc::Tvariant(row) => crate::types::btype::row_repr(ctx, row),
+        _ => return,
+    };
+    drop(desc);
+
+    let mut row_name = row.row_name.clone();
+    for (_, field) in &row.row_fields {
+        if let crate::types::type_expr::RowField::Reither {
+            matched: false,
+            link,
+            ..
+        } = crate::types::btype::row_field_repr(ctx, field)
+        {
+            ctx.set_row_field(link, crate::types::type_expr::RowField::Rabsent);
+            row_name = None;
+        }
+    }
+
+    if !row.row_closed || row_name != row.row_name {
+        let closed_row = crate::types::type_expr::RowDesc {
+            row_fields: vec![],
+            row_more: ctx.new_generic_var(None),
+            row_closed: true,
+            row_fixed: row.row_fixed,
+            row_name,
+        };
+        let closed_ty = ctx.new_generic_type(TypeDesc::Tvariant(closed_row));
+        let _ = crate::types::unify(ctx, &mut tctx.unify_state, row.row_more, closed_ty);
+    }
+}
+
+fn pressure_matrix_close_variant(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &Pattern,
+) {
+    pressure_matrix_close_variant_type(tctx, env, pat.pat_type);
+}
+
+fn pressure_matrix_full_match(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    closing: bool,
+    branches: &[(Pattern, Vec<Vec<Pattern>>)],
+) -> bool {
+    let Some((pat, _)) = branches.first() else {
+        return false;
+    };
+    match &pat.pat_desc {
+        PatternDesc::Tpat_construct(_, cstr, _) => {
+            !matches!(cstr.cstr_tag, crate::types::ConstructorTag::CstrExtension(_))
+                && branches.len() as i32 == cstr.cstr_consts + cstr.cstr_nonconsts
+        }
+        PatternDesc::Tpat_variant(_, _, _) => {
+            let fields: Vec<String> = branches
+                .iter()
+                .filter_map(|(branch_pat, _)| match &branch_pat.pat_desc {
+                    PatternDesc::Tpat_variant(tag, _, _) => Some(tag.clone()),
+                    _ => None,
+                })
+                .collect();
+            let Some(row) = pressure_matrix_row_of_pat(tctx, env, pat) else {
+                return false;
+            };
+            if closing && !crate::types::btype::row_fixed(tctx.type_ctx, &row) {
+                row.row_fields.iter().all(|(tag, field)| match crate::types::btype::row_field_repr(
+                    tctx.type_ctx,
+                    field,
+                ) {
+                    crate::types::type_expr::RowField::Rabsent => true,
+                    crate::types::type_expr::RowField::Reither { matched, .. } => {
+                        !matched || fields.iter().any(|field_tag| field_tag == tag)
+                    }
+                    crate::types::type_expr::RowField::Rpresent(_) => {
+                        fields.iter().any(|field_tag| field_tag == tag)
+                    }
+                })
+            } else {
+                row.row_closed
+                    && row.row_fields.iter().all(|(tag, field)| {
+                        matches!(
+                            crate::types::btype::row_field_repr(tctx.type_ctx, field),
+                            crate::types::type_expr::RowField::Rabsent
+                        ) || fields.iter().any(|field_tag| field_tag == tag)
+                    })
+            }
+        }
+        PatternDesc::Tpat_constant(_) => false,
+        PatternDesc::Tpat_tuple(_) | PatternDesc::Tpat_record(_, _) => true,
+        PatternDesc::Tpat_array(_) => false,
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(_, _)
+        | PatternDesc::Tpat_alias(_, _, _)
+        | PatternDesc::Tpat_or(_, _, _) => unreachable!("non-simple patterns must be expanded"),
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct PressureVariantsResult {
+    exhaustive: bool,
+    closed_current_variant: bool,
+}
+
+fn pressure_variants_result(
+    exhaustive: bool,
+    closed_current_variant: bool,
+) -> PressureVariantsResult {
+    PressureVariantsResult {
+        exhaustive,
+        closed_current_variant,
+    }
+}
+
+fn pressure_variants_match_matrix(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    can_close_variants: bool,
+    rows: &[Vec<Pattern>],
+) -> PressureVariantsResult {
+    if rows.is_empty() {
+        return pressure_variants_result(false, false);
+    }
+    if rows.iter().any(Vec::is_empty) {
+        return pressure_variants_result(true, false);
+    }
+
+    let first_col = pressure_matrix_simplified_first_col(rows);
+    if !pressure_matrix_all_coherent(&first_col) {
+        return pressure_variants_result(true, false);
+    }
+
+    let q0 = pressure_matrix_discr_pat(&pressure_matrix_omega_pat(), rows);
+    let constrs = pressure_matrix_filter_all(&q0, rows);
+    if constrs.is_empty() {
+        let child =
+            pressure_variants_match_matrix(tctx, env, can_close_variants, &pressure_matrix_filter_extra(rows));
+        return pressure_variants_result(child.exhaustive, false);
+    }
+
+    let try_non_omega = |tctx: &mut TypeCheckContext<'_>,
+                         env: &Env,
+                         can_close_variants: bool,
+                         branches: &[(Pattern, Vec<Vec<Pattern>>)]| {
+        branches.iter().all(|(_, matrix)| {
+            pressure_variants_match_matrix(tctx, env, can_close_variants, matrix).exhaustive
+        })
+    };
+
+    if pressure_matrix_full_match(tctx, env, !can_close_variants, &constrs) {
+        return pressure_variants_result(
+            try_non_omega(tctx, env, can_close_variants, &constrs),
+            false,
+        );
+    }
+
+    if !can_close_variants {
+        let child =
+            pressure_variants_match_matrix(tctx, env, false, &pressure_matrix_filter_extra(rows));
+        return pressure_variants_result(child.exhaustive, false);
+    }
+
+    let full = pressure_matrix_full_match(tctx, env, true, &constrs);
+    let ok = if full {
+        try_non_omega(tctx, env, true, &constrs)
+    } else {
+        let partial = pressure_matrix_filter_all(&q0, &pressure_matrix_mark_partial(rows));
+        try_non_omega(tctx, env, true, &partial)
+    };
+
+    let mut closed_current_variant = false;
+    if let Some((variant_pat, _)) = constrs
+        .first()
+        .filter(|(pat, _)| matches!(pat.pat_desc, PatternDesc::Tpat_variant(_, _, _)))
+    {
+        let row = pressure_matrix_row_of_pat(tctx, env, variant_pat);
+        let row_is_fixed = row
+            .as_ref()
+            .map(|row| crate::types::btype::row_fixed(tctx.type_ctx, row))
+            .unwrap_or(true);
+        let default_result =
+            pressure_variants_match_matrix(tctx, env, false, &pressure_matrix_filter_extra(rows));
+        if !row_is_fixed && !default_result.exhaustive {
+            pressure_matrix_close_variant(tctx, env, variant_pat);
+            closed_current_variant = true;
+        }
+    }
+
+    pressure_variants_result(
+        ok,
+        closed_current_variant && matches!(q0.pat_desc, PatternDesc::Tpat_variant(_, _, _)),
+    )
+}
+
+fn typed_pattern_has_variant(pat: &Pattern) -> bool {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_variant(_, _, _) => true,
+        PatternDesc::Tpat_alias(inner, _, _) => typed_pattern_has_variant(inner),
+        PatternDesc::Tpat_or(left, right, _) => {
+            typed_pattern_has_variant(left) || typed_pattern_has_variant(right)
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            items.iter().any(typed_pattern_has_variant)
+        }
+        PatternDesc::Tpat_construct(_, _, args) => args.iter().any(typed_pattern_has_variant),
+        PatternDesc::Tpat_record(fields, _) => fields
+            .iter()
+            .any(|(_, _, field_pat, _)| typed_pattern_has_variant(field_pat)),
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {
+            false
+        }
+    }
+}
+
+fn pressure_variants_on_match_cases(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pending_cases: &[PendingMatchCase<'_>],
+) -> bool {
+    let matrix: Vec<Vec<Pattern>> = pending_cases
+        .iter()
+        .map(|pending| vec![pending.typed_pat.clone(), pressure_matrix_omega_pat()])
+        .collect();
+    pressure_variants_match_matrix(tctx, env, true, &matrix).closed_current_variant
+}
+
+fn pressure_matrix_close_match_scrutinee_variants(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    ty_arg: TypeExprRef,
+    generic_scrutinee_ty: TypeExprRef,
+    closed_current_variant: bool,
+) {
+    if !closed_current_variant {
+        return;
+    }
+    pressure_matrix_close_variant_type(tctx, env, ty_arg);
+    if generic_scrutinee_ty != ty_arg {
+        pressure_matrix_close_variant_type(tctx, env, generic_scrutinee_ty);
     }
 }
 
@@ -7368,28 +8410,35 @@ fn type_match_cases_batch_non_gadt<'a>(
             normalize_erase_either_scrutinee_row(ctx, ty_arg);
         }
 
-        // Match OCaml `instance ~partial:false` behavior for erase_either cases:
-        // the copied non-generic row nodes are shared across case typing, so
-        // row growth from earlier cases is visible in later ones.
-        let shared_erase_scrutinee_ty = if erase_either {
-            Some(instance_for_erase_either_patterns(ctx, ty_arg))
-        } else {
-            None
-        };
-
         let mut pending_cases: Vec<PendingMatchCase<'a>> = Vec::with_capacity(cases.len());
         for case in cases {
+            let case_loc = tctx.arena.to_location(tctx.arena.get_pat(case.pc_lhs).ppat_loc);
+            let case_line = case_loc.loc_start.line;
             // Match OCaml type_cases: instance the GENERIC scrutinee type inside
             // begin_def. This creates fresh copies at the elevated level (L+1).
             // After end_def + generalize, pattern types become GENERIC, preventing
             // body unification from contaminating pattern types.
-            let case_scrutinee_ty = if let Some(shared) = shared_erase_scrutinee_ty {
-                shared
+            let case_scrutinee_ty = if erase_either {
+                instance_for_erase_either_patterns(ctx, ty_arg)
             } else if propagate {
                 crate::types::instance(ctx, generic_scrutinee_ty)
             } else {
                 crate::types::instance(ctx, ty_arg)
             };
+            debug_scrutinee_case_row(
+                tctx,
+                "before-case",
+                case_line,
+                "generic_scrutinee_ty",
+                generic_scrutinee_ty,
+            );
+            debug_scrutinee_case_row(
+                tctx,
+                "before-case",
+                case_line,
+                "case_scrutinee_ty",
+                case_scrutinee_ty,
+            );
             let mut state = PatternState::new();
             let typed_pat = type_pattern(
                 tctx,
@@ -7399,9 +8448,25 @@ fn type_match_cases_batch_non_gadt<'a>(
                 PatternMode::Normal,
                 &mut state,
             )?;
+            debug_scrutinee_case_row(
+                tctx,
+                "after-case",
+                case_line,
+                "generic_scrutinee_ty",
+                generic_scrutinee_ty,
+            );
+            debug_scrutinee_case_row(
+                tctx,
+                "after-case",
+                case_line,
+                "case_scrutinee_ty",
+                case_scrutinee_ty,
+            );
             let mut case_env = env.clone();
             let mut unpacks: Vec<PatternVariable> = Vec::new();
             for pv in &state.pattern_variables {
+                // Match OCaml add_pattern_variables: bind the exact pattern type
+                // into the case body environment.
                 let binding_ty = pv.ty;
                 let desc = ValueDescription {
                     val_type: binding_ty,
@@ -7455,59 +8520,14 @@ fn type_match_cases_batch_non_gadt<'a>(
         unify_pats_result?;
         debug_variant_match_state(tctx, env, "after-unify-pats", ty_arg, ty_arg_prime, &pending_cases);
 
-        // Match OCaml type_cases ordering: pressure_variants + finalize_variant
-        // happen before the propagation unification pass.
-        let mut row_keys_by_path: HashMap<Vec<String>, HashSet<usize>> = HashMap::new();
-        let mut variant_labels_by_path: HashMap<Vec<String>, HashSet<String>> = HashMap::new();
-        let mut row_label_count_by_path: HashMap<Vec<String>, usize> = HashMap::new();
-        let mut alternatives = Vec::new();
-        for pending in pending_cases.iter() {
-            alternatives.extend(collect_variant_path_alternatives_in_pattern(
-                tctx,
-                env,
-                &pending.typed_pat,
-                &[],
-                &mut row_keys_by_path,
-                &mut variant_labels_by_path,
-                &mut row_label_count_by_path,
-            ));
-        }
-        if !row_keys_by_path.is_empty() && !alternatives.is_empty() {
-            let mut wildcard_counts: HashMap<Vec<String>, usize> = HashMap::new();
-
-            for alt in &alternatives {
-                for path in &alt.wildcard_paths {
-                    *wildcard_counts.entry(path.clone()).or_insert(0) += 1;
-                }
-            }
-
-            let rows_to_close: HashSet<usize> = row_keys_by_path
-                .iter()
-                .filter(|(path, _)| {
-                    let saw_all_labels = variant_labels_by_path
-                        .get(*path)
-                        .map(|labels| labels.len())
-                        == row_label_count_by_path.get(*path).copied();
-                    let wildcard_on_path = wildcard_counts.get(*path).copied().unwrap_or(0) > 0;
-                    let wildcard_on_ancestor = wildcard_counts.iter().any(|(wild_path, count)| {
-                        *count > 0
-                            && wild_path.len() < path.len()
-                            && path.starts_with(wild_path)
-                    });
-                    saw_all_labels && !wildcard_on_path && !wildcard_on_ancestor
-                })
-                .flat_map(|(_, row_keys)| row_keys.iter().copied())
-                .collect();
-            if !rows_to_close.is_empty() {
-                for pending in pending_cases.iter_mut() {
-                    close_multi_label_variant_rows_in_pattern(
-                        tctx,
-                        env,
-                        &mut pending.typed_pat,
-                        &rows_to_close,
-                    );
-                }
-            }
+        // Match OCaml type_cases ordering exactly: pressure_variants mutates the
+        // original pattern row types through the recursive pattern matrix before
+        // finalize_variant converts still-open Reither fields.
+        if pending_cases
+            .iter()
+            .any(|pending| typed_pattern_has_variant(&pending.typed_pat))
+        {
+            let _ = pressure_variants_on_match_cases(tctx, env, &pending_cases);
             for pending in pending_cases.iter_mut() {
                 finalize_variant_in_pattern(tctx, env, &mut pending.typed_pat, false);
             }
@@ -7642,6 +8662,16 @@ fn type_match_cases_batch_non_gadt<'a>(
                 );
             }
             let typed_body = type_expect(tctx, &pending.case_env, body_expr, case_body_ty, None)?;
+            if std::env::var_os("RUST_DEBUG_CASE_BODY_TYPES").is_some() {
+                let body_loc = tctx.arena.to_location(body_expr.pexp_loc);
+                eprintln!(
+                    "[case-body-typed] line={} col={} typed_body={}@{}",
+                    body_loc.loc_start.line,
+                    body_loc.loc_start.column(),
+                    ctx.repr(typed_body.exp_type).0,
+                    ctx.get_level(ctx.repr(typed_body.exp_type)),
+                );
+            }
             let typed_body = wrap_module_unpacks_in_expression(
                 tctx,
                 &pending.case_env,
@@ -7652,6 +8682,16 @@ fn type_match_cases_batch_non_gadt<'a>(
             // Match OCaml type_cases: `exp_type = instance env ty_res'` where
             // `ty_res'` is corrected per-case when the pattern contains GADTs.
             let case_exp_ty = crate::types::instance(ctx, case_body_ty);
+            if std::env::var_os("RUST_DEBUG_CASE_BODY_TYPES").is_some() {
+                let body_loc = tctx.arena.to_location(body_expr.pexp_loc);
+                eprintln!(
+                    "[case-body-final] line={} col={} case_exp_ty={}@{}",
+                    body_loc.loc_start.line,
+                    body_loc.loc_start.column(),
+                    ctx.repr(case_exp_ty).0,
+                    ctx.get_level(ctx.repr(case_exp_ty)),
+                );
+            }
             let typed_body = Expression {
                 exp_type: case_exp_ty,
                 ..typed_body
@@ -7703,6 +8743,7 @@ fn type_match(
         crate::types::ctype::generalize_expansive(ctx, env, typed_scrutinee.exp_type);
     }
     crate::types::ctype::generalize(ctx, typed_scrutinee.exp_type);
+    debug_match_entry_type(tctx, env, loc, "typed_scrutinee", typed_scrutinee.exp_type);
     // OCaml split_cases: separate exception cases from value cases.
     // Exception cases have their Ppat_exception wrapper unwrapped, and
     // are typed against Predef.type_exn instead of the scrutinee type.
@@ -9818,51 +10859,7 @@ fn type_contains_variant_either(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool 
 /// variant row is closed, non-fixed, and still has `Reither` fields, reopen
 /// the row and drop those `Reither` fields.
 fn instance_for_erase_either_patterns(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
-    let inst = crate::types::instance(ctx, ty);
-    let mut stack = vec![ctx.repr(inst)];
-    let mut visited: HashSet<usize> = HashSet::new();
-
-    while let Some(current) = stack.pop() {
-        let current = ctx.repr(current);
-        if !visited.insert(current.0) {
-            continue;
-        }
-
-        let mut replacement: Option<crate::types::type_expr::RowDesc> = None;
-        let desc = ctx.get_desc(current);
-        if let TypeDesc::Tvariant(row) = &*desc {
-            let mut row = crate::types::btype::row_repr(ctx, row);
-            let has_reither = row.row_fields.iter().any(|(_, field)| {
-                matches!(
-                    crate::types::btype::row_field_repr(ctx, field),
-                    crate::types::type_expr::RowField::Reither { .. }
-                )
-            });
-            if row.row_closed && !row.row_fixed && has_reither {
-                row.row_fields.retain(|(_, field)| {
-                    !matches!(
-                        crate::types::btype::row_field_repr(ctx, field),
-                        crate::types::type_expr::RowField::Reither { .. }
-                    )
-                });
-                row.row_closed = false;
-                row.row_fixed = false;
-                row.row_name = None;
-                replacement = Some(row);
-            }
-        }
-        drop(desc);
-
-        if let Some(row) = replacement {
-            ctx.set_desc(current, TypeDesc::Tvariant(row));
-        }
-
-        crate::types::iter_type_expr(ctx, current, |child| {
-            stack.push(child);
-        });
-    }
-
-    inst
+    crate::types::ctype::subst_identity_copy_with_partial(ctx, ty, true)
 }
 
 /// Align erase-either scrutinee rows with OCaml's `type_cases` pre-state.
@@ -9980,10 +10977,9 @@ fn type_case_impl(
     // Extend environment with pattern bindings
     let mut unpacks: Vec<PatternVariable> = Vec::new();
     for pv in &state.pattern_variables {
-        // Match the task-9 OCaml parity fix: give case-body bindings their
-        // own shallow Tconstr node so body unification can't mutate the
-        // exact node shared with the typed pattern.
-        let binding_ty = shallow_copy_pattern_binding_type(tctx.type_ctx, pv.ty, false);
+        // Match OCaml add_pattern_variables: bind the exact pattern type
+        // into the case body environment.
+        let binding_ty = pv.ty;
         let desc = ValueDescription {
             val_type: binding_ty,
             val_kind: crate::types::ValueKind::ValReg,
@@ -10825,6 +11821,85 @@ fn type_variant(
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
+    let debug_variant_expr = |exp_type: TypeExprRef, arg: Option<&Expression>| {
+        if let Ok(raw_lines) = std::env::var("RUST_DEBUG_VARIANT_EXPR_LINE") {
+            let full_loc = tctx.arena.to_location(loc);
+            let should_debug = raw_lines
+                .split(',')
+                .filter_map(|s| s.trim().parse::<i32>().ok())
+                .any(|line| line == full_loc.loc_start.line);
+            if should_debug {
+                let summarize = |ty: TypeExprRef| {
+                    let repr = ctx.repr(ty);
+                    let desc = ctx.get_desc(repr);
+                    match &*desc {
+                        TypeDesc::Tvariant(row) => {
+                            let row = crate::types::btype::row_repr(ctx, row);
+                            let fields = row
+                                .row_fields
+                                .iter()
+                                .map(|(name, field)| {
+                                    let field = crate::types::btype::row_field_repr(ctx, field);
+                                    match field {
+                                        crate::types::type_expr::RowField::Rpresent(Some(inner)) => {
+                                            format!("{}=Rpresent({})", name, ctx.repr(inner).0)
+                                        }
+                                        crate::types::type_expr::RowField::Rpresent(None) => {
+                                            format!("{name}=Rpresent_none")
+                                        }
+                                        crate::types::type_expr::RowField::Reither {
+                                            constant,
+                                            types,
+                                            matched,
+                                            ..
+                                        } => format!(
+                                            "{}=Reither(const={} matched={} types=[{}])",
+                                            name,
+                                            constant,
+                                            matched,
+                                            types.iter()
+                                                .map(|inner| ctx.repr(*inner).0.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join(",")
+                                        ),
+                                        crate::types::type_expr::RowField::Rabsent => {
+                                            format!("{name}=Rabsent")
+                                        }
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            format!("Tvariant#{} {{{}}}", repr.0, fields)
+                        }
+                        TypeDesc::Ttuple(items) => format!(
+                            "Ttuple#{}({})",
+                            repr.0,
+                            items.iter()
+                                .map(|item| ctx.repr(*item).0.to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ),
+                        TypeDesc::Tvar(_) => format!("Tvar#{}", repr.0),
+                        TypeDesc::Tlink(target) => {
+                            format!("Tlink#{}->{}", repr.0, ctx.repr(*target).0)
+                        }
+                        _ => format!("{:?}#{}", &*desc, repr.0),
+                    }
+                };
+                let arg_summary = arg
+                    .map(|expr| summarize(expr.exp_type))
+                    .unwrap_or_else(|| "<none>".to_string());
+                eprintln!(
+                    "[variant-expr-debug] line={} col={} label={} exp={} arg={}",
+                    full_loc.loc_start.line,
+                    full_loc.loc_start.column(),
+                    label,
+                    summarize(exp_type),
+                    arg_summary
+                );
+            }
+        }
+    };
 
     if let Some(arg_expr) = arg {
         // OCaml fast path: when expected type is already a variant row with
@@ -10866,6 +11941,7 @@ fn type_variant(
         if let Some((arg_ty, arg_ty0)) = expected_payload {
             let typed_arg = type_expect(tctx, env, arg_expr, arg_ty, None)?;
             unify_expression_types(tctx, loc, typed_arg.exp_type, arg_ty0, None)?;
+            debug_variant_expr(expected_inst, Some(&typed_arg));
             return Ok(Expression::new(
                 ExpressionDesc::Texp_variant(label.to_string(), Some(Box::new(typed_arg))),
                 loc.clone(),
@@ -10891,6 +11967,7 @@ fn type_variant(
         });
         // OCaml: rue { ... exp_type = variant_row; ... }
         rue_unify(tctx, loc, variant_ty, expected_ty, None)?;
+        debug_variant_expr(variant_ty, Some(&typed_arg));
         return Ok(Expression::new(
             ExpressionDesc::Texp_variant(label.to_string(), Some(Box::new(typed_arg))),
             loc.clone(),
@@ -10913,6 +11990,7 @@ fn type_variant(
     });
     // OCaml: rue { ... exp_type = variant_row; ... }
     rue_unify(tctx, loc, variant_ty, expected_ty, None)?;
+    debug_variant_expr(variant_ty, None);
 
     Ok(Expression::new(
         ExpressionDesc::Texp_variant(label.to_string(), None),
