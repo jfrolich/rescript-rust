@@ -4857,9 +4857,13 @@ pub fn type_expect<'a>(
                     ))
                 }
                 None => {
-                    // OCaml: rue { ... exp_type = ifso.exp_type; ... }
-                    let unit_ty = env.type_unit(ctx);
-                    let typed_then = type_expect(tctx, env, then_branch, unit_ty, None)?;
+                    // Match OCaml Pexp_ifthenelse without else:
+                    // `type_expect ... sifso Predef.type_unit`
+                    // The then-branch must be typed against the generic
+                    // predef unit scheme itself, not a fresh unit instance,
+                    // so inner applications/matches still instance it lazily.
+                    let typed_then =
+                        type_expect(tctx, env, then_branch, ctx.predef_unit(), None)?;
                     let then_exp_type = typed_then.exp_type;
                     rue_unify(tctx, loc, then_exp_type, expected_ty, context)?;
 
