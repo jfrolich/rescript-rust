@@ -4144,6 +4144,74 @@ pub fn type_expect<'a>(
             )?;
 
             let ty = crate::types::instance(ctx, desc.val_type);
+            if std::env::var_os("RUST_DEBUG_IDENT_TRACE").is_some() {
+                let path_name = path.name();
+                if matches!(
+                    path_name.as_str(),
+                    "f"
+                        | "eq"
+                        | "setUnion2"
+                        | "dd"
+                        | "aa"
+                        | "bb"
+                        | "N.diff"
+                        | "N.intersect"
+                        | "N.union"
+                        | "N.make"
+                        | "N.fromArray"
+                        | "N.eq"
+                ) {
+                    let loc = tctx.arena.to_location(expr.pexp_loc);
+                    let ty_repr = ctx.repr(ty);
+                    let summary = {
+                        let desc = ctx.get_desc(ty_repr);
+                        match &*desc {
+                            TypeDesc::Tarrow { arg, ret, .. } => {
+                                let arg_r = ctx.repr(arg.typ);
+                                let ret_r = ctx.repr(*ret);
+                                let ret_desc = ctx.get_desc(ret_r);
+                                let ret_summary = match &*ret_desc {
+                                    TypeDesc::Tconstr { path, .. } => {
+                                        format!("Tconstr({})", path.name())
+                                    }
+                                    TypeDesc::Tarrow {
+                                        arg: ret_arg,
+                                        ret: ret_ret,
+                                        ..
+                                    } => {
+                                        let nested_arg = ctx.repr(ret_arg.typ);
+                                        let nested_ret = ctx.repr(*ret_ret);
+                                        format!(
+                                            "Tarrow(arg={} ret={})",
+                                            nested_arg.0, nested_ret.0
+                                        )
+                                    }
+                                    TypeDesc::Tvar(_) => "Tvar".to_string(),
+                                    _ => "other".to_string(),
+                                };
+                                format!(
+                                    "Tarrow arg={} ret={} ret_summary={}",
+                                    arg_r.0, ret_r.0, ret_summary
+                                )
+                            }
+                            TypeDesc::Tconstr { path, .. } => format!("Tconstr({})", path.name()),
+                            TypeDesc::Tvar(_) => "Tvar".to_string(),
+                            _ => "other".to_string(),
+                        }
+                    };
+                    eprintln!(
+                        "[ident-trace] line={} col={} env={} name={} path={} desc_ty={} inst_ty={} summary={}",
+                        loc.loc_start.line,
+                        loc.loc_start.column(),
+                        env.id(),
+                        path.last(),
+                        path_name,
+                        ctx.repr(desc.val_type).0,
+                        ty_repr.0,
+                        summary
+                    );
+                }
+            }
             if std::env::var_os("RUST_DEBUG_IDENT_LEVELS").is_some() {
                 let path_name = path.name();
                 if path_name == "foo1"
@@ -4444,6 +4512,9 @@ pub fn type_expect<'a>(
                 if path_name == "N.fromArray"
                     || path_name == "A.makeBy"
                     || path_name == "N.eq"
+                    || path_name == "N.toList"
+                    || path_name == "L.eq"
+                    || path_name == "L.makeBy"
                     || path_name == "dd"
                     || path_name == "layerStyleID"
                     || path_name == "Ord.compare"
@@ -4479,9 +4550,10 @@ pub fn type_expect<'a>(
                         }
                     };
                     let full_loc = tctx.arena.to_location(loc);
-                    let simple_memo = ctx.get_abbrev_memo(ctx.simple_abbrevs_memo());
+                    let simple_snapshot =
+                        ctx.debug_abbrev_memo_snapshot(ctx.simple_abbrevs_memo(), 6);
                     eprintln!(
-                        "[ident-trace] path={} loc={}:{} env_id={} val_ty={}({}) inst_ty={}({}) expected_ty={}({}) simple={:?}",
+                        "[ident-trace] path={} loc={}:{} env_id={} val_ty={}({}) inst_ty={}({}) expected_ty={}({}) simple={}",
                         path_name,
                         full_loc.loc_start.line,
                         full_loc.loc_start.column(),
@@ -4492,7 +4564,7 @@ pub fn type_expect<'a>(
                         summarize(inst_ty),
                         expected_repr.0,
                         summarize(expected_repr),
-                        simple_memo
+                        simple_snapshot
                     );
                     if path_name == "X.forEach" {
                         let describe = |ty: TypeExprRef| -> String {
@@ -10325,11 +10397,6 @@ fn type_function(
     }
     let typed_body = type_expect(tctx, &body_env, body, return_ty, None)?;
     tctx.generic_constraint_body_ty = saved_generic_constraint;
-    // Preserve abbreviation-env side effects for regular function bodies,
-    // but keep optional-arg functions on OCaml's pure type_function path.
-    if tctx.recursive_let_depth == 0 && !arg_label.is_optional() {
-        let _ = crate::types::ctype::expand_head(ctx, &body_env, typed_body.exp_type);
-    }
     let typed_body = wrap_module_unpacks_in_expression(
         tctx,
         &body_env,
@@ -10341,6 +10408,9 @@ fn type_function(
         exp_type: crate::types::instance(ctx, return_ty),
         ..typed_body
     };
+    if tctx.recursive_let_depth == 0 && !arg_label.is_optional() {
+        let _ = crate::types::ctype::expand_head(ctx, &body_env, typed_body.exp_type);
+    }
 
     // Build function parameter
     let fp = FunctionParam {
@@ -14936,6 +15006,27 @@ fn type_let_bindings(
         } else {
             env.clone()
         };
+        if std::env::var_os("RUST_DEBUG_LET_ENVS").is_some() {
+            let names: Vec<String> = bindings
+                .iter()
+                .filter_map(|binding| {
+                    extract_recursive_binding_name(tctx.arena.get_pat(binding.pvb_pat), tctx.arena)
+                        .map(|name| tctx.arena.get_string(name.txt).to_string())
+                })
+                .collect();
+            let line = bindings
+                .first()
+                .map(|binding| tctx.arena.to_location(binding.pvb_loc).loc_start.line)
+                .unwrap_or(0);
+            eprintln!(
+                "[let-env] stage=typing rec={:?} line={} base_env={} typing_env={} names={}",
+                rec_flag,
+                line,
+                env.id(),
+                typing_env.id(),
+                names.join(",")
+            );
+        }
 
         // Type check each pattern first, collecting pattern variables per binding.
         // Matches OCaml `type_let`: recursive pre-unification runs on typed patterns
@@ -15236,6 +15327,24 @@ fn type_let_bindings(
             }
         }
 
+        if std::env::var_os("RUST_DEBUG_LET_ENVS").is_some() {
+            let line = bindings
+                .first()
+                .map(|binding| tctx.arena.to_location(binding.pvb_loc).loc_start.line)
+                .unwrap_or(0);
+            let names: Vec<String> = all_pattern_vars
+                .iter()
+                .flat_map(|pvars| pvars.iter().map(|pv| pv.id.name().to_string()))
+                .collect();
+            eprintln!(
+                "[let-env] stage=final rec={:?} line={} base_env={} new_env={} names={}",
+                rec_flag,
+                line,
+                env.id(),
+                new_env.id(),
+                names.join(",")
+            );
+        }
         Ok((typed_bindings, new_env, unpacks))
     })();
 
