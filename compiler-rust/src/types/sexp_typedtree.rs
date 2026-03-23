@@ -429,17 +429,39 @@ fn sexp_type_expr(
     te: TypeExprRef,
 ) -> Sexp {
     let te = ctx.repr(te); // Follow Tlink chains
+    let debug_path = std::env::var("RUST_DEBUG_TYPED_SEXP_PATH").ok();
+    let should_debug_path = debug_path.as_deref().is_some_and(|needle| {
+        matches!(&*ctx.get_desc(te), TypeDesc::Tconstr { path, .. } if {
+            let name = path.name();
+            name == needle || path.last() == needle || name.contains(needle)
+        })
+    });
+    let debug_ids: Vec<usize> = std::env::var("RUST_DEBUG_TYPED_SEXP_IDS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|s| s.trim().parse::<usize>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Arity alias dedup: OCaml's update_uncurried_arity creates {t with desc=...}
     // sharing the same type_expr.id. We match this by resolving arity aliases
     // to the original's dedup key.
     let dedup_key = ctx.get_arity_alias(te).map(|orig| ctx.repr(orig)).unwrap_or(te);
+    let should_debug_id = debug_ids.iter().any(|id| *id == te.0 || *id == dedup_key.0);
 
     // Physical identity dedup (using alias-resolved key)
     if let Some(&idx) = dedup.map.get(&dedup_key) {
         // Also register te directly so future direct references dedup too
         if dedup_key != te {
             dedup.map.insert(te, idx);
+        }
+        if should_debug_path || should_debug_id {
+            eprintln!(
+                "[typed-sexp-dedup] hit te={} key={} idx={}",
+                te.0, dedup_key.0, idx
+            );
         }
         return Sexp::atom(&format!("#{idx}"));
     }
@@ -451,6 +473,12 @@ fn sexp_type_expr(
         dedup.map.insert(te, idx);
     }
     dedup.types.push(Sexp::atom("_")); // placeholder
+    if should_debug_path || should_debug_id {
+        eprintln!(
+            "[typed-sexp-dedup] new te={} key={} idx={}",
+            te.0, dedup_key.0, idx
+        );
+    }
 
     // Serialize the type body
     let desc = ctx.get_desc(te);
@@ -675,6 +703,22 @@ fn sexp_row_field(
 // ============================================================================
 
 fn sexp_pattern(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, dedup: &mut TypeDedupTable, p: &Pattern) -> Sexp {
+    if let Ok(raw_lines) = std::env::var("RUST_DEBUG_SEXP_PAT_LINE") {
+        let loc = arena.to_location(p.pat_loc);
+        let should_debug = raw_lines
+            .split(',')
+            .filter_map(|s| s.trim().parse::<i32>().ok())
+            .any(|line| line == loc.loc_start.line);
+        if should_debug {
+            eprintln!(
+                "[sexp-pat] line={} col={} pat_type={} repr={}",
+                loc.loc_start.line,
+                loc.loc_start.column(),
+                p.pat_type.0,
+                ctx.repr(p.pat_type).0
+            );
+        }
+    }
     let loc_sexp = if with_locs {
         vec![location_idx(arena, with_locs, p.pat_loc)]
     } else {
@@ -832,6 +876,42 @@ fn sexp_expression(
     dedup: &mut TypeDedupTable,
     e: &Expression,
 ) -> Sexp {
+    if let Some(raw_lines) = std::env::var("RUST_DEBUG_SEXP_EXPR_LINE").ok() {
+        let loc = arena.to_location(e.exp_loc);
+        let line = loc.loc_start.line;
+        let should_debug = raw_lines
+            .split(',')
+            .filter_map(|s| s.trim().parse::<i32>().ok())
+            .any(|target| target == line);
+        if should_debug {
+            let repr = ctx.repr(e.exp_type);
+            let kind = match &e.exp_desc {
+                ExpressionDesc::Texp_ident(path, _, _) => format!("ident:{}", path.name()),
+                ExpressionDesc::Texp_apply {
+                    funct,
+                    args: _,
+                    partial: _,
+                    transformed_jsx: _,
+                } => match &funct.exp_desc {
+                    ExpressionDesc::Texp_ident(path, _, _) => {
+                        format!("apply:{}", path.name())
+                    }
+                    _ => "apply:<non-ident>".to_string(),
+                },
+                ExpressionDesc::Texp_match(_, _, _, _) => "match".to_string(),
+                ExpressionDesc::Texp_ifthenelse(_, _, _) => "if".to_string(),
+                _ => "other".to_string(),
+            };
+            eprintln!(
+                "[sexp-expr] line={} col={} kind={} exp_type={} repr={}",
+                line,
+                loc.loc_start.column(),
+                kind,
+                e.exp_type.0,
+                repr.0
+            );
+        }
+    }
     let loc_sexp = if with_locs {
         vec![location_idx(arena, with_locs, e.exp_loc)]
     } else {

@@ -333,53 +333,74 @@ fn transform_value_bindings(
     result
 }
 
-/// Detect forwardRef wrapper and extract inner function
-/// Returns (wrapper_expr, has_forward_ref, inner_expression)
-/// wrapper_expr is the original wrapper (e.g., React.forwardRef) expression with its source location
-fn spelunk_for_fun_expression<'a>(
-    arena: &'a ParseArena,
+/// Detect component wrappers and extract the inner function expression.
+/// Returns `(binding_wrapper, has_forward_ref, internal_expression)`.
+///
+/// `binding_wrapper` preserves a single outer application wrapper such as
+/// `React.memo(...)` or `React.forwardRef(...)` so the generated public binding
+/// can be wrapped the same way OCaml's JSX PPX does.
+///
+/// `internal_expression` rebuilds structural wrappers like `let` and `sequence`
+/// around the transformed inner function, matching OCaml's `modified_binding`.
+fn spelunk_for_fun_expression(
+    arena: &mut ParseArena,
     expr_idx: ExprIdx,
-) -> (Option<&'a Expression>, bool, &'a Expression) {
-    let expr: &Expression = arena.get_expr(expr_idx);
+) -> (Option<Expression>, bool, Expression) {
+    let expr = arena.get_expr(expr_idx).clone();
     match &*expr.pexp_desc {
         // let make = (~prop) => ...
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => (None, false, expr),
         // let make = {let foo = bar in (~prop) => ...}
         ExpressionDesc::Pexp_let(inner) => {
-            let (_, _, ref body_idx) = **inner;
-            let (_, has_forward_ref, inner_expr) = spelunk_for_fun_expression(arena, *body_idx);
-            (None, has_forward_ref, inner_expr)
+            let (rec_flag, bindings, body_idx) = &**inner;
+            let (binding_wrapper, has_forward_ref, inner_expr) =
+                spelunk_for_fun_expression(arena, *body_idx);
+            let inner_expr_idx = arena.push_expr(inner_expr);
+            (
+                binding_wrapper,
+                has_forward_ref,
+                Expression {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
+                        *rec_flag,
+                        bindings.clone(),
+                        inner_expr_idx,
+                    )))),
+                    pexp_loc: expr.pexp_loc.clone(),
+                    pexp_attributes: expr.pexp_attributes.clone(),
+                },
+            )
         }
-        // let make = React.forwardRef((~prop) => ...)
+        // let make = React.memo((~prop) => ...) / React.forwardRef((~prop) => ...)
         ExpressionDesc::Pexp_apply(apply_inner)
             if apply_inner.args.len() == 1
                 && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel) =>
         {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **apply_inner;
+            let PexpApply { funct, args, .. } = &**apply_inner;
             let (_, _, inner_expr) = spelunk_for_fun_expression(arena, args[0].1);
-            let funct_expr: &Expression = arena.get_expr(*funct);
-            let has_forward_ref = is_forward_ref(arena, funct_expr);
-            // Return the original funct expression (e.g., React.forwardRef) to preserve its source location
+            let funct_expr = arena.get_expr(*funct).clone();
+            let has_forward_ref = is_forward_ref(arena, &funct_expr);
+            (Some(funct_expr), has_forward_ref, inner_expr)
+        }
+        ExpressionDesc::Pexp_sequence(wrapper_expr_idx, inner_idx) => {
+            let (binding_wrapper, has_forward_ref, inner_expr) =
+                spelunk_for_fun_expression(arena, *inner_idx);
+            let wrapper_expr_idx = *wrapper_expr_idx;
+            let inner_expr_idx = arena.push_expr(inner_expr);
             (
-                if has_forward_ref {
-                    Some(funct_expr)
-                } else {
-                    None
-                },
+                binding_wrapper,
                 has_forward_ref,
-                inner_expr,
+                Expression {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_sequence(
+                        wrapper_expr_idx,
+                        inner_expr_idx,
+                    )),
+                    pexp_loc: expr.pexp_loc.clone(),
+                    pexp_attributes: expr.pexp_attributes.clone(),
+                },
             )
         }
-        ExpressionDesc::Pexp_sequence(_, inner_idx) => {
-            let (_, has_forward_ref, inner_expr) = spelunk_for_fun_expression(arena, *inner_idx);
-            (None, has_forward_ref, inner_expr)
-        }
         ExpressionDesc::Pexp_constraint(inner) => {
-            let (ref inner_idx, _) = **inner;
+            let (inner_idx, _) = &**inner;
             spelunk_for_fun_expression(arena, *inner_idx)
         }
         _ => (None, false, expr),
@@ -417,12 +438,10 @@ fn transform_react_component_binding(
         .map(|typ| typ_vars_of_core_type(arena, typ))
         .unwrap_or_default();
 
-    // Detect forwardRef and get inner expression
-    // wrapper_expr is the original React.forwardRef expression with its source location
-    let (wrapper_expr, has_forward_ref, inner_expr) = {
-        let (w, h, i) = spelunk_for_fun_expression(arena, binding.pvb_expr);
-        (w.cloned(), h, i.clone())
-    };
+    // Detect component wrappers (e.g. React.memo / React.forwardRef) and get
+    // the rebuilt internal expression used for the implementation binding.
+    let (binding_wrapper_expr, has_forward_ref, inner_expr) =
+        spelunk_for_fun_expression(arena, binding.pvb_expr);
 
     // Detect if function is async
     let is_async = is_async_function(arena, binding.pvb_expr);
@@ -772,7 +791,7 @@ fn transform_react_component_binding(
 
         let binding_name_idx = arena.push_interned_string(&binding_name);
         let binding_expr_attrs = arena.get_expr(binding.pvb_expr).pexp_attributes.clone();
-        let wrapper_expr = make_props_wrapper_expr_with_ref(
+        let generated_wrapper_expr = make_props_wrapper_expr_with_ref(
             arena,
             &fn_name,
             rec_flag,
@@ -792,7 +811,7 @@ fn transform_react_component_binding(
                 ppat_attributes: Attributes::new(),
             }),
             // OCaml line 632: ~attrs:binding.pvb_expr.pexp_attributes
-            pvb_expr: arena.push_expr(wrapper_expr),
+            pvb_expr: arena.push_expr(generated_wrapper_expr),
             pvb_attributes: Attributes::new(),
             pvb_loc: empty_loc(),
         };
@@ -818,51 +837,19 @@ fn transform_react_component_binding(
         }
     };
 
-    // For forwardRef, wrap full_expression with React.forwardRef(...)
-    // Use the original wrapper_expr to preserve source locations
-    let final_full_expression = if has_forward_ref {
-        if let Some(wrapper) = wrapper_expr {
-            // Use original wrapper expression from source (preserves location)
-            let wrapper_idx = arena.push_expr(wrapper);
-            let full_expression_idx = arena.push_expr(full_expression);
-            Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                    funct: wrapper_idx,
-                    args: vec![(ArgLabel::Nolabel, full_expression_idx)],
-                    partial: false,
-                    transformed_jsx: false,
-                }))),
-                // OCaml uses ghost location for the outer Pexp_apply
-                pexp_loc: empty_loc(),
-                pexp_attributes: Attributes::new(),
-            }
-        } else {
-            // Fallback: create fresh expression (shouldn't happen)
-            let react_idx = arena.intern_string("React");
-            let forwardref_idx = arena.intern_string("forwardRef");
-            let react_forwardref_lid = arena.push_longident(Longident::Ldot(
-                Box::new(Longident::Lident(react_idx)),
-                forwardref_idx,
-            ));
-            let funct_idx = arena.push_expr(Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
-                    txt: react_forwardref_lid,
-                    loc: empty_loc(),
-                })),
-                pexp_loc: empty_loc(),
-                pexp_attributes: Attributes::new(),
-            });
-            let full_expression_idx = arena.push_expr(full_expression);
-            Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                    funct: funct_idx,
-                    args: vec![(ArgLabel::Nolabel, full_expression_idx)],
-                    partial: false,
-                    transformed_jsx: false,
-                }))),
-                pexp_loc: empty_loc(),
-                pexp_attributes: Attributes::new(),
-            }
+    let final_full_expression = if let Some(wrapper_expr) = binding_wrapper_expr {
+        let wrapper_idx = arena.push_expr(wrapper_expr);
+        let full_expression_idx = arena.push_expr(full_expression);
+        Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+                funct: wrapper_idx,
+                args: vec![(ArgLabel::Nolabel, full_expression_idx)],
+                partial: false,
+                transformed_jsx: false,
+            }))),
+            // OCaml uses ghost location for the outer Pexp_apply wrapper.
+            pexp_loc: empty_loc(),
+            pexp_attributes: Attributes::new(),
         }
     } else {
         full_expression

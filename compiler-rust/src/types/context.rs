@@ -91,6 +91,10 @@ pub struct TypeContext<'a> {
     /// Dedicated memo ref for OCaml's simple_abbrevs (nullary, non-object
     /// abbreviations). This points to a mutable AbbrevMemo cell.
     simple_abbrevs: Cell<AbbrevMemoRef>,
+    /// Reuse cache for generic dotted nullary constructors coming from cached
+    /// persistent signatures. Keyed by the original source node identity for
+    /// the lifetime of this typing context.
+    generic_dotted_constr_copies: RefCell<std::collections::HashMap<TypeExprRef, TypeExprRef>>,
     /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
     previous_env_id: Cell<u64>,
 
@@ -187,6 +191,7 @@ impl<'a> TypeContext<'a> {
             saved_levels: RefCell::new(Vec::new()),
             trace_gadt_instances: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
+            generic_dotted_constr_copies: RefCell::new(std::collections::HashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: RefCell::new(Vec::new()),
@@ -624,6 +629,17 @@ impl<'a> TypeContext<'a> {
         self.simple_abbrevs.get()
     }
 
+    pub fn find_generic_dotted_constr_copy(&self, source: TypeExprRef) -> Option<TypeExprRef> {
+        self.generic_dotted_constr_copies.borrow().get(&source).copied()
+    }
+
+    pub fn remember_generic_dotted_constr_copy(&self, source: TypeExprRef, copied: TypeExprRef) {
+        self.generic_dotted_constr_copies
+            .borrow_mut()
+            .entry(source)
+            .or_insert(copied);
+    }
+
     /// Clear simple abbreviations. Called during generalize/generalize_structure,
     /// matching OCaml's `simple_abbrevs := Mnil`.
     pub fn clear_simple_abbrevs(&self) {
@@ -761,6 +777,55 @@ impl<'a> TypeContext<'a> {
             .unwrap_or(AbbrevMemo::Mnil)
     }
 
+    /// Debug snapshot of an abbreviation memo chain.
+    pub fn debug_abbrev_memo_snapshot(&self, memo: AbbrevMemoRef, limit: usize) -> String {
+        let mut current = memo;
+        let mut parts = Vec::new();
+        for idx in 0..limit {
+            match self.get_abbrev_memo(current) {
+                AbbrevMemo::Mnil => {
+                    if idx == 0 {
+                        parts.push("Mnil".to_string());
+                    }
+                    break;
+                }
+                AbbrevMemo::Mlink(next) => {
+                    parts.push(format!("Mlink({})", next.0));
+                    current = next;
+                }
+                AbbrevMemo::Mcons {
+                    private_flag,
+                    path,
+                    abbrev,
+                    expansion,
+                    next,
+                } => {
+                    let abbrev = self.repr(abbrev);
+                    let expansion = self.repr(expansion);
+                    parts.push(format!(
+                        "{}:{} abbrev={}@{} expansion={}@{} next={}",
+                        idx,
+                        path.name(),
+                        abbrev.0,
+                        self.get_level(abbrev),
+                        expansion.0,
+                        self.get_level(expansion),
+                        next.0
+                    ));
+                    if matches!(private_flag, PrivateFlag::Private) {
+                        parts.push("private".to_string());
+                    }
+                    current = next;
+                }
+            }
+        }
+        if parts.is_empty() {
+            "Mnil".to_string()
+        } else {
+            parts.join(" | ")
+        }
+    }
+
     /// Reset a per-node abbreviation memo chain to Mnil.
     pub fn clear_abbrev_memo(&self, memo: AbbrevMemoRef) {
         if memo == AbbrevMemoRef::nil() {
@@ -769,6 +834,17 @@ impl<'a> TypeContext<'a> {
         let abbrevs = self.abbrevs.borrow();
         if let Some(cell) = abbrevs.get(memo.0) {
             *cell.borrow_mut() = AbbrevMemo::Mnil;
+        }
+    }
+
+    /// Overwrite a per-node abbreviation memo chain with a saved snapshot.
+    pub fn restore_abbrev_memo(&self, memo: AbbrevMemoRef, value: AbbrevMemo) {
+        if memo == AbbrevMemoRef::nil() {
+            return;
+        }
+        let abbrevs = self.abbrevs.borrow();
+        if let Some(cell) = abbrevs.get(memo.0) {
+            *cell.borrow_mut() = value;
         }
     }
 
@@ -787,8 +863,10 @@ impl<'a> TypeContext<'a> {
         }
         let debug_simple = std::env::var_os("RUST_DEBUG_SIMPLE_ABBREVS").is_some()
             && memo == self.simple_abbrevs.get();
+        let path_name = path.name();
+        let path_last = path.last().to_string();
         let debug_path_name = if debug_simple {
-            Some(path.name())
+            Some(path_name.clone())
         } else {
             None
         };
@@ -838,6 +916,22 @@ impl<'a> TypeContext<'a> {
                             std::backtrace::Backtrace::capture()
                         );
                     }
+                }
+            }
+            if let Some(needle) = std::env::var_os("RUST_DEBUG_MEMOIZE_ABBREV_PATH")
+                .and_then(|s| s.into_string().ok())
+                .filter(|s| !s.is_empty())
+            {
+                if path_name == needle || path_last == needle {
+                    eprintln!(
+                        "[memoize-abbrev] path={} private={:?} abbrev={} expansion={} memo={}\n{:?}",
+                        path_name,
+                        private_flag,
+                        abbrev.0,
+                        expansion.0,
+                        memo.0,
+                        std::backtrace::Backtrace::capture()
+                    );
                 }
             }
             self.memoized_abbrev_refs.borrow_mut().push(memo);
@@ -890,6 +984,17 @@ impl<'a> TypeContext<'a> {
         let row_fields = self.row_fields.borrow();
         if let Some(cell) = row_fields.get(rf.0) {
             *cell.borrow_mut() = Some(field);
+        }
+    }
+
+    /// Clear the value stored in a row field reference.
+    pub fn clear_row_field(&self, rf: RowFieldRef) {
+        if rf.is_null() {
+            return;
+        }
+        let row_fields = self.row_fields.borrow();
+        if let Some(cell) = row_fields.get(rf.0) {
+            *cell.borrow_mut() = None;
         }
     }
 

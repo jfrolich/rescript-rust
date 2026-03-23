@@ -903,6 +903,36 @@ fn moregen_link_structure(
                             let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
                             moregen_link(type_ctx, binding.vb_pat.pat_type, iface_inst,
                                 &mut std::collections::HashSet::new(), debug);
+                            if let crate::types::typedtree::ExpressionDesc::Texp_ident(_, _, desc) =
+                                &binding.vb_expr.exp_desc
+                            {
+                                debug.push(format!(
+                                    "moregen_link_alias: {} aliased={:?} iface={:?}",
+                                    name, desc.val_type, iface_ty
+                                ));
+                                let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
+                                moregen_link_exported_alias(
+                                    type_ctx,
+                                    desc.val_type,
+                                    iface_inst,
+                                    &mut std::collections::HashSet::new(),
+                                    debug,
+                                );
+                                moregen_link_exported_alias(
+                                    type_ctx,
+                                    binding.vb_pat.pat_type,
+                                    desc.val_type,
+                                    &mut std::collections::HashSet::new(),
+                                    debug,
+                                );
+                                moregen_link_exported_alias(
+                                    type_ctx,
+                                    binding.vb_expr.exp_type,
+                                    desc.val_type,
+                                    &mut std::collections::HashSet::new(),
+                                    debug,
+                                );
+                            }
                         } else {
                             debug.push(format!("no iface match: {}", name));
                         }
@@ -1021,6 +1051,27 @@ fn moregen_link(
     visited: &mut std::collections::HashSet<(crate::types::type_expr::TypeExprRef, crate::types::type_expr::TypeExprRef)>,
     debug: &mut Vec<String>,
 ) {
+    moregen_link_impl(ctx, impl_ty, iface_ty, visited, debug, false);
+}
+
+fn moregen_link_exported_alias(
+    ctx: &TypeContext<'_>,
+    impl_ty: crate::types::type_expr::TypeExprRef,
+    iface_ty: crate::types::type_expr::TypeExprRef,
+    visited: &mut std::collections::HashSet<(crate::types::type_expr::TypeExprRef, crate::types::type_expr::TypeExprRef)>,
+    debug: &mut Vec<String>,
+) {
+    moregen_link_impl(ctx, impl_ty, iface_ty, visited, debug, true);
+}
+
+fn moregen_link_impl(
+    ctx: &TypeContext<'_>,
+    impl_ty: crate::types::type_expr::TypeExprRef,
+    iface_ty: crate::types::type_expr::TypeExprRef,
+    visited: &mut std::collections::HashSet<(crate::types::type_expr::TypeExprRef, crate::types::type_expr::TypeExprRef)>,
+    debug: &mut Vec<String>,
+    allow_generic_anonymous: bool,
+) {
     use crate::types::type_expr::{TypeDesc, GENERIC_LEVEL};
 
     let impl_ty = ctx.repr(impl_ty);
@@ -1049,6 +1100,23 @@ fn moregen_link(
             drop(iface_desc);
             crate::types::ctype::link_type(ctx, impl_ty, iface_ty);
         }
+        (TypeDesc::Tvar(name), _) if allow_generic_anonymous && name.is_none() => {
+            let iface_summary = match &*iface_desc {
+                TypeDesc::Tvar(n) => format!("Tvar({:?})", n),
+                TypeDesc::Tconstr { path, .. } => format!("Tconstr({:?})", path),
+                _ => "other".to_string(),
+            };
+            debug.push(format!(
+                "  LINK exported generic {:?} Tvar({:?}) level={} -> {}",
+                impl_ty,
+                name,
+                ctx.get_level(impl_ty),
+                iface_summary
+            ));
+            drop(impl_desc);
+            drop(iface_desc);
+            crate::types::ctype::link_type(ctx, impl_ty, iface_ty);
+        }
         (TypeDesc::Tvar(name), _) => {
             debug.push(format!("  SKIP generic {:?} Tvar({:?}) level={}",
                 impl_ty, name, ctx.get_level(impl_ty)));
@@ -1063,7 +1131,7 @@ fn moregen_link(
             drop(impl_desc);
             drop(iface_desc);
             for (a, b) in a1.iter().zip(a2.iter()) {
-                moregen_link(ctx, *a, *b, visited, debug);
+                moregen_link_impl(ctx, *a, *b, visited, debug, allow_generic_anonymous);
             }
         }
         (TypeDesc::Tarrow { arg: a1, ret: r1, .. },
@@ -1074,8 +1142,8 @@ fn moregen_link(
             let (a2t, r2) = (a2.typ, *r2);
             drop(impl_desc);
             drop(iface_desc);
-            moregen_link(ctx, a1t, a2t, visited, debug);
-            moregen_link(ctx, r1, r2, visited, debug);
+            moregen_link_impl(ctx, a1t, a2t, visited, debug, false);
+            moregen_link_impl(ctx, r1, r2, visited, debug, allow_generic_anonymous);
         }
         (TypeDesc::Ttuple(t1), TypeDesc::Ttuple(t2)) if t1.len() == t2.len() => {
             let t1 = t1.clone();
@@ -1083,7 +1151,7 @@ fn moregen_link(
             drop(impl_desc);
             drop(iface_desc);
             for (a, b) in t1.iter().zip(t2.iter()) {
-                moregen_link(ctx, *a, *b, visited, debug);
+                moregen_link_impl(ctx, *a, *b, visited, debug, allow_generic_anonymous);
             }
         }
         (TypeDesc::Tconstr { path: p1, args: a1, .. },
