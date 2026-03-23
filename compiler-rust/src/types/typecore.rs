@@ -17597,6 +17597,17 @@ impl Env {
                                     }
                                 }
                             }
+                            // When we intentionally preserve the original signature graph
+                            // (for local modules with only value items), forcing
+                            // generalization here would mutate the shared weak nodes
+                            // backing the module body typedtree. Only generalize after
+                            // we have detached the signature via `needs_copy`.
+                            if needs_copy {
+                                crate::types::ctype::force_generalize_module_sig_values(
+                                    ctx,
+                                    &crate::types::decl::ModuleType::MtySignature(sig.clone()),
+                                );
+                            }
                         }
                         if std::env::var_os("RUST_DEBUG_SIG_N_T").is_some() && path.name() == "N" {
                             for item in &sig {
