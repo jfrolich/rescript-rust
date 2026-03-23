@@ -333,8 +333,9 @@ pub struct Env {
 impl Clone for Env {
     fn clone(&self) -> Self {
         Env {
-            // Keep identity stable across plain clones. Identity is bumped
-            // only when bindings/constraints are actually mutated.
+            // `Env` identity tracks logical binding changes, not Rust wrapper
+            // clones. Mutating add/update paths already call `bump_id()`, so a
+            // plain clone should preserve the current cache identity.
             id: self.id,
             values: self.values.clone(),
             types: self.types.clone(),
@@ -380,6 +381,25 @@ impl Env {
     /// Unique identifier for this environment instance.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Clone an environment while preserving its current identity.
+    /// This is for storing a snapshot of the same logical env value rather
+    /// than creating a fresh env instance.
+    pub fn clone_preserve_id(&self) -> Self {
+        Env {
+            id: self.id,
+            values: self.values.clone(),
+            types: self.types.clone(),
+            constrs: self.constrs.clone(),
+            labels: self.labels.clone(),
+            modules: self.modules.clone(),
+            modtypes: self.modtypes.clone(),
+            summary: self.summary.clone(),
+            local_constraints: self.local_constraints.clone(),
+            gadt_instances: self.gadt_instances.clone(),
+            flags: self.flags,
+        }
     }
 
     /// Get the environment summary.

@@ -487,6 +487,41 @@ pub(crate) fn flattened_alias_paths_equivalent(
     path2: &Path,
     arity: usize,
 ) -> bool {
+    fn underscore_joined_prefix_match(long: &[&str], short: &[&str]) -> bool {
+        if long.len() < 3 || short.len() != 2 || short[1] != long[long.len() - 1] {
+            return false;
+        }
+        let expected = long[..long.len() - 1].join("_");
+        short[0] == expected
+    }
+
+    fn concatenated_flatten_match(long: &[&str], short: &[&str]) -> bool {
+        if long.len() <= short.len() || short.is_empty() || long.last() != short.last() {
+            return false;
+        }
+
+        // Runtime/library flattened module heads often collapse a qualified
+        // prefix into `Head_Sub1Sub2...`, e.g. `Belt.Map.Dict.t` ->
+        // `Belt_MapDict.t`.
+        for collapse_end in 2..long.len() {
+            if 1 + (long.len() - collapse_end) != short.len() {
+                continue;
+            }
+
+            let mut flat_head = String::from(long[0]);
+            flat_head.push('_');
+            for seg in &long[1..collapse_end] {
+                flat_head.push_str(seg);
+            }
+
+            if flat_head == short[0] && short[1..] == long[collapse_end..] {
+                return true;
+            }
+        }
+
+        false
+    }
+
     let name1 = path1.name();
     let name2 = path2.name();
     let debug_flat = std::env::var_os("RUST_DEBUG_FLAT_EQ").is_some()
@@ -506,6 +541,14 @@ pub(crate) fn flattened_alias_paths_equivalent(
         && format!("{}__{}", seg2[0], seg2[1]) == seg1[0]
         && seg2[2..] == seg1[1..]
     {
+        Some((path2, path1))
+    } else if underscore_joined_prefix_match(seg1.as_slice(), seg2.as_slice()) {
+        Some((path1, path2))
+    } else if underscore_joined_prefix_match(seg2.as_slice(), seg1.as_slice()) {
+        Some((path2, path1))
+    } else if concatenated_flatten_match(seg1.as_slice(), seg2.as_slice()) {
+        Some((path1, path2))
+    } else if concatenated_flatten_match(seg2.as_slice(), seg1.as_slice()) {
         Some((path2, path1))
     } else {
         None
@@ -916,6 +959,9 @@ pub fn link_type(ctx: &TypeContext<'_>, t1: TypeExprRef, t2: TypeExprRef) {
                 t2_repr.0,
                 summarize(t2_repr)
             );
+            if std::env::var_os("RUST_DEBUG_LINK_BACKTRACE").is_some() {
+                eprintln!("{}", std::backtrace::Backtrace::force_capture());
+            }
         }
     }
     let source_name = {
@@ -1506,39 +1552,120 @@ fn resolve_type_through_env<'a>(
     strengthen_alias_types: bool,
 ) -> Option<super::decl::TypeDeclaration> {
     use super::decl::SignatureItem;
+    use super::type_expr::TypeDesc;
 
     let (module_path, type_name) = match path {
         Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
         _ => return None,
     };
+    let debug_target = std::env::var("RUST_DEBUG_RESOLVE_TYPE_PATH").ok();
+    let debug_this = debug_target.as_deref().is_some_and(|needle| {
+        let path_name = path.name();
+        path_name == needle || path.last() == needle || path_name.contains(needle)
+    });
 
     let mut visiting = HashSet::new();
     let module_mty = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)?;
     let module_sig =
         resolve_signature_through_env_module_type(ctx, env, &module_mty, &mut visiting)?;
     let module_sig = crate::types::typecore::copy_lookup_signature_for_subst(&module_sig, ctx);
-    // Match OCaml Env.components_of_module path lookup behavior: when resolving
-    // `M.t`, operate on a path-qualified copy of `M`'s signature so sibling
-    // references inside manifests are rewritten through the access path.
-    crate::cmi::persistent_env::substitute_type_paths_in_sig(&module_sig, module_path, ctx);
-    // For alias modules, expansion should expose the alias target path
-    // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
-    let alias_target_for_strengthening = if strengthen_alias_types {
-        match &module_mty {
-            super::decl::ModuleType::MtyAlias(_, target_path) => Some(target_path.clone()),
+    let alias_strengthening_path = if strengthen_alias_types {
+        match (&module_mty, module_path) {
+            // For qualified accesses through alias modules (A.B.t), keep the
+            // access path so sibling signature references can be rewritten
+            // through that qualified path before strengthening.
+            (super::decl::ModuleType::MtyAlias(_, _), Path::Pdot(..)) => {
+                Some(module_path.clone())
+            }
+            // For top-level aliases, strengthen through the underlying target
+            // path so lookups expand to the canonical declaration and do not
+            // strand type checking on a self-referential alias manifest.
+            (super::decl::ModuleType::MtyAlias(_, _), Path::Pident(_)) => {
+                match &module_mty {
+                    super::decl::ModuleType::MtyAlias(_, target_path) => Some(target_path.clone()),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     } else {
         None
     };
+    if matches!(module_path, Path::Pdot(..))
+        && let Some(access_path) = alias_strengthening_path.as_ref()
+        && let super::decl::ModuleType::MtyAlias(_, target_path) = &module_mty
+        && !target_path.same(access_path)
+    {
+        match target_path {
+            Path::Pdot(..) => {
+                crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                    &module_sig,
+                    target_path,
+                    access_path,
+                    ctx,
+                );
+            }
+            Path::Pident(alias_id) => {
+                crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                    &module_sig,
+                    alias_id.name(),
+                    access_path,
+                    ctx,
+                );
+            }
+            Path::Papply(_, _) => {}
+        }
+    }
+    // Match OCaml Env.components_of_module path lookup behavior: when resolving
+    // `M.t`, operate on a path-qualified copy of `M`'s signature so sibling
+    // references inside manifests are rewritten through the access path.
+    crate::cmi::persistent_env::substitute_type_paths_in_sig(&module_sig, module_path, ctx);
 
     for item in &module_sig {
         if let SignatureItem::SigType(id, decl, _) = item {
             if id.name() == type_name {
-                if let Some(target_path) = alias_target_for_strengthening.as_ref() {
+                if debug_this {
+                    let module_mty_kind = match &module_mty {
+                        super::decl::ModuleType::MtyIdent(p) => format!("MtyIdent({})", p.name()),
+                        super::decl::ModuleType::MtyAlias(_, p) => {
+                            format!("MtyAlias({})", p.name())
+                        }
+                        super::decl::ModuleType::MtySignature(_) => "MtySignature".to_string(),
+                        super::decl::ModuleType::MtyFunctor { .. } => {
+                            "MtyFunctor".to_string()
+                        }
+                    };
+                    let manifest_summary = decl
+                        .type_manifest
+                        .map(|manifest| {
+                            let manifest = ctx.repr(manifest);
+                            let desc = ctx.get_desc(manifest);
+                            match &*desc {
+                                TypeDesc::Tconstr { path, args, .. } => {
+                                    format!("Tconstr({}) args={}", path.name(), args.len())
+                                }
+                                other => format!("{other:?}"),
+                            }
+                        })
+                        .unwrap_or_else(|| "None".to_string());
+                    eprintln!(
+                        "[resolve-type-env] env={} path={} module_path={} module_mty={} strengthen_alias_types={} decl_type_path={} manifest={}",
+                        env.id(),
+                        path.name(),
+                        module_path.name(),
+                        module_mty_kind,
+                        strengthen_alias_types,
+                        decl.type_path
+                            .as_ref()
+                            .map(|p| p.name())
+                            .unwrap_or_else(|| "<none>".to_string()),
+                        manifest_summary
+                    );
+                }
+                if let Some(access_path) = alias_strengthening_path.as_ref() {
                     return Some(strengthen_type_decl_for_module_access_path(
                         ctx,
-                        target_path,
+                        access_path,
                         id,
                         decl,
                     ));
@@ -2187,6 +2314,68 @@ fn try_expand_head<'a>(
                     }
                 }
                 if let Some(manifest) = decl.type_manifest {
+                    let synthetic_self_manifest = {
+                        let manifest_repr = ctx.repr(manifest);
+                        let manifest_desc = ctx.get_desc(manifest_repr);
+                        matches!(
+                            &*manifest_desc,
+                            TypeDesc::Tconstr {
+                                path: manifest_path,
+                                args: manifest_args,
+                                ..
+                            } if manifest_path.same(&path)
+                                && manifest_args.len() == args.len()
+                                && matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
+                        )
+                    };
+                    // Match OCaml's nullary alias behavior: strengthened
+                    // self-manifests like `Stdlib.Intl.Locale.t = Stdlib.Intl.Locale.t`
+                    // still need to flow through `subst` so simple_abbrevs can
+                    // preserve sharing across repeated uses. For parameterized
+                    // synthetic manifests (`M.t<'a> = M.t<'a>`), keeping the old
+                    // rewrite-to-target behavior avoids collapsing distinct
+                    // instantiations onto a single cached copy.
+                    if synthetic_self_manifest && !args.is_empty() {
+                        let immediate_alias_target_path = match &path {
+                            Path::Pdot(parent, type_name, pos) => {
+                                let mut visiting = HashSet::new();
+                                match resolve_module_type_through_env_path(
+                                    ctx,
+                                    env,
+                                    parent,
+                                    &mut visiting,
+                                ) {
+                                    Some(super::decl::ModuleType::MtyAlias(
+                                        _,
+                                        target_module_path,
+                                    )) if !target_module_path.same(parent) => Some(Path::Pdot(
+                                        Box::new(target_module_path),
+                                        type_name.clone(),
+                                        *pos,
+                                    )),
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        };
+                        if let Some(target_path) = immediate_alias_target_path {
+                            if debug_expand {
+                                eprintln!(
+                                    "[expand] path={} resolve_type_through_env parameterized synthetic self-manifest; rewriting to alias target {}",
+                                    path_name,
+                                    target_path.name()
+                                );
+                            }
+                            let level = ctx.get_level(ty);
+                            let rewritten = ctx.new_type(TypeDesc::Tconstr {
+                                path: target_path,
+                                args: args.clone(),
+                                abbrev: orig_abbrev,
+                            });
+                            ctx.set_level(rewritten, level);
+                            return Some(rewritten);
+                        }
+                    }
                     if can_expand_decl_manifest(&decl, manifest) {
                         let params = &decl.type_params;
                         if params.len() == args.len() {
@@ -3630,6 +3819,16 @@ fn unify_types<'a>(
                             false
                         };
                         if alias_matches {
+                            if std::env::var_os("RUST_DEBUG_FLAT_ALIAS_UNIFY").is_some() {
+                                eprintln!(
+                                    "[flat-alias-unify] long_ty={} long_path={} short_ty={} short_path={} args={}",
+                                    ctx.repr(long_ty).0,
+                                    long_path.name(),
+                                    ctx.repr(short_ty).0,
+                                    short_path.name(),
+                                    args1.len()
+                                );
+                            }
                             let pairs: Vec<_> = args1
                                 .iter()
                                 .zip(args2.iter())
@@ -3786,6 +3985,14 @@ fn unify_types<'a>(
             }
             drop(desc1);
             drop(desc2);
+
+            if let Some(env) = state.env() {
+                let exp1 = expand_head(ctx, env, t1);
+                let exp2 = expand_head(ctx, env, t2);
+                if exp1 != t1 || exp2 != t2 {
+                    return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
+                }
+            }
 
             // OCaml ctype.ml unify3: for same-path Tconstr, just unify args.
             // OCaml's unify2 expands abbreviations BEFORE unify3, but the
@@ -5159,7 +5366,6 @@ pub fn force_generalize_module_sig_values(
     ctx: &TypeContext<'_>,
     mty: &crate::types::decl::ModuleType,
 ) {
-    ctx.clear_simple_abbrevs();
     let mut seen = HashSet::new();
     force_generalize_module_type_rec(ctx, mty, &mut seen);
 }
@@ -6641,6 +6847,15 @@ pub fn remap_label_type_to_params(
         }
         _ => label_ty,
     }
+}
+
+pub(crate) fn subst_type_params(
+    ctx: &TypeContext<'_>,
+    params: &[TypeExprRef],
+    args: &[TypeExprRef],
+    ty: TypeExprRef,
+) -> TypeExprRef {
+    subst_type(ctx, params, args, ty)
 }
 
 /// Instantiate a label description, creating fresh type variables for its
