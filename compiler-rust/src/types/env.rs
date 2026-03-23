@@ -333,10 +333,10 @@ pub struct Env {
 impl Clone for Env {
     fn clone(&self) -> Self {
         Env {
-            // `Env` identity tracks logical binding changes, not Rust wrapper
-            // clones. Mutating add/update paths already call `bump_id()`, so a
-            // plain clone should preserve the current cache identity.
-            id: self.id,
+            // Keep clone-induced env changes visible to abbreviation caching by
+            // default. Callers that are only snapshotting the same logical env
+            // must opt into `clone_preserve_id()`.
+            id: NEXT_ENV_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             values: self.values.clone(),
             types: self.types.clone(),
             constrs: self.constrs.clone(),

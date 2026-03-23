@@ -1552,70 +1552,27 @@ fn resolve_type_through_env<'a>(
     strengthen_alias_types: bool,
 ) -> Option<super::decl::TypeDeclaration> {
     use super::decl::SignatureItem;
-    use super::type_expr::TypeDesc;
 
     let (module_path, type_name) = match path {
         Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
         _ => return None,
     };
-    let debug_target = std::env::var("RUST_DEBUG_RESOLVE_TYPE_PATH").ok();
-    let debug_this = debug_target.as_deref().is_some_and(|needle| {
-        let path_name = path.name();
-        path_name == needle || path.last() == needle || path_name.contains(needle)
-    });
 
     let mut visiting = HashSet::new();
     let module_mty = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)?;
     let module_sig =
         resolve_signature_through_env_module_type(ctx, env, &module_mty, &mut visiting)?;
     let module_sig = crate::types::typecore::copy_lookup_signature_for_subst(&module_sig, ctx);
-    let alias_strengthening_path = if strengthen_alias_types {
-        match (&module_mty, module_path) {
-            // For qualified accesses through alias modules (A.B.t), keep the
-            // access path so sibling signature references can be rewritten
-            // through that qualified path before strengthening.
-            (super::decl::ModuleType::MtyAlias(_, _), Path::Pdot(..)) => {
-                Some(module_path.clone())
-            }
-            // For top-level aliases, strengthen through the underlying target
-            // path so lookups expand to the canonical declaration and do not
-            // strand type checking on a self-referential alias manifest.
-            (super::decl::ModuleType::MtyAlias(_, _), Path::Pident(_)) => {
-                match &module_mty {
-                    super::decl::ModuleType::MtyAlias(_, target_path) => Some(target_path.clone()),
-                    _ => None,
-                }
-            }
+    // For alias modules, expansion should expose the alias target path
+    // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
+    let alias_target_for_strengthening = if strengthen_alias_types {
+        match &module_mty {
+            super::decl::ModuleType::MtyAlias(_, target_path) => Some(target_path.clone()),
             _ => None,
         }
     } else {
         None
     };
-    if matches!(module_path, Path::Pdot(..))
-        && let Some(access_path) = alias_strengthening_path.as_ref()
-        && let super::decl::ModuleType::MtyAlias(_, target_path) = &module_mty
-        && !target_path.same(access_path)
-    {
-        match target_path {
-            Path::Pdot(..) => {
-                crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                    &module_sig,
-                    target_path,
-                    access_path,
-                    ctx,
-                );
-            }
-            Path::Pident(alias_id) => {
-                crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
-                    &module_sig,
-                    alias_id.name(),
-                    access_path,
-                    ctx,
-                );
-            }
-            Path::Papply(_, _) => {}
-        }
-    }
     // Match OCaml Env.components_of_module path lookup behavior: when resolving
     // `M.t`, operate on a path-qualified copy of `M`'s signature so sibling
     // references inside manifests are rewritten through the access path.
@@ -1624,48 +1581,10 @@ fn resolve_type_through_env<'a>(
     for item in &module_sig {
         if let SignatureItem::SigType(id, decl, _) = item {
             if id.name() == type_name {
-                if debug_this {
-                    let module_mty_kind = match &module_mty {
-                        super::decl::ModuleType::MtyIdent(p) => format!("MtyIdent({})", p.name()),
-                        super::decl::ModuleType::MtyAlias(_, p) => {
-                            format!("MtyAlias({})", p.name())
-                        }
-                        super::decl::ModuleType::MtySignature(_) => "MtySignature".to_string(),
-                        super::decl::ModuleType::MtyFunctor { .. } => {
-                            "MtyFunctor".to_string()
-                        }
-                    };
-                    let manifest_summary = decl
-                        .type_manifest
-                        .map(|manifest| {
-                            let manifest = ctx.repr(manifest);
-                            let desc = ctx.get_desc(manifest);
-                            match &*desc {
-                                TypeDesc::Tconstr { path, args, .. } => {
-                                    format!("Tconstr({}) args={}", path.name(), args.len())
-                                }
-                                other => format!("{other:?}"),
-                            }
-                        })
-                        .unwrap_or_else(|| "None".to_string());
-                    eprintln!(
-                        "[resolve-type-env] env={} path={} module_path={} module_mty={} strengthen_alias_types={} decl_type_path={} manifest={}",
-                        env.id(),
-                        path.name(),
-                        module_path.name(),
-                        module_mty_kind,
-                        strengthen_alias_types,
-                        decl.type_path
-                            .as_ref()
-                            .map(|p| p.name())
-                            .unwrap_or_else(|| "<none>".to_string()),
-                        manifest_summary
-                    );
-                }
-                if let Some(access_path) = alias_strengthening_path.as_ref() {
+                if let Some(target_path) = alias_target_for_strengthening.as_ref() {
                     return Some(strengthen_type_decl_for_module_access_path(
                         ctx,
-                        access_path,
+                        target_path,
                         id,
                         decl,
                     ));
