@@ -17286,6 +17286,61 @@ fn debug_type_summary<'a>(ctx: &'a TypeContext<'a>, ty: TypeExprRef) -> String {
     parts.join(" -> ")
 }
 
+fn debug_lookup_value_shape<'a>(ctx: &'a TypeContext<'a>, ty: TypeExprRef) -> String {
+    let summarize_endpoint = |ty: TypeExprRef| -> String {
+        let ty = ctx.repr(ty);
+        let level = ctx.get_level(ty);
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tarrow { .. } => format!("arrow#{}@{}", ty.0, level),
+            TypeDesc::Ttuple(items) => format!("tuple#{}@{}({})", ty.0, level, items.len()),
+            TypeDesc::Tconstr { path, args, .. } => {
+                let args = args
+                    .iter()
+                    .map(|arg| ctx.repr(*arg).0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{}#{}@{}({})", path.name(), ty.0, level, args)
+            }
+            TypeDesc::Tvar(_) => format!("tvar#{}@{}", ty.0, level),
+            TypeDesc::Tunivar(_) => format!("tunivar#{}@{}", ty.0, level),
+            TypeDesc::Tlink(target) => {
+                format!("tlink#{}@{}->{}", ty.0, level, ctx.repr(*target).0)
+            }
+            TypeDesc::Tsubst(target) => {
+                format!("tsubst#{}@{}->{}", ty.0, level, ctx.repr(*target).0)
+            }
+            TypeDesc::Tvariant(_) => format!("variant#{}@{}", ty.0, level),
+            TypeDesc::Tobject { .. } => format!("object#{}@{}", ty.0, level),
+            TypeDesc::Tfield { .. } => format!("field#{}@{}", ty.0, level),
+            TypeDesc::Tpoly { .. } => format!("poly#{}@{}", ty.0, level),
+            TypeDesc::Tpackage { .. } => format!("package#{}@{}", ty.0, level),
+            TypeDesc::Tnil => format!("nil#{}@{}", ty.0, level),
+        }
+    };
+
+    let mut parts = Vec::new();
+    let mut cursor = ctx.repr(ty);
+    for arg_index in 0..32 {
+        let desc = ctx.get_desc(cursor);
+        match &*desc {
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                parts.push(format!(
+                    "arg{}={}",
+                    arg_index,
+                    summarize_endpoint(arg.typ)
+                ));
+                cursor = ctx.repr(*ret);
+            }
+            _ => {
+                parts.push(format!("ret={}", summarize_endpoint(cursor)));
+                break;
+            }
+        }
+    }
+    parts.join(" -> ")
+}
+
 fn debug_stdlib_alias_sig<'a>(
     label: &str,
     module_name: &str,
@@ -17742,7 +17797,36 @@ impl Env {
                                 } else {
                                     mod_path.clone()
                                 };
+                                let persistent_module_lookup =
+                                    effective_mod_path.head().is_persistent();
                                 let path = Path::pdot(effective_mod_path, value_name.to_string());
+                                let debug_lookup_sig_value = std::env::var("RUST_DEBUG_LOOKUP_SIG_VALUE")
+                                    .ok()
+                                    .is_some_and(|raw| {
+                                        raw.split(',')
+                                            .map(|part| part.trim())
+                                            .filter(|part| !part.is_empty())
+                                            .any(|target| {
+                                                target == value_name
+                                                    || target == format!("{}.{}", prefix_str, value_name)
+                                                    || target == path.name()
+                                            })
+                                    });
+                                if debug_lookup_sig_value {
+                                    eprintln!(
+                                        "[lookup-sig-value] prefix={} mod_path={} effective_mod_path={} value_path={} persistent={} raw_val_path={} shape={}",
+                                        prefix_str,
+                                        mod_path.name(),
+                                        path.parent().map(|p| p.name()).unwrap_or_default(),
+                                        path.name(),
+                                        persistent_module_lookup,
+                                        vd.val_path
+                                            .as_ref()
+                                            .map(|p| p.name())
+                                            .unwrap_or_else(|| "<none>".to_string()),
+                                        debug_lookup_value_shape(ctx, vd.val_type)
+                                    );
+                                }
                                 if std::env::var_os("RUST_DEBUG_WEBAPI_WINDOW").is_some()
                                     && prefix_str == "Webapi.Dom"
                                     && value_name == "window"
@@ -18184,8 +18268,13 @@ impl Env {
                 // Then try persistent environment (external modules)
                 if let Some(pers) = pers_env.as_mut() {
                     if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
-                        let sig = ps.ps_sig.clone();
-                        return Some((Path::pident(Ident::create_persistent(mod_name)), sig));
+                        let module_path = Path::pident(Ident::create_persistent(mod_name));
+                        let sig = copy_lookup_signature_for_subst(&ps.ps_sig, ctx);
+                        crate::types::ctype::force_generalize_module_sig_values(
+                            ctx,
+                            &crate::types::decl::ModuleType::MtySignature(sig.clone()),
+                        );
+                        return Some((module_path, sig));
                     }
                 }
                 None
