@@ -1961,6 +1961,22 @@ pub fn add_signature_to_env(
         }
     }
 
+    fn inline_record_type_params(
+        ctx: &TypeContext<'_>,
+        parent_type_params: &[TypeExprRef],
+        labels: &[crate::types::LabelDeclaration],
+    ) -> Vec<TypeExprRef> {
+        parent_type_params
+            .iter()
+            .copied()
+            .filter(|param| {
+                labels
+                    .iter()
+                    .any(|label| crate::types::ctype::deep_occur(ctx, *param, label.ld_type))
+            })
+            .collect()
+    }
+
     for item in sig_items {
         match item {
             SignatureItem::SigValue(id, desc) => {
@@ -2041,17 +2057,62 @@ pub fn add_signature_to_env(
                                 tag
                             };
 
-                            // Get argument types from constructor arguments
-                            let (cstr_args, cstr_arity) = match &cd.cd_args {
-                                crate::types::decl::ConstructorArguments::CstrTuple(args) => {
-                                    (args.clone(), args.len() as i32)
-                                }
+                            let inline_record = match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-                                    let args: Vec<TypeExprRef> =
-                                        labels.iter().map(|l| l.ld_type).collect();
-                                    let arity = args.len() as i32;
-                                    (args, arity)
+                                    let inline_params =
+                                        inline_record_type_params(ctx, &decl.type_params, labels);
+                                    let inline_path =
+                                        Path::pdot(type_path.clone(), cd.cd_id.name());
+                                    let inline_tag = match cstr_tag {
+                                        ConstructorTag::CstrBlock(tag) => tag,
+                                        _ => 0,
+                                    };
+                                    let inline_decl = crate::types::TypeDeclaration {
+                                        type_params: inline_params.clone(),
+                                        type_arity: inline_params.len() as i32,
+                                        type_kind: crate::types::TypeKind::TypeRecord(
+                                            labels.clone(),
+                                            crate::types::RecordRepresentation::RecordInlined {
+                                                tag: inline_tag,
+                                                name: cd.cd_id.name().to_string(),
+                                                num_nonconsts,
+                                                attrs: cd.cd_attributes.clone(),
+                                            },
+                                        ),
+                                        type_private: decl.type_private,
+                                        type_manifest: None,
+                                        type_variance: inline_params
+                                            .iter()
+                                            .map(|_| crate::types::variance::Variance::full())
+                                            .collect(),
+                                        type_newtype_level: None,
+                                        type_loc: cd.cd_loc,
+                                        type_attributes: vec![],
+                                        type_immediate: false,
+                                        type_unboxed: crate::types::UnboxedStatus::default(),
+                                        type_inlined_types: vec![],
+                                        type_path: None,
+                                    };
+                                    let inline_constr =
+                                        ctx.new_generic_constr(inline_path, inline_params.clone());
+                                    Some((vec![inline_constr], 1, Box::new(inline_decl)))
                                 }
+                                _ => None,
+                            };
+
+                            // Get argument types from constructor arguments
+                            let (cstr_args, cstr_arity, cstr_inlined) = match inline_record {
+                                Some((inline_args, inline_arity, inline_decl)) => {
+                                    (inline_args, inline_arity, Some(inline_decl))
+                                }
+                                None => match &cd.cd_args {
+                                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                                        (args.clone(), args.len() as i32, None)
+                                    }
+                                    crate::types::decl::ConstructorArguments::CstrRecord(_) => {
+                                        unreachable!("handled inline record constructor above")
+                                    }
+                                },
                             };
                             // Signature items may carry constructor argument nodes at
                             // non-generic levels. Rebuild a generic-level scheme so
@@ -2083,8 +2144,45 @@ pub fn add_signature_to_env(
                                 cstr_private: decl.type_private,
                                 cstr_loc: crate::location::Location::none(),
                                 cstr_attributes: vec![],
-                                cstr_inlined: None,
+                                cstr_inlined,
                             };
+
+                            if let Some(ref inlined_decl) = cstr_desc.cstr_inlined {
+                                if let crate::types::TypeKind::TypeRecord(ref labels, ref repres) =
+                                    inlined_decl.type_kind
+                                {
+                                    let inline_path =
+                                        Path::pdot(type_path.clone(), cstr_desc.cstr_name.clone());
+                                    let ty_res = ctx.new_constr(
+                                        inline_path,
+                                        inlined_decl.type_params.clone(),
+                                    );
+                                    for (pos, ld) in labels.iter().enumerate() {
+                                        let label_desc = LabelDescription {
+                                            lbl_name: ld.ld_id.name().to_string(),
+                                            lbl_res: ty_res,
+                                            lbl_arg: crate::types::ctype::remap_label_type_to_params(
+                                                ctx,
+                                                ld.ld_type,
+                                                &inlined_decl.type_params,
+                                            ),
+                                            lbl_mut: ld.ld_mutable,
+                                            lbl_optional: ld.ld_optional,
+                                            lbl_pos: pos as i32,
+                                            lbl_all: crate::types::decl::LabelArrayRef(0),
+                                            lbl_repres: repres.clone(),
+                                            lbl_private: decl.type_private,
+                                            lbl_loc: crate::location::Location::none(),
+                                            lbl_attributes: vec![],
+                                        };
+                                        if as_opened {
+                                            env.add_opened_label(ld.ld_id.clone(), label_desc);
+                                        } else {
+                                            env.add_label(ld.ld_id.clone(), label_desc);
+                                        }
+                                    }
+                                }
+                            }
 
                             if as_opened {
                                 env.add_opened_constructor(cd.cd_id.clone(), cstr_desc);
