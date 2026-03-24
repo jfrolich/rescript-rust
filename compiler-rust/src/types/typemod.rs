@@ -2345,6 +2345,84 @@ fn rewrite_parent_scoped_type_paths_for_package<'b>(
     });
 }
 
+fn rewrite_package_constrained_type_refs<'b>(
+    ctx: &'b crate::types::context::TypeContext<'b>,
+    ty: TypeExprRef,
+    constrained_type_map: &HashMap<i32, TypeExprRef>,
+    seen: &mut HashSet<TypeExprRef>,
+) {
+    use crate::types::type_expr::TypeDesc;
+
+    let ty = ctx.repr(ty);
+    if !seen.insert(ty) {
+        return;
+    }
+
+    let desc = ctx.get_desc(ty).clone();
+    match desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            for arg in &args {
+                rewrite_package_constrained_type_refs(ctx, *arg, constrained_type_map, seen);
+            }
+            if args.is_empty() {
+                if let Path::Pident(id) = &path {
+                    if let Some(&manifest_ty) = constrained_type_map.get(&id.stamp()) {
+                        crate::types::link_type(ctx, ty, manifest_ty);
+                        return;
+                    }
+                }
+            }
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            rewrite_package_constrained_type_refs(ctx, arg.typ, constrained_type_map, seen);
+            rewrite_package_constrained_type_refs(ctx, ret, constrained_type_map, seen);
+        }
+        TypeDesc::Ttuple(types) => {
+            for child in &types {
+                rewrite_package_constrained_type_refs(ctx, *child, constrained_type_map, seen);
+            }
+        }
+        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+            rewrite_package_constrained_type_refs(ctx, target, constrained_type_map, seen);
+        }
+        TypeDesc::Tobject { fields, .. } => {
+            rewrite_package_constrained_type_refs(ctx, fields, constrained_type_map, seen);
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            rewrite_package_constrained_type_refs(ctx, typ, constrained_type_map, seen);
+            rewrite_package_constrained_type_refs(ctx, rest, constrained_type_map, seen);
+        }
+        TypeDesc::Tvariant(row) => {
+            rewrite_package_constrained_type_refs(ctx, row.row_more, constrained_type_map, seen);
+            for (_, field) in &row.row_fields {
+                match field {
+                    crate::types::type_expr::RowField::Rpresent(Some(t)) => {
+                        rewrite_package_constrained_type_refs(ctx, *t, constrained_type_map, seen);
+                    }
+                    crate::types::type_expr::RowField::Reither { types, .. } => {
+                        for t in types {
+                            rewrite_package_constrained_type_refs(ctx, *t, constrained_type_map, seen);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            rewrite_package_constrained_type_refs(ctx, body, constrained_type_map, seen);
+            for v in &vars {
+                rewrite_package_constrained_type_refs(ctx, *v, constrained_type_map, seen);
+            }
+        }
+        TypeDesc::Tpackage { args, .. } => {
+            for arg in &args {
+                rewrite_package_constrained_type_refs(ctx, *arg, constrained_type_map, seen);
+            }
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+
 fn apply_package_constraints_to_module_type<'b>(
     env: &Env,
     mty: &crate::types::decl::ModuleType,
@@ -2374,7 +2452,7 @@ fn apply_package_constraints_to_module_type<'b>(
             _ => None,
         })
         .collect();
-
+    let mut constrained_type_map: HashMap<i32, TypeExprRef> = HashMap::new();
     for item in sig {
         match item {
             SignatureItem::SigValue(id, mut vd) => {
@@ -2397,6 +2475,20 @@ fn apply_package_constraints_to_module_type<'b>(
                         .find(|(path, _)| path.len() == 1 && path[0] == id.name())
                     {
                         td.type_manifest = Some(*manifest_ty);
+                        if id.stamp() != 0 {
+                            let manifest = ctx.repr(*manifest_ty);
+                            let manifest_desc = ctx.get_desc(manifest);
+                            if matches!(
+                                &*manifest_desc,
+                                crate::types::type_expr::TypeDesc::Tconstr {
+                                    path: Path::Pident(manifest_id),
+                                    args,
+                                    ..
+                                } if args.is_empty() && !manifest_id.is_persistent()
+                            ) {
+                                constrained_type_map.insert(id.stamp(), *manifest_ty);
+                            }
+                        }
                     }
                 }
                 rewritten_sig.push(SignatureItem::SigType(id, td, rec_status));
@@ -2418,6 +2510,120 @@ fn apply_package_constraints_to_module_type<'b>(
                 rewritten_sig.push(SignatureItem::SigModule(id, md, rec_status));
             }
             other => rewritten_sig.push(other),
+        }
+    }
+
+    if !constrained_type_map.is_empty() {
+        let mut seen = HashSet::new();
+        for item in &rewritten_sig {
+            match item {
+                SignatureItem::SigValue(_, vd) => {
+                    rewrite_package_constrained_type_refs(
+                        ctx,
+                        vd.val_type,
+                        &constrained_type_map,
+                        &mut seen,
+                    );
+                }
+                SignatureItem::SigType(_, td, _) => {
+                    if let Some(manifest) = td.type_manifest {
+                        rewrite_package_constrained_type_refs(
+                            ctx,
+                            manifest,
+                            &constrained_type_map,
+                            &mut seen,
+                        );
+                    }
+                    match &td.type_kind {
+                        crate::types::TypeKind::TypeVariant(constrs) => {
+                            for cd in constrs {
+                                match &cd.cd_args {
+                                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                                        for arg in args {
+                                            rewrite_package_constrained_type_refs(
+                                                ctx,
+                                                *arg,
+                                                &constrained_type_map,
+                                                &mut seen,
+                                            );
+                                        }
+                                    }
+                                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                                        for lbl in labels {
+                                            rewrite_package_constrained_type_refs(
+                                                ctx,
+                                                lbl.ld_type,
+                                                &constrained_type_map,
+                                                &mut seen,
+                                            );
+                                        }
+                                    }
+                                }
+                                if let Some(res) = cd.cd_res {
+                                    rewrite_package_constrained_type_refs(
+                                        ctx,
+                                        res,
+                                        &constrained_type_map,
+                                        &mut seen,
+                                    );
+                                }
+                            }
+                        }
+                        crate::types::TypeKind::TypeRecord(labels, _) => {
+                            for lbl in labels {
+                                rewrite_package_constrained_type_refs(
+                                    ctx,
+                                    lbl.ld_type,
+                                    &constrained_type_map,
+                                    &mut seen,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                SignatureItem::SigTypext(_, ext, _) => {
+                    for arg in &ext.ext_type_params {
+                        rewrite_package_constrained_type_refs(
+                            ctx,
+                            *arg,
+                            &constrained_type_map,
+                            &mut seen,
+                        );
+                    }
+                    match &ext.ext_args {
+                        crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                            for arg in args {
+                                rewrite_package_constrained_type_refs(
+                                    ctx,
+                                    *arg,
+                                    &constrained_type_map,
+                                    &mut seen,
+                                );
+                            }
+                        }
+                        crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                            for lbl in labels {
+                                rewrite_package_constrained_type_refs(
+                                    ctx,
+                                    lbl.ld_type,
+                                    &constrained_type_map,
+                                    &mut seen,
+                                );
+                            }
+                        }
+                    }
+                    if let Some(ret) = ext.ext_ret_type {
+                        rewrite_package_constrained_type_refs(
+                            ctx,
+                            ret,
+                            &constrained_type_map,
+                            &mut seen,
+                        );
+                    }
+                }
+                _ => {}
+            }
         }
     }
 

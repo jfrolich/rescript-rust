@@ -5045,14 +5045,8 @@ pub fn type_expect<'a>(
 
             // Type check body in extended environment
             let body = tctx.arena.get_expr(*body_idx);
-            let typed_body = type_expect(tctx, &new_env, body, expected_ty, None)?;
-            let typed_body = wrap_module_unpacks_in_expression(
-                tctx,
-                &new_env,
-                typed_body,
-                &unpacks,
-                body.pexp_loc,
-            );
+            let typed_body =
+                type_expect_with_module_unpacks(tctx, &new_env, body, expected_ty, &unpacks, None)?;
             let body_type = typed_body.exp_type;
 
             Ok(Expression::new(
@@ -8820,16 +8814,6 @@ fn type_match_cases_batch_non_gadt<'a>(
                 };
                 case_env.add_value(pv.id.clone(), desc);
                 if pv.is_module {
-                    let module_type = module_type_from_package_binding(tctx, &case_env, binding_ty);
-                    case_env.add_module(
-                        pv.id.clone(),
-                        crate::types::decl::ModuleDeclaration {
-                            md_type: module_type,
-                            md_attributes: vec![],
-                            md_loc: crate::location::Location::none(),
-                            md_path: None,
-                        },
-                    );
                     // Match OCaml order in wrap_unpacks (`x :: module_variables`).
                     unpacks.insert(0, pv.clone());
                 }
@@ -8949,15 +8933,14 @@ fn type_match_cases_batch_non_gadt<'a>(
             let typed_guard = if let Some(guard) = &pending.parsed_case.pc_guard {
                 let bool_ty = env.type_bool(ctx);
                 let guard_expr = tctx.arena.get_expr(*guard);
-                let typed_guard =
-                    type_expect(tctx, &pending.case_env, guard_expr, bool_ty, None)?;
-                Some(wrap_module_unpacks_in_expression(
+                Some(type_expect_with_module_unpacks(
                     tctx,
                     &pending.case_env,
-                    typed_guard,
+                    guard_expr,
+                    bool_ty,
                     &pending.unpacks,
-                    guard_expr.pexp_loc,
-                ))
+                    None,
+                )?)
             } else {
                 None
             };
@@ -9004,7 +8987,14 @@ fn type_match_cases_batch_non_gadt<'a>(
                     ctx.get_level(ctx.repr(body_ty)),
                 );
             }
-            let typed_body = type_expect(tctx, &pending.case_env, body_expr, case_body_ty, None)?;
+            let typed_body = type_expect_with_module_unpacks(
+                tctx,
+                &pending.case_env,
+                body_expr,
+                case_body_ty,
+                &pending.unpacks,
+                None,
+            )?;
             if std::env::var_os("RUST_DEBUG_CASE_BODY_TYPES").is_some() {
                 let body_loc = tctx.arena.to_location(body_expr.pexp_loc);
                 eprintln!(
@@ -9015,13 +9005,6 @@ fn type_match_cases_batch_non_gadt<'a>(
                     ctx.get_level(ctx.repr(typed_body.exp_type)),
                 );
             }
-            let typed_body = wrap_module_unpacks_in_expression(
-                tctx,
-                &pending.case_env,
-                typed_body,
-                &pending.unpacks,
-                body_expr.pexp_loc,
-            );
             // Match OCaml type_cases: `exp_type = instance env ty_res'` where
             // `ty_res'` is corrected per-case when the pattern contains GADTs.
             let case_exp_ty = crate::types::instance(ctx, case_body_ty);
@@ -11335,16 +11318,6 @@ fn type_case_impl(
         };
         case_env.add_value(pv.id.clone(), desc);
         if pv.is_module {
-            let module_type = module_type_from_package_binding(tctx, &case_env, binding_ty);
-            case_env.add_module(
-                pv.id.clone(),
-                crate::types::decl::ModuleDeclaration {
-                    md_type: module_type,
-                    md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
-                    md_path: None,
-                },
-            );
             // OCaml records unpack vars in reverse insertion order
             // (`module_variables := x :: module_variables`).
             unpacks.insert(0, pv.clone());
@@ -11355,14 +11328,14 @@ fn type_case_impl(
     let typed_guard = if let Some(guard) = &case.pc_guard {
         let bool_ty = env.type_bool(tctx.type_ctx);
         let guard_expr = tctx.arena.get_expr(*guard);
-        let typed_guard = type_expect(tctx, &case_env, guard_expr, bool_ty, None)?;
-        Some(wrap_module_unpacks_in_expression(
+        Some(type_expect_with_module_unpacks(
             tctx,
             &case_env,
-            typed_guard,
+            guard_expr,
+            bool_ty,
             &unpacks,
-            guard_expr.pexp_loc,
-        ))
+            None,
+        )?)
     } else {
         None
     };
@@ -11384,14 +11357,14 @@ fn type_case_impl(
         );
     }
     let body_expr = tctx.arena.get_expr(case.pc_rhs);
-    let typed_body = type_expect(tctx, &case_env, body_expr, case_body_ty, None)?;
-    let typed_body = wrap_module_unpacks_in_expression(
+    let typed_body = type_expect_with_module_unpacks(
         tctx,
         &case_env,
-        typed_body,
+        body_expr,
+        case_body_ty,
         &unpacks,
-        body_expr.pexp_loc,
-    );
+        None,
+    )?;
     let case_exp_ty = crate::types::instance(tctx.type_ctx, case_body_ty);
     let typed_body = Expression {
         exp_type: case_exp_ty,
@@ -11695,16 +11668,6 @@ fn type_function(
         body_env.add_value(pv.id.clone(), desc);
 
         if pv.is_module {
-            let module_type = module_type_from_package_binding(tctx, &body_env, binding_ty);
-            body_env.add_module(
-                pv.id.clone(),
-                crate::types::decl::ModuleDeclaration {
-                    md_type: module_type,
-                    md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
-                    md_path: None,
-                },
-            );
             // OCaml records unpack vars in reverse insertion order
             // (`module_variables := x :: module_variables`).
             unpacks.insert(0, pv.clone());
@@ -11747,15 +11710,9 @@ fn type_function(
             );
         }
     }
-    let typed_body = type_expect(tctx, &body_env, body, return_ty, None)?;
+    let typed_body =
+        type_expect_with_module_unpacks(tctx, &body_env, body, return_ty, &unpacks, None)?;
     tctx.generic_constraint_body_ty = saved_generic_constraint;
-    let typed_body = wrap_module_unpacks_in_expression(
-        tctx,
-        &body_env,
-        typed_body,
-        &unpacks,
-        body.pexp_loc,
-    );
     let typed_body = Expression {
         exp_type: crate::types::instance(ctx, return_ty),
         ..typed_body
@@ -15943,13 +15900,14 @@ fn typed_module_type_for_unpack(
     }
 }
 
-fn wrap_module_unpacks_in_expression(
+fn type_expect_with_module_unpacks(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    mut body: Expression,
+    body: &ParsedExpression,
+    expected_ty: TypeExprRef,
     unpacks: &[PatternVariable],
-    wrapper_loc: LocIdx,
-) -> Expression {
+    context: Option<TypeClashContext>,
+) -> TypeCoreResult<Expression> {
     fn ensure_string_idx(arena: &ParseArena, s: &str) -> StrIdx {
         if let Some(idx) = arena.find_string_idx(s) {
             return idx;
@@ -15960,75 +15918,92 @@ fn wrap_module_unpacks_in_expression(
         unsafe { (*arena_ptr).intern_string(s) }
     }
 
-    for unpack in unpacks {
-        let lid = find_existing_lident_idx(tctx.arena, unpack.id.name())
-            .unwrap_or_else(|| tctx.arena.placeholder_lid());
-        let located_lid = Located {
-            txt: lid,
-            loc: unpack.loc_idx,
-        };
-
-        let value_desc = env
-            .find_value(unpack.id.name())
-            .cloned()
-            .unwrap_or(ValueDescription {
-                val_type: unpack.ty,
-                val_kind: crate::types::ValueKind::ValReg,
-                val_loc: unpack.loc.clone(),
-                val_attributes: vec![],
-                val_path: None,
-            });
-
-        // OCaml's wrap_unpacks types the unpack as Pexp_ident through type_expect,
-        // which calls instance() on the looked-up type. Match that by instancing here.
-        let unpack_inst_ty = crate::types::instance(tctx.type_ctx, unpack.ty);
-        let unpack_expr = Expression::new(
-            ExpressionDesc::Texp_ident(Path::pident(unpack.id.clone()), located_lid, value_desc),
-            unpack.loc_idx,
-            unpack_inst_ty,
-            EnvRef(0),
-            Attributes::new(),
-        );
-
-        let decl_mty = module_type_from_package_binding(tctx, env, unpack.ty);
-        let typed_mty = typed_module_type_for_unpack(tctx.arena, unpack.loc_idx, &decl_mty);
-        let unpack_module = crate::types::typedtree::ModuleExpr {
-            mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_unpack(
-                unpack_expr,
-                typed_mty.clone(),
-            ),
-            mod_loc: unpack.loc_idx,
-            mod_type: typed_mty,
-            mod_env: EnvRef(0),
-            mod_attributes: Attributes::new(),
-        };
-
-        // OCaml `wrap_unpacks` uses the source expression location (`sexp.pexp_loc`)
-        // for each generated `let module` wrapper.
-        let wrapped_loc = wrapper_loc;
-        let wrapped_ty = body.exp_type;
-        let modulepat_attrs = vec![(
-            Located {
-                txt: ensure_string_idx(tctx.arena, "#modulepat"),
-                loc: tctx.arena.none_loc(),
-            },
-            crate::parser::ast::Payload::PStr(Box::new(vec![])),
-        )];
-        body = Expression::new(
-            crate::types::typedtree::ExpressionDesc::Texp_letmodule(
-                Ident::create_local(unpack.id.name()),
-                unpack.name.clone(),
-                Box::new(unpack_module),
-                Box::new(body),
-            ),
-            wrapped_loc,
-            wrapped_ty,
-            EnvRef(0),
-            modulepat_attrs.into(),
-        );
+    fn ensure_lident_idx(arena: &ParseArena, name: &str) -> LidentIdx {
+        if let Some(idx) = find_existing_lident_idx(arena, name) {
+            return idx;
+        }
+        let arena_ptr = arena as *const ParseArena as *mut ParseArena;
+        unsafe { (*arena_ptr).push_lident(name) }
     }
 
-    body
+    let Some((unpack, rest)) = unpacks.split_first() else {
+        return type_expect(tctx, env, body, expected_ty, context);
+    };
+
+    let decl_mty = module_type_from_package_binding(tctx, env, unpack.ty);
+    let typed_mty = typed_module_type_for_unpack(tctx.arena, unpack.loc_idx, &decl_mty);
+    let mut body_env = env.clone();
+    body_env.add_module(
+        unpack.id.clone(),
+        crate::types::decl::ModuleDeclaration {
+            md_type: decl_mty,
+            md_attributes: vec![],
+            md_loc: crate::location::Location::none(),
+            md_path: None,
+        },
+    );
+    let typed_body =
+        type_expect_with_module_unpacks(tctx, &body_env, body, expected_ty, rest, context)?;
+
+    let lid = ensure_lident_idx(tctx.arena, &unpack.name.txt);
+    let located_lid = Located {
+        txt: lid,
+        loc: unpack.name.loc,
+    };
+    let value_desc = env
+        .find_value(unpack.id.name())
+        .cloned()
+        .unwrap_or(ValueDescription {
+            val_type: unpack.ty,
+            val_kind: crate::types::ValueKind::ValReg,
+            val_loc: unpack.loc.clone(),
+            val_attributes: vec![],
+            val_path: None,
+        });
+
+    // OCaml's wrap_unpacks types the unpack as Pexp_ident through type_expect,
+    // which calls instance() on the looked-up type. Match that by instancing here.
+    let unpack_inst_ty = crate::types::instance(tctx.type_ctx, unpack.ty);
+    let unpack_expr = Expression::new(
+        ExpressionDesc::Texp_ident(Path::pident(unpack.id.clone()), located_lid, value_desc),
+        unpack.loc_idx,
+        unpack_inst_ty,
+        EnvRef(0),
+        Attributes::new(),
+    );
+    let unpack_module = crate::types::typedtree::ModuleExpr {
+        mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_unpack(
+            unpack_expr,
+            typed_mty.clone(),
+        ),
+        mod_loc: unpack.loc_idx,
+        mod_type: typed_mty,
+        mod_env: EnvRef(0),
+        mod_attributes: Attributes::new(),
+    };
+
+    // OCaml `wrap_unpacks` uses the source expression location (`sexp.pexp_loc`)
+    // for each generated `let module` wrapper.
+    let modulepat_attrs = vec![(
+        Located {
+            txt: ensure_string_idx(tctx.arena, "#modulepat"),
+            loc: tctx.arena.none_loc(),
+        },
+        crate::parser::ast::Payload::PStr(Box::new(vec![])),
+    )];
+    let wrapped_ty = typed_body.exp_type;
+    Ok(Expression::new(
+        crate::types::typedtree::ExpressionDesc::Texp_letmodule(
+            Ident::create_local(unpack.id.name()),
+            unpack.name.clone(),
+            Box::new(unpack_module),
+            Box::new(typed_body),
+        ),
+        body.pexp_loc,
+        wrapped_ty,
+        EnvRef(0),
+        modulepat_attrs.into(),
+    ))
 }
 
 fn extract_recursive_binding_name(
@@ -16722,16 +16697,6 @@ fn type_let_bindings(
                 };
                 new_env.add_value(pv.id.clone(), desc);
                 if pv.is_module {
-                    let module_type = module_type_from_package_binding(tctx, &new_env, pv.ty);
-                    new_env.add_module(
-                        pv.id.clone(),
-                        crate::types::decl::ModuleDeclaration {
-                            md_type: module_type,
-                            md_attributes: vec![],
-                            md_loc: crate::location::Location::none(),
-                            md_path: None,
-                        },
-                    );
                     // OCaml records unpack vars in reverse insertion order
                     // (`module_variables := x :: module_variables`).
                     unpacks.insert(0, pv.clone());
@@ -17978,6 +17943,33 @@ impl Env {
         self.resolve_module_lid_impl(lid, arena, pers_env, ctx, false)
     }
 
+    fn signature_has_package_self_manifests(
+        sig: &[crate::types::decl::SignatureItem],
+        ctx: &crate::types::context::TypeContext<'_>,
+    ) -> bool {
+        use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
+
+        sig.iter().any(|item| match item {
+            SignatureItem::SigType(id, decl, _) => decl.type_manifest.is_some_and(|ty| {
+                let ty = ctx.repr(ty);
+                let desc = ctx.get_desc(ty);
+                matches!(
+                    &*desc,
+                    TypeDesc::Tconstr {
+                        path: Path::Pident(manifest_id),
+                        args,
+                        ..
+                    } if args.is_empty() && manifest_id.same(id)
+                )
+            }),
+            SignatureItem::SigModule(_, md, _) => match &md.md_type {
+                DeclMty::MtySignature(sub_sig) => Self::signature_has_package_self_manifests(sub_sig, ctx),
+                _ => false,
+            },
+            _ => false,
+        })
+    }
+
     /// Resolve a module longident to path+signature, optionally applying
     /// rewrite/substitution to contained type paths.
     fn resolve_module_lid_impl<'b>(
@@ -18086,6 +18078,8 @@ impl Env {
                                     | crate::types::decl::SignatureItem::SigModtype(..)
                             )
                         });
+                        let skip_self_manifest_subst = apply_subst
+                            && Self::signature_has_package_self_manifests(&sig, ctx);
                         // Extract module alias targets for path-prefix rewriting.
                         // - Pdot aliases (e.g. Js.Json) can be rewritten directly.
                         // - Pident aliases (e.g. Types = Mistakes__Types) should only
@@ -18113,12 +18107,13 @@ impl Env {
                                 || alias_target_pident.is_some());
                         if debug_module_sig {
                             eprintln!(
-                                "[local-module-sig] mod={} has_defs={} resolved_name={} alias_pdot={} alias_pident={} needs_copy={}",
+                                "[local-module-sig] mod={} has_defs={} resolved_name={} alias_pdot={} alias_pident={} skip_self_manifest_subst={} needs_copy={}",
                                 mod_name,
                                 has_type_or_module_defs,
                                 resolved_name.is_some(),
                                 alias_target_pdot.is_some(),
                                 alias_target_pident.is_some(),
+                                skip_self_manifest_subst,
                                 needs_copy
                             );
                         }
@@ -18141,7 +18136,7 @@ impl Env {
                                     &sig, old_name, &path, ctx,
                                 );
                             }
-                            if has_type_or_module_defs {
+                            if has_type_or_module_defs && !skip_self_manifest_subst {
                                 crate::cmi::persistent_env::substitute_type_paths_in_sig(
                                     &sig, &path, ctx,
                                 );
