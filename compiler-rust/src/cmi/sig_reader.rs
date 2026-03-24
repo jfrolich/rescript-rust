@@ -13,7 +13,7 @@ use crate::location::Location;
 use crate::types::asttypes::{ArgLabel, Located, MutableFlag, PrivateFlag};
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    AliasPresence, Attribute, ConstructorArguments, ConstructorDeclaration,
+    AliasPresence, Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
     ExtStatus, ExtensionConstructor, LabelDeclaration, ModtypeDeclaration, ModuleDeclaration,
     ModuleType, PrimitiveDescription, RecStatus, RecordRepresentation, Signature, SignatureItem,
     TypeDeclaration, TypeKind, UnboxedStatus, ValueDescription, ValueKind,
@@ -136,13 +136,13 @@ impl<'a> SigReadContext<'a> {
         let val_type = self.read_type_expr(&fields[0]);
         let val_kind = self.read_value_kind(&fields[1]);
         let _val_loc = read_location(&fields[2]);
-        let _val_attributes = read_attributes(&fields[3]);
+        let val_attributes = read_attributes(&fields[3]);
 
         ValueDescription {
             val_type,
             val_kind,
             val_loc: Location::none(), // Use none for CMI-loaded items
-            val_attributes: vec![],    // Skip complex attribute deserialization for now
+            val_attributes,
             val_path: None,
         }
     }
@@ -197,6 +197,7 @@ impl<'a> SigReadContext<'a> {
             let (_, f) = tup.as_block();
             (f[0].as_int() as i32, f[1].as_int() as i32)
         });
+        let type_attributes = read_attributes(&fields[8]);
         let type_immediate = fields[9].as_bool();
         let type_unboxed = read_unboxed_status(&fields[10]);
         let type_inlined_types = self.read_type_inlined_types(&fields[11]);
@@ -210,7 +211,7 @@ impl<'a> SigReadContext<'a> {
             type_variance,
             type_newtype_level,
             type_loc: Location::none(),
-            type_attributes: vec![],
+            type_attributes,
             type_immediate,
             type_unboxed,
             type_inlined_types,
@@ -273,7 +274,7 @@ impl<'a> SigReadContext<'a> {
                     tag: f[0].as_int() as i32,
                     name: f[1].as_string().to_string(),
                     num_nonconsts: f[2].as_int() as i32,
-                    attrs: vec![], // Skip attribute deserialization
+                    attrs: read_attributes(&f[3]),
                 }
             }
             _ => RecordRepresentation::RecordRegular, // fallback
@@ -295,6 +296,7 @@ impl<'a> SigReadContext<'a> {
         let ld_mutable = read_mutable_flag(&fields[1]);
         let ld_optional = fields[2].as_bool();
         let ld_type = self.read_type_expr(&fields[3]);
+        let ld_attributes = read_attributes(&fields[5]);
 
         LabelDeclaration {
             ld_id,
@@ -302,7 +304,7 @@ impl<'a> SigReadContext<'a> {
             ld_optional,
             ld_type,
             ld_loc: Location::none(),
-            ld_attributes: vec![],
+            ld_attributes,
         }
     }
 
@@ -319,13 +321,14 @@ impl<'a> SigReadContext<'a> {
         let cd_id = read_ident(&fields[0]);
         let cd_args = self.read_constructor_arguments(&fields[1]);
         let cd_res = fields[2].as_option().map(|te| self.read_type_expr(te));
+        let cd_attributes = read_attributes(&fields[4]);
 
         ConstructorDeclaration {
             cd_id,
             cd_args,
             cd_res,
             cd_loc: Location::none(),
-            cd_attributes: vec![],
+            cd_attributes,
         }
     }
 
@@ -379,6 +382,7 @@ impl<'a> SigReadContext<'a> {
         let ext_ret_type = fields[3].as_option().map(|te| self.read_type_expr(te));
         let ext_private = read_private_flag(&fields[4]);
         let ext_is_exception = fields[7].as_bool();
+        let ext_attributes = read_attributes(&fields[6]);
 
         ExtensionConstructor {
             ext_type_path,
@@ -387,7 +391,7 @@ impl<'a> SigReadContext<'a> {
             ext_ret_type,
             ext_private,
             ext_loc: Location::none(),
-            ext_attributes: vec![],
+            ext_attributes,
             ext_is_exception,
         }
     }
@@ -401,10 +405,11 @@ impl<'a> SigReadContext<'a> {
     fn read_module_declaration(&mut self, value: &OcamlValue) -> ModuleDeclaration {
         let fields = &value.as_block().1;
         let md_type = self.read_module_type(&fields[0]);
+        let md_attributes = read_attributes(&fields[1]);
 
         ModuleDeclaration {
             md_type,
-            md_attributes: vec![],
+            md_attributes,
             md_loc: Location::none(),
             md_path: None,
         }
@@ -419,10 +424,11 @@ impl<'a> SigReadContext<'a> {
     fn read_modtype_declaration(&mut self, value: &OcamlValue) -> ModtypeDeclaration {
         let fields = &value.as_block().1;
         let mtd_type = fields[0].as_option().map(|mt| self.read_module_type(mt));
+        let mtd_attributes = read_attributes(&fields[1]);
 
         ModtypeDeclaration {
             mtd_type,
-            mtd_attributes: vec![],
+            mtd_attributes,
             mtd_loc: Location::none(),
         }
     }
@@ -1053,9 +1059,47 @@ fn read_location(_value: &OcamlValue) -> Location {
     Location::none()
 }
 
-/// Read attributes (skip for now, just return empty).
-fn read_attributes(_value: &OcamlValue) -> Vec<Attribute> {
-    vec![]
+fn read_attribute_name(value: &OcamlValue) -> crate::types::asttypes::Located<String> {
+    match value {
+        OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
+        OcamlValue::Block(_, fields) if !fields.is_empty() => match &fields[0] {
+            OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
+            inner => crate::types::asttypes::Located::noloc(
+                read_first_string(inner).unwrap_or_else(|| "?".to_string()),
+            ),
+        },
+        other => crate::types::asttypes::Located::noloc(
+            read_first_string(other).unwrap_or_else(|| "?".to_string()),
+        ),
+    }
+}
+
+fn read_first_string(value: &OcamlValue) -> Option<String> {
+    match value {
+        OcamlValue::String(s) => Some(s.clone()),
+        OcamlValue::Block(_, fields) => fields.iter().find_map(read_first_string),
+        _ => None,
+    }
+}
+
+/// Read attributes from a CMI declaration.
+///
+/// For typedtree parity we only need to preserve declaration-level attribute
+/// identity by name. The typedtree sexp printer intentionally prints decl attrs
+/// as `(name <payload>)`, so we do not need to reconstruct the full payload here.
+fn read_attributes(value: &OcamlValue) -> Vec<Attribute> {
+    value
+        .as_list()
+        .iter()
+        .filter_map(|attr| match attr {
+            OcamlValue::Block(_, fields) if !fields.is_empty() => Some(Attribute {
+                attr_name: read_attribute_name(&fields[0]),
+                attr_payload: AttributePayload::Empty,
+                attr_loc: fields.get(2).map(read_location).unwrap_or_else(Location::none),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Read a Primitive.description.

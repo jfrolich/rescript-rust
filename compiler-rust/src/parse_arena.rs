@@ -651,6 +651,16 @@ impl Default for ParseArena {
             strings.intern("res.constructor_from_spread");
         let static_pat_from_variant_spread_attr_str =
             strings.intern("res.patFromVariantSpread");
+        // CMI-loaded declaration attributes are converted back into parser attrs
+        // during typedtree reconstruction. Pre-intern the common decl-attr names
+        // that can arrive from external CMIs so that round-tripping imported
+        // attrs does not depend on local source text having mentioned them.
+        let _ = strings.intern("as");
+        let _ = strings.intern("deprecated");
+        let _ = strings.intern("tag");
+        let _ = strings.intern("unboxed");
+        let _ = strings.intern("genType");
+        let _ = strings.intern("spice");
         let static_optional_default_opt_lid =
             longidents.push(Longident::Lident(static_optional_default_opt_str));
         let static_optional_default_sth_lid =

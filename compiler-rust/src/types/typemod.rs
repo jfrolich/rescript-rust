@@ -127,7 +127,12 @@ fn decl_attr_to_parser_attr(
 ) -> ParsedAttribute {
     let name_idx = arena
         .find_string_idx(&attr.attr_name.txt)
-        .expect("decl attribute name must already be interned in ParseArena");
+        .unwrap_or_else(|| {
+            panic!(
+                "decl attribute name must already be interned in ParseArena: {}",
+                attr.attr_name.txt
+            )
+        });
     (
         Located::mknoloc(name_idx),
         ParsedPayload::PStr(Box::new(vec![])),
