@@ -1527,7 +1527,9 @@ fn resolve_signature_through_env_module_type<'a>(
     use super::decl::ModuleType;
 
     match mty {
-        ModuleType::MtySignature(sig) => Some(sig.clone()),
+        ModuleType::MtySignature(sig) => {
+            Some(crate::types::typecore::copy_lookup_signature_for_subst(sig, ctx))
+        }
         ModuleType::MtyAlias(_, path) | ModuleType::MtyIdent(path) => {
             let resolved = resolve_module_type_through_env_path(ctx, env, path, visiting)?;
             resolve_signature_through_env_module_type(ctx, env, &resolved, visiting)
