@@ -20092,27 +20092,6 @@ fn disambiguate_label<'a>(
         }
     }
 
-    // Preserve OCaml-style alias paths in typed output: when disambiguation
-    // succeeds via path-equivalence (same semantic type, different path id),
-    // keep the expected alias path in lbl_res instead of the fully-qualified
-    // candidate path.
-    if let (Some(target_path), Some(label)) = (opath.as_ref(), selected.as_mut()) {
-        let lbl_res = ctx.repr(label.lbl_res);
-        let lbl_desc = ctx.get_desc(lbl_res);
-        if let TypeDesc::Tconstr { path, args, .. } = &*lbl_desc {
-            if !path.same(target_path)
-                && compare_type_paths_for_disambiguation(path, target_path, env, pers_env, ctx)
-            {
-                let rewritten = ctx.new_constr(target_path.clone(), args.clone());
-                let level = ctx.get_level(lbl_res);
-                if ctx.get_level(rewritten) != level {
-                    ctx.set_level(rewritten, level);
-                }
-                label.lbl_res = rewritten;
-            }
-        }
-    }
-
     if let Some(label) = selected.as_mut() {
         qualify_label_description_paths(label, env, pers_env, ctx);
     }
