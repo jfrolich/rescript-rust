@@ -5581,18 +5581,9 @@ fn generalize_expansive_rec(
 
     match action {
         Action::Constr { path, args } => {
-            let mut variances = env
-                .lookup_type(&path)
+            let mut variances = lookup_type_decl_for_path(ctx, env, &path)
                 .map(|decl| decl.type_variance.clone())
-                .unwrap_or_else(|_| {
-                    if let Path::Pdot(..) = &path {
-                        let path_name = path.name();
-                        if let Some(decl_ref) = ctx.find_type_decl_by_path(&path_name) {
-                            return decl_ref.type_variance.clone();
-                        }
-                    }
-                    vec![Variance::MAY_INV; args.len()]
-                });
+                .unwrap_or_else(|| vec![Variance::MAY_INV; args.len()]);
             if !args.is_empty() && variances.iter().all(|v| *v == Variance::NULL) {
                 if std::env::var_os("RUST_DEBUG_NULL_VARIANCE_FALLBACK").is_some() {
                     eprintln!(
