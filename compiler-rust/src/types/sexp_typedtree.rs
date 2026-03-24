@@ -384,43 +384,23 @@ fn sexp_partial(p: &Partial) -> Sexp {
 }
 
 // ============================================================================
-// Type Expression Preamble - each type occurrence is serialized once in the
-// file preamble and referenced by #N from the typedtree.
+// Type Expression Serializer
 //
-// Unlike the old parity serializer, each preamble entry is canonicalized
-// independently:
+// Types are serialized inline at each typedtree occurrence.
 // - non-cyclic sharing is ignored and serialized structurally
 // - Tvar/Tunivar identity is preserved via normalized local ids
 // - real recursion is preserved via inline mu/ref binders
 //
 // This makes the format insensitive to copy/allocation strategy while still
-// checking the final semantic shape of each type.
+// checking the final semantic shape of each type, without relying on a
+// file-global preamble or identity-based references.
 // ============================================================================
 
-struct TypeDedupTable {
-    types: Vec<Sexp>,
-}
+struct TypeDedupTable;
 
 impl TypeDedupTable {
     fn new() -> Self {
-        TypeDedupTable { types: Vec::new() }
-    }
-
-    fn build_preamble(&self) -> Sexp {
-        let mut items = vec![Sexp::atom("types")];
-        for (idx, sexp) in self.types.iter().enumerate() {
-            items.push(Sexp::list(vec![
-                Sexp::atom(&idx.to_string()),
-                sexp.clone(),
-            ]));
-        }
-        Sexp::list(items)
-    }
-
-    fn push_type(&mut self, sexp: Sexp) -> usize {
-        let idx = self.types.len();
-        self.types.push(sexp);
-        idx
+        TypeDedupTable
     }
 }
 
@@ -648,12 +628,11 @@ fn sexp_type_expr_body_inline(
 fn sexp_type_expr(
     arena: &ParseArena,
     ctx: &TypeContext<'_>,
-    dedup: &mut TypeDedupTable,
+    _dedup: &mut TypeDedupTable,
     te: TypeExprRef,
 ) -> Sexp {
     let mut state = TypeSexpState::new();
-    let idx = dedup.push_type(sexp_type_expr_inline(arena, ctx, &mut state, te));
-    Sexp::atom(&format!("#{idx}"))
+    sexp_type_expr_inline(arena, ctx, &mut state, te)
 }
 
 fn sexp_row_desc(
@@ -2577,8 +2556,7 @@ pub fn print_typed_structure<W: Write>(
 ) -> std::io::Result<()> {
     let mut dedup = TypeDedupTable::new();
     let body = sexp_structure(arena, ctx, false, &mut dedup, str);
-    let preamble = dedup.build_preamble();
-    write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), body.to_string()))
+    write_latin1_line(out, &body.to_string())
 }
 
 /// Print a typed structure as sexp (with locations)
@@ -2590,22 +2568,19 @@ pub fn print_typed_structure_with_locs<W: Write>(
 ) -> std::io::Result<()> {
     let mut dedup = TypeDedupTable::new();
     let body = sexp_structure(arena, ctx, true, &mut dedup, str);
-    let preamble = dedup.build_preamble();
-    write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), body.to_string()))
+    write_latin1_line(out, &body.to_string())
 }
 
 /// Print a typed signature as sexp (without locations)
 pub fn print_typed_signature<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>, sig: &crate::types::typedtree::TypedSignature, out: &mut W) -> std::io::Result<()> {
     let mut dedup = TypeDedupTable::new();
     let sexp = sexp_typed_signature(arena, ctx, false, &mut dedup, sig);
-    let preamble = dedup.build_preamble();
-    write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), sexp.to_string()))
+    write_latin1_line(out, &sexp.to_string())
 }
 
 /// Print a typed signature as sexp (with locations)
 pub fn print_typed_signature_with_locs<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>, sig: &crate::types::typedtree::TypedSignature, out: &mut W) -> std::io::Result<()> {
     let mut dedup = TypeDedupTable::new();
     let sexp = sexp_typed_signature(arena, ctx, true, &mut dedup, sig);
-    let preamble = dedup.build_preamble();
-    write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), sexp.to_string()))
+    write_latin1_line(out, &sexp.to_string())
 }

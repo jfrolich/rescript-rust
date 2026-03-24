@@ -7,13 +7,13 @@ reach 100% parity. Works with files in .parity-cache/tests/.
 Commands:
     summary              Overview of all failures
     motifs               Hunk-level motif classification across diffs
-    preamble <file>      Aligned type preamble comparison
-    trace <file> <id>    Trace a type through both compilers
+    preamble <file>      Aligned extracted-type comparison
+    trace <file> <id>    Trace an extracted type occurrence
     extra <file>         Find extra/missing type nodes
     extra-summary        Aggregate extra/missing type motifs across failing files
-    sharing <file>       Copy-sharing imbalance analysis
+    sharing <file>       Compare extracted type multiplicities
     row-order <file>     Polymorphic variant row-order mismatches
-    sharing-summary      Aggregate sharing imbalances across failing files
+    sharing-summary      Aggregate extracted type multiplicities across failing files
     divergence <file>    First divergence analysis
     divergence-summary   Aggregate first-divergence + insertion signatures
     insertion [file]     First insertion/resync analysis
@@ -134,10 +134,12 @@ def parse_sexp_file(text: str) -> List[SexpNode]:
 
 @dataclass
 class SexpFile:
-    """Parsed sexp file with types preamble and structure."""
+    """Parsed sexp file with optional type preamble or synthesized inline types."""
     types: dict[int, SexpNode]  # type_id -> type definition
     structure: Optional[SexpNode]
     raw_nodes: list[SexpNode]
+    type_paths: dict[int, str] = field(default_factory=dict)
+    synthetic_types: bool = False
 
     @staticmethod
     def parse(text: str) -> 'SexpFile':
@@ -160,10 +162,176 @@ class SexpFile:
                                     types[tid] = type_body
                                 except ValueError:
                                     pass
-                elif isinstance(head, SexpAtom) and head.value == "structure":
+                elif isinstance(head, SexpAtom) and head.value in {"structure", "signature"}:
                     structure = node
 
-        return SexpFile(types=types, structure=structure, raw_nodes=nodes)
+        type_paths: dict[int, str] = {}
+        synthetic_types = False
+        if not types:
+            synthetic_types = True
+            roots: List[tuple[str, SexpNode]] = []
+            if structure is not None:
+                roots.append((structure.children[0].value if isinstance(structure.children[0], SexpAtom) else "root", structure))
+            else:
+                for i, node in enumerate(nodes):
+                    roots.append((f"top[{i}]", node))
+
+            for root_label, root in roots:
+                _collect_inline_types(root, [root_label], types, type_paths)
+
+        return SexpFile(
+            types=types,
+            structure=structure,
+            raw_nodes=nodes,
+            type_paths=type_paths,
+            synthetic_types=synthetic_types,
+        )
+
+
+TYPE_TERM_TAGS = {
+    "mu",
+    "ref",
+    "Tvar",
+    "Tunivar",
+    "Tarrow",
+    "Ttuple",
+    "Tconstr",
+    "Tobject",
+    "Tfield",
+    "Tnil",
+    "Tlink",
+    "Tsubst",
+    "Tvariant",
+    "Tpoly",
+    "Tpackage",
+}
+
+
+def _node_head(node: SexpNode) -> Optional[str]:
+    if not isinstance(node, SexpList) or not node.children:
+        return None
+    head = node.children[0]
+    if not isinstance(head, SexpAtom):
+        return None
+    return head.value
+
+
+def _is_type_term(node: SexpNode) -> bool:
+    head = _node_head(node)
+    return head in TYPE_TERM_TAGS
+
+
+def _collect_type_term(term: SexpNode, path: List[str],
+                       types: dict[int, SexpNode],
+                       type_paths: dict[int, str]) -> None:
+    if not _is_type_term(term):
+        return
+
+    tid = len(types)
+    types[tid] = term
+    type_paths[tid] = " > ".join(path)
+
+    for label, child in _iter_type_term_children(term):
+        _collect_type_term(child, path + [label], types, type_paths)
+
+
+def _iter_row_field_type_children(node: SexpNode, prefix: str) -> List[tuple[str, SexpNode]]:
+    head = _node_head(node)
+    if head == "Rpresent" and isinstance(node, SexpList) and len(node.children) >= 2:
+        return [(f"{prefix}:present", node.children[1])]
+    if head == "Reither" and isinstance(node, SexpList) and len(node.children) >= 3:
+        types_node = node.children[2]
+        if isinstance(types_node, SexpList):
+            return [
+                (f"{prefix}:either[{i}]", child)
+                for i, child in enumerate(types_node.children)
+                if _is_type_term(child)
+            ]
+    return []
+
+
+def _iter_type_term_children(node: SexpNode) -> List[tuple[str, SexpNode]]:
+    if not isinstance(node, SexpList) or not node.children:
+        return []
+
+    head = _node_head(node)
+    if head is None:
+        return []
+
+    if head in {"Tvar", "Tunivar", "Tnil", "ref"}:
+        return []
+    if head == "mu" and len(node.children) >= 3:
+        return [("body", node.children[2])] if _is_type_term(node.children[2]) else []
+    if head == "Tarrow" and len(node.children) >= 4:
+        children = []
+        if _is_type_term(node.children[2]):
+            children.append(("arg", node.children[2]))
+        if _is_type_term(node.children[3]):
+            children.append(("ret", node.children[3]))
+        return children
+    if head == "Ttuple":
+        return [(f"tuple[{i}]", child) for i, child in enumerate(node.children[1:]) if _is_type_term(child)]
+    if head == "Tconstr" and len(node.children) >= 3 and isinstance(node.children[2], SexpList):
+        return [
+            (f"arg[{i}]", child)
+            for i, child in enumerate(node.children[2].children)
+            if _is_type_term(child)
+        ]
+    if head == "Tobject" and len(node.children) >= 2 and _is_type_term(node.children[1]):
+        return [("fields", node.children[1])]
+    if head == "Tfield" and len(node.children) >= 5:
+        children = []
+        if _is_type_term(node.children[3]):
+            children.append(("field_type", node.children[3]))
+        if _is_type_term(node.children[4]):
+            children.append(("rest", node.children[4]))
+        return children
+    if head in {"Tlink", "Tsubst"} and len(node.children) >= 2 and _is_type_term(node.children[1]):
+        return [("target", node.children[1])]
+    if head == "Tvariant" and len(node.children) >= 2 and isinstance(node.children[1], SexpList):
+        children: List[tuple[str, SexpNode]] = []
+        for entry in node.children[1].children:
+            if isinstance(entry, SexpList) and len(entry.children) >= 2:
+                label = sexp_to_str(entry.children[0])
+                children.extend(_iter_row_field_type_children(entry.children[1], f"field:{label}"))
+        return children
+    if head == "Tpoly":
+        children = []
+        if len(node.children) >= 2 and _is_type_term(node.children[1]):
+            children.append(("body", node.children[1]))
+        if len(node.children) >= 3 and isinstance(node.children[2], SexpList):
+            children.extend(
+                (f"var[{i}]", child)
+                for i, child in enumerate(node.children[2].children)
+                if _is_type_term(child)
+            )
+        return children
+    if head == "Tpackage" and len(node.children) >= 4 and isinstance(node.children[3], SexpList):
+        return [
+            (f"pkg_arg[{i}]", child)
+            for i, child in enumerate(node.children[3].children)
+            if _is_type_term(child)
+        ]
+    return []
+
+
+def _collect_inline_types(node: SexpNode, path: List[str],
+                          types: dict[int, SexpNode],
+                          type_paths: dict[int, str]) -> None:
+    if not isinstance(node, SexpList) or not node.children:
+        return
+
+    head = _node_head(node)
+    if head == "type" and len(node.children) == 2 and _is_type_term(node.children[1]):
+        _collect_type_term(node.children[1], path + ["type"], types, type_paths)
+        return
+    if head == "Kept" and len(node.children) == 2 and _is_type_term(node.children[1]):
+        _collect_type_term(node.children[1], path + ["Kept"], types, type_paths)
+        return
+
+    for idx, child in enumerate(node.children[1:], start=1):
+        child_label = f"{head}[{idx}]"
+        _collect_inline_types(child, path + [child_label], types, type_paths)
 
 
 # ─── Content-Based Type Matching ──────────────────────────────────────────────
@@ -987,6 +1155,16 @@ def find_refs_in_structure(structure: SexpNode, target_id: int,
     return results
 
 
+def find_refs_in_sexpfile(sf: SexpFile, target_id: int) -> List[str]:
+    """Find structure occurrence paths for an extracted type id."""
+    if sf.synthetic_types:
+        path = sf.type_paths.get(target_id)
+        return [path] if path is not None else []
+    if sf.structure is None:
+        return []
+    return find_refs_in_structure(sf.structure, target_id)
+
+
 # ─── Commands ─────────────────────────────────────────────────────────────────
 
 def cmd_summary(args, root: str):
@@ -1178,7 +1356,7 @@ def cmd_insertion(args, root: str):
         print(f"  Matching prefix: {result.matching_prefix} type(s)")
 
         if result.divergence_idx is None:
-            print(green("  No divergence in preamble content."))
+            print(green("  No divergence in extracted type content."))
             return
 
         print(f"  First divergence: position {result.divergence_idx} "
@@ -1254,7 +1432,7 @@ def cmd_insertion(args, root: str):
     print(bold("Insertion Analysis (all cached failing files)"))
     print(f"  Files analyzed: {len(records)}"
           f"{f' ({missing_sexp} missing sexp skipped)' if missing_sexp else ''}")
-    print(f"  Perfect preamble match: {len(perfect)}")
+    print(f"  Perfect extracted-type match: {len(perfect)}")
     print(f"  Shift detected: {len(shifted)} (Rust-extra: {len(rust_extra)}, OCaml-extra: {len(ocaml_extra)}, zero-shift: {len(zero_shift)})")
     print(f"  Unresolved (no resync window): {len(unresolved)}")
     print(f"  Estimated extra nodes: Rust +{total_rust_extra}, OCaml +{total_ocaml_extra}")
@@ -1285,7 +1463,7 @@ def cmd_insertion(args, root: str):
 
 
 def cmd_preamble(args, root: str):
-    """Show aligned type preamble comparison."""
+    """Show aligned extracted-type comparison."""
     name = resolve_file(args.file, root)
     ocaml_sf, rust_sf = require_sexp_files(name, root)
 
@@ -1299,7 +1477,8 @@ def cmd_preamble(args, root: str):
     total = len(ocaml_sf.types)
 
     short_name = name.replace("tests_tests_src_", "")
-    print(bold(f"Type Preamble: {short_name}"))
+    title = "Extracted Inline Types" if ocaml_sf.synthetic_types or rust_sf.synthetic_types else "Type Preamble"
+    print(bold(f"{title}: {short_name}"))
     print(f"  OCaml: {len(ocaml_sf.types)} types, Rust: {len(rust_sf.types)} types")
     print(f"  {green(f'{n_match} match')}  {yellow(f'{n_shifted} shifted')}  "
           f"{red(f'{n_extra_o} extra-ocaml')}  {red(f'{n_extra_r} extra-rust')}")
@@ -1346,7 +1525,7 @@ def cmd_preamble(args, root: str):
 
 
 def cmd_trace(args, root: str):
-    """Trace a type through both compilers."""
+    """Trace an extracted type occurrence through both compilers."""
     name = resolve_file(args.file, root)
     target_id = args.id
     compiler = args.compiler
@@ -1403,46 +1582,47 @@ def cmd_trace(args, root: str):
 
     # Find structural references
     print(bold(f"  References in {compiler} structure:"))
-    if primary_sf.structure:
-        refs = find_refs_in_structure(primary_sf.structure, target_id)
-        if refs:
-            for r in refs[:20]:  # Limit output
-                print(f"    {cyan(f'#{target_id}')} at {r}")
-            if len(refs) > 20:
-                print(f"    ... and {len(refs) - 20} more")
-        else:
-            print(dim("    (no references found)"))
+    refs = find_refs_in_sexpfile(primary_sf, target_id)
+    if refs:
+        for r in refs[:20]:  # Limit output
+            print(f"    {cyan(f'#{target_id}')} at {r}")
+        if len(refs) > 20:
+            print(f"    ... and {len(refs) - 20} more")
+    else:
+        print(dim("    (no references found)"))
     print()
 
     # Find refs in other compiler
     if matched_ids:
         print(bold(f"  References in {other_name} structure:"))
-        if other_sf.structure:
-            for mid in matched_ids:
-                refs = find_refs_in_structure(other_sf.structure, mid)
-                if refs:
-                    for r in refs[:20]:
-                        print(f"    {cyan(f'#{mid}')} at {r}")
-                    if len(refs) > 20:
-                        print(f"    ... and {len(refs) - 20} more")
-                else:
-                    print(dim(f"    #{mid}: (no references found)"))
+        for mid in matched_ids:
+            refs = find_refs_in_sexpfile(other_sf, mid)
+            if refs:
+                for r in refs[:20]:
+                    print(f"    {cyan(f'#{mid}')} at {r}")
+                if len(refs) > 20:
+                    print(f"    ... and {len(refs) - 20} more")
+            else:
+                print(dim(f"    #{mid}: (no references found)"))
         print()
 
     # Show what references this type
     print(bold(f"  Types referencing #{target_id} in {compiler}:"))
-    referencing = []
-    for tid, node in sorted(primary_sf.types.items()):
-        s = sexp_to_str(node)
-        if f"#{target_id}" in s and tid != target_id:
-            referencing.append(tid)
-    if referencing:
-        for tid in referencing[:15]:
-            print(f"    #{tid}: {type_summary(primary_sf.types[tid])}")
-        if len(referencing) > 15:
-            print(f"    ... and {len(referencing) - 15} more")
+    if primary_sf.synthetic_types:
+        print(dim("    inline type mode: synthetic ids are occurrence ids; only local mu/ref binders remain inside a type term"))
     else:
-        print(dim("    (none)"))
+        referencing = []
+        for tid, node in sorted(primary_sf.types.items()):
+            s = sexp_to_str(node)
+            if f"#{target_id}" in s and tid != target_id:
+                referencing.append(tid)
+        if referencing:
+            for tid in referencing[:15]:
+                print(f"    #{tid}: {type_summary(primary_sf.types[tid])}")
+            if len(referencing) > 15:
+                print(f"    ... and {len(referencing) - 15} more")
+        else:
+            print(dim("    (none)"))
 
 
 def cmd_extra(args, root: str):
@@ -1729,11 +1909,10 @@ def cmd_sharing(args, root: str):
                 continue
         diff = len(r_ids) - len(o_ids)
         refs_score = 0
-        if ocaml_sf.structure and rust_sf.structure:
-            for tid in o_ids[:3]:
-                refs_score += len(find_refs_in_structure(ocaml_sf.structure, tid))
-            for tid in r_ids[:3]:
-                refs_score += len(find_refs_in_structure(rust_sf.structure, tid))
+        for tid in o_ids[:3]:
+            refs_score += len(find_refs_in_sexpfile(ocaml_sf, tid))
+        for tid in r_ids[:3]:
+            refs_score += len(find_refs_in_sexpfile(rust_sf, tid))
         entries.append((abs(diff), refs_score, diff, summary, o_ids, r_ids))
 
     if not entries:
@@ -1757,24 +1936,22 @@ def cmd_sharing(args, root: str):
         print(f"      OCaml ids: {cyan(_format_id_list(o_ids, args.ids))}")
         print(f"      Rust  ids: {cyan(_format_id_list(r_ids, args.ids))}")
 
-        if ocaml_sf.structure:
-            for tid in o_ids[:min(args.ids, len(o_ids))]:
-                refs = find_refs_in_structure(ocaml_sf.structure, tid)
-                if refs:
-                    refs_text = " | ".join(refs[:args.refs])
-                    extra = f" (+{len(refs) - args.refs})" if len(refs) > args.refs else ""
-                    print(f"      OCaml #{tid} refs: {dim(refs_text + extra)}")
-                else:
-                    print(f"      OCaml #{tid} refs: {dim('(no structure refs)')}")
-        if rust_sf.structure:
-            for tid in r_ids[:min(args.ids, len(r_ids))]:
-                refs = find_refs_in_structure(rust_sf.structure, tid)
-                if refs:
-                    refs_text = " | ".join(refs[:args.refs])
-                    extra = f" (+{len(refs) - args.refs})" if len(refs) > args.refs else ""
-                    print(f"      Rust  #{tid} refs: {dim(refs_text + extra)}")
-                else:
-                    print(f"      Rust  #{tid} refs: {dim('(no structure refs)')}")
+        for tid in o_ids[:min(args.ids, len(o_ids))]:
+            refs = find_refs_in_sexpfile(ocaml_sf, tid)
+            if refs:
+                refs_text = " | ".join(refs[:args.refs])
+                extra = f" (+{len(refs) - args.refs})" if len(refs) > args.refs else ""
+                print(f"      OCaml #{tid} refs: {dim(refs_text + extra)}")
+            else:
+                print(f"      OCaml #{tid} refs: {dim('(no structure refs)')}")
+        for tid in r_ids[:min(args.ids, len(r_ids))]:
+            refs = find_refs_in_sexpfile(rust_sf, tid)
+            if refs:
+                refs_text = " | ".join(refs[:args.refs])
+                extra = f" (+{len(refs) - args.refs})" if len(refs) > args.refs else ""
+                print(f"      Rust  #{tid} refs: {dim(refs_text + extra)}")
+            else:
+                print(f"      Rust  #{tid} refs: {dim('(no structure refs)')}")
         print()
 
 
@@ -1979,7 +2156,7 @@ def _key_to_summary(key: str) -> str:
 
 
 def cmd_divergence(args, root: str):
-    """Find first divergence point between preambles."""
+    """Find first divergence point between extracted type streams."""
     name = resolve_file(args.file, root)
     ocaml_sf, rust_sf = require_sexp_files(name, root)
 
@@ -2168,7 +2345,7 @@ def cmd_divergence_summary(args, root: str):
     print()
     print(f"  Files analyzed: {bold(str(scanned))}"
           f"{f' ({skipped} missing sexp skipped)' if skipped else ''}")
-    print(f"  Perfect preamble match: {perfect}")
+    print(f"  Perfect extracted-type match: {perfect}")
     print(f"  Diverged files: {len(rows)}")
     print(f"  Resolved shift windows: {resolved}")
     print(f"  Unresolved divergence windows: {unresolved}")
@@ -2333,12 +2510,12 @@ Examples:
                             help='Number of removed/added path terms to show (default: 12)')
 
     # preamble
-    sub_preamble = subparsers.add_parser('preamble', help='Aligned type preamble comparison')
+    sub_preamble = subparsers.add_parser('preamble', help='Aligned extracted-type comparison')
     sub_preamble.add_argument('file', help='File name or short name (e.g., "ticker")')
     sub_preamble.add_argument('--diff', action='store_true', help='Only show non-matching types')
 
     # trace
-    sub_trace = subparsers.add_parser('trace', help='Trace a type through both compilers')
+    sub_trace = subparsers.add_parser('trace', help='Trace an extracted type occurrence')
     sub_trace.add_argument('file', help='File name or short name')
     sub_trace.add_argument('id', type=int, help='Type ID to trace')
     sub_trace.add_argument('--compiler', choices=['ocaml', 'rust'], default='ocaml',
@@ -2366,7 +2543,7 @@ Examples:
                                    help='Only include motifs whose content includes paths')
 
     # sharing
-    sub_sharing = subparsers.add_parser('sharing', help='Copy-sharing imbalance analysis')
+    sub_sharing = subparsers.add_parser('sharing', help='Extracted type multiplicity analysis')
     sub_sharing.add_argument('file', help='File name or short name')
     sub_sharing.add_argument('--top', type=int, default=15,
                              help='How many imbalance entries to show (default: 15)')
@@ -2391,7 +2568,7 @@ Examples:
 
     # sharing-summary
     sub_sharing_summary = subparsers.add_parser(
-        'sharing-summary', help='Aggregate sharing imbalances across failing files'
+        'sharing-summary', help='Aggregate extracted type multiplicities across failing files'
     )
     sub_sharing_summary.add_argument('--top', type=int, default=20,
                                      help='How many motifs to show (default: 20)')

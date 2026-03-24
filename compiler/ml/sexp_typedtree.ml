@@ -118,39 +118,15 @@ let partial = function
   | Partial -> Sexp.atom "Partial"
   | Total -> Sexp.atom "Total"
 
-(* Type expression preamble - each type occurrence is serialized once and
-   referenced by #N from the typedtree body.
+(* Type expression serializer.
 
-   Each preamble entry is canonicalized independently:
+   Types are serialized inline at each typedtree occurrence:
    - non-cyclic sharing is serialized structurally
    - Tvar/Tunivar identity is preserved via normalized local ids
    - real recursion is preserved with inline mu/ref binders
 
    This keeps parity focused on the final semantic type shape rather than the
-   allocator/copy strategy used to build it. *)
-let dedup_arr : Sexp.t array ref = ref (Array.make 1024 (Sexp.atom "_"))
-let dedup_next_idx : int ref = ref 0
-
-let reset_dedup () =
-  dedup_arr := Array.make 1024 (Sexp.atom "_");
-  dedup_next_idx := 0
-
-let build_types_preamble () =
-  let n = !dedup_next_idx in
-  let items = ref [] in
-  for i = n - 1 downto 0 do
-    items := Sexp.list [Sexp.atom (string_of_int i); (!dedup_arr).(i)] :: !items
-  done;
-  Sexp.list (Sexp.atom "types" :: !items)
-
-let ensure_dedup_capacity idx =
-  let arr = !dedup_arr in
-  if idx >= Array.length arr then begin
-    let new_len = max (Array.length arr * 2) (idx + 1) in
-    let new_arr = Array.make new_len (Sexp.atom "_") in
-    Array.blit arr 0 new_arr 0 (Array.length arr);
-    dedup_arr := new_arr
-  end
+   allocator/copy strategy used to build it, without a file-global preamble. *)
 
 type active_mu_binding = {
   id: int;
@@ -273,13 +249,8 @@ and type_expr_body_inline state te =
     ]
 
 and type_expr te =
-  let idx = !dedup_next_idx in
-  incr dedup_next_idx;
-  ensure_dedup_capacity idx;
   let state = new_type_sexp_state () in
-  let sexp = type_expr_inline state te in
-  (!dedup_arr).(idx) <- sexp;
-  Sexp.atom (Printf.sprintf "#%d" idx)
+  type_expr_inline state te
 
 and row_desc_sexp state row =
   let debug_sexp_row_filter () =
@@ -1064,27 +1035,18 @@ and include_declaration ~with_locs incl =
   ])
 
 (* Public API *)
-(* Content-based type normalization: merge duplicate type entries *)
 let print_typed_structure ppf str =
-  reset_dedup ();
   let body = structure ~with_locs:false str in
-  let preamble = build_types_preamble () in
-  Format.fprintf ppf "%s\n%s" (Sexp.to_string preamble) (Sexp.to_string body)
+  Format.fprintf ppf "%s" (Sexp.to_string body)
 
 let print_typed_structure_with_locs ppf str =
-  reset_dedup ();
   let body = structure ~with_locs:true str in
-  let preamble = build_types_preamble () in
-  Format.fprintf ppf "%s\n%s" (Sexp.to_string preamble) (Sexp.to_string body)
+  Format.fprintf ppf "%s" (Sexp.to_string body)
 
 let print_typed_signature ppf sg =
-  reset_dedup ();
   let body = signature ~with_locs:false sg in
-  let preamble = build_types_preamble () in
-  Format.fprintf ppf "%s\n%s" (Sexp.to_string preamble) (Sexp.to_string body)
+  Format.fprintf ppf "%s" (Sexp.to_string body)
 
 let print_typed_signature_with_locs ppf sg =
-  reset_dedup ();
   let body = signature ~with_locs:true sg in
-  let preamble = build_types_preamble () in
-  Format.fprintf ppf "%s\n%s" (Sexp.to_string preamble) (Sexp.to_string body)
+  Format.fprintf ppf "%s" (Sexp.to_string body)
