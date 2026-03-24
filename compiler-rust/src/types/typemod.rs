@@ -253,18 +253,103 @@ fn find_existing_loc_idx(arena: &ParseArena, target: &Location) -> Option<LocIdx
 }
 
 fn include_module_flat_name(mod_expr: &ModuleExpr) -> Option<String> {
+    include_module_root_path(mod_expr).map(|path| path.name().replace('.', "_"))
+}
+
+fn include_module_root_path(mod_expr: &ModuleExpr) -> Option<Path> {
     match &mod_expr.mod_desc {
-        ModuleExprDesc::Tmod_ident(path, _) => Some(path.name().replace('.', "_")),
-        ModuleExprDesc::Tmod_constraint(inner, _, _, _) => include_module_flat_name(inner),
+        ModuleExprDesc::Tmod_ident(path, _) => Some(path.clone()),
+        ModuleExprDesc::Tmod_constraint(inner, _, _, _) => include_module_root_path(inner),
         _ => None,
+    }
+}
+
+fn rewrite_included_path_to_local(
+    path: &Path,
+    include_root_path: Option<&Path>,
+    include_flat_name: Option<&str>,
+    local_type_ids: &HashMap<String, Ident>,
+    local_module_ids: &HashMap<String, Ident>,
+    local_modtype_ids: &HashMap<String, Ident>,
+) -> Option<Path> {
+    let rewrite_direct_child = |name: &str| {
+        local_type_ids
+            .get(name)
+            .or_else(|| local_module_ids.get(name))
+            .or_else(|| local_modtype_ids.get(name))
+            .map(|id| Path::Pident(id.clone()))
+    };
+
+    match path {
+        Path::Pident(id) => {
+            if include_flat_name.is_some_and(|flat| id.name() == flat) {
+                None
+            } else {
+                None
+            }
+        }
+        Path::Pdot(prefix, name, pos) => {
+            if include_root_path.is_some_and(|root| prefix.as_ref().same(root)) {
+                if let Some(rewritten) = rewrite_direct_child(name) {
+                    return Some(rewritten);
+                }
+            }
+
+            if let Path::Pident(prefix_id) = prefix.as_ref() {
+                if include_flat_name.is_some_and(|flat| prefix_id.name() == flat) {
+                    if let Some(rewritten) = rewrite_direct_child(name) {
+                        return Some(rewritten);
+                    }
+                }
+            }
+
+            rewrite_included_path_to_local(
+                prefix,
+                include_root_path,
+                include_flat_name,
+                local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
+            )
+            .map(|rewritten_prefix| Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos))
+        }
+        Path::Papply(functor, arg) => {
+            let rewritten_functor = rewrite_included_path_to_local(
+                functor,
+                include_root_path,
+                include_flat_name,
+                local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
+            );
+            let rewritten_arg = rewrite_included_path_to_local(
+                arg,
+                include_root_path,
+                include_flat_name,
+                local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
+            );
+            if rewritten_functor.is_none() && rewritten_arg.is_none() {
+                None
+            } else {
+                Some(Path::Papply(
+                    Box::new(rewritten_functor.unwrap_or_else(|| functor.as_ref().clone())),
+                    Box::new(rewritten_arg.unwrap_or_else(|| arg.as_ref().clone())),
+                ))
+            }
+        }
     }
 }
 
 fn rewrite_included_type_paths_to_local(
     ctx: &crate::types::context::TypeContext<'_>,
     ty_ref: TypeExprRef,
-    include_flat_name: &str,
+    include_root_path: Option<&Path>,
+    include_flat_name: Option<&str>,
     local_type_ids: &HashMap<String, Ident>,
+    local_module_ids: &HashMap<String, Ident>,
+    local_modtype_ids: &HashMap<String, Ident>,
     visited: &mut HashSet<TypeExprRef>,
 ) {
     use crate::types::type_expr::{RowField, TypeDesc};
@@ -277,28 +362,32 @@ fn rewrite_included_type_paths_to_local(
     let desc = ctx.get_desc(ty_ref).clone();
     match &desc {
         TypeDesc::Tconstr { path, args, abbrev } => {
-            if let Path::Pdot(prefix, name, _) = path {
-                if let Path::Pident(prefix_id) = prefix.as_ref() {
-                    if prefix_id.name() == include_flat_name {
-                        if let Some(local_id) = local_type_ids.get(name) {
-                            ctx.set_desc(
-                                ty_ref,
-                                TypeDesc::Tconstr {
-                                    path: Path::Pident(local_id.clone()),
-                                    args: args.clone(),
-                                    abbrev: *abbrev,
-                                },
-                            );
-                        }
-                    }
-                }
+            if let Some(rewritten_path) = rewrite_included_path_to_local(
+                path,
+                include_root_path,
+                include_flat_name,
+                local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
+            ) {
+                ctx.set_desc(
+                    ty_ref,
+                    TypeDesc::Tconstr {
+                        path: rewritten_path,
+                        args: args.clone(),
+                        abbrev: *abbrev,
+                    },
+                );
             }
             for arg in args {
                 rewrite_included_type_paths_to_local(
                     ctx,
                     *arg,
+                    include_root_path,
                     include_flat_name,
                     local_type_ids,
+                    local_module_ids,
+                    local_modtype_ids,
                     visited,
                 );
             }
@@ -307,15 +396,21 @@ fn rewrite_included_type_paths_to_local(
             rewrite_included_type_paths_to_local(
                 ctx,
                 arg.typ,
+                include_root_path,
                 include_flat_name,
                 local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
                 visited,
             );
             rewrite_included_type_paths_to_local(
                 ctx,
                 *ret,
+                include_root_path,
                 include_flat_name,
                 local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
                 visited,
             );
         }
@@ -324,8 +419,11 @@ fn rewrite_included_type_paths_to_local(
                 rewrite_included_type_paths_to_local(
                     ctx,
                     *ty,
+                    include_root_path,
                     include_flat_name,
                     local_type_ids,
+                    local_module_ids,
+                    local_modtype_ids,
                     visited,
                 );
             }
@@ -334,8 +432,11 @@ fn rewrite_included_type_paths_to_local(
             rewrite_included_type_paths_to_local(
                 ctx,
                 *ty,
+                include_root_path,
                 include_flat_name,
                 local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
                 visited,
             );
         }
@@ -343,16 +444,22 @@ fn rewrite_included_type_paths_to_local(
             rewrite_included_type_paths_to_local(
                 ctx,
                 *body,
+                include_root_path,
                 include_flat_name,
                 local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
                 visited,
             );
             for var in vars {
                 rewrite_included_type_paths_to_local(
                     ctx,
                     *var,
+                    include_root_path,
                     include_flat_name,
                     local_type_ids,
+                    local_module_ids,
+                    local_modtype_ids,
                     visited,
                 );
             }
@@ -361,8 +468,11 @@ fn rewrite_included_type_paths_to_local(
             rewrite_included_type_paths_to_local(
                 ctx,
                 *fields,
+                include_root_path,
                 include_flat_name,
                 local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
                 visited,
             );
         }
@@ -370,15 +480,21 @@ fn rewrite_included_type_paths_to_local(
             rewrite_included_type_paths_to_local(
                 ctx,
                 *typ,
+                include_root_path,
                 include_flat_name,
                 local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
                 visited,
             );
             rewrite_included_type_paths_to_local(
                 ctx,
                 *rest,
+                include_root_path,
                 include_flat_name,
                 local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
                 visited,
             );
         }
@@ -386,8 +502,11 @@ fn rewrite_included_type_paths_to_local(
             rewrite_included_type_paths_to_local(
                 ctx,
                 row.row_more,
+                include_root_path,
                 include_flat_name,
                 local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
                 visited,
             );
             for (_, field) in &row.row_fields {
@@ -395,8 +514,11 @@ fn rewrite_included_type_paths_to_local(
                     RowField::Rpresent(Some(ty)) => rewrite_included_type_paths_to_local(
                         ctx,
                         *ty,
+                        include_root_path,
                         include_flat_name,
                         local_type_ids,
+                        local_module_ids,
+                        local_modtype_ids,
                         visited,
                     ),
                     RowField::Reither { types, .. } => {
@@ -404,8 +526,11 @@ fn rewrite_included_type_paths_to_local(
                             rewrite_included_type_paths_to_local(
                                 ctx,
                                 *ty,
+                                include_root_path,
                                 include_flat_name,
                                 local_type_ids,
+                                local_module_ids,
+                                local_modtype_ids,
                                 visited,
                             );
                         }
@@ -419,13 +544,322 @@ fn rewrite_included_type_paths_to_local(
                 rewrite_included_type_paths_to_local(
                     ctx,
                     *arg,
+                    include_root_path,
                     include_flat_name,
                     local_type_ids,
+                    local_module_ids,
+                    local_modtype_ids,
                     visited,
                 );
             }
         }
         TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+
+fn rewrite_included_type_decl_paths_to_local(
+    ctx: &crate::types::context::TypeContext<'_>,
+    id: &Ident,
+    decl: &mut crate::types::decl::TypeDeclaration,
+    include_root_path: Option<&Path>,
+    include_flat_name: Option<&str>,
+    local_type_ids: &HashMap<String, Ident>,
+    local_module_ids: &HashMap<String, Ident>,
+    local_modtype_ids: &HashMap<String, Ident>,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    decl.type_path = Some(Path::Pident(id.clone()));
+    for param in &decl.type_params {
+        rewrite_included_type_paths_to_local(
+            ctx,
+            *param,
+            include_root_path,
+            include_flat_name,
+            local_type_ids,
+            local_module_ids,
+            local_modtype_ids,
+            visited,
+        );
+    }
+    if let Some(manifest) = decl.type_manifest {
+        rewrite_included_type_paths_to_local(
+            ctx,
+            manifest,
+            include_root_path,
+            include_flat_name,
+            local_type_ids,
+            local_module_ids,
+            local_modtype_ids,
+            visited,
+        );
+    }
+    match &mut decl.type_kind {
+        crate::types::TypeKind::TypeVariant(constructors) => {
+            for cd in constructors {
+                match &cd.cd_args {
+                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                        for arg in args {
+                            rewrite_included_type_paths_to_local(
+                                ctx,
+                                *arg,
+                                include_root_path,
+                                include_flat_name,
+                                local_type_ids,
+                                local_module_ids,
+                                local_modtype_ids,
+                                visited,
+                            );
+                        }
+                    }
+                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                        for label in labels {
+                            rewrite_included_type_paths_to_local(
+                                ctx,
+                                label.ld_type,
+                                include_root_path,
+                                include_flat_name,
+                                local_type_ids,
+                                local_module_ids,
+                                local_modtype_ids,
+                                visited,
+                            );
+                        }
+                    }
+                }
+                if let Some(res_ty) = cd.cd_res {
+                    rewrite_included_type_paths_to_local(
+                        ctx,
+                        res_ty,
+                        include_root_path,
+                        include_flat_name,
+                        local_type_ids,
+                        local_module_ids,
+                        local_modtype_ids,
+                        visited,
+                    );
+                }
+            }
+        }
+        crate::types::TypeKind::TypeRecord(labels, _) => {
+            for label in labels {
+                rewrite_included_type_paths_to_local(
+                    ctx,
+                    label.ld_type,
+                    include_root_path,
+                    include_flat_name,
+                    local_type_ids,
+                    local_module_ids,
+                    local_modtype_ids,
+                    visited,
+                );
+            }
+        }
+        crate::types::TypeKind::TypeAbstract | crate::types::TypeKind::TypeOpen => {}
+    }
+}
+
+fn rewrite_included_module_type_paths_to_local(
+    ctx: &crate::types::context::TypeContext<'_>,
+    mty: &mut crate::types::decl::ModuleType,
+    include_root_path: Option<&Path>,
+    include_flat_name: Option<&str>,
+    local_type_ids: &HashMap<String, Ident>,
+    local_module_ids: &HashMap<String, Ident>,
+    local_modtype_ids: &HashMap<String, Ident>,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    match mty {
+        crate::types::decl::ModuleType::MtyIdent(path)
+        | crate::types::decl::ModuleType::MtyAlias(_, path) => {
+            if let Some(rewritten) = rewrite_included_path_to_local(
+                path,
+                include_root_path,
+                include_flat_name,
+                local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
+            ) {
+                *path = rewritten;
+            }
+        }
+        crate::types::decl::ModuleType::MtySignature(sig) => {
+            rewrite_included_signature_paths_to_local(
+                ctx,
+                sig,
+                include_root_path,
+                include_flat_name,
+                local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
+                visited,
+            );
+        }
+        crate::types::decl::ModuleType::MtyFunctor {
+            param_type,
+            result,
+            ..
+        } => {
+            if let Some(param_type) = param_type.as_mut() {
+                rewrite_included_module_type_paths_to_local(
+                    ctx,
+                    param_type,
+                    include_root_path,
+                    include_flat_name,
+                    local_type_ids,
+                    local_module_ids,
+                    local_modtype_ids,
+                    visited,
+                );
+            }
+            rewrite_included_module_type_paths_to_local(
+                ctx,
+                result,
+                include_root_path,
+                include_flat_name,
+                local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
+                visited,
+            );
+        }
+    }
+}
+
+fn rewrite_included_signature_paths_to_local(
+    ctx: &crate::types::context::TypeContext<'_>,
+    sig: &mut [crate::types::decl::SignatureItem],
+    include_root_path: Option<&Path>,
+    include_flat_name: Option<&str>,
+    local_type_ids: &HashMap<String, Ident>,
+    local_module_ids: &HashMap<String, Ident>,
+    local_modtype_ids: &HashMap<String, Ident>,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    for item in sig {
+        match item {
+            crate::types::decl::SignatureItem::SigValue(_, desc) => {
+                desc.val_path = None;
+                rewrite_included_type_paths_to_local(
+                    ctx,
+                    desc.val_type,
+                    include_root_path,
+                    include_flat_name,
+                    local_type_ids,
+                    local_module_ids,
+                    local_modtype_ids,
+                    visited,
+                );
+            }
+            crate::types::decl::SignatureItem::SigType(id, decl, _) => {
+                rewrite_included_type_decl_paths_to_local(
+                    ctx,
+                    id,
+                    decl,
+                    include_root_path,
+                    include_flat_name,
+                    local_type_ids,
+                    local_module_ids,
+                    local_modtype_ids,
+                    visited,
+                );
+            }
+            crate::types::decl::SignatureItem::SigTypext(_, ext, _) => {
+                if let Some(rewritten) = rewrite_included_path_to_local(
+                    &ext.ext_type_path,
+                    include_root_path,
+                    include_flat_name,
+                    local_type_ids,
+                    local_module_ids,
+                    local_modtype_ids,
+                ) {
+                    ext.ext_type_path = rewritten;
+                }
+                for param in &ext.ext_type_params {
+                    rewrite_included_type_paths_to_local(
+                        ctx,
+                        *param,
+                        include_root_path,
+                        include_flat_name,
+                        local_type_ids,
+                        local_module_ids,
+                        local_modtype_ids,
+                        visited,
+                    );
+                }
+                match &ext.ext_args {
+                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                        for arg in args {
+                            rewrite_included_type_paths_to_local(
+                                ctx,
+                                *arg,
+                                include_root_path,
+                                include_flat_name,
+                                local_type_ids,
+                                local_module_ids,
+                                local_modtype_ids,
+                                visited,
+                            );
+                        }
+                    }
+                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                        for label in labels {
+                            rewrite_included_type_paths_to_local(
+                                ctx,
+                                label.ld_type,
+                                include_root_path,
+                                include_flat_name,
+                                local_type_ids,
+                                local_module_ids,
+                                local_modtype_ids,
+                                visited,
+                            );
+                        }
+                    }
+                }
+                if let Some(ret_ty) = ext.ext_ret_type {
+                    rewrite_included_type_paths_to_local(
+                        ctx,
+                        ret_ty,
+                        include_root_path,
+                        include_flat_name,
+                        local_type_ids,
+                        local_module_ids,
+                        local_modtype_ids,
+                        visited,
+                    );
+                }
+            }
+            crate::types::decl::SignatureItem::SigModule(id, md, _) => {
+                md.md_path = Some(Path::Pident(id.clone()));
+                rewrite_included_module_type_paths_to_local(
+                    ctx,
+                    &mut md.md_type,
+                    include_root_path,
+                    include_flat_name,
+                    local_type_ids,
+                    local_module_ids,
+                    local_modtype_ids,
+                    visited,
+                );
+            }
+            crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
+                if let Some(mty) = mtd.mtd_type.as_mut() {
+                    rewrite_included_module_type_paths_to_local(
+                        ctx,
+                        mty,
+                        include_root_path,
+                        include_flat_name,
+                        local_type_ids,
+                        local_module_ids,
+                        local_modtype_ids,
+                        visited,
+                    );
+                }
+                let _ = id;
+            }
+            crate::types::decl::SignatureItem::SigClass
+            | crate::types::decl::SignatureItem::SigClassType => {}
+        }
     }
 }
 
@@ -8337,18 +8771,12 @@ fn type_structure_item<'a>(
                     )
                 })
             });
-            let mut new_env = env.clone();
-            if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-                match &final_include_sig {
-                    Some(sig_items) => {
-                        eprintln!("[include-labels] include-sig-items={}", sig_items.len())
-                    }
-                    None => eprintln!("[include-labels] include-sig-items=NONE"),
-                }
-            }
-            if let Some(sig_items) = &final_include_sig {
+            let localized_include_sig = final_include_sig.as_ref().map(|sig_items| {
+                let mut sig =
+                    crate::types::typecore::copy_lookup_signature_for_subst(sig_items, tctx.type_ctx);
+                let include_root_path = include_module_root_path(&typed_mod);
                 let include_flat_name = include_module_flat_name(&typed_mod);
-                let local_include_types: HashMap<String, Ident> = sig_items
+                let local_include_types: HashMap<String, Ident> = sig
                     .iter()
                     .filter_map(|item| match item {
                         crate::types::decl::SignatureItem::SigType(id, _, _) => {
@@ -8357,6 +8785,49 @@ fn type_structure_item<'a>(
                         _ => None,
                     })
                     .collect();
+                let local_include_modules: HashMap<String, Ident> = sig
+                    .iter()
+                    .filter_map(|item| match item {
+                        crate::types::decl::SignatureItem::SigModule(id, _, _) => {
+                            Some((id.name().to_string(), id.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let local_include_modtypes: HashMap<String, Ident> = sig
+                    .iter()
+                    .filter_map(|item| match item {
+                        crate::types::decl::SignatureItem::SigModtype(id, _) => {
+                            Some((id.name().to_string(), id.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if include_root_path.is_some() || include_flat_name.is_some() {
+                    let mut visited = HashSet::new();
+                    rewrite_included_signature_paths_to_local(
+                        tctx.type_ctx,
+                        &mut sig,
+                        include_root_path.as_ref(),
+                        include_flat_name.as_deref(),
+                        &local_include_types,
+                        &local_include_modules,
+                        &local_include_modtypes,
+                        &mut visited,
+                    );
+                }
+                sig
+            });
+            let mut new_env = env.clone();
+            if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
+                match &localized_include_sig {
+                    Some(sig_items) => {
+                        eprintln!("[include-labels] include-sig-items={}", sig_items.len())
+                    }
+                    None => eprintln!("[include-labels] include-sig-items=NONE"),
+                }
+            }
+            if let Some(sig_items) = &localized_include_sig {
                 // OCaml's include adds all signature items directly to the environment
                 // as if they were defined locally (Pident paths, not Pdot paths).
                 // This matches OCaml's Env.add_signature behavior.
@@ -8366,27 +8837,7 @@ fn type_structure_item<'a>(
                             if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
                                 eprintln!("[include-labels] sigvalue {}", id.name());
                             }
-                            let mut desc = desc.clone();
-                            if let Some(include_flat_name) = include_flat_name.as_deref() {
-                                if !local_include_types.is_empty() {
-                                    // Avoid mutating shared type nodes from the included
-                                    // signature. OCaml's Env.add_signature rewrites through
-                                    // substitution, not by in-place edits on original nodes.
-                                    desc.val_type = crate::types::ctype::subst_identity_copy(
-                                        tctx.type_ctx,
-                                        desc.val_type,
-                                    );
-                                    let mut visited = HashSet::new();
-                                    rewrite_included_type_paths_to_local(
-                                        tctx.type_ctx,
-                                        desc.val_type,
-                                        include_flat_name,
-                                        &local_include_types,
-                                        &mut visited,
-                                    );
-                                }
-                            }
-                            new_env.add_value(id.clone(), desc);
+                            new_env.add_value(id.clone(), desc.clone());
                         }
                         crate::types::decl::SignatureItem::SigType(id, decl, _) => {
                             if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
@@ -8574,7 +9025,7 @@ fn type_structure_item<'a>(
 
             let desc = StructureItemDesc::Tstr_include(IncludeDeclaration {
                 incl_mod: typed_mod,
-                incl_type: final_include_sig.unwrap_or_default(),
+                incl_type: localized_include_sig.unwrap_or_default(),
                 incl_attributes: incl.pincl_attributes.clone(),
                 incl_loc: incl.pincl_loc,
             });
