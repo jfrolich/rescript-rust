@@ -2484,7 +2484,7 @@ fn apply_package_constraints_to_module_type<'b>(
                                     path: Path::Pident(manifest_id),
                                     args,
                                     ..
-                                } if args.is_empty() && !manifest_id.is_persistent()
+                                } if args.is_empty() && !manifest_id.is_persistent() && id.name() == "state"
                             ) {
                                 constrained_type_map.insert(id.stamp(), *manifest_ty);
                             }

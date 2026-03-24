@@ -14829,6 +14829,173 @@ fn type_extension_expr(
     ))
 }
 
+fn letmodule_path_root_is_module(path: &Path, module_id: &Ident) -> bool {
+    match path {
+        Path::Pident(id) => id.same(module_id),
+        Path::Pdot(prefix, _, _) => letmodule_path_root_is_module(prefix, module_id),
+        Path::Papply(_, _) => false,
+    }
+}
+
+fn letmodule_replace_module_root_path(path: &Path, module_id: &Ident, alias_root: &Path) -> Path {
+    match path {
+        Path::Pident(id) => {
+            if id.same(module_id) {
+                alias_root.clone()
+            } else {
+                path.clone()
+            }
+        }
+        Path::Pdot(prefix, name, _) => {
+            let rewritten_prefix =
+                letmodule_replace_module_root_path(prefix, module_id, alias_root);
+            if rewritten_prefix == **prefix {
+                path.clone()
+            } else {
+                Path::pdot(rewritten_prefix, name.clone())
+            }
+        }
+        Path::Papply(_, _) => path.clone(),
+    }
+}
+
+fn resolve_alias_root_from_module_type(
+    env: &Env,
+    mty: &crate::types::decl::ModuleType,
+    visited: &mut HashSet<String>,
+) -> Option<Path> {
+    use crate::types::decl::ModuleType as DeclMty;
+
+    match mty {
+        DeclMty::MtyAlias(_, alias_path) => Some(alias_path.clone()),
+        DeclMty::MtyIdent(path) => match path {
+            Path::Pident(id) => {
+                let name = id.name().to_string();
+                if !visited.insert(name.clone()) {
+                    return None;
+                }
+
+                if let Ok(mtd) = env.find_modtype(&name) {
+                    if let Some(inner_mty) = &mtd.mtd_type {
+                        if let Some(alias_root) =
+                            resolve_alias_root_from_module_type(env, inner_mty, visited)
+                        {
+                            return Some(alias_root);
+                        }
+                    }
+                }
+
+                if let Ok(md) = env.find_module(&name) {
+                    if let Some(alias_root) =
+                        resolve_alias_root_from_module_type(env, &md.md_type, visited)
+                    {
+                        return Some(alias_root);
+                    }
+                }
+
+                None
+            }
+            _ => Some(path.clone()),
+        },
+        _ => None,
+    }
+}
+
+fn resolve_letmodule_alias_root(env: &Env, module_id: &Ident) -> Option<Path> {
+    let md = env.find_module(module_id.name()).ok()?;
+    let mut visited = HashSet::new();
+    resolve_alias_root_from_module_type(env, &md.md_type, &mut visited)
+}
+
+fn replace_letmodule_local_paths<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    ty: TypeExprRef,
+    module_id: &Ident,
+    replacements: &mut HashMap<String, TypeExprRef>,
+    seen: &mut HashSet<TypeExprRef>,
+) {
+    let ty = ctx.repr(ty);
+    if !seen.insert(ty) {
+        return;
+    }
+
+    let local_constr = match &*ctx.get_desc(ty) {
+        TypeDesc::Tconstr { path, args, .. } if letmodule_path_root_is_module(path, module_id) => {
+            Some((path.clone(), args.clone()))
+        }
+        _ => None,
+    };
+
+    if let Some((local_path, local_args)) = local_constr {
+        // Match OCaml `Ctype.nondep_type`: for local module-rooted paths,
+        // first try one-step abbreviation expansion.
+        if let Some(expanded) = crate::types::ctype::expand_head_once(ctx, env, ty) {
+            let expanded = ctx.repr(expanded);
+            if expanded != ty {
+                crate::types::link_type(ctx, ty, expanded);
+                replace_letmodule_local_paths(ctx, env, expanded, module_id, replacements, seen);
+                return;
+            }
+        }
+
+        // If expansion is unavailable, try replacing the local root module
+        // with its underlying alias root path (`MS.t` -> `Belt_MapString.t`).
+        if let Some(alias_root) = resolve_letmodule_alias_root(env, module_id) {
+            let rewritten_path =
+                letmodule_replace_module_root_path(&local_path, module_id, &alias_root);
+            if rewritten_path != local_path {
+                let rewritten_ty = ctx.new_constr(rewritten_path, local_args);
+                crate::types::link_type(ctx, ty, rewritten_ty);
+                replace_letmodule_local_paths(
+                    ctx,
+                    env,
+                    rewritten_ty,
+                    module_id,
+                    replacements,
+                    seen,
+                );
+                return;
+            }
+        }
+
+        // If no manifest expansion is available, keep the existing fallback:
+        // abstract this module-rooted constructor with a shared fresh variable.
+        let key = local_path.name();
+        let replacement_ty = *replacements.entry(key).or_insert_with(|| ctx.new_var(None));
+        crate::types::link_type(ctx, ty, replacement_ty);
+        return;
+    }
+
+    crate::types::iter_type_expr(ctx, ty, |child| {
+        replace_letmodule_local_paths(ctx, env, child, module_id, replacements, seen);
+    });
+}
+
+fn apply_letmodule_local_path_cleanup<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    body_env: &Env,
+    module_id: &Ident,
+    rewritten_ty: TypeExprRef,
+    expected_ty: TypeExprRef,
+) {
+    let mut replacements: HashMap<String, TypeExprRef> = HashMap::new();
+    let mut seen: HashSet<TypeExprRef> = HashSet::new();
+    replace_letmodule_local_paths(ctx, body_env, rewritten_ty, module_id, &mut replacements, &mut seen);
+    replace_letmodule_local_paths(ctx, body_env, expected_ty, module_id, &mut replacements, &mut seen);
+    for (_id, value_desc) in env.iter_values() {
+        replace_letmodule_local_paths(
+            ctx,
+            body_env,
+            value_desc.val_type,
+            module_id,
+            &mut replacements,
+            &mut seen,
+        );
+    }
+}
+
 /// Type check let module expression.
 #[allow(clippy::too_many_arguments)]
 fn type_letmodule(
@@ -15290,34 +15457,7 @@ fn type_letmodule(
         // expression type before unifying with the surrounding expectation.
         let typed_body = type_expect(tctx, &body_env, body, expected_ty, None)?;
         let rewritten_ty = typed_body.exp_type;
-        let mut replacements: HashMap<String, TypeExprRef> = HashMap::new();
-        let mut seen: HashSet<TypeExprRef> = HashSet::new();
-        replace_letmodule_local_paths(
-            ctx,
-            &body_env,
-            rewritten_ty,
-            &mod_id,
-            &mut replacements,
-            &mut seen,
-        );
-        replace_letmodule_local_paths(
-            ctx,
-            &body_env,
-            expected_ty,
-            &mod_id,
-            &mut replacements,
-            &mut seen,
-        );
-        for (_id, value_desc) in env.iter_values() {
-            replace_letmodule_local_paths(
-                ctx,
-                &body_env,
-                value_desc.val_type,
-                &mod_id,
-                &mut replacements,
-                &mut seen,
-            );
-        }
+        apply_letmodule_local_path_cleanup(ctx, env, &body_env, &mod_id, rewritten_ty, expected_ty);
         // NOTE: OCaml does NOT unify body.exp_type with ty_expected here.
         // type_expect already connected them internally. Unifying here would
         // merge the Pexp_tuple's result_ty with the filter_arrow's return_ty,
@@ -15944,6 +16084,14 @@ fn type_expect_with_module_unpacks(
     );
     let typed_body =
         type_expect_with_module_unpacks(tctx, &body_env, body, expected_ty, rest, context)?;
+    apply_letmodule_local_path_cleanup(
+        tctx.type_ctx,
+        env,
+        &body_env,
+        &unpack.id,
+        typed_body.exp_type,
+        expected_ty,
+    );
 
     let lid = ensure_lident_idx(tctx.arena, &unpack.name.txt);
     let located_lid = Located {
