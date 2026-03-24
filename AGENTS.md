@@ -223,9 +223,9 @@ python3 scripts/parity_analyzer.py insertion ticker --lookahead 300 --min-run 6 
 python3 scripts/parity_analyzer.py divergence-summary
 python3 scripts/parity_analyzer.py divergence-summary --lookahead 300 --min-run 6 --top 25 --types 25
 
-# Aligned type preamble comparison (requires sexp files)
-python3 scripts/parity_analyzer.py preamble ticker
-python3 scripts/parity_analyzer.py preamble ticker --diff   # only show non-matching types
+# Aligned type-occurrence comparison (requires sexp files)
+python3 scripts/parity_analyzer.py types ticker
+python3 scripts/parity_analyzer.py types ticker --diff   # only show non-matching types
 
 # Trace a type ID through both compilers
 python3 scripts/parity_analyzer.py trace ticker 11
@@ -238,7 +238,7 @@ python3 scripts/parity_analyzer.py extra chn_test
 python3 scripts/parity_analyzer.py row-order DBScript__MigrationLayoutsRounding
 python3 scripts/parity_analyzer.py row-order DBScript__MigrationLayoutsRounding --contains Layer
 
-# Find first divergence point between preambles with cascade analysis
+# Find first divergence point between extracted type streams with cascade analysis
 python3 scripts/parity_analyzer.py divergence chn_test
 ```
 

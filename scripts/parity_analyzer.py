@@ -7,7 +7,7 @@ reach 100% parity. Works with files in .parity-cache/tests/.
 Commands:
     summary              Overview of all failures
     motifs               Hunk-level motif classification across diffs
-    preamble <file>      Aligned extracted-type comparison
+    types <file>         Aligned type-occurrence comparison
     trace <file> <id>    Trace an extracted type occurrence
     extra <file>         Find extra/missing type nodes
     extra-summary        Aggregate extra/missing type motifs across failing files
@@ -24,7 +24,7 @@ from collections import Counter
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -134,58 +134,31 @@ def parse_sexp_file(text: str) -> List[SexpNode]:
 
 @dataclass
 class SexpFile:
-    """Parsed sexp file with optional type preamble or synthesized inline types."""
+    """Parsed sexp file with extracted inline type occurrences."""
     types: dict[int, SexpNode]  # type_id -> type definition
-    structure: Optional[SexpNode]
-    raw_nodes: list[SexpNode]
-    type_paths: dict[int, str] = field(default_factory=dict)
-    synthetic_types: bool = False
+    type_paths: dict[int, str]
 
     @staticmethod
     def parse(text: str) -> 'SexpFile':
         nodes = parse_sexp_file(text)
-        types = {}
-        structure = None
+        roots: List[tuple[str, SexpNode]] = []
 
         for node in nodes:
             if isinstance(node, SexpList) and node.children:
                 head = node.children[0]
-                if isinstance(head, SexpAtom) and head.value == "types":
-                    # Parse type entries: (id (Tvar ...))
-                    for child in node.children[1:]:
-                        if isinstance(child, SexpList) and len(child.children) >= 2:
-                            id_node = child.children[0]
-                            if isinstance(id_node, SexpAtom):
-                                try:
-                                    tid = int(id_node.value)
-                                    type_body = child.children[1] if len(child.children) == 2 else SexpList(child.children[1:])
-                                    types[tid] = type_body
-                                except ValueError:
-                                    pass
-                elif isinstance(head, SexpAtom) and head.value in {"structure", "signature"}:
-                    structure = node
+                if isinstance(head, SexpAtom) and head.value in {"structure", "signature"}:
+                    roots.append((head.value, node))
 
+        if not roots:
+            for i, node in enumerate(nodes):
+                roots.append((f"top[{i}]", node))
+
+        types: dict[int, SexpNode] = {}
         type_paths: dict[int, str] = {}
-        synthetic_types = False
-        if not types:
-            synthetic_types = True
-            roots: List[tuple[str, SexpNode]] = []
-            if structure is not None:
-                roots.append((structure.children[0].value if isinstance(structure.children[0], SexpAtom) else "root", structure))
-            else:
-                for i, node in enumerate(nodes):
-                    roots.append((f"top[{i}]", node))
+        for root_label, root in roots:
+            _collect_inline_types(root, [root_label], types, type_paths)
 
-            for root_label, root in roots:
-                _collect_inline_types(root, [root_label], types, type_paths)
-
-        return SexpFile(
-            types=types,
-            structure=structure,
-            raw_nodes=nodes,
-            type_paths=type_paths,
-            synthetic_types=synthetic_types,
-        )
+        return SexpFile(types=types, type_paths=type_paths)
 
 
 TYPE_TERM_TAGS = {
@@ -670,23 +643,6 @@ def analyze_diff(diff_text: str) -> dict:
     hunks = count_hunks(diff_text)
     lines = diff_text.split('\n')
 
-    # Check if diff is in preamble (types section) or structure
-    in_types = False
-    preamble_hunks = 0
-    structure_hunks = 0
-    current_in_types = True
-
-    for line in lines:
-        if line.startswith('@@'):
-            if current_in_types:
-                preamble_hunks += 1
-            else:
-                structure_hunks += 1
-        # Track if we've passed the (structure line
-        stripped = line.lstrip('+-').lstrip()
-        if stripped.startswith('(structure'):
-            current_in_types = False
-
     # Find first actual difference
     first_diff = ""
     for line in lines:
@@ -699,8 +655,6 @@ def analyze_diff(diff_text: str) -> dict:
 
     return {
         'hunks': hunks,
-        'preamble_hunks': preamble_hunks,
-        'structure_hunks': structure_hunks,
         'first_diff': first_diff,
         'category': category,
     }
@@ -743,39 +697,11 @@ def categorize_diff(diff_text: str) -> str:
     else:
         return "id-only"
 
-
-def count_preamble_types(diff_text: str) -> tuple[int, int]:
-    """Count types mentioned in OCaml (-) and Rust (+) sides of preamble."""
-    ocaml_ids = set()
-    rust_ids = set()
-    in_preamble = True
-
-    for line in diff_text.split('\n'):
-        stripped = line.lstrip('+-').lstrip()
-        if stripped.startswith('(structure'):
-            in_preamble = False
-            continue
-        if not in_preamble:
-            continue
-
-        # Look for type ID definitions: lines that are just a number
-        if line.startswith('-') and not line.startswith('---'):
-            content = line[1:].strip()
-            if re.match(r'^\d+$', content):
-                ocaml_ids.add(int(content))
-        elif line.startswith('+') and not line.startswith('+++'):
-            content = line[1:].strip()
-            if re.match(r'^\d+$', content):
-                rust_ids.add(int(content))
-
-    return len(ocaml_ids), len(rust_ids)
-
-
 # ─── Motif Helpers ───────────────────────────────────────────────────────────
 
 PATH_DOT_RE = re.compile(r'\(Pdot\s+\(Pident\s+"?([^) "]+)"?\)\s+"?([^) "]+)"?\)')
 PATH_IDENT_RE = re.compile(r'\(Pident\s+"?([^) "]+)"?\)')
-TYPE_ID_RE = re.compile(r'^#\d+$')
+LOCAL_TYPE_ID_RE = re.compile(r'\((?:mu|ref|Tvar|Tunivar)\s+\d+\b')
 
 
 def iter_diff_hunks(diff_text: str) -> List[List[str]]:
@@ -855,8 +781,9 @@ def _path_hint_from_key(key: str, limit: int = 2) -> str:
     return hint
 
 
-def _normalize_type_refs(line: str) -> str:
-    return re.sub(r'#\d+', '#N', line)
+def _normalize_type_ids(line: str) -> str:
+    line = re.sub(r'#\d+', '#N', line)
+    return re.sub(r'\((mu|ref|Tvar|Tunivar)\s+\d+\b', r'(\1 N', line)
 
 
 def _extract_path_terms(text: str) -> List[str]:
@@ -929,7 +856,10 @@ def classify_hunk_motifs(hunk_lines: List[str]) -> tuple[set[str], List[Tuple[st
     minus_has_path = ('Pdot' in minus_text) or ('Pident' in minus_text)
     plus_has_path = ('Pdot' in plus_text) or ('Pident' in plus_text)
     has_path = minus_has_path or plus_has_path
-    has_refs = ('#' in minus_text) or ('#' in plus_text)
+    has_refs = (
+        ('#' in minus_text) or ('#' in plus_text) or
+        bool(LOCAL_TYPE_ID_RE.search(minus_text)) or bool(LOCAL_TYPE_ID_RE.search(plus_text))
+    )
 
     minus_flat = {_canonicalize_ident_path(i) for i in PATH_IDENT_RE.findall(minus_text) if '__' in i}
     plus_flat = {_canonicalize_ident_path(i) for i in PATH_IDENT_RE.findall(plus_text) if '__' in i}
@@ -955,16 +885,12 @@ def classify_hunk_motifs(hunk_lines: List[str]) -> tuple[set[str], List[Tuple[st
 
     id_norm_matches = 0
     for m_line, p_line in zip(minus, plus):
-        if m_line != p_line and _normalize_type_refs(m_line) == _normalize_type_refs(p_line):
-            if '#' in m_line or '#' in p_line or TYPE_ID_RE.match(m_line) or TYPE_ID_RE.match(p_line):
+        if m_line != p_line and _normalize_type_ids(m_line) == _normalize_type_ids(p_line):
+            if ('#' in m_line or '#' in p_line or
+                    LOCAL_TYPE_ID_RE.search(m_line) or LOCAL_TYPE_ID_RE.search(p_line)):
                 id_norm_matches += 1
     if id_norm_matches:
         motifs.add("id_ref_shift")
-
-    minus_num_ids = sum(1 for l in minus if l.isdigit())
-    plus_num_ids = sum(1 for l in plus if l.isdigit())
-    if minus_num_ids != plus_num_ids:
-        motifs.add("preamble_id_imbalance")
 
     if (('Reither' in minus_text and 'Rpresent' in plus_text) or
             ('Rpresent' in minus_text and 'Reither' in plus_text)):
@@ -1115,54 +1041,12 @@ def analyze_insertion(
     return result
 
 
-# ─── Structure Reference Finder ──────────────────────────────────────────────
-
-def find_refs_in_structure(structure: SexpNode, target_id: int,
-                           path: Optional[List[str]] = None) -> List[str]:
-    """Find all references to #<target_id> in the structure tree.
-
-    Returns list of path descriptions.
-    """
-    if path is None:
-        path = []
-    results = []
-
-    if isinstance(structure, SexpAtom):
-        if structure.value == f"#{target_id}":
-            results.append(" > ".join(path) if path else "(root)")
-        return results
-
-    # Build context from this node
-    context = ""
-    if structure.children:
-        head = structure.children[0]
-        if isinstance(head, SexpAtom):
-            context = head.value
-
-    # Check for (type #N) pattern
-    if (len(structure.children) == 2 and
-        isinstance(structure.children[0], SexpAtom) and
-        structure.children[0].value == "type" and
-        isinstance(structure.children[1], SexpAtom) and
-        structure.children[1].value == f"#{target_id}"):
-        results.append(" > ".join(path + ["type"]) if path else "type")
-        return results
-
-    new_path = path + [context] if context else path
-    for child in structure.children:
-        results.extend(find_refs_in_structure(child, target_id, new_path))
-
-    return results
-
-
 def find_refs_in_sexpfile(sf: SexpFile, target_id: int) -> List[str]:
     """Find structure occurrence paths for an extracted type id."""
-    if sf.synthetic_types:
-        path = sf.type_paths.get(target_id)
-        return [path] if path is not None else []
-    if sf.structure is None:
+    path = sf.type_paths.get(target_id)
+    if path is None:
         return []
-    return find_refs_in_structure(sf.structure, target_id)
+    return [path]
 
 
 # ─── Commands ─────────────────────────────────────────────────────────────────
@@ -1199,12 +1083,11 @@ def cmd_summary(args, root: str):
     # Print header
     print(bold(f"Parity Failures: {len(entries)} files, {total_hunks} total hunks"))
     print()
-    print(f"  {'File':<45} {'Hunks':>6}  {'Pre/Str':>8}  {'Category':<12} {'First diff'}")
-    print(f"  {'─'*45} {'─'*6}  {'─'*8}  {'─'*12} {'─'*40}")
+    print(f"  {'File':<45} {'Hunks':>6}  {'Category':<12} {'First diff'}")
+    print(f"  {'─'*45} {'─'*6}  {'─'*12} {'─'*40}")
 
     for name, info in entries:
         hunks_str = str(info['hunks'])
-        pre_str = f"{info['preamble_hunks']}/{info['structure_hunks']}"
 
         cat = info['category']
         if cat == "id-only":
@@ -1217,7 +1100,7 @@ def cmd_summary(args, root: str):
             cat_str = cat
 
         first = info['first_diff'][:40]
-        print(f"  {name:<45} {hunks_str:>6}  {pre_str:>8}  {cat:<12} {dim(first)}")
+        print(f"  {name:<45} {hunks_str:>6}  {cat_str:<12} {dim(first)}")
 
     print()
     print(f"  Total: {bold(str(total_hunks))} hunks across {bold(str(len(entries)))} files")
@@ -1462,8 +1345,8 @@ def cmd_insertion(args, root: str):
             print(f"  {file_name:<42} div={div_str:<6} reason={result.reason:<8} ids=#{result.ocaml_id}/#{result.rust_id}")
 
 
-def cmd_preamble(args, root: str):
-    """Show aligned extracted-type comparison."""
+def cmd_types(args, root: str):
+    """Show aligned type-occurrence comparison."""
     name = resolve_file(args.file, root)
     ocaml_sf, rust_sf = require_sexp_files(name, root)
 
@@ -1474,11 +1357,8 @@ def cmd_preamble(args, root: str):
     n_shifted = sum(1 for m in matches if m[2] == "SHIFTED")
     n_extra_o = sum(1 for m in matches if m[2] == "EXTRA_OCAML")
     n_extra_r = sum(1 for m in matches if m[2] == "EXTRA_RUST")
-    total = len(ocaml_sf.types)
-
     short_name = name.replace("tests_tests_src_", "")
-    title = "Extracted Inline Types" if ocaml_sf.synthetic_types or rust_sf.synthetic_types else "Type Preamble"
-    print(bold(f"{title}: {short_name}"))
+    print(bold(f"Type Occurrences: {short_name}"))
     print(f"  OCaml: {len(ocaml_sf.types)} types, Rust: {len(rust_sf.types)} types")
     print(f"  {green(f'{n_match} match')}  {yellow(f'{n_shifted} shifted')}  "
           f"{red(f'{n_extra_o} extra-ocaml')}  {red(f'{n_extra_r} extra-rust')}")
@@ -1605,25 +1485,6 @@ def cmd_trace(args, root: str):
             else:
                 print(dim(f"    #{mid}: (no references found)"))
         print()
-
-    # Show what references this type
-    print(bold(f"  Types referencing #{target_id} in {compiler}:"))
-    if primary_sf.synthetic_types:
-        print(dim("    inline type mode: synthetic ids are occurrence ids; only local mu/ref binders remain inside a type term"))
-    else:
-        referencing = []
-        for tid, node in sorted(primary_sf.types.items()):
-            s = sexp_to_str(node)
-            if f"#{target_id}" in s and tid != target_id:
-                referencing.append(tid)
-        if referencing:
-            for tid in referencing[:15]:
-                print(f"    #{tid}: {type_summary(primary_sf.types[tid])}")
-            if len(referencing) > 15:
-                print(f"    ... and {len(referencing) - 15} more")
-        else:
-            print(dim("    (none)"))
-
 
 def cmd_extra(args, root: str):
     """Find extra/missing type nodes between compilers."""
@@ -2480,7 +2341,7 @@ Examples:
   %(prog)s motifs
   %(prog)s motifs Service__PublicVideo --top 15
   %(prog)s divergence-summary --top 20 --types 20
-  %(prog)s preamble ticker
+  %(prog)s types ticker
   %(prog)s trace ticker 11
   %(prog)s extra more_poly_variant_test
   %(prog)s extra jsx_preserve_test --paths-only
@@ -2509,10 +2370,10 @@ Examples:
     sub_motifs.add_argument('--paths', type=int, default=12,
                             help='Number of removed/added path terms to show (default: 12)')
 
-    # preamble
-    sub_preamble = subparsers.add_parser('preamble', help='Aligned extracted-type comparison')
-    sub_preamble.add_argument('file', help='File name or short name (e.g., "ticker")')
-    sub_preamble.add_argument('--diff', action='store_true', help='Only show non-matching types')
+    # types
+    sub_types = subparsers.add_parser('types', help='Aligned type-occurrence comparison')
+    sub_types.add_argument('file', help='File name or short name (e.g., "ticker")')
+    sub_types.add_argument('--diff', action='store_true', help='Only show non-matching types')
 
     # trace
     sub_trace = subparsers.add_parser('trace', help='Trace an extracted type occurrence')
@@ -2620,7 +2481,7 @@ Examples:
     commands = {
         'summary': cmd_summary,
         'motifs': cmd_motifs,
-        'preamble': cmd_preamble,
+        'types': cmd_types,
         'trace': cmd_trace,
         'extra': cmd_extra,
         'extra-summary': cmd_extra_summary,
