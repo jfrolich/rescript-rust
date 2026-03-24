@@ -118,6 +118,7 @@ scriptDir=$(dirname "$0")
 PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
+SEMANTIC_COMPARE="$PROJECT_ROOT/scripts/typedtree_semantic_compare.py"
 RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/release/bsc}"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe}"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
@@ -332,7 +333,7 @@ mkdir -p "$RESULTS_DIR"
 mkdir -p "$TEMP_DIR/diffs"
 
 # Export variables for parallel execution
-export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT TELLA_MODE CACHE_DIR
+export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT TELLA_MODE CACHE_DIR SEMANTIC_COMPARE
 
 # Function to test a single file - writes results to a file
 test_single_file() {
@@ -420,6 +421,8 @@ test_single_file() {
     # Compare if both succeeded
     if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
         if diff -q "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > /dev/null 2>&1; then
+            parity_pass=1
+        elif python3 "$SEMANTIC_COMPARE" "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > /dev/null 2>&1; then
             parity_pass=1
         else
             parity_fail=1
