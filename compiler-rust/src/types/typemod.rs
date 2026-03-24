@@ -17,6 +17,7 @@ use crate::parser::ast::Attributes;
 use crate::parser::ast::RecFlag;
 use crate::parser::ast::Variance as ParserVariance;
 use crate::parser::ast::{
+    Attribute as ParsedAttribute, Payload as ParsedPayload,
     ModuleExpr as ParsedModuleExpr, ModuleExprDesc as ParsedModuleExprDesc,
     StructureItem as ParsedStructureItem, StructureItemDesc as ParsedStructureItemDesc,
 };
@@ -88,6 +89,60 @@ fn force_poly_typed_core_type(
             (poly_ctyp, poly_ty)
         }
     }
+}
+
+fn parser_attr_to_decl_attr(
+    arena: &ParseArena,
+    attr: &ParsedAttribute,
+) -> crate::types::decl::Attribute {
+    let (name, payload) = attr;
+    let attr_payload = match payload {
+        ParsedPayload::PStr(_) => crate::types::decl::AttributePayload::Structure(vec![]),
+        ParsedPayload::PSig(_) => crate::types::decl::AttributePayload::Structure(vec![]),
+        ParsedPayload::PTyp(_) => crate::types::decl::AttributePayload::Ident("<core_type>".into()),
+        ParsedPayload::PPat(_) => crate::types::decl::AttributePayload::Ident("<pattern>".into()),
+    };
+    crate::types::decl::Attribute {
+        attr_name: crate::types::asttypes::Located {
+            txt: arena.get_string(name.txt).to_string(),
+            loc: arena.to_location(name.loc),
+        },
+        attr_payload,
+        attr_loc: arena.to_location(name.loc),
+    }
+}
+
+fn parser_attrs_to_decl_attrs(
+    arena: &ParseArena,
+    attrs: &Attributes,
+) -> Vec<crate::types::decl::Attribute> {
+    attrs.iter()
+        .map(|attr| parser_attr_to_decl_attr(arena, attr))
+        .collect()
+}
+
+fn decl_attr_to_parser_attr(
+    arena: &ParseArena,
+    attr: &crate::types::decl::Attribute,
+) -> ParsedAttribute {
+    let name_idx = arena
+        .find_string_idx(&attr.attr_name.txt)
+        .expect("decl attribute name must already be interned in ParseArena");
+    (
+        Located::mknoloc(name_idx),
+        ParsedPayload::PStr(Box::new(vec![])),
+    )
+}
+
+fn decl_attrs_to_parser_attrs(
+    arena: &ParseArena,
+    attrs: &[crate::types::decl::Attribute],
+) -> Attributes {
+    Attributes::from_vec(
+        attrs.iter()
+            .map(|attr| decl_attr_to_parser_attr(arena, attr))
+            .collect(),
+    )
 }
 
 /// Try to convert a parsed module expression to a module path.
@@ -1793,7 +1848,7 @@ fn make_typed_spread_label(
         ld_optional: field.ld_optional,
         ld_type: typed_ld_type,
         ld_loc: source_loc,
-        ld_attributes: template.ld_attributes.clone(),
+        ld_attributes: decl_attrs_to_parser_attrs(arena, &field.ld_attributes),
     }
 }
 
@@ -6254,7 +6309,10 @@ fn type_structure_item<'a>(
                                                             &l.ld_loc,
                                                         )
                                                         .unwrap_or(source_cd_loc),
-                                                        ld_attributes: Attributes::new(),
+                                                        ld_attributes: decl_attrs_to_parser_attrs(
+                                                            arena,
+                                                            &l.ld_attributes,
+                                                        ),
                                                     })
                                                     .collect();
                                                 let args_vec = normalized_lbls
@@ -6311,6 +6369,14 @@ fn type_structure_item<'a>(
                                         cd_attributes: {
                                             let mut attrs = tag_attrs.clone();
                                             attrs.push(spread_constructor_attr.clone());
+                                            attrs.extend(
+                                                decl_attrs_to_parser_attrs(
+                                                    arena,
+                                                    &source_cstr.cd_attributes,
+                                                )
+                                                .iter()
+                                                .cloned(),
+                                            );
                                             Attributes::from_vec(attrs)
                                         },
                                     });
@@ -6469,7 +6535,10 @@ fn type_structure_item<'a>(
                                             ld_optional: lbl.pld_optional,
                                             ld_type: internal_type_ref,
                                             ld_loc: arena.to_location(lbl.pld_loc),
-                                            ld_attributes: vec![],
+                                            ld_attributes: parser_attrs_to_decl_attrs(
+                                                arena,
+                                                &lbl.pld_attributes,
+                                            ),
                                         });
                                         typed_labels.push(TypedLabelDeclaration {
                                             ld_id: Ident::create_persistent(lbl_name_str),
@@ -6670,7 +6739,14 @@ fn type_structure_item<'a>(
                                 cd_args: internal_cd_args,
                                 cd_res: internal_cd_res,
                                 cd_loc: arena.to_location(cstr.pcd_loc),
-                                cd_attributes: vec![],
+                                cd_attributes: {
+                                    let mut attrs = tag_attrs.clone();
+                                    attrs.extend(cstr.pcd_attributes.iter().cloned());
+                                    parser_attrs_to_decl_attrs(
+                                        arena,
+                                        &Attributes::from_vec(attrs),
+                                    )
+                                },
                             });
 
                             // Create typed tree constructor declaration
@@ -6782,7 +6858,10 @@ fn type_structure_item<'a>(
                                 ld_optional: lbl.pld_optional,
                                 ld_type: internal_type_ref,
                                 ld_loc: arena.to_location(lbl.pld_loc),
-                                ld_attributes: vec![],
+                                ld_attributes: parser_attrs_to_decl_attrs(
+                                    arena,
+                                    &lbl.pld_attributes,
+                                ),
                             });
                             typed_tree_labels.push(TypedLabelDeclaration {
                                 ld_id: Ident::create_persistent(lbl_name_str),
@@ -6914,7 +6993,7 @@ fn type_structure_item<'a>(
                     type_variance: typ_params.iter().map(|(_, v)| *v).collect(),
                     type_newtype_level: None,
                     type_loc: arena.to_location(decl.ptype_loc),
-                    type_attributes: vec![],
+                    type_attributes: parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
                     type_immediate: false,
                     type_unboxed: crate::types::UnboxedStatus::default(),
                     type_inlined_types: vec![],
@@ -8698,7 +8777,10 @@ fn transl_sig_type_declarations<'a>(
                         ld_optional: label.pld_optional,
                         ld_type: internal_lbl_type,
                         ld_loc: arena.to_location(label.pld_loc),
-                        ld_attributes: vec![],
+                        ld_attributes: parser_attrs_to_decl_attrs(
+                            arena,
+                            &label.pld_attributes,
+                        ),
                     });
 
                     typed_tree_labels.push(TypedLabelDeclaration {
@@ -8726,6 +8808,15 @@ fn transl_sig_type_declarations<'a>(
             crate::parser::ast::TypeKind::Ptype_variant(cstrs) => {
                 let mut internal_cstrs = Vec::with_capacity(cstrs.len());
                 let mut typed_tree_cstrs = Vec::with_capacity(cstrs.len());
+                let tag_attrs: Vec<_> = decl
+                    .ptype_attributes
+                    .iter()
+                    .filter(|attr| {
+                        let name = arena.get_string(attr.0.txt);
+                        name == "unboxed" || name == "tag"
+                    })
+                    .cloned()
+                    .collect();
 
                 for cstr in cstrs {
                     let cstr_name = arena.get_string(cstr.pcd_name.txt);
@@ -8775,7 +8866,10 @@ fn transl_sig_type_declarations<'a>(
                                     ld_optional: label.pld_optional,
                                     ld_type: internal_lbl_type,
                                     ld_loc: arena.to_location(label.pld_loc),
-                                    ld_attributes: vec![],
+                                    ld_attributes: parser_attrs_to_decl_attrs(
+                                        arena,
+                                        &label.pld_attributes,
+                                    ),
                                 });
                                 typed_record_labels.push(TypedLabelDeclaration {
                                     ld_id: Ident::create_persistent(lbl_name),
@@ -8812,7 +8906,14 @@ fn transl_sig_type_declarations<'a>(
                         cd_args: internal_args,
                         cd_res: internal_res,
                         cd_loc: arena.to_location(cstr.pcd_loc),
-                        cd_attributes: vec![],
+                        cd_attributes: {
+                            let mut attrs = tag_attrs.clone();
+                            attrs.extend(cstr.pcd_attributes.iter().cloned());
+                            parser_attrs_to_decl_attrs(
+                                arena,
+                                &Attributes::from_vec(attrs),
+                            )
+                        },
                     });
                     typed_tree_cstrs.push(TypedConstructorDeclaration {
                         cd_id: Ident::create_persistent(cstr_name),
@@ -8823,7 +8924,11 @@ fn transl_sig_type_declarations<'a>(
                         cd_args: typed_args,
                         cd_res: typed_res,
                         cd_loc: cstr.pcd_loc,
-                        cd_attributes: cstr.pcd_attributes.clone(),
+                        cd_attributes: {
+                            let mut attrs = tag_attrs.clone();
+                            attrs.extend(cstr.pcd_attributes.iter().cloned());
+                            Attributes::from_vec(attrs)
+                        },
                     });
                 }
 
@@ -8849,7 +8954,7 @@ fn transl_sig_type_declarations<'a>(
             type_variance: typ_params.iter().map(|(_, variance)| *variance).collect(),
             type_newtype_level: None,
             type_loc: arena.to_location(decl.ptype_loc),
-            type_attributes: vec![],
+            type_attributes: parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
             type_immediate: false,
             type_unboxed: crate::types::UnboxedStatus {
                 unboxed: false,
