@@ -20,8 +20,8 @@ use super::asttypes::{MutableFlag, PrivateFlag};
 use super::context::TypeContext;
 use super::decl::{
     ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorTag,
-    LabelDescription, ModtypeDeclaration, ModuleDeclaration, PrimitiveDescription, TypeDeclaration,
-    TypeKind, ValueDescription, ValueKind,
+    LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType, PrimitiveDescription,
+    TypeDeclaration, TypeKind, ValueDescription, ValueKind,
 };
 use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
@@ -679,6 +679,36 @@ impl Env {
             .find_by_name_with_origin(name)
             .map(|(id, decl, is_local)| (id, decl.as_ref(), is_local))
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+    }
+
+    /// Return current local module aliases in the environment.
+    pub fn current_local_module_aliases(&self) -> Vec<(Ident, Path)> {
+        let mut aliases = self
+            .modules
+            .by_name
+            .values()
+            .filter_map(|entries| entries.last())
+            .filter_map(|(id, decl, is_local)| {
+                if !*is_local {
+                    return None;
+                }
+                match &decl.md_type {
+                    ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => {
+                        Some((id.clone(), target.clone()))
+                    }
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        aliases.sort_by(|(_, left_target), (_, right_target)| {
+            right_target
+                .name()
+                .len()
+                .cmp(&left_target.name().len())
+                .then_with(|| left_target.name().cmp(&right_target.name()))
+        });
+        aliases
     }
 
     /// Find a module by path.

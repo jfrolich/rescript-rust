@@ -13718,24 +13718,26 @@ fn type_field(
             path
         };
         if let Some(module_path) = module_access_path {
-            let mut visited_arg = HashSet::new();
-            qualify_module_local_type_paths_in_place(
-                tctx.type_ctx,
-                env,
-                &mut tctx.persistent_env,
-                ty_arg,
-                &module_path,
-                &mut visited_arg,
-            );
-            let mut visited_res = HashSet::new();
-            qualify_module_local_type_paths_in_place(
-                tctx.type_ctx,
-                env,
-                &mut tctx.persistent_env,
-                ty_res,
-                &module_path,
-                &mut visited_res,
-            );
+            if is_local_module_access_path(&module_path) {
+                let mut visited_arg = HashSet::new();
+                qualify_module_local_type_paths_in_place(
+                    tctx.type_ctx,
+                    env,
+                    &mut tctx.persistent_env,
+                    ty_arg,
+                    &module_path,
+                    &mut visited_arg,
+                );
+                let mut visited_res = HashSet::new();
+                qualify_module_local_type_paths_in_place(
+                    tctx.type_ctx,
+                    env,
+                    &mut tctx.persistent_env,
+                    ty_res,
+                    &module_path,
+                    &mut visited_res,
+                );
+            }
         }
         if std::env::var_os("RUST_DEBUG_FIELD_INST").is_some() {
             let name = env_label.lbl_name.as_str();
@@ -13870,24 +13872,26 @@ fn type_setfield(
             path
         };
         if let Some(module_path) = module_access_path {
-            let mut visited_arg = HashSet::new();
-            qualify_module_local_type_paths_in_place(
-                ctx,
-                env,
-                &mut tctx.persistent_env,
-                ty_arg,
-                &module_path,
-                &mut visited_arg,
-            );
-            let mut visited_res = HashSet::new();
-            qualify_module_local_type_paths_in_place(
-                ctx,
-                env,
-                &mut tctx.persistent_env,
-                ty_res,
-                &module_path,
-                &mut visited_res,
-            );
+            if is_local_module_access_path(&module_path) {
+                let mut visited_arg = HashSet::new();
+                qualify_module_local_type_paths_in_place(
+                    ctx,
+                    env,
+                    &mut tctx.persistent_env,
+                    ty_arg,
+                    &module_path,
+                    &mut visited_arg,
+                );
+                let mut visited_res = HashSet::new();
+                qualify_module_local_type_paths_in_place(
+                    ctx,
+                    env,
+                    &mut tctx.persistent_env,
+                    ty_res,
+                    &module_path,
+                    &mut visited_res,
+                );
+            }
         }
         unify_expression_types(tctx, loc, ty_res, record_ty, None)?;
         (env_label, ty_arg)
@@ -19517,6 +19521,20 @@ fn path_root_module(path: &Path) -> Path {
     }
 }
 
+fn is_local_module_access_path(path: &Path) -> bool {
+    matches!(path_root_module(path), Path::Pident(id) if !id.is_persistent())
+}
+
+fn path_has_prefix(path: &Path, prefix: &Path) -> bool {
+    if path.same(prefix) {
+        return true;
+    }
+    match path {
+        Path::Pdot(parent, _, _) => path_has_prefix(parent, prefix),
+        _ => false,
+    }
+}
+
 fn type_contains_unresolved_local_path<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
     env: &Env,
@@ -19624,22 +19642,47 @@ fn qualify_label_description_paths<'a>(
     let TypeDesc::Tconstr { path: res_path, .. } = &*res_desc else {
         return;
     };
-    if !matches!(res_path, Path::Pdot(_, _, _)) {
-        return;
-    }
-    let mut probe_visited = HashSet::new();
-    if !type_contains_unresolved_local_path(ctx, env, pers_env, label.lbl_arg, &mut probe_visited)
-    {
-        return;
-    }
-
     let mut module_access_paths = Vec::new();
-    if let Some(parent) = res_path.parent() {
-        module_access_paths.push(parent);
-    }
-    let root = path_root_module(res_path);
-    if !module_access_paths.iter().any(|p| p.same(&root)) {
-        module_access_paths.push(root);
+    let mut anchor_prefixes = Vec::new();
+
+    match res_path {
+        Path::Pdot(_, _, _) => {
+            let mut probe_visited = HashSet::new();
+            let has_unresolved_local_path =
+                type_contains_unresolved_local_path(ctx, env, pers_env, label.lbl_arg, &mut probe_visited);
+            if let Some(parent) = res_path.parent() {
+                if has_unresolved_local_path {
+                    module_access_paths.push(parent.clone());
+                }
+                anchor_prefixes.push(parent);
+            }
+            let root = path_root_module(res_path);
+            if has_unresolved_local_path && !module_access_paths.iter().any(|p| p.same(&root)) {
+                module_access_paths.push(root.clone());
+            }
+            if !anchor_prefixes.iter().any(|p| p.same(&root)) {
+                anchor_prefixes.push(root);
+            }
+        }
+        Path::Pident(_) => {
+            if let Some(decl) = lookup_type_decl_for_path(res_path, env, pers_env, ctx) {
+                if let Some(manifest) = decl.type_manifest {
+                    let manifest_path = {
+                        let manifest_desc = ctx.get_desc(ctx.repr(manifest));
+                        match &*manifest_desc {
+                            TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+                            _ => None,
+                        }
+                    };
+                    if let Some(manifest_path) = manifest_path {
+                        if let Some(parent) = manifest_path.parent() {
+                            anchor_prefixes.push(parent);
+                        }
+                    }
+                }
+            }
+        }
+        Path::Papply(_, _) => return,
     }
     drop(res_desc);
 
@@ -19651,6 +19694,29 @@ fn qualify_label_description_paths<'a>(
             pers_env,
             label.lbl_arg,
             &module_access_path,
+            &mut visited,
+        );
+    }
+
+    if anchor_prefixes.is_empty() {
+        return;
+    }
+
+    for (alias_id, alias_target) in env.current_local_module_aliases() {
+        if !anchor_prefixes
+            .iter()
+            .any(|anchor| path_has_prefix(&alias_target, anchor))
+        {
+            continue;
+        }
+
+        let mut visited = HashSet::new();
+        qualify_module_local_type_paths_in_place(
+            ctx,
+            env,
+            pers_env,
+            label.lbl_arg,
+            &Path::pident(alias_id),
             &mut visited,
         );
     }
