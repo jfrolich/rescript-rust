@@ -12786,6 +12786,14 @@ fn type_record(
 
         // Build label description (prefer env-disambiguated metadata).
         let (mut label_desc, field_input_ty, poly_vars) = if let Some(env_label) = disambiguated {
+            let env_label = lookup_label_by_expected_type(
+                &field_name,
+                expected_ty,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            )
+            .unwrap_or(env_label);
             if std::env::var_os("RUST_DEBUG_GPR_4274").is_some()
                 && env_label.lbl_name == "i"
             {
@@ -21267,6 +21275,22 @@ fn lookup_type_decl_for_path<'a>(
                                     .lookup_module(parent.as_ref())
                                     .or_else(|_| env.find_module(parent_id.name()))
                                 {
+                                    // Preserve local alias access paths. For bindings like
+                                    // `module Functions = WasmBindings__Functions`, deferring
+                                    // here falls through to the alias target's global
+                                    // declaration and loses the local path family.
+                                    if !parent_id.is_persistent()
+                                        && matches!(
+                                            md.md_type,
+                                            crate::types::decl::ModuleType::MtyAlias(..)
+                                                | crate::types::decl::ModuleType::MtyIdent(..)
+                                        )
+                                    {
+                                        if let Some(cache_key) = cache_key.as_deref() {
+                                            ctx.register_resolved_pdot_type(cache_key, decl.clone());
+                                        }
+                                        return Some(decl.clone());
+                                    }
                                     if let crate::types::decl::ModuleType::MtySignature(raw_sig) =
                                         &md.md_type
                                     {
