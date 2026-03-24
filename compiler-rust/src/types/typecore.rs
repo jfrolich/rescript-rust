@@ -20939,10 +20939,10 @@ fn resolve_module_signature_for_path<'a>(
                 ) {
                     sig = strengthen_signature_for_module_access_path(ctx, &access_path, &sig);
                 }
-                if let Some(old_name) = resolved_name {
+                if let Some(ref old_name) = resolved_name {
                     crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                         &sig,
-                        &old_name,
+                        old_name,
                         &access_path,
                         ctx,
                     );
@@ -21019,14 +21019,14 @@ fn resolve_module_signature_for_path<'a>(
                             sig =
                                 strengthen_signature_for_module_access_path(ctx, &access_path, &sig);
                         }
-                        if let Some(old_name) = resolved_name {
+                        if let Some(ref old_name) = resolved_name {
                             if should_rewrite_nested_alias_self_path(
-                                &old_name,
+                                old_name,
                                 &resolved_parent_path,
                             ) {
                                 crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                                     &sig,
-                                    &old_name,
+                                    old_name,
                                     &access_path,
                                     ctx,
                                 );
@@ -21126,12 +21126,12 @@ fn lookup_type_decl_for_path<'a>(
     if let Path::Pdot(parent, type_name, _) = type_path {
         let mut deferred_self_manifest_decl: Option<crate::types::decl::TypeDeclaration> = None;
         let cache_key = path_cache_key(type_path);
+        let path_name = type_path.name();
 
         // Check resolved-sig cache first to avoid re-creating fresh type copies.
         // This approximates OCaml's components_of_module_maker lazy caching.
         // Uses a separate cache from type_decl_by_path to avoid conflicts with
         // expand_head_once entries which have unqualified paths.
-        let path_name = type_path.name();
         if let Some(cache_key) = cache_key.as_deref() {
             if let Some(decl) = ctx.find_resolved_pdot_type(cache_key) {
                 if debug_lookup_options {
@@ -21287,6 +21287,17 @@ fn lookup_type_decl_for_path<'a>(
                                         }
                                     }
                                 }
+                            }
+
+                            if decl
+                                .type_path
+                                .as_ref()
+                                .is_some_and(|stored_path| !stored_path.same(type_path))
+                            {
+                                if let Some(cache_key) = cache_key.as_deref() {
+                                    ctx.register_resolved_pdot_type(cache_key, decl.clone());
+                                }
+                                return Some(decl.clone());
                             }
 
                             // Keep the substituted declaration as a last-resort fallback,
