@@ -166,7 +166,10 @@ This is achieved ONLY by making the Rust type checker implementation equivalent 
 # Stop on first failure
 ./scripts/test_typedtree_parity.sh --quick
 
-# Skip the rewatch build step (when you only changed the Rust compiler, not test files)
+# Skip rebuilding the test project's ReScript artifacts.
+# `--no-build` does NOT rebuild `compiler-rust`, OCaml `bsc`, or `rewatch`.
+# It only skips the parity script's `rescript build` step and reuses the existing
+# `.ast` / compiled test-project artifacts already on disk.
 ./scripts/test_typedtree_parity.sh --no-build lazy_test
 ```
 
@@ -176,6 +179,7 @@ cargo build --release --manifest-path compiler-rust/Cargo.toml
 cargo build --release --manifest-path rewatch/Cargo.toml
 ```
 The parity script uses the rewatch binary, NOT bsc directly. A stale rewatch binary gives WRONG results!
+`--no-build` does not change that. It only skips rebuilding the ReScript test project inputs.
 
 **CRITICAL: Clear parity cache files before authoritative runs:**
 ```bash
@@ -265,6 +269,8 @@ find .parity-cache/tests/ocaml -type f -delete
 find .parity-cache/tests/rust -type f -delete
 
 # 3) Run full baseline (tests or tella)
+# `--no-build` here means: reuse existing generated test-project artifacts.
+# It does NOT mean the compiler binaries are fresh.
 ./scripts/test_typedtree_parity.sh --no-build
 ./scripts/test_typedtree_parity.sh --tella --no-build
 
@@ -288,6 +294,14 @@ Guardrails for every tella iteration:
 2. Non-tella must stay at `657/657` before accepting a tella fix
 3. If non-tella regresses, revert the candidate change and re-baseline cache
 
+Interpretation of `--no-build` in the commands above:
+- It skips the parity script's `rescript build` step for the test project.
+- It reuses the existing generated compiler inputs/artifacts already on disk.
+- It does not rebuild `compiler-rust`.
+- It does not rebuild OCaml `bsc`.
+- It does not rebuild `rewatch`.
+- If you changed any compiler binary, rebuild that binary first, then run parity with `--no-build` if you want to reuse the existing test-project artifacts.
+
 Tella file-key tips for analyzer commands:
 - Tella cached diff keys are underscore-encoded absolute paths, e.g. `_Users_jake_dev_tella-fusion_packages_core_webapp_src_backend_Service__PublicVideo.res`
 - You can still pass short fuzzy names (`Service__PublicVideo`) to analyzer commands; confirm resolution from command output
@@ -301,6 +315,7 @@ python3 scripts/parity_analyzer.py extra <file-key>
 Iteration loop after each candidate fix:
 1. Rebuild `compiler-rust` (and `rewatch` if touched)
 2. Re-run a focused parity slice (`./scripts/test_typedtree_parity.sh --no-build <pattern>` or `--tella --no-build <pattern>`)
+   Here `--no-build` only skips regenerating the test-project artifacts; it assumes step 1 already rebuilt the compiler binaries you changed.
 3. Re-run full parity baseline
 4. Re-run analyzer summary/divergence on updated cache
 
