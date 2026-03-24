@@ -1463,6 +1463,10 @@ fn resolve_module_type_through_env_path<'a>(
             let parent_mty = resolve_module_type_through_env_path(ctx, env, parent, visiting)?;
             let parent_sig =
                 resolve_signature_through_env_module_type(ctx, env, &parent_mty, visiting)?;
+            let parent_alias_target = match &parent_mty {
+                super::decl::ModuleType::MtyAlias(_, target_path) => Some(target_path.clone()),
+                _ => None,
+            };
             parent_sig.iter().find_map(|item| match item {
                 SignatureItem::SigModule(id, md, _) if id.name() == name => match &md.md_type {
                     super::decl::ModuleType::MtySignature(sig) => {
@@ -1476,9 +1480,33 @@ fn resolve_module_type_through_env_path<'a>(
                             parent,
                             ctx,
                         );
-                        Some(super::decl::ModuleType::MtySignature(sig.clone()))
+                        let child_sig = if let Some(target_parent_path) =
+                            parent_alias_target.as_ref()
+                        {
+                            let child_target_path = Path::pdot(target_parent_path.clone(), name);
+                            strengthen_signature_for_module_access_path(
+                                ctx,
+                                &child_target_path,
+                                sig,
+                                0,
+                            )
+                        } else {
+                            sig.clone()
+                        };
+                        Some(super::decl::ModuleType::MtySignature(child_sig))
                     }
-                    other => Some(other.clone()),
+                    other => {
+                        if let Some(target_parent_path) = parent_alias_target.as_ref() {
+                            let child_target_path = Path::pdot(target_parent_path.clone(), name);
+                            Some(strengthen_module_type_for_module_access_path(
+                                ctx,
+                                &child_target_path,
+                                other,
+                            ))
+                        } else {
+                            Some(other.clone())
+                        }
+                    }
                 },
                 SignatureItem::SigModtype(id, mtd) if id.name() == name => mtd.mtd_type.clone(),
                 _ => None,
@@ -1542,6 +1570,102 @@ fn strengthen_type_decl_for_module_access_path<'a>(
     strengthened
 }
 
+fn strengthen_module_type_for_module_access_path<'a>(
+    ctx: &'a TypeContext<'a>,
+    module_access_path: &Path,
+    mty: &super::decl::ModuleType,
+) -> super::decl::ModuleType {
+    use super::decl::ModuleType;
+
+    match mty {
+        ModuleType::MtySignature(sig) => ModuleType::MtySignature(
+            strengthen_signature_for_module_access_path(ctx, module_access_path, sig, 0),
+        ),
+        ModuleType::MtyAlias(..) | ModuleType::MtyIdent(..) => mty.clone(),
+        ModuleType::MtyFunctor {
+            param,
+            param_type,
+            result,
+        } => ModuleType::MtyFunctor {
+            param: param.clone(),
+            param_type: param_type.clone(),
+            result: Box::new(strengthen_module_type_for_module_access_path(
+                ctx,
+                module_access_path,
+                result,
+            )),
+        },
+    }
+}
+
+fn strengthen_module_decl_for_module_access_path<'a>(
+    ctx: &'a TypeContext<'a>,
+    module_access_path: &Path,
+    md: &super::decl::ModuleDeclaration,
+) -> super::decl::ModuleDeclaration {
+    let mut strengthened = md.clone();
+    strengthened.md_type =
+        strengthen_module_type_for_module_access_path(ctx, module_access_path, &md.md_type);
+    strengthened
+}
+
+fn strengthen_signature_for_module_access_path<'a>(
+    ctx: &'a TypeContext<'a>,
+    module_access_path: &Path,
+    sig: &[super::decl::SignatureItem],
+    mut pos: i32,
+) -> super::decl::Signature {
+    use super::decl::{SignatureItem, ValueKind};
+
+    let mut strengthened = Vec::with_capacity(sig.len());
+    for item in sig {
+        let new_item = match item {
+            SignatureItem::SigValue(id, desc) => {
+                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                    pos += 1;
+                }
+                SignatureItem::SigValue(id.clone(), desc.clone())
+            }
+            SignatureItem::SigType(id, decl, rec_status) => SignatureItem::SigType(
+                id.clone(),
+                strengthen_type_decl_for_module_access_path(ctx, module_access_path, id, decl),
+                *rec_status,
+            ),
+            SignatureItem::SigTypext(id, ext, ext_status) => {
+                pos += 1;
+                SignatureItem::SigTypext(id.clone(), ext.clone(), *ext_status)
+            }
+            SignatureItem::SigModule(id, md, rec_status) => {
+                let child_path = Path::Pdot(
+                    Box::new(module_access_path.clone()),
+                    id.name().to_string(),
+                    pos,
+                );
+                pos += 1;
+                SignatureItem::SigModule(
+                    id.clone(),
+                    strengthen_module_decl_for_module_access_path(ctx, &child_path, md),
+                    *rec_status,
+                )
+            }
+            SignatureItem::SigModtype(id, mtd) => {
+                let mut strengthened_mtd = mtd.clone();
+                if let Some(mty) = &mtd.mtd_type {
+                    let modtype_path = Path::pdot(module_access_path.clone(), id.name());
+                    strengthened_mtd.mtd_type = Some(
+                        strengthen_module_type_for_module_access_path(ctx, &modtype_path, mty),
+                    );
+                }
+                SignatureItem::SigModtype(id.clone(), strengthened_mtd)
+            }
+            SignatureItem::SigClass => SignatureItem::SigClass,
+            SignatureItem::SigClassType => SignatureItem::SigClassType,
+        };
+        strengthened.push(new_item);
+    }
+    strengthened
+}
+
 /// Resolve a type through local environment modules.
 /// For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
 /// follow aliases (MtyAlias/MtyIdent), and then find type t in its signature.
@@ -1557,6 +1681,12 @@ fn resolve_type_through_env<'a>(
         Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
         _ => return None,
     };
+    let debug_resolve = std::env::var("RUST_DEBUG_RESOLVE_TYPE_ENV")
+        .ok()
+        .is_some_and(|needle| {
+            let path_name = path.name();
+            !needle.is_empty() && (path_name == needle || path_name.contains(&needle))
+        });
 
     let mut visiting = HashSet::new();
     let module_mty = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)?;
@@ -1573,6 +1703,18 @@ fn resolve_type_through_env<'a>(
     } else {
         None
     };
+    if debug_resolve {
+        eprintln!(
+            "[resolve-type-env] path={} module_path={} module_mty={:?} alias_target={}",
+            path.name(),
+            module_path.name(),
+            module_mty,
+            alias_target_for_strengthening
+                .as_ref()
+                .map(|p| p.name())
+                .unwrap_or_else(|| "<none>".to_string())
+        );
+    }
     // Match OCaml Env.components_of_module path lookup behavior: when resolving
     // `M.t`, operate on a path-qualified copy of `M`'s signature so sibling
     // references inside manifests are rewritten through the access path.
@@ -1580,8 +1722,27 @@ fn resolve_type_through_env<'a>(
 
     for item in &module_sig {
         if let SignatureItem::SigType(id, decl, _) = item {
+            if debug_resolve {
+                eprintln!(
+                    "[resolve-type-env] sig-type id={} match={} manifest={} type_path={}",
+                    id.name(),
+                    id.name() == type_name,
+                    decl.type_manifest.is_some(),
+                    decl.type_path
+                        .as_ref()
+                        .map(|p| p.name())
+                        .unwrap_or_else(|| "<none>".to_string())
+                );
+            }
             if id.name() == type_name {
                 if let Some(target_path) = alias_target_for_strengthening.as_ref() {
+                    if debug_resolve {
+                        eprintln!(
+                            "[resolve-type-env] strengthen target={} type={}",
+                            target_path.name(),
+                            id.name()
+                        );
+                    }
                     return Some(strengthen_type_decl_for_module_access_path(
                         ctx,
                         target_path,
@@ -1589,11 +1750,20 @@ fn resolve_type_through_env<'a>(
                         decl,
                     ));
                 }
+                if debug_resolve {
+                    eprintln!("[resolve-type-env] returning raw decl type={}", id.name());
+                }
                 return Some(decl.clone());
             }
         }
     }
 
+    if debug_resolve {
+        eprintln!(
+            "[resolve-type-env] fallback resolve_type_through_modules path={}",
+            path.name()
+        );
+    }
     // Fall back to CMI-based resolution if local env-based lookup didn't find
     // the type item (e.g. when only the persistent path is available).
     resolve_type_through_modules(ctx, path)
