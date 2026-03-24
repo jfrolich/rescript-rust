@@ -115,12 +115,7 @@ def tokenize_sexp(text: str) -> list[str]:
 
 
 def parse_sexp_file(text: str) -> List[SexpNode]:
-    """Parse all top-level sexp forms from text using an iterative stack-based parser.
-
-    Some cached sexp files contain malformed top-level closing parens from debug
-    placeholders. Be tolerant so analysis can still proceed on the surrounding
-    well-formed structure.
-    """
+    """Parse all top-level sexp forms from text using an iterative stack-based parser."""
     tokens = tokenize_sexp(text)
     # Iterative parser to avoid Python recursion overhead
     stack = [[]]  # stack of children lists; stack[0] = top-level results
@@ -128,15 +123,10 @@ def parse_sexp_file(text: str) -> List[SexpNode]:
         if tok == '(':
             stack.append([])
         elif tok == ')':
-            if len(stack) == 1:
-                continue
             children = stack.pop()
             stack[-1].append(SexpList(children))
         else:
             stack[-1].append(SexpAtom(tok))
-    while len(stack) > 1:
-        children = stack.pop()
-        stack[-1].append(SexpList(children))
     return stack[0]
 
 
