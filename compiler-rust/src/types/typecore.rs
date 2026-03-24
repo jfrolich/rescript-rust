@@ -19403,6 +19403,39 @@ fn expand_type_path_for_compare<'a>(
                 }
             };
             if let Some(manifest_path) = manifest_path {
+                if manifest_path.same(path) {
+                    if let Some(stored_path) = decl.type_path.as_ref() {
+                        if !stored_path.same(path) {
+                            let expanded = expand_type_path_for_compare(
+                                stored_path,
+                                env,
+                                pers_env,
+                                ctx,
+                                depth + 1,
+                                visiting,
+                            );
+                            visiting.remove(&visit_key);
+                            return expanded;
+                        }
+                    }
+                    if let Path::Pdot(parent, leaf_name, _) = path {
+                        if let Some(alias_target) =
+                            alias_target_for_module_path(parent, env, pers_env, ctx)
+                        {
+                            let target_path = Path::pdot(alias_target, leaf_name.as_str());
+                            let expanded = expand_type_path_for_compare(
+                                &target_path,
+                                env,
+                                pers_env,
+                                ctx,
+                                depth + 1,
+                                visiting,
+                            );
+                            visiting.remove(&visit_key);
+                            return expanded;
+                        }
+                    }
+                }
                 let expanded = expand_type_path_for_compare(
                     &manifest_path,
                     env,
@@ -21085,6 +21118,45 @@ fn resolve_module_signature_for_path<'a>(
                             );
                         }
                         return Some((access_path, sig));
+                    }
+                }
+            }
+            None
+        }
+        Path::Papply(_, _) => None,
+    }
+}
+
+fn alias_target_for_module_path<'a>(
+    module_path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<Path> {
+    match module_path {
+        Path::Pident(id) => {
+            let md = env
+                .lookup_module(module_path)
+                .or_else(|_| env.find_module(id.name()))
+                .ok()?;
+            match &md.md_type {
+                crate::types::decl::ModuleType::MtyAlias(_, target)
+                | crate::types::decl::ModuleType::MtyIdent(target) => Some(target.clone()),
+                _ => None,
+            }
+        }
+        Path::Pdot(parent, module_name, _) => {
+            let (_, parent_sig) = resolve_module_signature_for_path(parent, env, pers_env, ctx)?;
+            for item in &parent_sig {
+                if let crate::types::decl::SignatureItem::SigModule(id, md, _) = item {
+                    if id.name() == module_name.as_str() {
+                        return match &md.md_type {
+                            crate::types::decl::ModuleType::MtyAlias(_, target)
+                            | crate::types::decl::ModuleType::MtyIdent(target) => {
+                                Some(target.clone())
+                            }
+                            _ => None,
+                        };
                     }
                 }
             }
