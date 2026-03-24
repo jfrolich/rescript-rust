@@ -29,10 +29,6 @@ end
 (* Helper functions *)
 let string txt = Sexp.atom ("\"" ^ txt ^ "\"")
 
-let opt_string = function
-  | None -> Sexp.atom "None"
-  | Some s -> Sexp.list [Sexp.atom "Some"; string s]
-
 let opt f = function
   | None -> Sexp.atom "None"
   | Some x -> Sexp.list [Sexp.atom "Some"; f x]
@@ -122,14 +118,20 @@ let partial = function
   | Partial -> Sexp.atom "Partial"
   | Total -> Sexp.atom "Total"
 
-(* Type expression dedup - each unique type is serialized once, referenced by #N *)
-(* Uses physical identity (type_expr.id after repr) as the dedup key. *)
-let dedup_tbl : (int, int) Hashtbl.t = Hashtbl.create 256
+(* Type expression preamble - each type occurrence is serialized once and
+   referenced by #N from the typedtree body.
+
+   Each preamble entry is canonicalized independently:
+   - non-cyclic sharing is serialized structurally
+   - Tvar/Tunivar identity is preserved via normalized local ids
+   - real recursion is preserved with inline mu/ref binders
+
+   This keeps parity focused on the final semantic type shape rather than the
+   allocator/copy strategy used to build it. *)
 let dedup_arr : Sexp.t array ref = ref (Array.make 1024 (Sexp.atom "_"))
 let dedup_next_idx : int ref = ref 0
 
 let reset_dedup () =
-  Hashtbl.clear dedup_tbl;
   dedup_arr := Array.make 1024 (Sexp.atom "_");
   dedup_next_idx := 0
 
@@ -150,29 +152,82 @@ let ensure_dedup_capacity idx =
     dedup_arr := new_arr
   end
 
-let rec type_expr te =
-  let te = Btype.repr te in  (* Follow Tlink chains *)
-  let key = te.Types.id in
-  match Hashtbl.find_opt dedup_tbl key with
-  | Some idx -> Sexp.atom (Printf.sprintf "#%d" idx)
-  | None ->
-    let idx = !dedup_next_idx in
-    incr dedup_next_idx;
-    Hashtbl.add dedup_tbl key idx;
-    ensure_dedup_capacity idx;
-    let sexp = type_expr_body te in
-    (!dedup_arr).(idx) <- sexp;
-    Sexp.atom (Printf.sprintf "#%d" idx)
+type active_mu_binding = {
+  id: int;
+  mutable used: bool;
+}
 
-and type_expr_body te =
-  (* All type_expr calls use let-bindings to ensure deterministic left-to-right
-     evaluation order. OCaml's ocamlopt uses unspecified order for list literal
-     elements, so inlining type_expr in [...] would give inconsistent ordering. *)
+type type_sexp_state = {
+  tvars: (int, int) Hashtbl.t;
+  tunivars: (int, int) Hashtbl.t;
+  active_bindings: (int, active_mu_binding) Hashtbl.t;
+  mutable next_tvar_id: int;
+  mutable next_tunivar_id: int;
+  mutable next_mu_id: int;
+}
+
+let new_type_sexp_state () = {
+  tvars = Hashtbl.create 16;
+  tunivars = Hashtbl.create 16;
+  active_bindings = Hashtbl.create 16;
+  next_tvar_id = 0;
+  next_tunivar_id = 0;
+  next_mu_id = 0;
+}
+
+let next_tvar_id state te =
+  match Hashtbl.find_opt state.tvars te.Types.id with
+  | Some id -> id
+  | None ->
+    let id = state.next_tvar_id in
+    state.next_tvar_id <- id + 1;
+    Hashtbl.add state.tvars te.Types.id id;
+    id
+
+let next_tunivar_id state te =
+  match Hashtbl.find_opt state.tunivars te.Types.id with
+  | Some id -> id
+  | None ->
+    let id = state.next_tunivar_id in
+    state.next_tunivar_id <- id + 1;
+    Hashtbl.add state.tunivars te.Types.id id;
+    id
+
+let rec type_expr_inline state te =
+  let te = Btype.repr te in
   match te.Types.desc with
-  | Tvar name -> Sexp.list [Sexp.atom "Tvar"; opt_string name]
+  | Tvar _ ->
+    let id = next_tvar_id state te in
+    Sexp.list [Sexp.atom "Tvar"; Sexp.atom (string_of_int id)]
+  | Tunivar _ ->
+    let id = next_tunivar_id state te in
+    Sexp.list [Sexp.atom "Tunivar"; Sexp.atom (string_of_int id)]
+  | _ -> (
+    match Hashtbl.find_opt state.active_bindings te.Types.id with
+    | Some binding ->
+      binding.used <- true;
+      Sexp.list [Sexp.atom "ref"; Sexp.atom (string_of_int binding.id)]
+    | None ->
+      let binding = {id = state.next_mu_id; used = false} in
+      state.next_mu_id <- state.next_mu_id + 1;
+      Hashtbl.add state.active_bindings te.Types.id binding;
+      let sexp = type_expr_body_inline state te in
+      Hashtbl.remove state.active_bindings te.Types.id;
+      if binding.used then
+        Sexp.list [Sexp.atom "mu"; Sexp.atom (string_of_int binding.id); sexp]
+      else
+        sexp)
+
+and type_expr_body_inline state te =
+  (* All recursive calls use let-bindings to ensure deterministic left-to-right
+     evaluation order. OCaml's ocamlopt uses unspecified order for list literal
+     elements, so inlining type_expr_inline in [...] would give inconsistent
+     ordering. *)
+  match te.Types.desc with
+  | Tvar _ | Tunivar _ -> assert false
   | Tarrow (arg, ret, _, arity) ->
-    let arg_sexp = type_expr arg.Types.typ in
-    let ret_sexp = type_expr ret in
+    let arg_sexp = type_expr_inline state arg.Types.typ in
+    let ret_sexp = type_expr_inline state ret in
     Sexp.list [
       Sexp.atom "Tarrow";
       sexp_arg_label arg.Types.lbl;
@@ -181,13 +236,13 @@ and type_expr_body te =
       (match arity with Some a -> Sexp.list [Sexp.atom "Some"; Sexp.atom (string_of_int a)] | None -> Sexp.atom "None");
     ]
   | Ttuple l ->
-    let items = List.map type_expr l in
+    let items = List.map (type_expr_inline state) l in
     Sexp.list (Sexp.atom "Ttuple" :: items)
   | Tconstr (p, args, _) ->
-    let arg_sexps = List.map type_expr args in
+    let arg_sexps = List.map (type_expr_inline state) args in
     Sexp.list [Sexp.atom "Tconstr"; path p; Sexp.list arg_sexps]
   | Tobject (ty, _) ->
-    let ty_sexp = type_expr ty in
+    let ty_sexp = type_expr_inline state ty in
     Sexp.list [Sexp.atom "Tobject"; ty_sexp]
   | Tfield (name, kind, ty1, ty2) ->
     let kind_str = match Btype.field_kind_repr kind with
@@ -195,22 +250,21 @@ and type_expr_body te =
       | Fabsent -> "Fabsent"
       | Fvar _ -> "Fvar"
     in
-    let ty1_sexp = type_expr ty1 in
-    let ty2_sexp = type_expr ty2 in
+    let ty1_sexp = type_expr_inline state ty1 in
+    let ty2_sexp = type_expr_inline state ty2 in
     Sexp.list [Sexp.atom "Tfield"; string name; Sexp.atom kind_str; ty1_sexp; ty2_sexp]
   | Tnil -> Sexp.atom "Tnil"
   | Tlink _ -> Sexp.atom "Tlink"  (* Should not happen after Btype.repr *)
   | Tsubst ty ->
-    let ty_sexp = type_expr ty in
+    let ty_sexp = type_expr_inline state ty in
     Sexp.list [Sexp.atom "Tsubst"; ty_sexp]
-  | Tvariant row -> row_desc_sexp row
-  | Tunivar name -> Sexp.list [Sexp.atom "Tunivar"; opt_string name]
+  | Tvariant row -> row_desc_sexp state row
   | Tpoly (ty, tyl) ->
-    let ty_sexp = type_expr ty in
-    let tyl_sexps = List.map type_expr tyl in
+    let ty_sexp = type_expr_inline state ty in
+    let tyl_sexps = List.map (type_expr_inline state) tyl in
     Sexp.list [Sexp.atom "Tpoly"; ty_sexp; Sexp.list tyl_sexps]
   | Tpackage (p, lids, tyl) ->
-    let tyl_sexps = List.map type_expr tyl in
+    let tyl_sexps = List.map (type_expr_inline state) tyl in
     Sexp.list [
       Sexp.atom "Tpackage";
       path p;
@@ -218,7 +272,16 @@ and type_expr_body te =
       Sexp.list tyl_sexps;
     ]
 
-and row_desc_sexp row =
+and type_expr te =
+  let idx = !dedup_next_idx in
+  incr dedup_next_idx;
+  ensure_dedup_capacity idx;
+  let state = new_type_sexp_state () in
+  let sexp = type_expr_inline state te in
+  (!dedup_arr).(idx) <- sexp;
+  Sexp.atom (Printf.sprintf "#%d" idx)
+
+and row_desc_sexp state row =
   let debug_sexp_row_filter () =
     match Sys.getenv_opt "OCAML_DEBUG_SEXP_ROWS" with
     | None -> None
@@ -250,7 +313,7 @@ and row_desc_sexp row =
         row.Types.row_fixed
   | None -> ());
   let fields_sexp = Sexp.list (List.map (fun (l, rf) ->
-    let rf_sexp = row_field_sexp rf in
+    let rf_sexp = row_field_sexp state rf in
     Sexp.list [string l; rf_sexp]
   ) row.Types.row_fields) in
   Sexp.list [
@@ -260,14 +323,14 @@ and row_desc_sexp row =
     Sexp.atom (if row.Types.row_fixed then "fixed" else "not_fixed");
   ]
 
-and row_field_sexp rf =
+and row_field_sexp state rf =
   match Btype.row_field_repr rf with
   | Rpresent None -> Sexp.atom "Rpresent_none"
   | Rpresent (Some ty) ->
-    let ty_sexp = type_expr ty in
+    let ty_sexp = type_expr_inline state ty in
     Sexp.list [Sexp.atom "Rpresent"; ty_sexp]
   | Reither (c, tyl, _, _) ->
-    let tyl_sexp = Sexp.list (List.map type_expr tyl) in
+    let tyl_sexp = Sexp.list (List.map (type_expr_inline state) tyl) in
     Sexp.list [
       Sexp.atom "Reither";
       Sexp.atom (if c then "const" else "non_const");

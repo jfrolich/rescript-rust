@@ -2,7 +2,7 @@
 
 use crate::ident::Ident;
 use crate::location::Location;
-use crate::parse_arena::{LidentIdx, LocIdx, ParseArena};
+use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::{
     ArgLabel, Arity, Attribute, ClosedFlag, DirectionFlag, MutableFlag, OverrideFlag, Payload,
     PrivateFlag, RecFlag,
@@ -106,13 +106,6 @@ fn write_latin1_line<W: Write>(out: &mut W, s: &str) -> std::io::Result<()> {
 
 fn string(txt: &str) -> Sexp {
     Sexp::atom(&format!("\"{}\"", txt))
-}
-
-fn opt_string(opt: &Option<String>) -> Sexp {
-    match opt {
-        None => Sexp::atom("None"),
-        Some(s) => Sexp::list(vec![Sexp::atom("Some"), string(s)]),
-    }
 }
 
 fn opt<T, F>(f: F, opt: &Option<T>) -> Sexp
@@ -391,22 +384,26 @@ fn sexp_partial(p: &Partial) -> Sexp {
 }
 
 // ============================================================================
-// Type Expression Dedup - each unique type is serialized once, referenced by #N
-// Uses physical identity (TypeExprRef after repr) as the dedup key.
-// The table is created per-file in the public API functions (not global state).
+// Type Expression Preamble - each type occurrence is serialized once in the
+// file preamble and referenced by #N from the typedtree.
+//
+// Unlike the old parity serializer, each preamble entry is canonicalized
+// independently:
+// - non-cyclic sharing is ignored and serialized structurally
+// - Tvar/Tunivar identity is preserved via normalized local ids
+// - real recursion is preserved via inline mu/ref binders
+//
+// This makes the format insensitive to copy/allocation strategy while still
+// checking the final semantic shape of each type.
 // ============================================================================
 
 struct TypeDedupTable {
-    map: HashMap<TypeExprRef, usize>,
     types: Vec<Sexp>,
 }
 
 impl TypeDedupTable {
     fn new() -> Self {
-        TypeDedupTable {
-            map: HashMap::new(),
-            types: Vec::new(),
-        }
+        TypeDedupTable { types: Vec::new() }
     }
 
     fn build_preamble(&self) -> Sexp {
@@ -420,105 +417,146 @@ impl TypeDedupTable {
         Sexp::list(items)
     }
 
+    fn push_type(&mut self, sexp: Sexp) -> usize {
+        let idx = self.types.len();
+        self.types.push(sexp);
+        idx
+    }
 }
 
-fn sexp_type_expr(
+#[derive(Clone, Copy)]
+struct ActiveMuBinding {
+    ty: TypeExprRef,
+    id: usize,
+    used: bool,
+}
+
+struct TypeSexpState {
+    tvars: HashMap<TypeExprRef, usize>,
+    tunivars: HashMap<TypeExprRef, usize>,
+    active_bindings: HashMap<TypeExprRef, usize>,
+    mu_stack: Vec<ActiveMuBinding>,
+    next_tvar_id: usize,
+    next_tunivar_id: usize,
+    next_mu_id: usize,
+}
+
+impl TypeSexpState {
+    fn new() -> Self {
+        TypeSexpState {
+            tvars: HashMap::new(),
+            tunivars: HashMap::new(),
+            active_bindings: HashMap::new(),
+            mu_stack: Vec::new(),
+            next_tvar_id: 0,
+            next_tunivar_id: 0,
+            next_mu_id: 0,
+        }
+    }
+
+    fn tvar_id(&mut self, te: TypeExprRef) -> usize {
+        if let Some(&id) = self.tvars.get(&te) {
+            id
+        } else {
+            let id = self.next_tvar_id;
+            self.next_tvar_id += 1;
+            self.tvars.insert(te, id);
+            id
+        }
+    }
+
+    fn tunivar_id(&mut self, te: TypeExprRef) -> usize {
+        if let Some(&id) = self.tunivars.get(&te) {
+            id
+        } else {
+            let id = self.next_tunivar_id;
+            self.next_tunivar_id += 1;
+            self.tunivars.insert(te, id);
+            id
+        }
+    }
+
+    fn push_active_binding(&mut self, te: TypeExprRef) -> usize {
+        let stack_idx = self.mu_stack.len();
+        let id = self.next_mu_id;
+        self.next_mu_id += 1;
+        self.active_bindings.insert(te, stack_idx);
+        self.mu_stack.push(ActiveMuBinding {
+            ty: te,
+            id,
+            used: false,
+        });
+        stack_idx
+    }
+
+    fn lookup_active_binding(&mut self, te: TypeExprRef) -> Option<usize> {
+        let stack_idx = *self.active_bindings.get(&te)?;
+        self.mu_stack[stack_idx].used = true;
+        Some(self.mu_stack[stack_idx].id)
+    }
+
+    fn pop_active_binding(&mut self, stack_idx: usize) -> ActiveMuBinding {
+        let binding = self.mu_stack.pop().expect("active mu binding stack underflow");
+        debug_assert_eq!(stack_idx, self.mu_stack.len());
+        self.active_bindings.remove(&binding.ty);
+        binding
+    }
+}
+
+fn sexp_type_expr_inline(
     arena: &ParseArena,
     ctx: &TypeContext<'_>,
-    dedup: &mut TypeDedupTable,
+    state: &mut TypeSexpState,
     te: TypeExprRef,
 ) -> Sexp {
-    let te = ctx.repr(te); // Follow Tlink chains
-    let debug_path = std::env::var("RUST_DEBUG_TYPED_SEXP_PATH").ok();
-    let should_debug_path = debug_path.as_deref().is_some_and(|needle| {
-        matches!(&*ctx.get_desc(te), TypeDesc::Tconstr { path, .. } if {
-            let name = path.name();
-            name == needle || path.last() == needle || name.contains(needle)
-        })
-    });
-    let debug_ids: Vec<usize> = std::env::var("RUST_DEBUG_TYPED_SEXP_IDS")
-        .ok()
-        .map(|raw| {
-            raw.split(',')
-                .filter_map(|s| s.trim().parse::<usize>().ok())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Arity alias dedup: OCaml's update_uncurried_arity creates {t with desc=...}
-    // sharing the same type_expr.id. We match this by resolving arity aliases
-    // to the original's dedup key.
-    let dedup_key = ctx.get_arity_alias(te).map(|orig| ctx.repr(orig)).unwrap_or(te);
-    let should_debug_id = debug_ids.iter().any(|id| *id == te.0 || *id == dedup_key.0);
-
-    // Physical identity dedup (using alias-resolved key)
-    if let Some(&idx) = dedup.map.get(&dedup_key) {
-        // Also register te directly so future direct references dedup too
-        if dedup_key != te {
-            dedup.map.insert(te, idx);
-        }
-        if should_debug_path || should_debug_id {
-            eprintln!(
-                "[typed-sexp-dedup] hit te={} key={} idx={}",
-                te.0, dedup_key.0, idx
-            );
-        }
-        return Sexp::atom(&format!("#{idx}"));
-    }
-
-    // Reserve slot before recursion (handles cycles automatically)
-    let idx = dedup.types.len();
-    dedup.map.insert(dedup_key, idx);
-    if dedup_key != te {
-        dedup.map.insert(te, idx);
-    }
-    dedup.types.push(Sexp::atom("_")); // placeholder
-    if should_debug_path || should_debug_id {
-        eprintln!(
-            "[typed-sexp-dedup] new te={} key={} idx={}",
-            te.0, dedup_key.0, idx
-        );
-    }
-
-    // Serialize the type body
+    let te = ctx.repr(te); // Follow Tlink chains, but keep Tsubst visible.
     let desc = ctx.get_desc(te);
-    let debug_type_ids = std::env::var_os("RUST_DEBUG_TYPED_SEXP_IDS").is_some();
-    if debug_type_ids && idx < 80 {
-        let summary = match &*desc {
-            TypeDesc::Tconstr { path, args, .. } => {
-                format!("Tconstr({}) args={}", path.name(), args.len())
-            }
-            TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
-            TypeDesc::Ttuple(types) => format!("Ttuple len={}", types.len()),
-            TypeDesc::Tvar(name) => format!("Tvar({name:?})"),
-            TypeDesc::Tunivar(name) => format!("Tunivar({name:?})"),
-            TypeDesc::Tvariant(_) => "Tvariant".to_string(),
-            TypeDesc::Tpoly { vars, .. } => format!("Tpoly vars={}", vars.len()),
-            TypeDesc::Tpackage { path, args, .. } => {
-                format!("Tpackage({}) args={}", path.name(), args.len())
-            }
-            TypeDesc::Tobject { .. } => "Tobject".to_string(),
-            TypeDesc::Tfield { name, .. } => format!("Tfield({name})"),
-            TypeDesc::Tnil => "Tnil".to_string(),
-            TypeDesc::Tlink(target) => format!("Tlink({})", target.0),
-            TypeDesc::Tsubst(target) => format!("Tsubst({})", target.0),
-        };
-        eprintln!(
-            "[typed-sexp-id] idx={} te={} level={} key={} summary={}",
-            idx,
-            te.0,
-            ctx.get_level(te),
-            dedup_key.0,
-            summary
-        );
+    match &*desc {
+        TypeDesc::Tvar(_) => {
+            let id = state.tvar_id(te);
+            return Sexp::list(vec![Sexp::atom("Tvar"), Sexp::atom(&id.to_string())]);
+        }
+        TypeDesc::Tunivar(_) => {
+            let id = state.tunivar_id(te);
+            return Sexp::list(vec![Sexp::atom("Tunivar"), Sexp::atom(&id.to_string())]);
+        }
+        _ => {}
     }
-    let sexp = match &*desc {
-        TypeDesc::Tvar(name) => Sexp::list(vec![Sexp::atom("Tvar"), opt_string(name)]),
+    drop(desc);
+
+    if let Some(id) = state.lookup_active_binding(te) {
+        return Sexp::list(vec![Sexp::atom("ref"), Sexp::atom(&id.to_string())]);
+    }
+
+    let stack_idx = state.push_active_binding(te);
+    let sexp = sexp_type_expr_body_inline(arena, ctx, state, te);
+    let binding = state.pop_active_binding(stack_idx);
+
+    if binding.used {
+        Sexp::list(vec![
+            Sexp::atom("mu"),
+            Sexp::atom(&binding.id.to_string()),
+            sexp,
+        ])
+    } else {
+        sexp
+    }
+}
+
+fn sexp_type_expr_body_inline(
+    arena: &ParseArena,
+    ctx: &TypeContext<'_>,
+    state: &mut TypeSexpState,
+    te: TypeExprRef,
+) -> Sexp {
+    let desc = ctx.get_desc(te);
+    match &*desc {
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => unreachable!("variable nodes handled before body serialization"),
         TypeDesc::Tarrow {
             arg, ret, arity, ..
         } => {
-            let arg_sexp = sexp_type_expr(arena, ctx, dedup, arg.typ);
-            let ret_sexp = sexp_type_expr(arena, ctx, dedup, *ret);
+            let arg_sexp = sexp_type_expr_inline(arena, ctx, state, arg.typ);
+            let ret_sexp = sexp_type_expr_inline(arena, ctx, state, *ret);
             Sexp::list(vec![
                 Sexp::atom("Tarrow"),
                 sexp_type_arg_label(&arg.lbl),
@@ -533,14 +571,14 @@ fn sexp_type_expr(
         TypeDesc::Ttuple(types) => {
             let mut items = vec![Sexp::atom("Ttuple")];
             for t in types.iter() {
-                items.push(sexp_type_expr(arena, ctx, dedup, *t));
+                items.push(sexp_type_expr_inline(arena, ctx, state, *t));
             }
             Sexp::list(items)
         }
         TypeDesc::Tconstr { path, args, .. } => {
             let mut arg_sexps = Vec::new();
             for t in args.iter() {
-                arg_sexps.push(sexp_type_expr(arena, ctx, dedup, *t));
+                arg_sexps.push(sexp_type_expr_inline(arena, ctx, state, *t));
             }
             Sexp::list(vec![
                 Sexp::atom("Tconstr"),
@@ -549,7 +587,7 @@ fn sexp_type_expr(
             ])
         }
         TypeDesc::Tobject { fields, .. } => {
-            let fields_sexp = sexp_type_expr(arena, ctx, dedup, *fields);
+            let fields_sexp = sexp_type_expr_inline(arena, ctx, state, *fields);
             Sexp::list(vec![Sexp::atom("Tobject"), fields_sexp])
         }
         TypeDesc::Tfield {
@@ -558,14 +596,13 @@ fn sexp_type_expr(
             typ,
             rest,
         } => {
-            // Standalone Tfield (not via Tobject which sorts them)
             let kind_str = match kind {
                 FieldKind::Fpresent => "Fpresent",
                 FieldKind::Fabsent => "Fabsent",
                 FieldKind::Fvar(_) => "Fvar",
             };
-            let typ_sexp = sexp_type_expr(arena, ctx, dedup, *typ);
-            let rest_sexp = sexp_type_expr(arena, ctx, dedup, *rest);
+            let typ_sexp = sexp_type_expr_inline(arena, ctx, state, *typ);
+            let rest_sexp = sexp_type_expr_inline(arena, ctx, state, *rest);
             Sexp::list(vec![
                 Sexp::atom("Tfield"),
                 string(name),
@@ -577,16 +614,15 @@ fn sexp_type_expr(
         TypeDesc::Tnil => Sexp::atom("Tnil"),
         TypeDesc::Tlink(_) => Sexp::atom("Tlink"), // Should not happen after ctx.repr
         TypeDesc::Tsubst(ty) => {
-            let s = sexp_type_expr(arena, ctx, dedup, *ty);
+            let s = sexp_type_expr_inline(arena, ctx, state, *ty);
             Sexp::list(vec![Sexp::atom("Tsubst"), s])
         }
-        TypeDesc::Tvariant(row) => sexp_row_desc(arena, ctx, dedup, row),
-        TypeDesc::Tunivar(name) => Sexp::list(vec![Sexp::atom("Tunivar"), opt_string(name)]),
+        TypeDesc::Tvariant(row) => sexp_row_desc(arena, ctx, state, row),
         TypeDesc::Tpoly { body, vars } => {
-            let body_sexp = sexp_type_expr(arena, ctx, dedup, *body);
+            let body_sexp = sexp_type_expr_inline(arena, ctx, state, *body);
             let mut var_sexps = Vec::new();
             for t in vars.iter() {
-                var_sexps.push(sexp_type_expr(arena, ctx, dedup, *t));
+                var_sexps.push(sexp_type_expr_inline(arena, ctx, state, *t));
             }
             Sexp::list(vec![
                 Sexp::atom("Tpoly"),
@@ -597,7 +633,7 @@ fn sexp_type_expr(
         TypeDesc::Tpackage { path, lids, args } => {
             let mut arg_sexps = Vec::new();
             for t in args.iter() {
-                arg_sexps.push(sexp_type_expr(arena, ctx, dedup, *t));
+                arg_sexps.push(sexp_type_expr_inline(arena, ctx, state, *t));
             }
             Sexp::list(vec![
                 Sexp::atom("Tpackage"),
@@ -606,18 +642,24 @@ fn sexp_type_expr(
                 Sexp::list(arg_sexps),
             ])
         }
-    };
+    }
+}
 
-    // Store result in dedup table
-    dedup.types[idx] = sexp;
-
+fn sexp_type_expr(
+    arena: &ParseArena,
+    ctx: &TypeContext<'_>,
+    dedup: &mut TypeDedupTable,
+    te: TypeExprRef,
+) -> Sexp {
+    let mut state = TypeSexpState::new();
+    let idx = dedup.push_type(sexp_type_expr_inline(arena, ctx, &mut state, te));
     Sexp::atom(&format!("#{idx}"))
 }
 
 fn sexp_row_desc(
     arena: &ParseArena,
     ctx: &TypeContext<'_>,
-    dedup: &mut TypeDedupTable,
+    state: &mut TypeSexpState,
     row: &RowDesc,
 ) -> Sexp {
     fn debug_row_filter(env_var: &str) -> Option<Vec<String>> {
@@ -657,7 +699,7 @@ fn sexp_row_desc(
     }
     let mut field_sexps = Vec::new();
     for (l, rf) in row.row_fields.iter() {
-        let rf_sexp = sexp_row_field(arena, ctx, dedup, rf);
+        let rf_sexp = sexp_row_field(arena, ctx, state, rf);
         field_sexps.push(Sexp::list(vec![string(l), rf_sexp]));
     }
     Sexp::list(vec![
@@ -671,14 +713,14 @@ fn sexp_row_desc(
 fn sexp_row_field(
     arena: &ParseArena,
     ctx: &TypeContext<'_>,
-    dedup: &mut TypeDedupTable,
+    state: &mut TypeSexpState,
     rf: &RowField,
 ) -> Sexp {
     let rf = btype::row_field_repr(ctx, rf);
     match rf {
         RowField::Rpresent(None) => Sexp::atom("Rpresent_none"),
         RowField::Rpresent(Some(ty)) => {
-            let s = sexp_type_expr(arena, ctx, dedup, ty);
+            let s = sexp_type_expr_inline(arena, ctx, state, ty);
             Sexp::list(vec![Sexp::atom("Rpresent"), s])
         }
         RowField::Reither {
@@ -686,7 +728,7 @@ fn sexp_row_field(
         } => {
             let mut type_sexps = Vec::new();
             for t in types.iter() {
-                type_sexps.push(sexp_type_expr(arena, ctx, dedup, *t));
+                type_sexps.push(sexp_type_expr_inline(arena, ctx, state, *t));
             }
             Sexp::list(vec![
                 Sexp::atom("Reither"),
