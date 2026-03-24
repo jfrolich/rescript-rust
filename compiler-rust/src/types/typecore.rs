@@ -20746,6 +20746,26 @@ fn resolve_module_signature_for_path<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<(Path, crate::types::decl::Signature)> {
     use crate::types::decl::SignatureItem;
+
+    fn rewrite_alias_pident_child_prefixes<'a>(
+        sig: &[crate::types::decl::SignatureItem],
+        target: &Path,
+        access_path: &Path,
+        ctx: &'a crate::types::context::TypeContext<'a>,
+    ) {
+        for item in sig {
+            if let crate::types::decl::SignatureItem::SigModule(id, _, _) = item {
+                let old_prefix = Path::pdot(target.clone(), id.name().to_string());
+                let new_prefix = Path::pdot(access_path.clone(), id.name().to_string());
+                crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                    sig,
+                    &old_prefix,
+                    &new_prefix,
+                    ctx,
+                );
+            }
+        }
+    }
     let debug_module_sig = std::env::var_os("RUST_DEBUG_LOCAL_MODULE_SIG").is_some()
         && matches!(module_path.head().name(), "IntCmp" | "N" | "D");
 
@@ -20812,6 +20832,12 @@ fn resolve_module_signature_for_path<'a>(
                                 crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                                     &sig,
                                     alias_id.name(),
+                                    &access_path,
+                                    ctx,
+                                );
+                                rewrite_alias_pident_child_prefixes(
+                                    &sig,
+                                    target,
                                     &access_path,
                                     ctx,
                                 );
@@ -20892,6 +20918,12 @@ fn resolve_module_signature_for_path<'a>(
                                         crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                                             &sig,
                                             alias_id.name(),
+                                            &access_path,
+                                            ctx,
+                                        );
+                                        rewrite_alias_pident_child_prefixes(
+                                            &sig,
+                                            target,
                                             &access_path,
                                             ctx,
                                         );
