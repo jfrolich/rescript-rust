@@ -93,6 +93,10 @@ impl PersistentEnv {
             .collect()
     }
 
+    pub fn qualified_alias_path_for_flattened_head(&self, flat_head: &str) -> Option<Path> {
+        self.alias_prefix_rewrites.get(flat_head).cloned()
+    }
+
     /// Find and load a module by name.
     /// Returns the cached signature, or None if the module cannot be found.
     pub fn find_pers_struct<'a>(
@@ -140,20 +144,11 @@ impl PersistentEnv {
         // Also recursively substitute paths in sub-module signatures
         substitute_submodule_paths(&signature, &module_path, ctx);
 
-        // If this module has a registered alias rewrite (e.g., "Stdlib_JSON" was
-        // registered when loading Stdlib.cmi), apply depth-restricted prefix
-        // rewriting: only rewrite Tconstr paths where the flattened name appears
-        // at depth >= 2 (i.e., as a nested module prefix, not the direct parent).
-        // This matches OCaml's behavior where:
-        // - Pdot(Pident("Stdlib_JSON"), "t") stays as-is (direct type access)
-        // - Pdot(Pdot(Pident("Stdlib_JSON"), "Classify"), "t") gets rewritten
-        //   to Pdot(Pdot(Pdot(Pident("Stdlib"), "JSON"), "Classify"), "t")
+        // Keep the existing deep-prefix rewrite for flattened alias heads
+        // like `Js_json`, so `module J = Js.Json` can still see `J.Kind.json`.
+        // Explicit double-underscore source modules are normalized back to
+        // their flattened access path at lookup time.
         if let Some(qualified_path) = self.alias_prefix_rewrites.get(name).cloned() {
-            // Skip rewriting for hyphenated module names (e.g., "Stream-NodeJs",
-            // "Crypto-NodeJs"). OCaml does NOT rewrite these at CMI load time.
-            // The rewriting would modify shared type nodes in OTHER modules'
-            // types (like Decipher.cmi referencing Crypto-NodeJs.KeyObject.t),
-            // producing wrong paths.
             if !name.contains('-') {
                 rewrite_deep_prefix_in_sig(&signature, name, &qualified_path, ctx);
             }

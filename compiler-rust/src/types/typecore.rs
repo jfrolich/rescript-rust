@@ -17527,6 +17527,26 @@ fn should_rewrite_nested_alias_self_path(old_name: &str, parent_path: &Path) -> 
     !old_name.starts_with(&(flat_parent + "_"))
 }
 
+fn rewrite_flattened_alias_child_prefixes<'a>(
+    sig: &[crate::types::decl::SignatureItem],
+    qualified_alias_path: &Path,
+    flattened_access_path: &Path,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) {
+    for item in sig {
+        if let crate::types::decl::SignatureItem::SigModule(id, _, _) = item {
+            let old_prefix = Path::pdot(qualified_alias_path.clone(), id.name().to_string());
+            let new_prefix = Path::pdot(flattened_access_path.clone(), id.name().to_string());
+            crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                sig,
+                &old_prefix,
+                &new_prefix,
+                ctx,
+            );
+        }
+    }
+}
+
 pub(crate) fn copy_lookup_signature_for_subst(
     sig_items: &[crate::types::decl::SignatureItem],
     ctx: &TypeContext<'_>,
@@ -18421,6 +18441,18 @@ impl Env {
                     if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
                         let module_path = Path::pident(Ident::create_persistent(mod_name));
                         let sig = copy_lookup_signature_for_subst(&ps.ps_sig, ctx);
+                        if mod_name.contains("__") {
+                            if let Some(qualified_alias_path) =
+                                pers.qualified_alias_path_for_flattened_head(mod_name)
+                            {
+                                rewrite_flattened_alias_child_prefixes(
+                                    &sig,
+                                    &qualified_alias_path,
+                                    &module_path,
+                                    ctx,
+                                );
+                            }
+                        }
                         crate::types::ctype::force_generalize_module_sig_values(
                             ctx,
                             &crate::types::decl::ModuleType::MtySignature(sig.clone()),
@@ -21028,7 +21060,20 @@ fn resolve_module_signature_for_path<'a>(
             if let Some(pers) = pers_env.as_mut() {
                 if let Some(ps) = pers.find_pers_struct(id.name(), ctx) {
                     let access_path = Path::pident(Ident::create_persistent(id.name()));
-                    return Some((access_path, ps.ps_sig.clone()));
+                    let sig = copy_lookup_signature_for_subst(&ps.ps_sig, ctx);
+                    if id.name().contains("__") {
+                        if let Some(qualified_alias_path) =
+                            pers.qualified_alias_path_for_flattened_head(id.name())
+                        {
+                            rewrite_flattened_alias_child_prefixes(
+                                &sig,
+                                &qualified_alias_path,
+                                &access_path,
+                                ctx,
+                            );
+                        }
+                    }
+                    return Some((access_path, sig));
                 }
             }
             None
