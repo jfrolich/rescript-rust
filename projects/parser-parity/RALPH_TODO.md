@@ -521,7 +521,7 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 timeout 300 ./scripts/test_typedtree_parity.sh --quick
 
 # Skip rewatch build (if already built)
-timeout 300 ./scripts/test_typedtree_parity.sh --no-build
+timeout 300 ./scripts/test_typedtree_parity.sh
 
 **This is a common mistake that wastes time. DO NOT make it.**
 

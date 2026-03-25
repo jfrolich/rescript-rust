@@ -14,7 +14,6 @@
 #   -q, --quick       Stop on first failure (useful for quick iteration)
 #   -j, --parallel N  Run N tests in parallel (default: 16)
 #   -v, --verbose     Show progress for each file
-#   --no-build        Skip the initial rewatch build (assume already built)
 #   --tella           Test tella-fusion, skipping large JSX-heavy files
 #   --tella-jsx       Test only large JSX-heavy tella files
 #   --tella-fast      Extra-fast tella mode (also skip files > 5000 bytes)
@@ -51,7 +50,6 @@ QUICK_MODE=false
 PARALLEL_JOBS=16
 VERBOSE=false
 FILE_ARG=""
-SKIP_BUILD=false
 TELLA_MODE=false
 TELLA_JSX_MODE=false
 TELLA_MAX_SOURCE_BYTES=0
@@ -76,8 +74,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --no-build)
-            SKIP_BUILD=true
-            shift
+            echo -e "Error: --no-build was removed."
+            echo "This script now always rebuilds the test project's ReScript artifacts."
+            echo "Run ./scripts/test_typedtree_parity.sh without --no-build."
+            exit 2
             ;;
         --tella)
             TELLA_MODE=true
@@ -99,7 +99,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            head -38 "$0" | tail -33
+            sed -n '10,44p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -209,27 +209,25 @@ echo "Parallel jobs: $PARALLEL_JOBS"
 echo ""
 
 # Step 1: Build with rewatch to ensure all dependencies are compiled
-if [[ "$SKIP_BUILD" != "true" ]]; then
-    echo -e "${BOLD}Step 1: Building project with rewatch...${RESET}"
-    cd "$BUILD_DIR"
-    if [[ "$TELLA_MODE" == "true" ]]; then
-        # Build with OCaml bsc to ensure all .ast artifacts exist.
-        # Rust parity is measured per-file below with the same compiler args.
-        echo "Building with OCaml bsc to generate AST artifacts..."
-        RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
-        if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
-            echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
-        fi
-    else
-        # Use the standard OCaml bsc for the initial build
-        RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
-        if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
-            echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
-        fi
+echo -e "${BOLD}Step 1: Building project with rewatch...${RESET}"
+cd "$BUILD_DIR"
+if [[ "$TELLA_MODE" == "true" ]]; then
+    # Build with OCaml bsc to ensure all .ast artifacts exist.
+    # Rust parity is measured per-file below with the same compiler args.
+    echo "Building with OCaml bsc to generate AST artifacts..."
+    RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
+    if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
+        echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
     fi
-    cd "$PROJECT_ROOT"
-    echo ""
+else
+    # Use the standard OCaml bsc for the initial build
+    RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
+    if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
+        echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
+    fi
 fi
+cd "$PROJECT_ROOT"
+echo ""
 
 # Find test files based on arguments
 cd "$PROJECT_ROOT"
