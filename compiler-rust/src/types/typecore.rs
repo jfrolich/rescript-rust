@@ -9986,7 +9986,6 @@ fn merge_variant_row_fields_single(
     variant_repr: TypeExprRef,
     get_pat_variant_ty: impl Fn(&crate::types::typedtree::Case) -> TypeExprRef,
 ) {
-    use std::collections::HashMap;
     use crate::types::btype::row_repr;
 
     let desc = ctx.get_desc(variant_repr);
@@ -9998,13 +9997,19 @@ fn merge_variant_row_fields_single(
 
     let variant_row_data = row_repr(ctx, &variant_row);
 
-    // Collect ALL variant row fields: start with scrutinee's, add from patterns.
-    let mut all_fields: HashMap<String, crate::types::type_expr::RowField> = HashMap::new();
-    for (tag, field) in &variant_row_data.row_fields {
-        all_fields.insert(tag.clone(), field.clone());
-    }
+    // Preserve encounter order: scrutinee row order first, then any new pattern
+    // fields in the order they are seen while walking cases.
+    let mut merged_fields = variant_row_data.row_fields.clone();
 
-    // Collect new fields from all case pattern variant types
+    let mut push_missing_field =
+        |fields: &mut Vec<(String, crate::types::type_expr::RowField)>,
+         tag: &String,
+         field: &crate::types::type_expr::RowField| {
+            if fields.iter().all(|(existing, _)| existing != tag) {
+                fields.push((tag.clone(), field.clone()));
+            }
+        };
+
     for case in cases {
         let pat_ty = get_pat_variant_ty(case);
         let repr = ctx.repr(pat_ty);
@@ -10012,18 +10017,13 @@ fn merge_variant_row_fields_single(
         if let TypeDesc::Tvariant(row) = &*desc {
             let row_data = row_repr(ctx, row);
             for (tag, field) in &row_data.row_fields {
-                all_fields.entry(tag.clone()).or_insert_with(|| field.clone());
+                push_missing_field(&mut merged_fields, tag, field);
             }
         }
     }
-
-    if all_fields.len() <= variant_row_data.row_fields.len() {
+    if merged_fields.len() <= variant_row_data.row_fields.len() {
         return; // No new fields to add
     }
-
-    // Build sorted field list
-    let mut merged_fields: Vec<_> = all_fields.into_iter().collect();
-    merged_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
 
     // Set on scrutinee element
     let mut merged_row = variant_row_data;
@@ -10041,16 +10041,20 @@ fn merge_variant_row_fields_single(
         if let TypeDesc::Tvariant(row) = &*pat_desc {
             let pat_row_data = row_repr(ctx, row);
             if pat_row_data.row_fields.len() < merged_fields.len() {
-                let mut pat_fields: HashMap<String, crate::types::type_expr::RowField> = HashMap::new();
-                for (tag, field) in &pat_row_data.row_fields {
-                    pat_fields.insert(tag.clone(), field.clone());
-                }
-                for (tag, field) in &merged_fields {
-                    pat_fields.entry(tag.clone()).or_insert_with(|| field.clone());
-                }
                 let mut updated_row = pat_row_data;
-                updated_row.row_fields = pat_fields.into_iter().collect();
-                updated_row.row_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+                updated_row.row_fields = merged_fields
+                    .iter()
+                    .map(|(tag, merged_field)| {
+                        let field = updated_row
+                            .row_fields
+                            .iter()
+                            .find_map(|(existing_tag, existing_field)| {
+                                (existing_tag == tag).then_some(existing_field.clone())
+                            })
+                            .unwrap_or_else(|| merged_field.clone());
+                        (tag.clone(), field)
+                    })
+                    .collect();
                 drop(pat_desc);
                 ctx.set_desc(pat_repr, TypeDesc::Tvariant(updated_row));
             }
@@ -13233,7 +13237,9 @@ fn type_record(
     let mut all_labels = if has_dotdotdot_field {
         None
     } else {
-        get_record_labels(ctx, env, &mut tctx.persistent_env, disambiguation_ty)
+        get_record_labels(ctx, env, &mut tctx.persistent_env, record_ty).or_else(|| {
+            get_record_labels(ctx, env, &mut tctx.persistent_env, disambiguation_ty)
+        })
     };
     if all_labels.is_none() {
         if let Some(base_expr) = typed_base.as_ref() {
@@ -13716,50 +13722,53 @@ fn get_record_labels<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
 ) -> Option<Vec<crate::types::decl::LabelDeclaration>> {
+    if let Some((path, _actual_args, type_decl)) =
+        extract_concrete_record_type_info(ty, env, pers_env, ctx)
+    {
+        if let crate::types::TypeKind::TypeRecord(ref labels, _) = type_decl.type_kind {
+            if std::env::var_os("RUST_DEBUG_RECORD_LABELS").is_some()
+                && path.last() == "options"
+            {
+                for lbl in labels {
+                    if matches!(
+                        lbl.ld_id.name(),
+                        "compactDisplay" | "currency" | "useGrouping"
+                    ) {
+                        let ty = ctx.repr(lbl.ld_type);
+                        let d = ctx.get_desc(ty);
+                        let head = match &*d {
+                            TypeDesc::Tconstr { path, args, .. } => {
+                                if path.name() == "option" && args.len() == 1 {
+                                    let a = ctx.repr(args[0]);
+                                    let ad = ctx.get_desc(a);
+                                    match &*ad {
+                                        TypeDesc::Tconstr { path, .. } => {
+                                            format!("option<{}>", path.name())
+                                        }
+                                        _ => format!("option<ty#{}>", a.0),
+                                    }
+                                } else {
+                                    path.name()
+                                }
+                            }
+                            _ => format!("ty#{}", ty.0),
+                        };
+                        eprintln!(
+                            "[record-labels] path={} field={} type={}",
+                            path.name(),
+                            lbl.ld_id.name(),
+                            head
+                        );
+                    }
+                }
+            }
+            return Some(labels.clone());
+        }
+    }
+
     let repr = ctx.repr(ty);
     let desc = ctx.get_desc(repr);
     if let crate::types::TypeDesc::Tconstr { ref path, .. } = *desc {
-        if let Some(type_decl) = lookup_type_decl_for_path(path, env, pers_env, ctx) {
-            if let crate::types::TypeKind::TypeRecord(ref labels, _) = type_decl.type_kind {
-                if std::env::var_os("RUST_DEBUG_RECORD_LABELS").is_some()
-                    && path.last() == "options"
-                {
-                    for lbl in labels {
-                        if matches!(
-                            lbl.ld_id.name(),
-                            "compactDisplay" | "currency" | "useGrouping"
-                        ) {
-                            let ty = ctx.repr(lbl.ld_type);
-                            let d = ctx.get_desc(ty);
-                            let head = match &*d {
-                                TypeDesc::Tconstr { path, args, .. } => {
-                                    if path.name() == "option" && args.len() == 1 {
-                                        let a = ctx.repr(args[0]);
-                                        let ad = ctx.get_desc(a);
-                                        match &*ad {
-                                            TypeDesc::Tconstr { path, .. } => {
-                                                format!("option<{}>", path.name())
-                                            }
-                                            _ => format!("option<ty#{}>", a.0),
-                                        }
-                                    } else {
-                                        path.name()
-                                    }
-                                }
-                                _ => format!("ty#{}", ty.0),
-                            };
-                            eprintln!(
-                                "[record-labels] path={} field={} type={}",
-                                path.name(),
-                                lbl.ld_id.name(),
-                                head
-                            );
-                        }
-                    }
-                }
-                return Some(labels.clone());
-            }
-        }
         // For inline records in extension/exception constructors, the type path
         // is the constructor name. Look up the constructor and check cstr_inlined.
         let cstr_name = match path {
@@ -20227,11 +20236,12 @@ fn qualify_label_description_paths<'a>(
     };
     let mut module_access_paths = Vec::new();
     let mut anchor_prefixes = Vec::new();
+    let mut has_unresolved_local_path = false;
 
     match res_path {
         Path::Pdot(_, _, _) => {
             let mut probe_visited = HashSet::new();
-            let has_unresolved_local_path =
+            has_unresolved_local_path =
                 type_contains_unresolved_local_path(ctx, env, pers_env, label.lbl_arg, &mut probe_visited);
             if let Some(parent) = res_path.parent() {
                 if has_unresolved_local_path {
@@ -20282,6 +20292,13 @@ fn qualify_label_description_paths<'a>(
     }
 
     if anchor_prefixes.is_empty() {
+        return;
+    }
+
+    // Only rewrite canonical paths through visible local aliases when the
+    // argument type still contains unresolved local heads. Otherwise preserve
+    // the already-qualified family path OCaml keeps in the typedtree.
+    if !has_unresolved_local_path {
         return;
     }
 
