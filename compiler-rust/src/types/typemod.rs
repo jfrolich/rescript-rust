@@ -8557,11 +8557,14 @@ fn type_structure_item<'a>(
                         ParsedModuleExprDesc::Pmod_structure(_)
                     );
                     if should_substitute_sig_paths {
+                        let sig =
+                            crate::types::typecore::copy_lookup_signature_for_subst(sig, tctx.type_ctx);
                         crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                            sig,
+                            &sig,
                             &Path::pident(mod_id.clone()),
                             tctx.type_ctx,
                         );
+                        decl_mod_type = crate::types::decl::ModuleType::MtySignature(sig);
                     }
                 }
                 // Match OCaml typemod.ml:

@@ -12793,6 +12793,15 @@ fn type_record(
                 &mut tctx.persistent_env,
                 ctx,
             )
+            .filter(|expected_label| {
+                should_prefer_expected_record_label(
+                    expected_label,
+                    &env_label,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                )
+            })
             .unwrap_or(env_label);
             if std::env::var_os("RUST_DEBUG_GPR_4274").is_some()
                 && env_label.lbl_name == "i"
@@ -19511,6 +19520,43 @@ fn compare_type_paths_for_disambiguation<'a>(
     let right_expanded =
         expand_type_path_for_compare(right, env, pers_env, ctx, 0, &mut right_visiting);
     left_expanded.same(&right_expanded)
+}
+
+fn label_result_path<'a>(
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    label: &crate::types::LabelDescription,
+) -> Option<Path> {
+    let res = ctx.repr(label.lbl_res);
+    let desc = ctx.get_desc(res);
+    match &*desc {
+        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+        _ => None,
+    }
+}
+
+fn should_prefer_expected_record_label<'a>(
+    expected_label: &crate::types::LabelDescription,
+    env_label: &crate::types::LabelDescription,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> bool {
+    let Some(expected_path) = label_result_path(ctx, expected_label) else {
+        return false;
+    };
+    let Some(env_path) = label_result_path(ctx, env_label) else {
+        return false;
+    };
+
+    if expected_path.same(&env_path) {
+        return false;
+    }
+
+    if !compare_type_paths_for_disambiguation(&expected_path, &env_path, env, pers_env, ctx) {
+        return false;
+    }
+
+    is_local_module_access_path(&expected_path) && !is_local_module_access_path(&env_path)
 }
 
 fn path_root_module(path: &Path) -> Path {
