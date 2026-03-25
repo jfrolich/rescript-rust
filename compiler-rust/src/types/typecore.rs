@@ -7340,7 +7340,12 @@ fn check_partial_simple<'a>(ctx: &'a TypeContext<'a>, env: &Env, cases: &[crate:
             if row.row_closed {
                 // Collect all tags from the variant type
                 let type_tags: HashSet<&str> = row.row_fields.iter()
-                    .filter(|(_, f)| !matches!(f, crate::types::type_expr::RowField::Rabsent))
+                    .filter(|(_, f)| {
+                        !matches!(
+                            crate::types::btype::row_field_repr(ctx, f),
+                            crate::types::type_expr::RowField::Rabsent
+                        )
+                    })
                     .map(|(l, _)| l.as_str())
                     .collect();
 
