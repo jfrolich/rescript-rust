@@ -19007,12 +19007,35 @@ impl Env {
                                         );
                                     }
                                     if apply_subst {
-                                        rebind_direct_sig_type_family_to_access_path(
-                                            ctx,
-                                            &sub_path,
-                                            &sig,
-                                            module_type_has_hidden_unpack_ident(&sub_md.md_type),
-                                        );
+                                        let should_rebind_direct_type_family = matches!(
+                                            &sub_md.md_type,
+                                            crate::types::decl::ModuleType::MtyAlias(
+                                                _,
+                                                Path::Pdot(..)
+                                            ) | crate::types::decl::ModuleType::MtyIdent(
+                                                Path::Pdot(..)
+                                            )
+                                        ) || module_type_has_hidden_unpack_ident(&sub_md.md_type);
+                                        let allow_inferred_rebind_paths = module_type_has_hidden_unpack_ident(
+                                            &sub_md.md_type,
+                                        ) || match &sub_md.md_type {
+                                            crate::types::decl::ModuleType::MtyAlias(
+                                                _,
+                                                target @ Path::Pdot(..),
+                                            )
+                                            | crate::types::decl::ModuleType::MtyIdent(
+                                                target @ Path::Pdot(..),
+                                            ) => !target.head().is_persistent(),
+                                            _ => false,
+                                        };
+                                        if should_rebind_direct_type_family {
+                                            rebind_direct_sig_type_family_to_access_path(
+                                                ctx,
+                                                &sub_path,
+                                                &sig,
+                                                allow_inferred_rebind_paths,
+                                            );
+                                        }
                                         // Match OCaml Subst behavior for nested module access:
                                         // when resolving A.B, first substitute parent-scope
                                         // type/module references inside B using A's signature.
