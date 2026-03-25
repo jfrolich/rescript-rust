@@ -3791,6 +3791,38 @@ fn unify_types<'a>(
                     }
                     return Ok(());
                 }
+                if let Some(env) = state.env() {
+                    let norm1 = normalize_path_full(ctx, env, path1);
+                    let norm2 = normalize_path_full(ctx, env, path2);
+                    if norm1.same(&norm2) && args1.len() == args2.len() {
+                        let pairs: Vec<_> = args1
+                            .iter()
+                            .zip(args2.iter())
+                            .map(|(&a, &b)| (a, b))
+                            .collect();
+                        let p1_changed = !norm1.same(path1);
+                        let p2_changed = !norm2.same(path2);
+                        let p1_persistent = path1.head().is_persistent();
+                        let p2_persistent = path2.head().is_persistent();
+                        if p1_changed && !p2_changed && !p1_persistent && p2_persistent {
+                            drop(desc1);
+                            drop(desc2);
+                            link_type(ctx, t2, t1);
+                            for (a, b) in pairs {
+                                unify(ctx, state, a, b)?;
+                            }
+                            return Ok(());
+                        } else if p2_changed && !p1_changed && !p2_persistent && p1_persistent {
+                            drop(desc1);
+                            drop(desc2);
+                            link_type(ctx, t1, t2);
+                            for (a, b) in pairs {
+                                unify(ctx, state, a, b)?;
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
                 let debug_image_alias_pair = debug_image_alias
                     && ((p1 == "Html.imageElement"
                         || p1 == "Dom_html.imageElement"
