@@ -54,6 +54,10 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 **Important:** The comparison is raw byte-for-byte (`cmp -s`). No post-processing. Both compilers must produce identical output.
 
+### Tooling Follow-Up
+
+- [ ] Add a parity-inspection CLI path that works from cached `.parity-cache` artifacts without triggering a rebuild/recompile. It should support: listing current failing files, opening cached diff/sexp for one file, and running analyzer-style first-divergence summaries directly from the cache. Goal: make parity debugging iterative even when compiler binaries are already built and the cache is authoritative.
+
 ---
 
 ## Current Status
