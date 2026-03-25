@@ -412,7 +412,7 @@ pub struct CompilerOptions {
     pub jsx_version: Option<i32>,
 }
 
-fn jsx_version_for_structure(
+pub(crate) fn jsx_version_for_structure(
     structure: &Structure,
     options: &CompilerOptions,
     arena: &crate::parse_arena::ParseArena,
@@ -470,6 +470,8 @@ pub fn compile_source_to_js_with_options(
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path(load_path);
+    pers_env.set_open_modules(options.open_modules.clone());
+    pers_env.set_jsx_version(options.jsx_version);
     load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
 
     // Store persistent env in the type check context for module resolution
@@ -574,6 +576,8 @@ pub fn typecheck_interface_source(
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path(load_path);
+    pers_env.set_open_modules(options.open_modules.clone());
+    pers_env.set_jsx_version(options.jsx_version);
     load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
 
     tctx.set_persistent_env(pers_env);
@@ -645,7 +649,7 @@ fn build_load_path(options: &CompilerOptions) -> Vec<PathBuf> {
 ///
 /// This is equivalent to OCaml's `res_compmisc.ml:initial_env()` which loads
 /// Pervasives.cmi and Stdlib.cmi and opens them into the environment.
-fn load_pervasives<'a>(
+pub(crate) fn load_pervasives<'a>(
     pers_env: &mut PersistentEnv,
     env: &mut Env,
     ctx: &'a TypeContext<'a>,
@@ -713,6 +717,8 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let load_path = build_load_path(options);
         type_ctx.set_load_paths(load_path.clone());
         pers_env.set_load_path(load_path);
+        pers_env.set_open_modules(options.open_modules.clone());
+        pers_env.set_jsx_version(options.jsx_version);
         load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
         tctx.set_persistent_env(pers_env);
 
@@ -753,6 +759,8 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let load_path = build_load_path(options);
         type_ctx.set_load_paths(load_path.clone());
         pers_env.set_load_path(load_path);
+        pers_env.set_open_modules(options.open_modules.clone());
+        pers_env.set_jsx_version(options.jsx_version);
         load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
         tctx.set_persistent_env(pers_env);
 
@@ -1314,6 +1322,8 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path(load_path);
+    pers_env.set_open_modules(options.open_modules.clone());
+    pers_env.set_jsx_version(options.jsx_version);
     load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
     tctx.set_persistent_env(pers_env);
 
@@ -1342,6 +1352,8 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path(load_path);
+    pers_env.set_open_modules(options.open_modules.clone());
+    pers_env.set_jsx_version(options.jsx_version);
     load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
     tctx.set_persistent_env(pers_env);
 
@@ -1363,7 +1375,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
 /// uses `build_as_type(inner)` for alias patterns. For `Tpat_alias(Tpat_any, "v")`,
 /// val_type = Tpat_any's pat_type, NOT the outer pattern's pat_type. We look up
 /// val_type from the env to match this behavior exactly.
-fn normalize_signature_types(
+pub(crate) fn normalize_signature_types(
     type_ctx: &TypeContext<'_>,
     typed_structure: &crate::types::typedtree::Structure,
     final_env: &crate::types::env::Env,

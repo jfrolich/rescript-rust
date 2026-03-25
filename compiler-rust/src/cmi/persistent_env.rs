@@ -11,23 +11,30 @@
 //! case-insensitive on the first character (matching OCaml's `find_in_path_uncap`).
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::Path as FsPath;
 use std::path::PathBuf;
 
+use crate::driver::{jsx_version_for_structure, load_pervasives, normalize_signature_types, CompilerOptions};
 use crate::ident::Ident;
+use crate::parser::{jsx_ppx, module, Parser};
 use crate::types::context::TypeContext;
 use crate::types::decl::{
     ConstructorDescription, ConstructorTag, LabelDescription, ModuleDeclaration, ModuleType,
     Signature, SignatureItem, TypeKind,
 };
-use crate::types::env::Env;
+use crate::types::env::{initial_env, Env};
 use crate::types::path::Path;
+use crate::types::typecore::TypeCheckContext;
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
+use crate::types::typedtree::{ModuleType as TypedModuleType, ModuleTypeDesc as TypedModuleTypeDesc};
+use crate::types::typemod::{decl_module_type_from_typed, transl_signature, type_structure};
 
 use super::cmi_format;
 use super::sig_reader::SigReadContext;
 
 /// A cached persistent module structure.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PersStruct {
     /// Module name
     pub ps_name: String,
@@ -38,6 +45,7 @@ pub struct PersStruct {
 }
 
 /// Persistent environment for module loading.
+#[derive(Clone)]
 pub struct PersistentEnv {
     /// Cache of loaded modules: module_name -> PersStruct (or None if loading failed)
     cache: HashMap<String, Option<PersStruct>>,
@@ -48,6 +56,10 @@ pub struct PersistentEnv {
     /// (e.g., Stdlib.cmi has module JSON = Stdlib_JSON, so we record
     /// "Stdlib_JSON" → Pdot(Pident("Stdlib"), "JSON")).
     alias_prefix_rewrites: HashMap<String, Path>,
+    /// Additional modules opened implicitly from `-open` flags.
+    open_modules: Vec<String>,
+    /// Default JSX version from CLI flags, if any.
+    jsx_version: Option<i32>,
 }
 
 impl PersistentEnv {
@@ -57,12 +69,22 @@ impl PersistentEnv {
             cache: HashMap::new(),
             load_path: Vec::new(),
             alias_prefix_rewrites: HashMap::new(),
+            open_modules: Vec::new(),
+            jsx_version: None,
         }
     }
 
     /// Set the load path (list of directories to search for .cmi files).
     pub fn set_load_path(&mut self, paths: Vec<PathBuf>) {
         self.load_path = paths;
+    }
+
+    pub fn set_open_modules(&mut self, open_modules: Vec<String>) {
+        self.open_modules = open_modules;
+    }
+
+    pub fn set_jsx_version(&mut self, jsx_version: Option<i32>) {
+        self.jsx_version = jsx_version;
     }
 
     /// Add a directory to the load path.
@@ -109,73 +131,242 @@ impl PersistentEnv {
             return self.cache.get(name).and_then(|opt| opt.as_ref());
         }
 
+        // Insert a placeholder before loading so recursive lookups of the same
+        // module fail cleanly instead of recursing indefinitely.
+        self.cache.insert(name.to_string(), None);
+
         // Try to load from disk
         let result = self.load_module(name, ctx);
         self.cache.insert(name.to_string(), result);
         self.cache.get(name).and_then(|opt| opt.as_ref())
     }
 
-    /// Load a module from a .cmi file.
-    fn load_module<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<PersStruct> {
-        // Search for the CMI file
-        let cmi_filename = format!("{}.cmi", name);
-        let full_path = self.find_in_path_uncap(&cmi_filename)?;
-
-        // Read and parse the CMI file
-        let cmi = match cmi_format::read_cmi(&full_path) {
-            Ok(cmi) => cmi,
-            Err(e) => {
-                eprintln!("warning: failed to read CMI file {}: {}", full_path, e);
-                return None;
-            }
-        };
-
-        // Convert generic OCaml values to Rust type structures
-        let mut sig_ctx = SigReadContext::new(ctx);
-        let signature = sig_ctx.read_signature(&cmi.cmi_sign);
-
+    fn finalize_loaded_signature<'a>(
+        &mut self,
+        name: &str,
+        ps_name: String,
+        signature: Signature,
+        ps_filename: String,
+        ctx: &'a TypeContext<'a>,
+    ) -> PersStruct {
         let module_path = Path::Pident(Ident::create_persistent(name));
 
         // Apply path substitution: rewrite Tconstr paths from internal
         // (e.g., Pident "ref") to qualified (e.g., Pdot(Pident "Pervasives") "ref").
-        // This matches OCaml's `prefix_idents` + `Subst.type_path` mechanism.
         substitute_type_paths_in_sig(&signature, &module_path, ctx);
 
-        // Also recursively substitute paths in sub-module signatures
+        // Also recursively substitute paths in sub-module signatures.
         substitute_submodule_paths(&signature, &module_path, ctx);
 
-        // Keep the existing deep-prefix rewrite for flattened alias heads
-        // like `Js_json`, so `module J = Js.Json` can still see `J.Kind.json`.
-        // Explicit double-underscore source modules are normalized back to
-        // their flattened access path at lookup time.
+        // Keep the existing deep-prefix rewrite for flattened alias heads.
         if let Some(qualified_path) = self.alias_prefix_rewrites.get(name).cloned() {
             if !name.contains('-') {
                 rewrite_deep_prefix_in_sig(&signature, name, &qualified_path, ctx);
             }
         }
 
-        // Collect alias submodule mappings: when a module has submodules declared
-        // as MtyAlias (e.g., Stdlib has module JSON = Stdlib_JSON), record the
-        // mapping so that when Stdlib_JSON.cmi is later loaded, its type paths
-        // get rewritten from Pident("Stdlib_JSON") to Pdot(Pident("Stdlib"), "JSON").
-        // Use the qualified path (if available) so nested aliases produce fully
-        // qualified paths. E.g., Stdlib_Intl's "NumberFormat" alias becomes
-        // Pdot(Pdot(Pident("Stdlib"), "Intl"), "NumberFormat") not
-        // Pdot(Pident("Stdlib_Intl"), "NumberFormat").
-        let effective_module_path = self.alias_prefix_rewrites.get(name).cloned()
+        let effective_module_path = self
+            .alias_prefix_rewrites
+            .get(name)
+            .cloned()
             .unwrap_or_else(|| module_path.clone());
-        collect_alias_rewrites(&signature, &effective_module_path, &mut self.alias_prefix_rewrites);
-
-        // Register type declarations after all signature rewrites so cached
-        // declarations (especially record/variant field types) use the same
-        // qualified paths seen during lookup from this signature.
+        collect_alias_rewrites(
+            &signature,
+            &effective_module_path,
+            &mut self.alias_prefix_rewrites,
+        );
         register_sig_types_recursive(&signature, &effective_module_path, ctx, &self.load_path);
 
-        Some(PersStruct {
-            ps_name: cmi.cmi_name,
+        PersStruct {
+            ps_name,
             ps_sig: signature,
-            ps_filename: full_path,
-        })
+            ps_filename,
+        }
+    }
+
+    fn read_ast_source_path(ast_path: &FsPath) -> Option<PathBuf> {
+        let content = fs::read(ast_path).ok()?;
+        if content.len() < 5 {
+            return None;
+        }
+
+        let dep_size =
+            u32::from_be_bytes([content[0], content[1], content[2], content[3]]) as usize;
+        let path_start = 4 + dep_size;
+        if path_start >= content.len() {
+            return None;
+        }
+
+        let path_end = content[path_start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|pos| path_start + pos)
+            .unwrap_or(content.len());
+        let path_bytes = &content[path_start..path_end];
+        let path_str = String::from_utf8_lossy(path_bytes);
+        if path_str.is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(path_str.into_owned()))
+    }
+
+    fn read_source_latin1(path: &FsPath) -> Option<String> {
+        let bytes = fs::read(path).ok()?;
+        Some(bytes.iter().map(|&b| b as char).collect())
+    }
+
+    fn typecheck_source_signature<'a>(
+        &self,
+        source_path: &FsPath,
+        ctx: &'a TypeContext<'a>,
+    ) -> Option<(Signature, PersistentEnv)> {
+        let filename = source_path.to_string_lossy().into_owned();
+        let source = Self::read_source_latin1(source_path)?;
+        let mut fallback_pers = self.clone();
+        let mut env = initial_env(ctx);
+        let open_modules = fallback_pers.open_modules.clone();
+        load_pervasives(&mut fallback_pers, &mut env, ctx, &open_modules);
+
+        if source_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|ext| ext == "resi" || ext == "mli")
+        {
+            let mut parser = Parser::new(&filename, &source);
+            let signature = module::parse_signature(&mut parser);
+            if parser.has_errors() {
+                return None;
+            }
+            let signature = crate::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut()).ok()?;
+
+            let mut tctx = TypeCheckContext::new(ctx, parser.arena());
+            tctx.set_persistent_env(fallback_pers);
+            let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature).ok()?;
+            let fallback_pers = tctx.persistent_env.take()?;
+            let typed_module_type = TypedModuleType {
+                mty_desc: TypedModuleTypeDesc::Tmty_signature(typed_signature),
+                mty_loc: crate::parse_arena::LocIdx(0),
+                mty_attributes: crate::parser::ast::Attributes::new(),
+            };
+            let signature = match decl_module_type_from_typed(&typed_module_type)? {
+                crate::types::decl::ModuleType::MtySignature(signature) => signature,
+                _ => return None,
+            };
+            return Some((signature, fallback_pers));
+        }
+
+        let mut parser = Parser::new(&filename, &source);
+        let structure = module::parse_structure(&mut parser);
+        if parser.has_errors() {
+            return None;
+        }
+
+        let options = CompilerOptions {
+            open_modules: self.open_modules.clone(),
+            jsx_version: self.jsx_version,
+            ..CompilerOptions::default()
+        };
+        let jsx_version = jsx_version_for_structure(&structure, &options, parser.arena());
+        let structure = if let Some(jsx_version) = jsx_version {
+            jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
+        } else {
+            structure
+        };
+        let structure = crate::binary_ast::ppx::expand_extensions(&structure, parser.arena_mut());
+        let structure =
+            crate::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut()).ok()?;
+
+        let mut tctx = TypeCheckContext::new(ctx, parser.arena());
+        tctx.set_persistent_env(fallback_pers);
+        let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure).ok()?;
+
+        let has_resi = source_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|ext| ext == "res")
+            && FsPath::new(&format!("{}i", filename)).exists();
+        if !has_resi {
+            normalize_signature_types(ctx, &typed_structure, &final_env);
+        }
+
+        let fallback_pers = tctx.persistent_env.take()?;
+        Some((typed_structure.str_type.clone(), fallback_pers))
+    }
+
+    fn load_module_from_source_fallback<'a>(
+        &mut self,
+        name: &str,
+        ctx: &'a TypeContext<'a>,
+    ) -> Option<PersStruct> {
+        let ast_filename = format!("{}.ast", name);
+        let ast_path = self.find_in_path_uncap(&ast_filename)?;
+        let source_path = Self::read_ast_source_path(FsPath::new(&ast_path))?;
+        let interface_path = match source_path.extension().and_then(|s| s.to_str()) {
+            Some("res") => {
+                let resi = PathBuf::from(format!("{}i", source_path.to_string_lossy()));
+                resi.exists().then_some(resi)
+            }
+            Some("ml") => {
+                let mli = PathBuf::from(format!("{}i", source_path.to_string_lossy()));
+                mli.exists().then_some(mli)
+            }
+            _ => None,
+        };
+        let preferred_path = interface_path.as_deref().unwrap_or(source_path.as_path());
+
+        let debug_source_fallback = std::env::var_os("RUST_DEBUG_PERSISTENT_SOURCE_FALLBACK").is_some();
+        if debug_source_fallback {
+            eprintln!(
+                "[persistent-source] module={} ast={} source={}",
+                name,
+                ast_path,
+                preferred_path.display()
+            );
+        }
+
+        let (signature, fallback_pers) = self.typecheck_source_signature(preferred_path, ctx)?;
+        self.alias_prefix_rewrites
+            .extend(fallback_pers.alias_prefix_rewrites.clone());
+        for (module_name, loaded) in fallback_pers.cache {
+            if module_name != name && loaded.is_some() && !self.cache.contains_key(&module_name) {
+                self.cache.insert(module_name, loaded);
+            }
+        }
+
+        Some(self.finalize_loaded_signature(
+            name,
+            name.to_string(),
+            signature,
+            preferred_path.to_string_lossy().into_owned(),
+            ctx,
+        ))
+    }
+
+    /// Load a module from a .cmi file, or fall back to the source path embedded
+    /// in a sibling `.ast` when the module is implementation-only.
+    fn load_module<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<PersStruct> {
+        let cmi_filename = format!("{}.cmi", name);
+        if let Some(full_path) = self.find_in_path_uncap(&cmi_filename) {
+            let cmi = match cmi_format::read_cmi(&full_path) {
+                Ok(cmi) => cmi,
+                Err(e) => {
+                    eprintln!("warning: failed to read CMI file {}: {}", full_path, e);
+                    return None;
+                }
+            };
+
+            let mut sig_ctx = SigReadContext::new(ctx);
+            let signature = sig_ctx.read_signature(&cmi.cmi_sign);
+            return Some(self.finalize_loaded_signature(
+                name,
+                cmi.cmi_name,
+                signature,
+                full_path,
+                ctx,
+            ));
+        }
+
+        self.load_module_from_source_fallback(name, ctx)
     }
 
     /// Read a module's signature from CMI without applying path substitution.

@@ -5045,7 +5045,7 @@ fn anchor_local_module_aliases_to_owner(
 /// Convert a typed tree ModuleType to a decl ModuleType.
 /// Used both in extract_module_type_from_mod_expr and in transl_signature
 /// to add modules to sig_env for subsequent items.
-fn decl_module_type_from_typed(
+pub(crate) fn decl_module_type_from_typed(
     mty: &ModuleType,
 ) -> Option<crate::types::decl::ModuleType> {
     use crate::types::decl::AliasPresence;

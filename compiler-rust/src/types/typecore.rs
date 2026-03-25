@@ -5816,6 +5816,30 @@ fn unify_expression_types(
                 };
                 dropped(lhs).is_some_and(|d| d == rhs) || dropped(rhs).is_some_and(|d| d == lhs)
             };
+            let repeated_terminal_module_match = |lhs: &str, rhs: &str| -> bool {
+                let matches = |long: &str, short: &str| -> bool {
+                    let long_segs: Vec<&str> = long.split('.').collect();
+                    let short_segs: Vec<&str> = short.split('.').collect();
+                    if long_segs.len() != short_segs.len() + 1 || short_segs.len() < 2 {
+                        return false;
+                    }
+                    if long_segs.last() != short_segs.last() {
+                        return false;
+                    }
+                    let long_modules = &long_segs[..long_segs.len() - 1];
+                    let short_modules = &short_segs[..short_segs.len() - 1];
+                    if long_modules.len() != short_modules.len() + 1 {
+                        return false;
+                    }
+                    let Some((&short_last, short_prefix)) = short_modules.split_last() else {
+                        return false;
+                    };
+                    long_modules[..short_prefix.len()] == *short_prefix
+                        && long_modules[short_prefix.len()] == short_last
+                        && long_modules[short_prefix.len() + 1] == short_last
+                };
+                matches(lhs, rhs) || matches(rhs, lhs)
+            };
             let repr1 = tctx.type_ctx.repr(ty1);
             let repr2 = tctx.type_ctx.repr(ty2);
             let desc1 = tctx.type_ctx.get_desc(repr1);
@@ -5848,6 +5872,15 @@ fn unify_expression_types(
                 {
                     drop(desc1);
                     drop(desc2);
+                    return Ok(());
+                }
+                if args1.is_empty()
+                    && args2.is_empty()
+                    && repeated_terminal_module_match(&path1.name(), &path2.name())
+                {
+                    drop(desc1);
+                    drop(desc2);
+                    crate::types::ctype::link_type(tctx.type_ctx, repr1, repr2);
                     return Ok(());
                 }
             }
@@ -13756,6 +13789,8 @@ fn type_field(
     field_lid: &Located<LidentIdx>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
+    let debug_field_label = std::env::var_os("RUST_DEBUG_FIELD_LABEL").is_some();
+
     let resolved_lid = tctx.resolve_lid(field_lid.txt).clone();
     let field_name = tctx.longident_last_name(&resolved_lid);
 
@@ -13781,6 +13816,60 @@ fn type_field(
             tctx.type_ctx,
         )
     });
+    let mut env_label = env_label;
+    if let Some(label) = env_label.as_mut() {
+        if debug_field_label {
+            let lbl_res_repr = tctx.type_ctx.repr(label.lbl_res);
+            let lbl_arg_repr = tctx.type_ctx.repr(label.lbl_arg);
+            let lbl_res_desc = tctx.type_ctx.get_desc(lbl_res_repr);
+            let lbl_arg_desc = tctx.type_ctx.get_desc(lbl_arg_repr);
+            let lbl_res_head = match &*lbl_res_desc {
+                TypeDesc::Tconstr { path, .. } => path.name(),
+                _ => format!("ty#{}", lbl_res_repr.0),
+            };
+            let lbl_arg_head = match &*lbl_arg_desc {
+                TypeDesc::Tconstr { path, .. } => path.name(),
+                _ => format!("ty#{}", lbl_arg_repr.0),
+            };
+            drop(lbl_res_desc);
+            drop(lbl_arg_desc);
+            eprintln!(
+                "[field-label] stage=selected field={} record_ty={} lbl_res={} lbl_arg={}",
+                field_name,
+                {
+                    let ty_exp_repr = tctx.type_ctx.repr(ty_exp);
+                    let ty_exp_desc = tctx.type_ctx.get_desc(ty_exp_repr);
+                    match &*ty_exp_desc {
+                        TypeDesc::Tconstr { path, .. } => path.name(),
+                        _ => format!("ty#{}", ty_exp_repr.0),
+                    }
+                },
+                lbl_res_head,
+                lbl_arg_head
+            );
+        }
+        qualify_label_description_paths(label, env, &mut tctx.persistent_env, tctx.type_ctx);
+        if debug_field_label {
+            let lbl_res_repr = tctx.type_ctx.repr(label.lbl_res);
+            let lbl_arg_repr = tctx.type_ctx.repr(label.lbl_arg);
+            let lbl_res_desc = tctx.type_ctx.get_desc(lbl_res_repr);
+            let lbl_arg_desc = tctx.type_ctx.get_desc(lbl_arg_repr);
+            let lbl_res_head = match &*lbl_res_desc {
+                TypeDesc::Tconstr { path, .. } => path.name(),
+                _ => format!("ty#{}", lbl_res_repr.0),
+            };
+            let lbl_arg_head = match &*lbl_arg_desc {
+                TypeDesc::Tconstr { path, .. } => path.name(),
+                _ => format!("ty#{}", lbl_arg_repr.0),
+            };
+            drop(lbl_res_desc);
+            drop(lbl_arg_desc);
+            eprintln!(
+                "[field-label] stage=qualified field={} lbl_res={} lbl_arg={}",
+                field_name, lbl_res_head, lbl_arg_head
+            );
+        }
+    }
 
     let (label_desc, field_ty, ty_res) = if let Some(env_label) = env_label {
         let (_poly_vars, ty_arg, ty_res) =
@@ -13817,6 +13906,26 @@ fn type_field(
                     &mut visited_res,
                 );
             }
+        }
+        if debug_field_label {
+            let ty_arg_repr = tctx.type_ctx.repr(ty_arg);
+            let ty_res_repr = tctx.type_ctx.repr(ty_res);
+            let ty_arg_desc = tctx.type_ctx.get_desc(ty_arg_repr);
+            let ty_res_desc = tctx.type_ctx.get_desc(ty_res_repr);
+            let ty_arg_head = match &*ty_arg_desc {
+                TypeDesc::Tconstr { path, .. } => path.name(),
+                _ => format!("ty#{}", ty_arg_repr.0),
+            };
+            let ty_res_head = match &*ty_res_desc {
+                TypeDesc::Tconstr { path, .. } => path.name(),
+                _ => format!("ty#{}", ty_res_repr.0),
+            };
+            drop(ty_arg_desc);
+            drop(ty_res_desc);
+            eprintln!(
+                "[field-label] stage=instantiated field={} ty_res={} ty_arg={}",
+                field_name, ty_res_head, ty_arg_head
+            );
         }
         if std::env::var_os("RUST_DEBUG_FIELD_INST").is_some() {
             let name = env_label.lbl_name.as_str();
@@ -13936,6 +14045,10 @@ fn type_setfield(
             ctx,
         )
     });
+    let mut env_label = env_label;
+    if let Some(label) = env_label.as_mut() {
+        qualify_label_description_paths(label, env, &mut tctx.persistent_env, ctx);
+    }
     let (label_desc, field_ty) = if let Some(env_label) = env_label {
         let (_poly_vars, ty_arg, ty_res) =
             crate::types::ctype::instance_label(ctx, false, &env_label);
@@ -17749,6 +17862,19 @@ impl Env {
                 // Resolve the module prefix to get a signature and path.
                 let lid_str = Self::longident_to_string(lid, arena);
                 let prefix_str = Self::longident_to_string(prefix, arena);
+                let debug_lookup_value_lid = std::env::var("RUST_DEBUG_LOOKUP_VALUE_LID")
+                    .ok()
+                    .is_some_and(|raw| {
+                        raw.split(',')
+                            .map(|part| part.trim())
+                            .filter(|part| !part.is_empty())
+                            .any(|target| {
+                                target == lid_str
+                                    || target == prefix_str
+                                    || target == value_name
+                                    || target == format!("{}.{}", prefix_str, value_name)
+                            })
+                    });
                 let prefix_cache_fragment = match &**prefix {
                     Longident::Lident(mod_idx) => {
                         let mod_name = arena.get_string(*mod_idx);
@@ -17767,6 +17893,12 @@ impl Env {
 
                 let cached_module = ctx.find_resolved_module_sig(&module_cache_key);
                 let cache_hit = cached_module.is_some();
+                if debug_lookup_value_lid {
+                    eprintln!(
+                        "[lookup-value-lid] lid={} prefix={} value={} cache_key={} cache_hit={}",
+                        lid_str, prefix_str, value_name, module_cache_key, cache_hit
+                    );
+                }
                 let resolved_module = cached_module.or_else(|| {
                     let resolved = self.resolve_module_lid(prefix, arena, pers_env, ctx);
                     if let Some((mod_path, sig)) = &resolved {
@@ -17778,6 +17910,46 @@ impl Env {
                     }
                     resolved
                 });
+                if debug_lookup_value_lid {
+                    match &resolved_module {
+                        Some((mod_path, sig)) => {
+                            let values = sig
+                                .iter()
+                                .filter_map(|item| match item {
+                                    crate::types::decl::SignatureItem::SigValue(id, _) => {
+                                        Some(id.name().to_string())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            let modules = sig
+                                .iter()
+                                .filter_map(|item| match item {
+                                    crate::types::decl::SignatureItem::SigModule(id, _, _) => {
+                                        Some(id.name().to_string())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            eprintln!(
+                                "[lookup-value-lid] resolved prefix={} mod_path={} sig_items={} values={} modules={}",
+                                prefix_str,
+                                mod_path.name(),
+                                sig.len(),
+                                values,
+                                modules
+                            );
+                        }
+                        None => {
+                            eprintln!(
+                                "[lookup-value-lid] unresolved prefix={} lid={}",
+                                prefix_str, lid_str
+                            );
+                        }
+                    }
+                }
                 if std::env::var_os("RUST_DEBUG_MODULE_CACHE").is_some() && prefix_str == "N" {
                     eprintln!(
                         "[module-cache] prefix={} key={} hit={} resolved={}",
@@ -18120,6 +18292,12 @@ impl Env {
                             }
                         }
                     }
+                    if debug_lookup_value_lid {
+                        eprintln!(
+                            "[lookup-value-lid] missing value={} in prefix={} lid={}",
+                            value_name, prefix_str, lid_str
+                        );
+                    }
                     return Err(TypeCoreError::UndefinedMethod {
                         ty: TypeExprRef(0),
                         method: lid_str,
@@ -18164,6 +18342,14 @@ impl Env {
                                 .clone()
                                 .unwrap_or_else(|| Path::pident(id.clone()))
                         };
+                        if debug_lookup_value_lid {
+                            eprintln!(
+                                "[lookup-value-lid] fallback-local lid={} value={} path={}",
+                                lid_str,
+                                value_name,
+                                path.name()
+                            );
+                        }
                         Ok((path, desc.clone()))
                     }
                     Err(_) => Err(TypeCoreError::UndefinedMethod {
@@ -18622,8 +18808,19 @@ impl Env {
                             ctx,
                             &crate::types::decl::ModuleType::MtySignature(sig.clone()),
                         );
+                        if debug_module_sig {
+                            eprintln!(
+                                "[local-module-sig] mod={} source=persistent path={} items={}",
+                                mod_name,
+                                module_path.name(),
+                                sig.len()
+                            );
+                        }
                         return Some((module_path, sig));
                     }
+                }
+                if debug_module_sig {
+                    eprintln!("[local-module-sig] mod={} unresolved", mod_name);
                 }
                 None
             }
@@ -19733,6 +19930,58 @@ fn expand_type_path_for_compare<'a>(
     path.clone()
 }
 
+fn resolve_type_item_identity<'a>(
+    path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<(i32, usize)> {
+    match path {
+        Path::Pident(id) => {
+            if id.stamp() == 0 {
+                return None;
+            }
+            let arity = if let Ok(decl) = env.lookup_type(path) {
+                decl.type_params.len()
+            } else {
+                ctx.find_type_decl_by_stamp(id.stamp())?.type_params.len()
+            };
+            Some((id.stamp(), arity))
+        }
+        Path::Pdot(parent, type_name, _) => {
+            let (_, parent_sig) = resolve_module_signature_for_path(parent, env, pers_env, ctx)?;
+            for item in &parent_sig {
+                if let crate::types::decl::SignatureItem::SigType(id, decl, _) = item {
+                    if id.name() == type_name.as_str() && id.stamp() != 0 {
+                        return Some((id.stamp(), decl.type_params.len()));
+                    }
+                }
+            }
+            None
+        }
+        Path::Papply(_, _) => None,
+    }
+}
+
+fn resolved_type_items_share_identity<'a>(
+    left: &Path,
+    right: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> bool {
+    let Some((left_stamp, left_arity)) = resolve_type_item_identity(left, env, pers_env, ctx)
+    else {
+        return false;
+    };
+    let Some((right_stamp, right_arity)) = resolve_type_item_identity(right, env, pers_env, ctx)
+    else {
+        return false;
+    };
+
+    left_stamp == right_stamp && left_arity == right_arity
+}
+
 fn compare_type_paths_for_disambiguation<'a>(
     left: &Path,
     right: &Path,
@@ -19740,9 +19989,16 @@ fn compare_type_paths_for_disambiguation<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> bool {
+    if left.same(right) {
+        return true;
+    }
+    if resolved_type_items_share_identity(left, right, env, pers_env, ctx) {
+        return true;
+    }
     let mut left_visiting = HashSet::new();
     let mut right_visiting = HashSet::new();
-    let left_expanded = expand_type_path_for_compare(left, env, pers_env, ctx, 0, &mut left_visiting);
+    let left_expanded =
+        expand_type_path_for_compare(left, env, pers_env, ctx, 0, &mut left_visiting);
     let right_expanded =
         expand_type_path_for_compare(right, env, pers_env, ctx, 0, &mut right_visiting);
     left_expanded.same(&right_expanded)
@@ -19859,11 +20115,8 @@ fn type_contains_unresolved_local_path<'a>(
     let desc = ctx.get_desc(repr);
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
-            let has_local_head = match path {
-                Path::Pident(_) => true,
-                Path::Pdot(prefix, _, _) => matches!(&**prefix, Path::Pident(_)),
-                Path::Papply(_, _) => false,
-            };
+            let has_local_head =
+                matches!(path_root_module(path), Path::Pident(id) if !id.is_persistent());
             if has_local_head && lookup_type_decl_for_path(path, env, pers_env, ctx).is_none() {
                 return true;
             }
@@ -20042,6 +20295,8 @@ fn disambiguate_constructor<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
+    let debug_all = std::env::var_os("RUST_DEBUG_DISAMB_CSTR_ALL").is_some();
+
     // Step 1: Try to extract the variant type path from the expected type
     let opath = extract_variant_type_path_from_expected_with_persistent_env(
         expected_ty,
@@ -20049,9 +20304,33 @@ fn disambiguate_constructor<'a>(
         pers_env,
         ctx,
     );
+    if debug_all {
+        eprintln!(
+            "[disamb-cstr-all] name={} target={}",
+            cstr_name,
+            opath
+                .as_ref()
+                .map(|p| p.name())
+                .unwrap_or_else(|| "<none>".to_string())
+        );
+    }
 
     // Step 2: Find all constructors with this name
     let all_constrs = env.find_all_constructors(cstr_name);
+    if debug_all {
+        for (idx, cstr) in all_constrs.iter().enumerate() {
+            let cstr_ty = ctx.repr(cstr.cstr_res);
+            let cstr_desc = ctx.get_desc(cstr_ty);
+            let cstr_path = match &*cstr_desc {
+                TypeDesc::Tconstr { path, .. } => path.name(),
+                _ => format!("ty#{}", cstr_ty.0),
+            };
+            eprintln!(
+                "[disamb-cstr-all] candidate[{}] name={} res={}",
+                idx, cstr_name, cstr_path
+            );
+        }
+    }
 
     if all_constrs.is_empty() {
         // No constructors found in env - try type-directed lookup
@@ -20070,6 +20349,22 @@ fn disambiguate_constructor<'a>(
                 path: cstr_path, ..
             } = &*cstr_desc
             {
+                if debug_all {
+                    eprintln!(
+                        "[disamb-cstr-all] compare name={} candidate={} target={} same={} compatible={}",
+                        cstr_name,
+                        cstr_path.name(),
+                        target_path.name(),
+                        cstr_path.same(target_path),
+                        compare_type_paths_for_disambiguation(
+                            cstr_path,
+                            target_path,
+                            env,
+                            pers_env,
+                            ctx,
+                        )
+                    );
+                }
                 if cstr_path.same(target_path)
                     || compare_type_paths_for_disambiguation(
                         cstr_path,
@@ -20242,14 +20537,18 @@ fn lookup_label_by_lid<'a>(
                             ctx,
                         )
                     {
-                        return Some(candidate.clone());
+                        let mut selected = candidate.clone();
+                        qualify_label_description_paths(&mut selected, env, pers_env, ctx);
+                        return Some(selected);
                     }
                 }
             }
         }
     }
 
-    candidates.pop()
+    let mut selected = candidates.pop()?;
+    qualify_label_description_paths(&mut selected, env, pers_env, ctx);
+    Some(selected)
 }
 
 fn extract_concrete_record_type_info<'a>(
@@ -20396,7 +20695,7 @@ fn lookup_label_by_expected_type<'a>(
     let res_ty = ctx.new_generic_constr(type_path, type_decl.type_params.clone());
     for (pos, ld) in labels.iter().enumerate() {
         if ld.ld_id.name() == label_name {
-            return Some(crate::types::LabelDescription {
+            let mut selected = crate::types::LabelDescription {
                 lbl_name: ld.ld_id.name().to_string(),
                 lbl_res: res_ty,
                 lbl_arg: crate::types::ctype::remap_label_type_to_params(
@@ -20412,7 +20711,9 @@ fn lookup_label_by_expected_type<'a>(
                 lbl_private: type_decl.type_private,
                 lbl_loc: ld.ld_loc.clone(),
                 lbl_attributes: ld.ld_attributes.clone(),
-            });
+            };
+            qualify_label_description_paths(&mut selected, env, pers_env, ctx);
+            return Some(selected);
         }
     }
     None
@@ -21685,8 +21986,8 @@ fn resolve_module_signature_for_path<'a>(
                 }
                 if matches!(
                     &md.md_type,
-                    crate::types::decl::ModuleType::MtyAlias(_, Path::Pdot(..))
-                        | crate::types::decl::ModuleType::MtyIdent(Path::Pdot(..))
+                    crate::types::decl::ModuleType::MtyAlias(..)
+                        | crate::types::decl::ModuleType::MtyIdent(..)
                 ) {
                     let allow_inferred_rebind_paths = match &md.md_type {
                         crate::types::decl::ModuleType::MtyAlias(_, target @ Path::Pdot(..))

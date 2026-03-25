@@ -1680,13 +1680,36 @@ fn strengthen_signature_for_module_access_path<'a>(
 /// Resolve a type through local environment modules.
 /// For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
 /// follow aliases (MtyAlias/MtyIdent), and then find type t in its signature.
-fn resolve_type_through_env<'a>(
+fn resolve_type_item_through_env<'a>(
     ctx: &'a TypeContext<'a>,
     env: &super::env::Env,
     path: &Path,
     strengthen_alias_types: bool,
-) -> Option<super::decl::TypeDeclaration> {
+) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
     use super::decl::SignatureItem;
+
+    fn lookup_raw_module_sig_type(
+        env: &super::env::Env,
+        module_path: &Path,
+        type_name: &str,
+    ) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
+        let md = match module_path {
+            Path::Pident(id) => env
+                .lookup_module(module_path)
+                .or_else(|_| env.find_module(id.name()))
+                .ok()?,
+            _ => return None,
+        };
+        let super::decl::ModuleType::MtySignature(raw_sig) = &md.md_type else {
+            return None;
+        };
+        raw_sig.iter().find_map(|item| match item {
+            SignatureItem::SigType(id, decl, _) if id.name() == type_name => {
+                Some((id.clone(), decl.clone()))
+            }
+            _ => None,
+        })
+    }
 
     let (module_path, type_name) = match path {
         Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
@@ -1746,6 +1769,42 @@ fn resolve_type_through_env<'a>(
                 );
             }
             if id.name() == type_name {
+                let queried_type_path = Path::pdot(module_path.clone(), type_name.to_string());
+                let self_manifest = decl
+                    .type_manifest
+                    .is_some_and(|manifest| {
+                        let manifest = ctx.repr(manifest);
+                        let manifest_desc = ctx.get_desc(manifest);
+                        matches!(
+                            &*manifest_desc,
+                            TypeDesc::Tconstr {
+                                path: manifest_path, ..
+                            } if manifest_path.same(&queried_type_path)
+                        )
+                    });
+                if self_manifest {
+                    let raw_module_path = alias_target_for_strengthening
+                        .as_ref()
+                        .unwrap_or(module_path);
+                    if let Some((raw_id, raw_decl)) =
+                        lookup_raw_module_sig_type(env, raw_module_path, type_name)
+                    {
+                        if debug_resolve {
+                            eprintln!(
+                                "[resolve-type-env] raw-self-manifest-fallback module={} type={} raw_manifest={} raw_type_path={}",
+                                raw_module_path.name(),
+                                type_name,
+                                raw_decl.type_manifest.is_some(),
+                                raw_decl
+                                    .type_path
+                                    .as_ref()
+                                    .map(|p| p.name())
+                                    .unwrap_or_else(|| "<none>".to_string())
+                            );
+                        }
+                        return Some((raw_id, raw_decl));
+                    }
+                }
                 if let Some(target_path) = alias_target_for_strengthening.as_ref() {
                     if debug_resolve {
                         eprintln!(
@@ -1754,17 +1813,15 @@ fn resolve_type_through_env<'a>(
                             id.name()
                         );
                     }
-                    return Some(strengthen_type_decl_for_module_access_path(
-                        ctx,
-                        target_path,
-                        id,
-                        decl,
+                    return Some((
+                        id.clone(),
+                        strengthen_type_decl_for_module_access_path(ctx, target_path, id, decl),
                     ));
                 }
                 if debug_resolve {
                     eprintln!("[resolve-type-env] returning raw decl type={}", id.name());
                 }
-                return Some(decl.clone());
+                return Some((id.clone(), decl.clone()));
             }
         }
     }
@@ -1777,7 +1834,41 @@ fn resolve_type_through_env<'a>(
     }
     // Fall back to CMI-based resolution if local env-based lookup didn't find
     // the type item (e.g. when only the persistent path is available).
-    resolve_type_through_modules(ctx, path)
+    resolve_type_through_modules(ctx, path).map(|decl| {
+        (
+            crate::ident::Ident::create_local(type_name),
+            decl,
+        )
+    })
+}
+
+fn resolve_type_through_env<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &super::env::Env,
+    path: &Path,
+    strengthen_alias_types: bool,
+) -> Option<super::decl::TypeDeclaration> {
+    resolve_type_item_through_env(ctx, env, path, strengthen_alias_types).map(|(_, decl)| decl)
+}
+
+fn resolved_type_items_share_identity(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    path1: &Path,
+    path2: &Path,
+    arity: usize,
+) -> bool {
+    let Some((id1, decl1)) = resolve_type_item_through_env(ctx, env, path1, false) else {
+        return false;
+    };
+    let Some((id2, decl2)) = resolve_type_item_through_env(ctx, env, path2, false) else {
+        return false;
+    };
+
+    id1.stamp() != 0
+        && id1.stamp() == id2.stamp()
+        && decl1.type_params.len() == arity
+        && decl2.type_params.len() == arity
 }
 
 /// Normalize a path by following module aliases, using both the local env
@@ -2318,7 +2409,37 @@ fn try_expand_head<'a>(
                     }),
                 };
                 if exact_lookup {
-                    if let Some(manifest) = env_decl.type_manifest {
+                    let self_manifest = env_decl.type_manifest.is_some_and(|manifest| {
+                        let manifest = ctx.repr(manifest);
+                        let manifest_desc = ctx.get_desc(manifest);
+                        matches!(
+                            &*manifest_desc,
+                            TypeDesc::Tconstr {
+                                path: manifest_path, ..
+                            } if manifest_path.same(&path)
+                        )
+                    });
+                    let alias_backed_parent = match &path {
+                        Path::Pdot(parent, _, _) => {
+                            let mut visiting = HashSet::new();
+                            matches!(
+                                resolve_module_type_through_env_path(ctx, env, parent, &mut visiting),
+                                Some(
+                                    super::decl::ModuleType::MtyAlias(..)
+                                        | super::decl::ModuleType::MtyIdent(..)
+                                )
+                            )
+                        }
+                        _ => false,
+                    };
+                    if self_manifest && alias_backed_parent {
+                        if debug_expand {
+                            eprintln!(
+                                "[expand] path={} env.lookup_type synthetic self-manifest; defer qualified resolution",
+                                path_name
+                            );
+                        }
+                    } else if let Some(manifest) = env_decl.type_manifest {
                         if can_expand_decl_manifest(env_decl, manifest) {
                             let params = &env_decl.type_params;
                             if params.len() == args.len() {
@@ -3445,6 +3566,39 @@ fn unify_after_expansion<'a>(
         return Ok(());
     }
 
+    {
+        let lhs_desc = ctx.get_desc(lhs);
+        let rhs_desc = ctx.get_desc(rhs);
+        if let (
+            TypeDesc::Tconstr {
+                path: path1,
+                args: args1,
+                ..
+            },
+            TypeDesc::Tconstr {
+                path: path2,
+                args: args2,
+                ..
+            },
+        ) = (&*lhs_desc, &*rhs_desc)
+        {
+            if args1.is_empty() && args2.is_empty() && path1.name() == path2.name() {
+                drop(lhs_desc);
+                drop(rhs_desc);
+                link_type(ctx, lhs, rhs);
+                if state.mode != crate::types::UnifyMode::Pattern {
+                    let to_ty = ctx.repr(relink_target);
+                    if rhs != to_ty && !deep_occur(ctx, rhs, to_ty) {
+                        ctx.set_desc(rhs, TypeDesc::Tlink(to_ty));
+                    }
+                }
+                return Ok(());
+            }
+        }
+        drop(lhs_desc);
+        drop(rhs_desc);
+    }
+
     let unify_result = unify(ctx, state, lhs, rhs);
     if debug_unify_after {
         eprintln!("[unify-after-expand] unify(lhs,rhs) ok={}", unify_result.is_ok());
@@ -3899,6 +4053,13 @@ fn unify_types<'a>(
                             false
                         };
                         if alias_matches {
+                            if std::env::var_os("RUST_DEBUG_TCONSTR_UNIFY").is_some() {
+                                eprintln!(
+                                    "[tconstr-unify:qualified-alias] keep={} drop={}",
+                                    long_path.name(),
+                                    short_path.name()
+                                );
+                            }
                             let pairs: Vec<_> = args1
                                 .iter()
                                 .zip(args2.iter())
@@ -3976,6 +4137,45 @@ fn unify_types<'a>(
                             }
                             return Ok(());
                         }
+                    }
+                }
+
+                if args1.len() == args2.len()
+                    && let Some(env) = state.env()
+                    && resolved_type_items_share_identity(ctx, env, path1, path2, args1.len())
+                {
+                    let p1 = path1.name();
+                    let p2 = path2.name();
+                    let seg1: Vec<&str> = p1.split('.').collect();
+                    let seg2: Vec<&str> = p2.split('.').collect();
+                    let same_root_drop_one =
+                        seg1.len() == seg2.len() + 1
+                            && seg1.len() >= 3
+                            && seg1[0] == seg2[0]
+                            && seg1[2..] == seg2[1..]
+                        || seg2.len() == seg1.len() + 1
+                            && seg2.len() >= 3
+                            && seg2[0] == seg1[0]
+                            && seg2[2..] == seg1[1..];
+                    let flattened_family = p1.contains("__") != p2.contains("__");
+                    if same_root_drop_one || flattened_family {
+                        if std::env::var_os("RUST_DEBUG_TCONSTR_UNIFY").is_some() {
+                            eprintln!(
+                                "[tconstr-unify:same-identity] lhs={} rhs={}",
+                                p1, p2
+                            );
+                        }
+                        let pairs: Vec<_> = args1
+                            .iter()
+                            .zip(args2.iter())
+                            .map(|(&a, &b)| (a, b))
+                            .collect();
+                        drop(desc1);
+                        drop(desc2);
+                        for (a, b) in pairs {
+                            unify(ctx, state, a, b)?;
+                        }
+                        return Ok(());
                     }
                 }
 
