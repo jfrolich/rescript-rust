@@ -21292,6 +21292,32 @@ fn lookup_constructor_by_expected_type<'b>(
         .type_path
         .clone()
         .unwrap_or(type_path.clone());
+    // Use the concrete expanded path to find the declaration, but preserve the
+    // original expected alias family for the reconstructed constructor result
+    // when the two paths are alias-equivalent. This matches OCaml's behavior
+    // for pattern typing over aliases like `M.t = Path.t`: the constructor is
+    // selected from `Path.t`, but the resulting pattern type still inhabits
+    // the expected `M.t` family.
+    let result_type_path = {
+        let expected_repr = ctx.repr(expected_ty);
+        let expected_desc = ctx.get_desc(expected_repr);
+        match &*expected_desc {
+            TypeDesc::Tconstr { path, args, .. }
+                if args.len() == concrete_type_decl.type_params.len()
+                    && (path.same(&concrete_type_path)
+                        || compare_type_paths_for_disambiguation(
+                            path,
+                            &concrete_type_path,
+                            env,
+                            pers_env,
+                            ctx,
+                        )) =>
+            {
+                path.clone()
+            }
+            _ => concrete_type_path.clone(),
+        }
+    };
     if std::env::var_os("RUST_DEBUG_LOOKUP_CSTR_PATH").is_some() {
         if concrete_type_path.last() == "t" || cstr_name == "JSONObject" || cstr_name == "JSONArray" {
             let decl_path = concrete_type_decl
@@ -21327,7 +21353,7 @@ fn lookup_constructor_by_expected_type<'b>(
                 } else {
                     crate::types::decl::ConstructorTag::CstrBlock(block_idx)
                 };
-                let module_access_path = concrete_type_path.parent();
+                let module_access_path = result_type_path.parent();
                 let (cstr_args, cstr_arity, cstr_inlined) = match &cd.cd_args {
                     crate::types::ConstructorArguments::CstrTuple(args) => {
                         let mut copied_args = Vec::with_capacity(args.len());
@@ -21441,7 +21467,7 @@ fn lookup_constructor_by_expected_type<'b>(
                         })
                         .collect::<Vec<_>>();
                         let inline_path =
-                            Path::pdot(concrete_type_path.clone(), cstr_name.to_string());
+                            Path::pdot(result_type_path.clone(), cstr_name.to_string());
                         let inline_constr =
                             ctx.new_generic_constr(inline_path, inline_params.clone());
                         let inline_decl = crate::types::TypeDeclaration {
@@ -21511,7 +21537,7 @@ fn lookup_constructor_by_expected_type<'b>(
                                     copied
                                 })
                                 .collect();
-                            ctx.new_generic_constr(concrete_type_path.clone(), mapped_args)
+                            ctx.new_generic_constr(result_type_path.clone(), mapped_args)
                         }
                         _ => {
                             drop(res_desc);
@@ -21552,7 +21578,7 @@ fn lookup_constructor_by_expected_type<'b>(
                             copied
                         })
                         .collect();
-                    ctx.new_generic_constr(concrete_type_path.clone(), result_params)
+                    ctx.new_generic_constr(result_type_path.clone(), result_params)
                 };
                 let desc = crate::types::decl::ConstructorDescription {
                     cstr_name: cstr_name.to_string(),
