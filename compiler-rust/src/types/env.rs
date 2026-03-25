@@ -800,6 +800,21 @@ impl Env {
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
     }
 
+    /// Find a module type by path.
+    pub fn lookup_modtype(&self, path: &Path) -> EnvResult<&ModtypeDeclaration> {
+        match path {
+            Path::Pident(id) => self
+                .modtypes
+                .find_by_ident(id)
+                .map(|m| m.as_ref())
+                .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string())),
+            Path::Pdot(_, name, _) => self.find_modtype(name),
+            Path::Papply(_, _) => Err(EnvError::ModuleNotFound(
+                "(functor application)".to_string(),
+            )),
+        }
+    }
+
     // ========================================================================
     // GADT Support
     // ========================================================================

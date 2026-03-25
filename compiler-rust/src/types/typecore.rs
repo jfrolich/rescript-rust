@@ -7015,12 +7015,61 @@ fn type_application(
                 );
                 tctx.force_fresh_local_float = previous_force_fresh_local_float;
 
-                let typed_arg = typed_arg_result?;
+                let mut typed_arg = typed_arg_result?;
                 if let Some(saved_env) = saved_unify_env {
                     tctx.unify_state.set_env(&saved_env);
                 } else {
                     tctx.set_unify_env(env);
                 }
+                let preserved_local_ident_flat_alias = if !enforce_optional {
+                    match &typed_arg.exp_desc {
+                        ExpressionDesc::Texp_ident(Path::Pident(_), _, desc) => {
+                            let desc_repr = ctx.repr(desc.val_type);
+                            let unify_repr = ctx.repr(unify_ty);
+                            let desc_snapshot = ctx.get_desc(desc_repr);
+                            let unify_snapshot = ctx.get_desc(unify_repr);
+                            let preserved = match (&*desc_snapshot, &*unify_snapshot) {
+                                (
+                                    TypeDesc::Tconstr {
+                                        path: desc_path,
+                                        args: desc_args,
+                                        ..
+                                    },
+                                    TypeDesc::Tconstr {
+                                        path: unify_path,
+                                        args: unify_args,
+                                        ..
+                                    },
+                                ) => {
+                                    let desc_segments = desc_path.name().split('.').count();
+                                    desc_path.head().is_persistent()
+                                        && unify_path.head().is_persistent()
+                                        && desc_segments >= 3
+                                        && desc_args.len() == unify_args.len()
+                                        && crate::types::ctype::flattened_alias_paths_equivalent(
+                                            ctx,
+                                            env,
+                                            desc_path,
+                                            unify_path,
+                                            desc_args.len(),
+                                        )
+                                        && ctx.repr(desc.val_type) != ctx.repr(unify_ty)
+                                }
+                                _ => false,
+                            };
+                            drop(desc_snapshot);
+                            drop(unify_snapshot);
+                            if preserved {
+                                Some(crate::types::ctype::subst_identity_copy(ctx, desc.val_type))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 // OCaml's type_unknown_args only calls type_expect (no
                 // subsequent unify_exp). Skip the post-unify for that path
                 // to preserve separate physical nodes in the typed tree.
@@ -7032,6 +7081,9 @@ fn type_application(
                         unify_ty,
                         Some(TypeClashContext::FunctionCall),
                     )?;
+                }
+                if let Some(preserved_ty) = preserved_local_ident_flat_alias {
+                    typed_arg.exp_type = preserved_ty;
                 }
                 if debug_apply_eq {
                     let full_loc = tctx.arena.to_location(loc);
@@ -17564,12 +17616,33 @@ fn rewrite_flattened_alias_child_prefixes<'a>(
     flattened_access_path: &Path,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) {
-    for item in sig {
+    rewrite_child_module_prefixes_from_sig(
+        sig,
+        sig,
+        qualified_alias_path,
+        flattened_access_path,
+        None,
+        ctx,
+    );
+}
+
+fn rewrite_child_module_prefixes_from_sig<'a>(
+    sig_to_rewrite: &[crate::types::decl::SignatureItem],
+    source_sig: &[crate::types::decl::SignatureItem],
+    old_parent_path: &Path,
+    new_parent_path: &Path,
+    skip_child_name: Option<&str>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) {
+    for item in source_sig {
         if let crate::types::decl::SignatureItem::SigModule(id, _, _) = item {
-            let old_prefix = Path::pdot(qualified_alias_path.clone(), id.name().to_string());
-            let new_prefix = Path::pdot(flattened_access_path.clone(), id.name().to_string());
+            if skip_child_name == Some(id.name()) {
+                continue;
+            }
+            let old_prefix = Path::pdot(old_parent_path.clone(), id.name().to_string());
+            let new_prefix = Path::pdot(new_parent_path.clone(), id.name().to_string());
             crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                sig,
+                sig_to_rewrite,
                 &old_prefix,
                 &new_prefix,
                 ctx,
@@ -18190,8 +18263,14 @@ impl Env {
         match lid {
             Longident::Lident(mod_idx) => {
                 let mod_name = arena.get_string(*mod_idx);
-                let debug_module_sig = std::env::var_os("RUST_DEBUG_LOCAL_MODULE_SIG").is_some()
-                    && matches!(mod_name, "IntCmp" | "N" | "D");
+                let debug_module_sig = std::env::var("RUST_DEBUG_LOCAL_MODULE_SIG")
+                    .ok()
+                    .is_some_and(|raw| {
+                        raw.split(',')
+                            .map(|part| part.trim())
+                            .filter(|part| !part.is_empty())
+                            .any(|target| target == mod_name)
+                    });
                 // First try local environment
                 if let Ok((mod_id, md, is_local)) = self.find_module_with_origin(mod_name) {
                     let access_path_hint = if is_local {
@@ -18459,6 +18538,41 @@ impl Env {
                                 }
                             }
                         }
+                        if debug_module_sig {
+                            let items = sig
+                                .iter()
+                                .map(|item| match item {
+                                    crate::types::decl::SignatureItem::SigValue(id, _) => {
+                                        format!("val:{}", id.name())
+                                    }
+                                    crate::types::decl::SignatureItem::SigType(id, _, _) => {
+                                        format!("type:{}", id.name())
+                                    }
+                                    crate::types::decl::SignatureItem::SigModule(id, _, _) => {
+                                        format!("module:{}", id.name())
+                                    }
+                                    crate::types::decl::SignatureItem::SigModtype(id, _) => {
+                                        format!("modtype:{}", id.name())
+                                    }
+                                    crate::types::decl::SignatureItem::SigTypext(id, _, _) => {
+                                        format!("ext:{}", id.name())
+                                    }
+                                    crate::types::decl::SignatureItem::SigClass => {
+                                        "class".to_string()
+                                    }
+                                    crate::types::decl::SignatureItem::SigClassType => {
+                                        "class_type".to_string()
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            eprintln!(
+                                "[local-module-sig] mod={} path={} items=[{}]",
+                                mod_name,
+                                path.name(),
+                                items
+                            );
+                        }
                         ctx.register_resolved_module_sig(
                             &module_cache_key,
                             path.clone(),
@@ -18472,17 +18586,15 @@ impl Env {
                     if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
                         let module_path = Path::pident(Ident::create_persistent(mod_name));
                         let sig = copy_lookup_signature_for_subst(&ps.ps_sig, ctx);
-                        if mod_name.contains("__") {
-                            if let Some(qualified_alias_path) =
-                                pers.qualified_alias_path_for_flattened_head(mod_name)
-                            {
-                                rewrite_flattened_alias_child_prefixes(
-                                    &sig,
-                                    &qualified_alias_path,
-                                    &module_path,
-                                    ctx,
-                                );
-                            }
+                        if let Some(qualified_alias_path) =
+                            pers.qualified_alias_path_for_flattened_head(mod_name)
+                        {
+                            rewrite_flattened_alias_child_prefixes(
+                                &sig,
+                                &qualified_alias_path,
+                                &module_path,
+                                ctx,
+                            );
                         }
                         crate::types::ctype::force_generalize_module_sig_values(
                             ctx,
@@ -18499,6 +18611,35 @@ impl Env {
                 if let Some((parent_path, parent_sig)) =
                     self.resolve_module_lid_impl(prefix, arena, pers_env, ctx, apply_subst)
                 {
+                    if std::env::var_os("RUST_DEBUG_IMPORT_MODULES").is_some()
+                        && (parent_path.name().starts_with("N") || parent_path.name().starts_with("M2"))
+                    {
+                        let items = parent_sig
+                            .iter()
+                            .filter_map(|item| match item {
+                                crate::types::decl::SignatureItem::SigValue(id, _) => {
+                                    Some(format!("val:{}", id.name()))
+                                }
+                                crate::types::decl::SignatureItem::SigType(id, _, _) => {
+                                    Some(format!("type:{}", id.name()))
+                                }
+                                crate::types::decl::SignatureItem::SigModule(id, _, _) => {
+                                    Some(format!("module:{}", id.name()))
+                                }
+                                crate::types::decl::SignatureItem::SigModtype(id, _) => {
+                                    Some(format!("modtype:{}", id.name()))
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        eprintln!(
+                            "[import-modules] parent={} looking_for={} items={}",
+                            parent_path.name(),
+                            submod_name,
+                            items
+                        );
+                    }
                     // Search for the sub-module in the parent's signature
                     for sig_item in &parent_sig {
                         if let crate::types::decl::SignatureItem::SigModule(id, sub_md, _) =
@@ -18669,6 +18810,24 @@ impl Env {
                                         crate::cmi::persistent_env::substitute_type_paths_in_sig(
                                             &sig, &sub_path, ctx,
                                         );
+                                        if let Some(pers) = pers_env.as_ref() {
+                                            for flat_head in pers.flattened_alias_heads_for_path(&parent_path)
+                                            {
+                                                let flattened_parent = Path::pident(
+                                                    Ident::create_persistent(&flat_head),
+                                                );
+                                                if !flattened_parent.same(&parent_path) {
+                                                    rewrite_child_module_prefixes_from_sig(
+                                                        &sig,
+                                                        &parent_sig,
+                                                        &parent_path,
+                                                        &flattened_parent,
+                                                        Some(submod_name),
+                                                        ctx,
+                                                    );
+                                                }
+                                            }
+                                        }
                                         if let Some(ref target) = alias_target_pdot {
                                             crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                                                 &sig,
@@ -21226,17 +21385,15 @@ fn resolve_module_signature_for_path<'a>(
                 if let Some(ps) = pers.find_pers_struct(id.name(), ctx) {
                     let access_path = Path::pident(Ident::create_persistent(id.name()));
                     let sig = copy_lookup_signature_for_subst(&ps.ps_sig, ctx);
-                    if id.name().contains("__") {
-                        if let Some(qualified_alias_path) =
-                            pers.qualified_alias_path_for_flattened_head(id.name())
-                        {
-                            rewrite_flattened_alias_child_prefixes(
-                                &sig,
-                                &qualified_alias_path,
-                                &access_path,
-                                ctx,
-                            );
-                        }
+                    if let Some(qualified_alias_path) =
+                        pers.qualified_alias_path_for_flattened_head(id.name())
+                    {
+                        rewrite_flattened_alias_child_prefixes(
+                            &sig,
+                            &qualified_alias_path,
+                            &access_path,
+                            ctx,
+                        );
                     }
                     return Some((access_path, sig));
                 }
@@ -21310,6 +21467,23 @@ fn resolve_module_signature_for_path<'a>(
                             &access_path,
                             ctx,
                         );
+                        if let Some(pers) = pers_env.as_ref() {
+                            for flat_head in pers.flattened_alias_heads_for_path(&resolved_parent_path)
+                            {
+                                let flattened_parent =
+                                    Path::pident(Ident::create_persistent(&flat_head));
+                                if !flattened_parent.same(&resolved_parent_path) {
+                                    rewrite_child_module_prefixes_from_sig(
+                                        &sig,
+                                        &parent_sig,
+                                        &resolved_parent_path,
+                                        &flattened_parent,
+                                        Some(submodule_name.as_str()),
+                                        ctx,
+                                    );
+                                }
+                            }
+                        }
                         if let Some(module_key) = module_key.as_deref() {
                             ctx.register_resolved_module_sig(
                                 module_key,

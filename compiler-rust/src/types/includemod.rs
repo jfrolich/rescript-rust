@@ -17,8 +17,10 @@ use crate::types::decl::{
     TypeDeclaration, ValueDescription,
 };
 use crate::types::env::Env;
+use crate::types::Path;
 use crate::types::typedtree::ModuleCoercion;
 use crate::types::{TypeContext, TypeExprRef};
+use std::collections::{HashMap, HashSet};
 
 // ============================================================================
 // Error Types
@@ -83,6 +85,96 @@ fn modtypes_inner<'a>(
     mty_sig: &ModuleType,
     aliasable: bool,
 ) -> IncludeModResult<ModuleCoercion> {
+    fn expand_module_type_in_env(
+        type_ctx: &TypeContext<'_>,
+        env: &Env,
+        path: &Path,
+    ) -> Option<ModuleType> {
+        use crate::types::decl::SignatureItem as SigItem;
+
+        fn expand_local(
+            env: &Env,
+            path: &Path,
+            visiting: &mut HashSet<Path>,
+        ) -> Option<ModuleType> {
+            if !visiting.insert(path.clone()) {
+                return None;
+            }
+
+            match path {
+                Path::Pident(id) => {
+                    if let Ok(md) = env.lookup_module(&Path::pident(id.clone())) {
+                        match &md.md_type {
+                            ModuleType::MtyIdent(alias_path)
+                            | ModuleType::MtyAlias(_, alias_path)
+                                if !alias_path.same(path) =>
+                            {
+                                if let Some(expanded) = expand_local(env, alias_path, visiting) {
+                                    return Some(expanded);
+                                }
+                            }
+                            _ => return Some(md.md_type.clone()),
+                        }
+                    }
+                    if let Ok(mtd) = env.lookup_modtype(&Path::pident(id.clone())) {
+                        if let Some(mty) = &mtd.mtd_type {
+                            match mty {
+                                ModuleType::MtyIdent(alias_path)
+                                | ModuleType::MtyAlias(_, alias_path)
+                                    if !alias_path.same(path) =>
+                                {
+                                    if let Some(expanded) = expand_local(env, alias_path, visiting) {
+                                        return Some(expanded);
+                                    }
+                                }
+                                _ => return Some(mty.clone()),
+                            }
+                        }
+                    }
+                    None
+                }
+                Path::Pdot(parent, name, _) => {
+                    let parent_mty = expand_local(env, parent, visiting)?;
+                    let parent_sig = match &parent_mty {
+                        ModuleType::MtySignature(sig) => sig.clone(),
+                        ModuleType::MtyIdent(parent_path)
+                        | ModuleType::MtyAlias(_, parent_path) => match expand_local(env, parent_path, visiting)?
+                        {
+                            ModuleType::MtySignature(sig) => sig,
+                            _ => return None,
+                        },
+                        _ => return None,
+                    };
+                    for item in &parent_sig {
+                        match item {
+                            SigItem::SigModule(id, md, _) if id.name() == name.as_str() => {
+                                return Some(md.md_type.clone());
+                            }
+                            SigItem::SigModtype(id, mtd) if id.name() == name.as_str() => {
+                                return mtd.mtd_type.clone();
+                            }
+                            _ => {}
+                        }
+                    }
+                    None
+                }
+                Path::Papply(_, _) => None,
+            }
+        }
+
+        let head = path.head();
+        if head.is_persistent() || head.stamp() == 0 {
+            if let Some(resolved) =
+                crate::types::ctype::resolve_module_type_through_env(type_ctx, env, path)
+            {
+                return Some(resolved);
+            }
+        }
+
+        let mut visiting = HashSet::new();
+        expand_local(env, path, &mut visiting)
+    }
+
     match (mty_impl, mty_sig) {
         // Identical module type identifiers
         (ModuleType::MtyIdent(p1), ModuleType::MtyIdent(p2)) if p1 == p2 => {
@@ -91,15 +183,20 @@ fn modtypes_inner<'a>(
 
         // Alias on the implementation side - expand and check
         (ModuleType::MtyAlias(_, path), mty_sig) => {
-            // In a full implementation, we would expand the alias here
-            // For now, we treat aliases as opaque
-            Ok(ModuleCoercion::Tcoerce_none)
+            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
+                modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)
+            } else {
+                Ok(ModuleCoercion::Tcoerce_none)
+            }
         }
 
         // Alias on the signature side - expand and check
         (mty_impl, ModuleType::MtyAlias(_, path)) => {
-            // In a full implementation, we would expand the alias here
-            Ok(ModuleCoercion::Tcoerce_none)
+            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
+                modtypes_inner(type_ctx, env, mty_impl, &expanded, aliasable)
+            } else {
+                Ok(ModuleCoercion::Tcoerce_none)
+            }
         }
 
         // Signature matching
@@ -146,16 +243,36 @@ fn modtypes_inner<'a>(
 
         // Signature implementation matches identifier signature
         (ModuleType::MtySignature(sig_impl), ModuleType::MtyIdent(path)) => {
-            // Look up the signature in the environment
-            // For now, we treat this as compatible
-            Ok(ModuleCoercion::Tcoerce_none)
+            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
+                modtypes_inner(type_ctx, env, mty_impl, &expanded, aliasable)
+            } else {
+                Ok(ModuleCoercion::Tcoerce_none)
+            }
         }
 
         // Identifier implementation matches signature
         (ModuleType::MtyIdent(path), ModuleType::MtySignature(sig_sig)) => {
-            // Look up and expand the module type
-            // For now, we treat this as compatible
-            Ok(ModuleCoercion::Tcoerce_none)
+            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
+                modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)
+            } else {
+                Ok(ModuleCoercion::Tcoerce_none)
+            }
+        }
+
+        (ModuleType::MtyIdent(path), mty_sig) => {
+            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
+                modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)
+            } else {
+                Ok(ModuleCoercion::Tcoerce_none)
+            }
+        }
+
+        (mty_impl, ModuleType::MtyIdent(path)) => {
+            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
+                modtypes_inner(type_ctx, env, mty_impl, &expanded, aliasable)
+            } else {
+                Ok(ModuleCoercion::Tcoerce_none)
+            }
         }
 
         // Fallback: incompatible module types
@@ -177,12 +294,50 @@ pub fn signatures<'a>(
     sig_impl: &Signature,
     sig_sig: &Signature,
 ) -> IncludeModResult<ModuleCoercion> {
+    if std::env::var_os("RUST_DEBUG_INCLUDE_SIG_ORDER").is_some() {
+        let summarize = |sig: &Signature| {
+            sig.iter()
+                .map(|item| match item {
+                    SignatureItem::SigValue(id, _) => format!("val:{}", id.name()),
+                    SignatureItem::SigType(id, _, _) => format!("type:{}", id.name()),
+                    SignatureItem::SigTypext(id, _, _) => format!("ext:{}", id.name()),
+                    SignatureItem::SigModule(id, _, _) => format!("module:{}", id.name()),
+                    SignatureItem::SigModtype(id, _) => format!("modtype:{}", id.name()),
+                    SignatureItem::SigClass => "class".to_string(),
+                    SignatureItem::SigClassType => "class_type".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let interesting = |sig: &Signature| {
+            sig.iter().any(|item| {
+                matches!(item, SignatureItem::SigValue(id, _) if matches!(id.name(), "t_encode" | "t_decode"))
+            })
+        };
+        if interesting(sig_impl) || interesting(sig_sig) {
+            eprintln!("[include-sig-order] impl=[{}]", summarize(sig_impl));
+            eprintln!("[include-sig-order] sig=[{}]", summarize(sig_sig));
+        }
+    }
+
     let mut errors = Vec::new();
     let mut coercions = Vec::new();
+    let mut include_env = env.clone();
+    let mut type_subst = HashMap::new();
+
+    for sig_item in sig_impl {
+        add_sig_item_to_env(sig_item, &mut include_env);
+    }
 
     // For each item in the signature, find the corresponding item in the implementation
     for (pos, sig_item) in sig_sig.iter().enumerate() {
-        match signature_item(type_ctx, env, sig_impl, sig_item) {
+        match signature_item(
+            type_ctx,
+            &include_env,
+            sig_impl,
+            sig_item,
+            &mut type_subst,
+        ) {
             Ok((impl_pos, coercion)) => {
                 coercions.push((impl_pos, coercion));
             }
@@ -212,6 +367,7 @@ fn signature_item<'a>(
     env: &Env,
     sig_impl: &Signature,
     sig_item: &SignatureItem,
+    type_subst: &mut HashMap<String, Path>,
 ) -> IncludeModResult<(usize, ModuleCoercion)> {
     match sig_item {
         SignatureItem::SigValue(id, val_desc) => {
@@ -220,8 +376,14 @@ fn signature_item<'a>(
                 if let SignatureItem::SigValue(impl_id, impl_val_desc) = impl_item {
                     if impl_id.name() == id.name() {
                         // Check that the types are compatible
-                        let coercion =
-                            value_descriptions(type_ctx, env, id.clone(), impl_val_desc, val_desc)?;
+                        let coercion = value_descriptions(
+                            type_ctx,
+                            env,
+                            id.clone(),
+                            impl_val_desc,
+                            val_desc,
+                            type_subst,
+                        )?;
                         return Ok((pos, coercion));
                     }
                 }
@@ -236,6 +398,15 @@ fn signature_item<'a>(
                     if impl_id.name() == id.name() {
                         // Check that the type declarations are compatible
                         type_declarations(type_ctx, env, id.clone(), impl_type_decl, type_decl)?;
+                        let subst_path = Path::pident(impl_id.clone());
+                        if std::env::var_os("RUST_DEBUG_INCLUDE_TYPE_SUBST").is_some() {
+                            eprintln!(
+                                "[include-type-subst] {} -> {}",
+                                id.name(),
+                                subst_path.name()
+                            );
+                        }
+                        type_subst.insert(id.name().to_string(), subst_path);
                         return Ok((pos, ModuleCoercion::Tcoerce_none));
                     }
                 }
@@ -316,25 +487,452 @@ fn value_descriptions<'a>(
     id: Ident,
     impl_desc: &ValueDescription,
     sig_desc: &ValueDescription,
+    type_subst: &HashMap<String, Path>,
 ) -> IncludeModResult<ModuleCoercion> {
+    fn has_non_row_type_variables(
+        type_ctx: &TypeContext<'_>,
+        ty: TypeExprRef,
+        seen: &mut HashSet<TypeExprRef>,
+    ) -> bool {
+        use crate::types::type_expr::{RowField, TypeDesc};
+
+        let ty = type_ctx.repr(ty);
+        if !seen.insert(ty) {
+            return false;
+        }
+
+        match &*type_ctx.get_desc(ty) {
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => true,
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                has_non_row_type_variables(type_ctx, arg.typ, seen)
+                    || has_non_row_type_variables(type_ctx, *ret, seen)
+            }
+            TypeDesc::Ttuple(items) => items
+                .iter()
+                .any(|item| has_non_row_type_variables(type_ctx, *item, seen)),
+            TypeDesc::Tconstr { args, .. } | TypeDesc::Tpackage { args, .. } => args
+                .iter()
+                .any(|arg| has_non_row_type_variables(type_ctx, *arg, seen)),
+            TypeDesc::Tobject { fields, .. } => has_non_row_type_variables(type_ctx, *fields, seen),
+            TypeDesc::Tfield { typ, rest, .. } => {
+                has_non_row_type_variables(type_ctx, *typ, seen)
+                    || has_non_row_type_variables(type_ctx, *rest, seen)
+            }
+            TypeDesc::Tvariant(row0) => {
+                let row = crate::types::btype::row_repr(type_ctx, row0);
+                row.row_fields.iter().any(|(_, field)| match field {
+                    RowField::Rpresent(Some(arg)) => {
+                        has_non_row_type_variables(type_ctx, *arg, seen)
+                    }
+                    RowField::Reither { types, .. } => types
+                        .iter()
+                        .any(|arg| has_non_row_type_variables(type_ctx, *arg, seen)),
+                    RowField::Rpresent(None) | RowField::Rabsent => false,
+                }) || row.row_name.as_ref().is_some_and(|(_, tys)| {
+                    tys.iter()
+                        .any(|arg| has_non_row_type_variables(type_ctx, *arg, seen))
+                })
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                has_non_row_type_variables(type_ctx, *body, seen)
+                    || vars
+                        .iter()
+                        .any(|var| has_non_row_type_variables(type_ctx, *var, seen))
+            }
+            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+                has_non_row_type_variables(type_ctx, *target, seen)
+            }
+            TypeDesc::Tnil => false,
+        }
+    }
+
+    fn type_summary(type_ctx: &TypeContext<'_>, ty: TypeExprRef, depth: usize) -> String {
+        use crate::types::type_expr::TypeDesc;
+
+        if depth > 8 {
+            return "...".to_string();
+        }
+
+        let ty = type_ctx.repr(ty);
+        match &*type_ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, args, .. } => {
+                if args.is_empty() {
+                    path.name()
+                } else {
+                    format!(
+                        "{}<{}>",
+                        path.name(),
+                        args.iter()
+                            .map(|arg| type_summary(type_ctx, *arg, depth + 1))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            }
+            TypeDesc::Tarrow { arg, ret, .. } => format!(
+                "({} -> {})",
+                type_summary(type_ctx, arg.typ, depth + 1),
+                type_summary(type_ctx, *ret, depth + 1)
+            ),
+            TypeDesc::Ttuple(items) => format!(
+                "({})",
+                items.iter()
+                    .map(|item| type_summary(type_ctx, *item, depth + 1))
+                    .collect::<Vec<_>>()
+                    .join(" * ")
+            ),
+            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+                type_summary(type_ctx, *target, depth + 1)
+            }
+            TypeDesc::Tpoly { body, .. } => {
+                format!("poly {}", type_summary(type_ctx, *body, depth + 1))
+            }
+            TypeDesc::Tvar(name) => format!("var({})", name.as_deref().unwrap_or("_")),
+            TypeDesc::Tunivar(name) => format!("univar({})", name.as_deref().unwrap_or("_")),
+            TypeDesc::Tpackage { path, .. } => format!("package {}", path.name()),
+            TypeDesc::Tvariant(_) => "variant".to_string(),
+            TypeDesc::Tobject { .. } => "object".to_string(),
+            TypeDesc::Tfield { .. } => "field".to_string(),
+            TypeDesc::Tnil => "nil".to_string(),
+        }
+    }
+
     // Check that the value types are compatible
     // The implementation type should be more general than (or equal to) the signature type
     let mut unify_state = UnifyState::default();
+    unify_state.set_env(env);
+    let expected_ty = substitute_value_type_paths(type_ctx, sig_desc.val_type, type_subst);
 
-    // Instantiate both types
-    let impl_ty = ctype::instance(type_ctx, impl_desc.val_type);
-    let sig_ty = ctype::instance(type_ctx, sig_desc.val_type);
+    // Match OCaml Includecore.value_descriptions more closely:
+    // - ordinary generic variables should be compared through `instance`
+    // - row-only variability should keep the structural copy path so later
+    //   row-closing feedback can still line up with the implementation shape
+    let mut seen = HashSet::new();
+    let impl_ty = if has_non_row_type_variables(type_ctx, impl_desc.val_type, &mut seen) {
+        ctype::instance(type_ctx, impl_desc.val_type)
+    } else {
+        ctype::subst_identity_copy(type_ctx, impl_desc.val_type)
+    };
+    let sig_ty = ctype::instance(type_ctx, expected_ty);
+
+    if std::env::var_os("RUST_DEBUG_INCLUDE_VALUE_TYPES").is_some()
+        && matches!(id.name(), "t_encode" | "t_decode")
+    {
+        if std::env::var_os("RUST_DEBUG_INCLUDE_TYPE_SUBST").is_some() {
+            let mut subst_entries = type_subst
+                .iter()
+                .map(|(name, path)| format!("{}->{}", name, path.name()))
+                .collect::<Vec<_>>();
+            subst_entries.sort();
+            eprintln!(
+                "[include-type-subst] before {} [{}]",
+                id.name(),
+                subst_entries.join(", ")
+            );
+        }
+        eprintln!(
+            "[include-value] {} impl={} expected={}",
+            id.name(),
+            type_summary(type_ctx, impl_ty, 0),
+            type_summary(type_ctx, sig_ty, 0)
+        );
+    }
 
     // Try to unify (signature type should match implementation type)
     if ctype::unify(type_ctx, &mut unify_state, impl_ty, sig_ty).is_err() {
         return Err(IncludeModError::ValueTypeMismatch {
             name: id,
-            expected: sig_desc.val_type,
+            expected: expected_ty,
             found: impl_desc.val_type,
         });
     }
 
+    close_matching_variant_rows_from_expected(type_ctx, env, impl_desc.val_type, expected_ty);
+
     Ok(ModuleCoercion::Tcoerce_none)
+}
+
+fn add_sig_item_to_env(item: &SignatureItem, env: &mut Env) {
+    match item {
+        SignatureItem::SigValue(id, desc) => env.add_value(id.clone(), desc.clone()),
+        SignatureItem::SigType(id, decl, _) => env.add_type(id.clone(), decl.clone()),
+        SignatureItem::SigModule(id, md, _) => env.add_module(id.clone(), md.clone()),
+        SignatureItem::SigModtype(id, mtd) => env.add_modtype(id.clone(), mtd.clone()),
+        SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass | SignatureItem::SigClassType => {}
+    }
+}
+
+fn substitute_value_type_paths<'a>(
+    type_ctx: &'a TypeContext<'a>,
+    ty: TypeExprRef,
+    type_subst: &HashMap<String, Path>,
+) -> TypeExprRef {
+    use crate::types::type_expr::{RowField, TypeDesc};
+
+    if type_subst.is_empty() {
+        return ty;
+    }
+
+    fn rewrite<'a>(
+        type_ctx: &'a TypeContext<'a>,
+        ty: TypeExprRef,
+        type_subst: &HashMap<String, Path>,
+        seen: &mut HashSet<TypeExprRef>,
+    ) {
+        let ty = type_ctx.repr(ty);
+        if !seen.insert(ty) {
+            return;
+        }
+
+        let desc = type_ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tconstr { path, args, abbrev } => {
+                for arg in args {
+                    rewrite(type_ctx, *arg, type_subst, seen);
+                }
+                if let Path::Pident(id) = path {
+                    if let Some(new_path) = type_subst.get(id.name()) {
+                        type_ctx.set_desc(
+                            ty,
+                            TypeDesc::Tconstr {
+                                path: new_path.clone(),
+                                args: args.clone(),
+                                abbrev: *abbrev,
+                            },
+                        );
+                    }
+                }
+            }
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                rewrite(type_ctx, arg.typ, type_subst, seen);
+                rewrite(type_ctx, *ret, type_subst, seen);
+            }
+            TypeDesc::Ttuple(items) => {
+                for item in items {
+                    rewrite(type_ctx, *item, type_subst, seen);
+                }
+            }
+            TypeDesc::Tobject { fields, .. } => {
+                rewrite(type_ctx, *fields, type_subst, seen);
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                rewrite(type_ctx, *typ, type_subst, seen);
+                rewrite(type_ctx, *rest, type_subst, seen);
+            }
+            TypeDesc::Tvariant(row0) => {
+                let row = crate::types::btype::row_repr(type_ctx, row0);
+                for (_, field) in &row.row_fields {
+                    match field {
+                        RowField::Rpresent(Some(arg)) => rewrite(type_ctx, *arg, type_subst, seen),
+                        RowField::Reither { types, .. } => {
+                            for ty in types {
+                                rewrite(type_ctx, *ty, type_subst, seen);
+                            }
+                        }
+                        RowField::Rpresent(None) | RowField::Rabsent => {}
+                    }
+                }
+                rewrite(type_ctx, row.row_more, type_subst, seen);
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                rewrite(type_ctx, *body, type_subst, seen);
+                for var in vars {
+                    rewrite(type_ctx, *var, type_subst, seen);
+                }
+            }
+            TypeDesc::Tpackage { args, .. } => {
+                for arg in args {
+                    rewrite(type_ctx, *arg, type_subst, seen);
+                }
+            }
+            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+                rewrite(type_ctx, *target, type_subst, seen);
+            }
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        }
+    }
+
+    let copied = ctype::subst_identity_copy(type_ctx, ty);
+    let mut seen = HashSet::new();
+    rewrite(type_ctx, copied, type_subst, &mut seen);
+    copied
+}
+
+fn close_matching_variant_rows_from_expected<'a>(
+    type_ctx: &'a TypeContext<'a>,
+    env: &Env,
+    impl_ty: TypeExprRef,
+    expected_ty: TypeExprRef,
+) {
+    use crate::types::btype;
+    use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
+
+    fn align_rows<'a>(
+        type_ctx: &'a TypeContext<'a>,
+        env: &Env,
+        impl_ty: TypeExprRef,
+        expected_ty: TypeExprRef,
+        depth: usize,
+        seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    ) {
+        let impl_ty = type_ctx.repr(ctype::expand_head(type_ctx, env, impl_ty));
+        let expected_ty = type_ctx.repr(ctype::expand_head(type_ctx, env, expected_ty));
+        if !seen.insert((impl_ty, expected_ty)) {
+            return;
+        }
+
+        let impl_desc = type_ctx.get_desc(impl_ty);
+        let expected_desc = type_ctx.get_desc(expected_ty);
+
+        match (&*impl_desc, &*expected_desc) {
+            (
+                TypeDesc::Tarrow {
+                    arg: impl_arg,
+                    ret: impl_ret,
+                    ..
+                },
+                TypeDesc::Tarrow {
+                    arg: expected_arg,
+                    ret: expected_ret,
+                    ..
+                },
+            ) if impl_arg.lbl == expected_arg.lbl => {
+                align_rows(type_ctx, env, impl_arg.typ, expected_arg.typ, depth + 1, seen);
+                align_rows(type_ctx, env, *impl_ret, *expected_ret, depth + 1, seen);
+            }
+            (TypeDesc::Ttuple(impl_items), TypeDesc::Ttuple(expected_items))
+                if impl_items.len() == expected_items.len() =>
+            {
+                for (impl_item, expected_item) in impl_items.iter().zip(expected_items.iter()) {
+                    align_rows(type_ctx, env, *impl_item, *expected_item, depth + 1, seen);
+                }
+            }
+            (
+                TypeDesc::Tconstr {
+                    path: impl_path,
+                    args: impl_args,
+                    ..
+                },
+                TypeDesc::Tconstr {
+                    path: expected_path,
+                    args: expected_args,
+                    ..
+                },
+            ) if impl_path.same(expected_path) && impl_args.len() == expected_args.len() => {
+                for (impl_arg, expected_arg) in impl_args.iter().zip(expected_args.iter()) {
+                    align_rows(type_ctx, env, *impl_arg, *expected_arg, depth + 1, seen);
+                }
+            }
+            (TypeDesc::Tvariant(impl_row0), TypeDesc::Tvariant(expected_row0)) => {
+                let impl_row = btype::row_repr(type_ctx, impl_row0);
+                let expected_row = btype::row_repr(type_ctx, expected_row0);
+
+                let mut expected_by_label: HashMap<String, RowField> = expected_row
+                    .row_fields
+                    .iter()
+                    .map(|(label, field)| (label.clone(), field.clone()))
+                    .collect();
+                let mut extra_impl = Vec::new();
+                let mut pairs = Vec::new();
+
+                for (label, impl_field) in &impl_row.row_fields {
+                    if let Some(expected_field) = expected_by_label.remove(label) {
+                        pairs.push((impl_field.clone(), expected_field));
+                    } else {
+                        extra_impl.push((label.clone(), impl_field.clone()));
+                    }
+                }
+
+                let exact_labels = extra_impl.is_empty() && expected_by_label.is_empty();
+                let mut payloads_match = true;
+
+                for (impl_field, expected_field) in &pairs {
+                    match (
+                        btype::row_field_repr(type_ctx, impl_field),
+                        btype::row_field_repr(type_ctx, expected_field),
+                    ) {
+                        (RowField::Rpresent(None), RowField::Rpresent(None))
+                        | (RowField::Rabsent, RowField::Rabsent) => {}
+                        (RowField::Rpresent(Some(impl_arg)), RowField::Rpresent(Some(expected_arg))) => {
+                            align_rows(type_ctx, env, impl_arg, expected_arg, depth + 1, seen);
+                        }
+                        (
+                            RowField::Reither { types: impl_types, .. },
+                            RowField::Reither { types: expected_types, .. },
+                        ) if impl_types.len() == expected_types.len() => {
+                            for (impl_arg, expected_arg) in
+                                impl_types.iter().zip(expected_types.iter())
+                            {
+                                align_rows(type_ctx, env, *impl_arg, *expected_arg, depth + 1, seen);
+                            }
+                        }
+                        (
+                            RowField::Reither {
+                                constant: true,
+                                types,
+                                ..
+                            },
+                            RowField::Rpresent(None),
+                        ) if types.is_empty() => {}
+                        _ => {
+                            payloads_match = false;
+                            break;
+                        }
+                    }
+                }
+
+                if depth > 0
+                    && expected_row.row_closed
+                    && exact_labels
+                    && payloads_match
+                    && !impl_row.row_closed
+                {
+                    let impl_more = btype::row_more(type_ctx, &impl_row);
+                    let impl_more_repr = type_ctx.repr(impl_more);
+                    if btype::is_tvar(type_ctx, impl_more_repr) {
+                        let closing_row = type_ctx.new_generic_type(TypeDesc::Tvariant(RowDesc {
+                            row_fields: vec![],
+                            row_more: btype::row_more(type_ctx, &expected_row),
+                            row_closed: true,
+                            row_fixed: expected_row.row_fixed,
+                            row_name: None,
+                        }));
+                        ctype::update_level(type_ctx, type_ctx.get_level(impl_more_repr), closing_row);
+                        ctype::link_type(type_ctx, impl_more_repr, closing_row);
+                    }
+                }
+            }
+            (
+                TypeDesc::Tpoly {
+                    body: impl_body,
+                    vars: impl_vars,
+                },
+                TypeDesc::Tpoly {
+                    body: expected_body,
+                    vars: expected_vars,
+                },
+            ) if impl_vars.len() == expected_vars.len() => {
+                align_rows(type_ctx, env, *impl_body, *expected_body, depth + 1, seen);
+                for (impl_var, expected_var) in impl_vars.iter().zip(expected_vars.iter()) {
+                    align_rows(type_ctx, env, *impl_var, *expected_var, depth + 1, seen);
+                }
+            }
+            (
+                TypeDesc::Tpackage { args: impl_args, .. },
+                TypeDesc::Tpackage {
+                    args: expected_args, ..
+                },
+            ) if impl_args.len() == expected_args.len() => {
+                for (impl_arg, expected_arg) in impl_args.iter().zip(expected_args.iter()) {
+                    align_rows(type_ctx, env, *impl_arg, *expected_arg, depth + 1, seen);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut seen = HashSet::new();
+    align_rows(type_ctx, env, impl_ty, expected_ty, 0, &mut seen);
 }
 
 /// Check if type declaration `impl_decl` is a subtype of `sig_decl`.

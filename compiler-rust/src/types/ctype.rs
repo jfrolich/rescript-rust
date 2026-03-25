@@ -1518,6 +1518,15 @@ fn resolve_module_type_through_env_path<'a>(
     result
 }
 
+pub fn resolve_module_type_through_env<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &super::env::Env,
+    path: &Path,
+) -> Option<super::decl::ModuleType> {
+    let mut visiting = HashSet::new();
+    resolve_module_type_through_env_path(ctx, env, path, &mut visiting)
+}
+
 fn resolve_signature_through_env_module_type<'a>(
     ctx: &'a TypeContext<'a>,
     env: &super::env::Env,
@@ -2384,6 +2393,7 @@ fn try_expand_head<'a>(
             {
                 if let Some(decl_type_path) = decl.type_path.as_ref() {
                     if path_name.contains("__")
+                        && !path.head().is_persistent()
                         && decl.type_params.len() == args.len()
                         && !decl_type_path.same(&path)
                     {
@@ -5504,6 +5514,7 @@ fn generalize_structure_rec(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprR
 
     enum Action {
         LowerVar,
+        LowerTo(i32),
         PromoteAndRecurse {
             children: Vec<TypeExprRef>,
             clear_abbrev: Option<AbbrevMemoRef>,
@@ -5517,6 +5528,21 @@ fn generalize_structure_rec(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprR
             Action::LowerVar
         } else if level > ctx.current_level() {
             match &*desc {
+                TypeDesc::Tvariant(row0) => {
+                    let row = crate::types::btype::row_repr(ctx, row0);
+                    let more = crate::types::btype::row_more(ctx, &row);
+                    let more_level = ctx.get_level(ctx.repr(more));
+                    if more_level <= ctx.current_level() && !crate::types::btype::static_row(ctx, &row) {
+                        Action::LowerTo(more_level)
+                    } else {
+                        let mut children = Vec::new();
+                        iter_type_expr(ctx, ty, |child| children.push(child));
+                        Action::PromoteAndRecurse {
+                            children,
+                            clear_abbrev: None,
+                        }
+                    }
+                }
                 // Match OCaml ctype.ml is_object_type path guard in generalize_structure:
                 // object types (names starting with '#') are not promoted here.
                 TypeDesc::Tconstr { path, .. } if path.head_name().starts_with('#') => {
@@ -5547,6 +5573,9 @@ fn generalize_structure_rec(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprR
     match action {
         Action::LowerVar => {
             ctx.set_level(ty, var_level);
+        }
+        Action::LowerTo(level) => {
+            ctx.set_level(ty, level);
         }
         Action::PromoteAndRecurse {
             children,
@@ -7968,6 +7997,10 @@ fn copy_type_cached(
         if let TypeDesc::Tvariant(row0) = &*ctx.get_desc(ty) {
             let row = row_repr(ctx, row0);
             let more = ctx.repr(row.row_more);
+            if ctx.get_level(more) != GENERIC_LEVEL && !super::btype::static_row(ctx, &row) {
+                cache.nodes.insert(ty, ty);
+                return ty;
+            }
             if let Some(marker) = cache.row_more_markers.get(&more).copied() {
                 cache.nodes.insert(ty, marker.variant);
                 return marker.variant;
