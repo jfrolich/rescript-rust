@@ -647,8 +647,8 @@ pub struct PrimitiveCoercion {
 pub struct Structure {
     /// Structure items.
     pub str_items: Vec<StructureItem>,
-    /// Structure type.
-    pub str_type: Vec<SignatureItem>,
+    /// Inferred signature items for this structure.
+    pub str_type: Vec<crate::types::decl::SignatureItem>,
     /// Final environment.
     pub str_final_env: EnvRef,
 }

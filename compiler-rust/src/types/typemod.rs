@@ -2431,6 +2431,124 @@ where
     }
 }
 
+fn push_sig_values_from_pattern(
+    pat: &crate::types::typedtree::Pattern,
+    ty: crate::types::type_expr::TypeExprRef,
+    sig_items: &mut Vec<crate::types::decl::SignatureItem>,
+) {
+    use crate::types::typedtree::PatternDesc;
+
+    match &pat.pat_desc {
+        PatternDesc::Tpat_var(id, _) => {
+            sig_items.push(crate::types::decl::SignatureItem::SigValue(
+                id.clone(),
+                crate::types::decl::ValueDescription {
+                    val_type: ty,
+                    val_kind: crate::types::decl::ValueKind::ValReg,
+                    val_loc: crate::location::Location::none(),
+                    val_attributes: vec![],
+                    val_path: None,
+                },
+            ));
+        }
+        PatternDesc::Tpat_alias(inner, id, _) => {
+            push_sig_values_from_pattern(inner, ty, sig_items);
+            sig_items.push(crate::types::decl::SignatureItem::SigValue(
+                id.clone(),
+                crate::types::decl::ValueDescription {
+                    val_type: ty,
+                    val_kind: crate::types::decl::ValueKind::ValReg,
+                    val_loc: crate::location::Location::none(),
+                    val_attributes: vec![],
+                    val_path: None,
+                },
+            ));
+        }
+        PatternDesc::Tpat_tuple(pats) => {
+            for p in pats {
+                push_sig_values_from_pattern(p, p.pat_type, sig_items);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_sig_values_from_pattern(
+    pat: &crate::types::typedtree::Pattern,
+    ty: TypeExprRef,
+    sig_items: &mut Vec<crate::types::decl::SignatureItem>,
+) {
+    use crate::types::decl::{SignatureItem as SigItem, ValueDescription};
+    iter_bound_pattern_idents(pat, &mut |id| {
+        sig_items.push(SigItem::SigValue(
+            id.clone(),
+            ValueDescription {
+                val_type: ty,
+                val_kind: crate::types::decl::ValueKind::ValReg,
+                val_loc: crate::location::Location::none(),
+                val_attributes: vec![],
+                val_path: None,
+            },
+        ));
+    });
+}
+
+fn sig_rec_status(rec_flag: RecFlag, index: usize) -> crate::types::decl::RecStatus {
+    match rec_flag {
+        RecFlag::Recursive => {
+            if index == 0 {
+                crate::types::decl::RecStatus::TrecFirst
+            } else {
+                crate::types::decl::RecStatus::TrecNext
+            }
+        }
+        RecFlag::Nonrecursive => crate::types::decl::RecStatus::TrecNot,
+    }
+}
+
+fn sig_ext_status(index: usize) -> crate::types::decl::ExtStatus {
+    if index == 0 {
+        crate::types::decl::ExtStatus::TextFirst
+    } else {
+        crate::types::decl::ExtStatus::TextNext
+    }
+}
+
+fn sig_type_rec_statuses(
+    rec_flag: RecFlag,
+    decls: &[TypedTypeDeclaration],
+) -> Vec<crate::types::decl::RecStatus> {
+    let mut statuses = Vec::with_capacity(decls.len());
+    let mut first_non_row = true;
+    for decl in decls {
+        if crate::types::btype::is_row_name(decl.typ_id.name()) {
+            statuses.push(crate::types::decl::RecStatus::TrecNot);
+            continue;
+        }
+        if first_non_row {
+            first_non_row = false;
+            statuses.push(match rec_flag {
+                RecFlag::Recursive => crate::types::decl::RecStatus::TrecFirst,
+                RecFlag::Nonrecursive => crate::types::decl::RecStatus::TrecNot,
+            });
+        } else {
+            statuses.push(crate::types::decl::RecStatus::TrecNext);
+        }
+    }
+    statuses
+}
+
+fn decl_module_type_from_typed_module_expr_for_sig(
+    mod_expr: &ModuleExpr,
+) -> Option<crate::types::decl::ModuleType> {
+    match &mod_expr.mod_desc {
+        ModuleExprDesc::Tmod_structure(structure) => Some(
+            crate::types::decl::ModuleType::MtySignature(structure.str_type.clone()),
+        ),
+        _ => decl_module_type_from_typed(&mod_expr.mod_type),
+    }
+}
+
 /// Check if a structure has duplicate value names (like OCaml's simplify_signature).
 /// Returns true if there are duplicates, meaning the structure should be wrapped
 /// in Tmod_constraint with Tmodtype_implicit.
@@ -4996,12 +5114,6 @@ where
                 match &item.str_desc {
                     StructureItemDesc::Tstr_value(_, bindings) => {
                         for vb in bindings {
-                            // Extract identifier from pattern
-                            // Use pat_type (generalized) instead of exp_type
-                            // (ungeneralized). OCaml's type_structure uses the
-                            // pattern type for signature extraction. The pattern
-                            // type preserves type aliases (e.g., actionless →
-                            // Tconstr) while exp_type may be Tvar(None).
                             extract_sig_values_from_pattern(
                                 &vb.vb_pat,
                                 vb.vb_pat.pat_type,
@@ -5129,7 +5241,6 @@ where
                         }
                     }
                     StructureItemDesc::Tstr_include(incl) => {
-                        // Include: merge all signature items from the included module
                         let mut included = false;
                         if !incl.incl_type.is_empty() {
                             for sig_item in incl.incl_type.clone() {
@@ -5162,8 +5273,6 @@ where
                                 }
                             }
                         }
-                        // For includes of module identifiers, ask the caller-provided resolver
-                        // first. This can use persistent env state (e.g. Stdlib aliases).
                         if !included {
                             if let ModuleExprDesc::Tmod_ident(_, lid) = &incl.incl_mod.mod_desc {
                                 if let Some(inner_sig) = resolve_ident_sig(lid, current_env) {
@@ -5177,8 +5286,6 @@ where
                                 }
                             }
                         }
-                        // Fallback for Tmod_ident: first look up from already-accumulated sig_items,
-                        // then from the surrounding typing environment.
                         if !included {
                             if let ModuleExprDesc::Tmod_ident(path, _) = &incl.incl_mod.mod_desc {
                                 let mod_name = match path {
@@ -5187,7 +5294,6 @@ where
                                     _ => None,
                                 };
                                 if let Some(mod_name) = mod_name {
-                                    // Find this module in our already-collected sig_items
                                     let found_sig: Option<Vec<SigItem>> =
                                         sig_items.iter().find_map(|si| {
                                             if let SigItem::SigModule(id, md, _) = si {
@@ -5339,27 +5445,6 @@ where
             })
         }
     }
-}
-
-/// Extract value signature items from a pattern (handles all pattern types).
-fn extract_sig_values_from_pattern(
-    pat: &crate::types::typedtree::Pattern,
-    ty: TypeExprRef,
-    sig_items: &mut Vec<crate::types::decl::SignatureItem>,
-) {
-    use crate::types::decl::{SignatureItem as SigItem, ValueDescription};
-    iter_bound_pattern_idents(pat, &mut |id| {
-        sig_items.push(SigItem::SigValue(
-            id.clone(),
-            ValueDescription {
-                val_type: ty,
-                val_kind: crate::types::decl::ValueKind::ValReg,
-                val_loc: crate::location::Location::none(),
-                val_attributes: vec![],
-                val_path: None,
-            },
-        ));
-    });
 }
 
 // ============================================================================
@@ -6015,20 +6100,22 @@ pub fn type_structure<'a>(
     }
 
     let mut typed_items = Vec::new();
+    let mut sig_items = Vec::new();
     let mut current_env = env.clone();
 
     for item in items {
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
-        let (typed_item, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
+        let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
+        sig_items.extend(item_sig);
         typed_items.push(typed_item);
         current_env = new_env;
     }
 
     let structure = Structure {
         str_items: typed_items,
-        str_type: vec![], // Signature would be computed here
+        str_type: sig_items,
         str_final_env: EnvRef(0),
     };
 
@@ -6047,20 +6134,22 @@ fn type_structure_no_export<'a>(
 
     // Type check all items normally first
     let mut typed_items = Vec::new();
+    let mut sig_items = Vec::new();
     let mut current_env = env.clone();
 
     for item in items {
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
-        let (typed_item, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
+        let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
+        sig_items.extend(item_sig);
         typed_items.push(typed_item);
         current_env = new_env;
     }
 
     let inner_structure = Structure {
         str_items: typed_items,
-        str_type: vec![],
+        str_type: sig_items,
         str_final_env: EnvRef(0),
     };
 
@@ -6142,7 +6231,7 @@ fn type_structure_item<'a>(
     env: &Env,
     arena: &'a ParseArena,
     item: &ParsedStructureItem,
-) -> TypeModResult<(StructureItem, Env)> {
+) -> TypeModResult<(StructureItem, Vec<crate::types::decl::SignatureItem>, Env)> {
     let loc = item.pstr_loc;
 
     match &*item.pstr_desc {
@@ -6158,6 +6247,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
+                vec![],
                 env.clone(),
             ))
         }
@@ -6166,6 +6256,10 @@ fn type_structure_item<'a>(
             let (ref rec_flag, ref bindings) = **inner;
             // Value binding: let P = E
             let (typed_bindings, new_env) = type_value_bindings(tctx, env, *rec_flag, bindings)?;
+            let mut sig_items = Vec::new();
+            for vb in &typed_bindings {
+                push_sig_values_from_pattern(&vb.vb_pat, vb.vb_pat.pat_type, &mut sig_items);
+            }
 
             let desc = StructureItemDesc::Tstr_value(*rec_flag, typed_bindings);
             Ok((
@@ -6174,6 +6268,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
+                sig_items,
                 new_env,
             ))
         }
@@ -6319,6 +6414,10 @@ fn type_structure_item<'a>(
                 val_attributes: vec![],
                 val_path: None,
             };
+            let sig_item = crate::types::decl::SignatureItem::SigValue(
+                id.clone(),
+                val_desc_for_env.clone(),
+            );
             new_env.add_value(id.clone(), val_desc_for_env);
 
             let desc =
@@ -6339,6 +6438,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
+                vec![sig_item],
                 new_env,
             ))
         }
@@ -7717,6 +7817,18 @@ fn type_structure_item<'a>(
                 }
             }
 
+            let item_sig = sig_type_rec_statuses(*rec_flag, typed_tree_decls.as_slice())
+                .into_iter()
+                .zip(typed_tree_decls.iter())
+                .zip(internal_decls_for_generalize.iter())
+                .map(|((rec_status, typed_decl), decl)| {
+                    crate::types::decl::SignatureItem::SigType(
+                        typed_decl.typ_id.clone(),
+                        decl.clone(),
+                        rec_status,
+                    )
+                })
+                .collect();
             let desc = StructureItemDesc::Tstr_type(*rec_flag, typed_tree_decls);
             Ok((
                 StructureItem {
@@ -7724,6 +7836,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
+                item_sig,
                 new_env,
             ))
         }
@@ -7979,6 +8092,17 @@ fn type_structure_item<'a>(
                 typed_params.push((typed_ct, variance));
             }
 
+            let item_sig = typed_constructors
+                .iter()
+                .enumerate()
+                .map(|(index, ext_cstr)| {
+                    crate::types::decl::SignatureItem::SigTypext(
+                        ext_cstr.ext_id.clone(),
+                        ext_cstr.ext_type.clone(),
+                        sig_ext_status(index),
+                    )
+                })
+                .collect();
             let desc = StructureItemDesc::Tstr_typext(TypeExtension {
                 tyext_path: path,
                 tyext_txt: ext.ptyext_path.clone(),
@@ -7994,6 +8118,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
+                item_sig,
                 new_env,
             ))
         }
@@ -8196,23 +8321,24 @@ fn type_structure_item<'a>(
             }
             new_env.add_constructor(id.clone(), cstr_desc);
 
+            let ext_type = crate::types::ExtensionConstructor {
+                ext_type_path: Path::pident(Ident::create_persistent("exn")),
+                ext_type_params: vec![],
+                ext_args,
+                ext_ret_type: None,
+                ext_private: crate::types::PrivateFlag::Public,
+                ext_loc: arena.to_location(loc),
+                ext_attributes: vec![],
+                ext_is_exception: true,
+            };
             let desc =
                 StructureItemDesc::Tstr_exception(crate::types::typedtree::ExtensionConstructor {
-                    ext_id: id,
+                    ext_id: id.clone(),
                     ext_name: crate::parse_arena::Located {
                         txt: name_str,
                         loc: ext_constr.pext_name.loc,
                     },
-                    ext_type: crate::types::ExtensionConstructor {
-                        ext_type_path: Path::pident(Ident::create_persistent("exn")),
-                        ext_type_params: vec![],
-                        ext_args,
-                        ext_ret_type: None,
-                        ext_private: crate::types::PrivateFlag::Public,
-                        ext_loc: arena.to_location(loc),
-                        ext_attributes: vec![],
-                        ext_is_exception: true,
-                    },
+                    ext_type: ext_type.clone(),
                     ext_kind: crate::types::typedtree::ExtensionConstructorKind::Text_decl(
                         typed_args, _ext_ret,
                     ),
@@ -8225,6 +8351,11 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
+                vec![crate::types::decl::SignatureItem::SigTypext(
+                    id,
+                    ext_type,
+                    crate::types::decl::ExtStatus::TextException,
+                )],
                 new_env,
             ))
         }
@@ -8411,6 +8542,9 @@ fn type_structure_item<'a>(
                 }
             }
             let mut new_env = env.clone();
+            let item_sig_mod_type = decl_module_type_from_typed_module_expr_for_sig(&typed_mod)
+                .unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(vec![]));
+
             if let Some(decl_mod_type) = final_mod_type {
                 let mut decl_mod_type = decl_mod_type;
                 anchor_local_module_aliases_to_owner(
@@ -8447,6 +8581,16 @@ fn type_structure_item<'a>(
                     },
                 );
             }
+            let item_sig = vec![crate::types::decl::SignatureItem::SigModule(
+                mod_id.clone(),
+                crate::types::decl::ModuleDeclaration {
+                    md_type: item_sig_mod_type,
+                    md_attributes: vec![],
+                    md_loc: crate::location::Location::none(),
+                    md_path: None,
+                },
+                crate::types::decl::RecStatus::TrecNot,
+            )];
 
             let desc = StructureItemDesc::Tstr_module(ModuleBinding {
                 mb_id: mod_id,
@@ -8464,6 +8608,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
+                item_sig,
                 new_env,
             ))
         }
@@ -8614,7 +8759,24 @@ fn type_structure_item<'a>(
                     mb_loc: mb.pmb_loc,
                 });
             }
-
+            let item_sig = typed_bindings
+                .iter()
+                .enumerate()
+                .map(|(index, mb)| {
+                    let mod_type = decl_module_type_from_typed_module_expr_for_sig(&mb.mb_expr)
+                        .unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(vec![]));
+                    crate::types::decl::SignatureItem::SigModule(
+                        mb.mb_id.clone(),
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: mod_type,
+                            md_attributes: vec![],
+                            md_loc: crate::location::Location::none(),
+                            md_path: None,
+                        },
+                        sig_rec_status(RecFlag::Recursive, index),
+                    )
+                })
+                .collect();
             let desc = StructureItemDesc::Tstr_recmodule(typed_bindings);
             Ok((
                 StructureItem {
@@ -8622,6 +8784,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
+                item_sig,
                 new_env,
             ))
         }
@@ -8636,8 +8799,6 @@ fn type_structure_item<'a>(
                 None => None,
             };
 
-            let mtd_id_clone = mtd_id.clone();
-
             // Convert the typed module type to a decl-level modtype declaration
             let decl_mtd_type = if let Some(mt) = &mtd.pmtd_type {
                 translate_module_type_to_decl(tctx, env, arena, arena.get_mod_type(*mt)).ok()
@@ -8646,7 +8807,7 @@ fn type_structure_item<'a>(
             };
 
             let desc = StructureItemDesc::Tstr_modtype(ModuleTypeDeclaration {
-                mtd_id,
+                mtd_id: mtd_id.clone(),
                 mtd_name: Located {
                     txt: mtd_name_str.to_string(),
                     loc: mtd.pmtd_name.loc,
@@ -8658,14 +8819,12 @@ fn type_structure_item<'a>(
 
             // Add the module type to the environment
             let mut new_env = env.clone();
-            new_env.add_modtype(
-                mtd_id_clone,
-                crate::types::decl::ModtypeDeclaration {
-                    mtd_type: decl_mtd_type,
-                    mtd_attributes: vec![],
-                    mtd_loc: crate::location::Location::none(),
-                },
-            );
+            let decl_mtd = crate::types::decl::ModtypeDeclaration {
+                mtd_type: decl_mtd_type,
+                mtd_attributes: vec![],
+                mtd_loc: crate::location::Location::none(),
+            };
+            new_env.add_modtype(mtd_id.clone(), decl_mtd.clone());
 
             Ok((
                 StructureItem {
@@ -8673,6 +8832,10 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
+                vec![crate::types::decl::SignatureItem::SigModtype(
+                    mtd_id,
+                    decl_mtd,
+                )],
                 new_env,
             ))
         }
@@ -8721,6 +8884,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
+                vec![],
                 new_env,
             ))
         }
@@ -9097,9 +9261,10 @@ fn type_structure_item<'a>(
                 }
             }
 
+            let item_sig = localized_include_sig.unwrap_or_default();
             let desc = StructureItemDesc::Tstr_include(IncludeDeclaration {
                 incl_mod: typed_mod,
-                incl_type: localized_include_sig.unwrap_or_default(),
+                incl_type: item_sig.clone(),
                 incl_attributes: incl.pincl_attributes.clone(),
                 incl_loc: incl.pincl_loc,
             });
@@ -9109,6 +9274,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
+                item_sig,
                 new_env,
             ))
         }
@@ -9122,6 +9288,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
+                vec![],
                 env.clone(),
             ))
         }
@@ -9151,6 +9318,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
+                vec![],
                 env.clone(),
             ))
         }

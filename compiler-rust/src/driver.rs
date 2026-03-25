@@ -1369,7 +1369,9 @@ fn normalize_signature_types(
     final_env: &crate::types::env::Env,
 ) {
     use crate::types::ctype::normalize_type;
-    use crate::types::typedtree::{StructureItemDesc, ModuleExprDesc, PatternDesc};
+    use crate::types::decl::SignatureItem;
+    use crate::types::typedtree::{ModuleExprDesc, PatternDesc, StructureItemDesc};
+    use std::collections::HashMap;
 
     /// Collect bound variable names from a pattern.
     fn collect_bound_names(pat: &crate::types::typedtree::Pattern, names: &mut Vec<String>) {
@@ -1395,7 +1397,28 @@ fn normalize_signature_types(
         }
     }
 
-    fn norm_structure(ctx: &TypeContext<'_>, env: &crate::types::env::Env, s: &crate::types::typedtree::Structure) {
+    fn local_sig_values(sig: &[SignatureItem]) -> HashMap<String, crate::types::type_expr::TypeExprRef> {
+        let mut map = HashMap::new();
+        for item in sig {
+            if let SignatureItem::SigValue(id, vd) = item {
+                map.insert(id.name().to_string(), vd.val_type);
+            }
+        }
+        map
+    }
+
+    fn norm_structure(
+        ctx: &TypeContext<'_>,
+        env: &crate::types::env::Env,
+        s: &crate::types::typedtree::Structure,
+        allow_local_sig_values: bool,
+    ) {
+        let local_values = if allow_local_sig_values {
+            local_sig_values(&s.str_type)
+        } else {
+            HashMap::new()
+        };
+
         for item in &s.str_items {
             match &item.str_desc {
                 StructureItemDesc::Tstr_value(_, bindings) => {
@@ -1406,7 +1429,10 @@ fn normalize_signature_types(
                         collect_bound_names(&b.vb_pat, &mut names);
                         let mut normalized_from_env = false;
                         for name in &names {
-                            if let Ok(vd) = env.find_value(name) {
+                            if let Some(&val_type) = local_values.get(name) {
+                                normalize_type(ctx, val_type);
+                                normalized_from_env = true;
+                            } else if let Ok(vd) = env.find_value(name) {
                                 normalize_type(ctx, vd.val_type);
                                 normalized_from_env = true;
                             }
@@ -1422,8 +1448,11 @@ fn normalize_signature_types(
                     }
                 }
                 StructureItemDesc::Tstr_primitive(vd) => {
-                    // Normalize the primitive's top-level type
-                    normalize_type(ctx, vd.val_desc.ctyp_type);
+                    if let Some(&val_type) = local_values.get(vd.val_id.name()) {
+                        normalize_type(ctx, val_type);
+                    } else {
+                        normalize_type(ctx, vd.val_desc.ctyp_type);
+                    }
                 }
                 StructureItemDesc::Tstr_module(mb) => {
                     norm_modexpr(ctx, env, &mb.mb_expr);
@@ -1435,7 +1464,7 @@ fn normalize_signature_types(
 
     fn norm_modexpr(ctx: &TypeContext<'_>, env: &crate::types::env::Env, me: &crate::types::typedtree::ModuleExpr) {
         match &me.mod_desc {
-            ModuleExprDesc::Tmod_structure(s) => { norm_structure(ctx, env, s); }
+            ModuleExprDesc::Tmod_structure(s) => { norm_structure(ctx, env, s, true); }
             ModuleExprDesc::Tmod_constraint(me, _, _, _) => { norm_modexpr(ctx, env, me); }
             ModuleExprDesc::Tmod_functor(_, _, _, me) => { norm_modexpr(ctx, env, me); }
             ModuleExprDesc::Tmod_apply(me1, me2, _) => { norm_modexpr(ctx, env, me1); norm_modexpr(ctx, env, me2); }
@@ -1443,5 +1472,5 @@ fn normalize_signature_types(
         }
     }
 
-    norm_structure(type_ctx, final_env, typed_structure);
+    norm_structure(type_ctx, final_env, typed_structure, false);
 }
