@@ -1255,14 +1255,13 @@ fn resolve_module_signature_through_cmi<'a>(
             let full_path = find_cmi_file(load_paths, id.name())?;
             let cmi = cmi_format::read_cmi(&full_path).ok()?;
             let mut sig_ctx = SigReadContext::new(ctx);
-            let sig = sig_ctx.read_signature(&cmi.cmi_sign);
+            let mut sig = sig_ctx.read_signature(&cmi.cmi_sign);
             // Apply path substitution to qualify internal types with the
             // module path, matching persistent_env::load_module behavior.
             // Without this, types have bare Pident paths that cause
             // incorrect path qualification through resolve_module_lid_impl.
-            crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                &sig, module_path, ctx,
-            );
+            crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, module_path, ctx);
+            crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, module_path);
             // Also recursively substitute submodule paths.
             crate::cmi::persistent_env::substitute_submodule_paths_pub(
                 &sig, module_path, ctx,
@@ -1329,7 +1328,7 @@ pub fn resolve_type_through_modules<'a>(
     }
 
     let mut visiting = HashSet::new();
-    let current_sig =
+    let mut current_sig =
         resolve_module_signature_through_cmi(ctx, &load_paths, module_path, &mut visiting)?;
     let debug_event =
         std::env::var_os("RUST_DEBUG_EXPAND_EVENT").is_some() && path.name().contains("Event.");
@@ -1344,6 +1343,7 @@ pub fn resolve_type_through_modules<'a>(
     // rewrite intra-signature type/module references to qualified access paths
     // (e.g. `componentLike` -> `Jsx.componentLike`, `element` -> `Jsx.element`).
     crate::cmi::persistent_env::substitute_type_paths_in_sig(&current_sig, module_path, ctx);
+    crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut current_sig, module_path);
 
     // Register ALL types in the final signature by stamp for future lookups.
     // This is important because type manifests may reference sibling types

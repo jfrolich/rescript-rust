@@ -129,6 +129,7 @@ Files where OCaml fails are excluded from parity denominators and listed separat
   - ✅ Resolved for in-scope files by fixing Rust-only parser failures and excluding 11 dual-failure (OCaml+Rust) files via explicit parity blacklist.
 - Current blocker:
   - Remaining full-scope `bsc-ast` parity diffs (`579`) are now the primary target (dependency extraction + sharing identity mismatches).
+  - Tooling follow-up: add a compiler CLI/debug mode that can dump resolved module signatures and type-decl lookups for a selected path without recompiling. The current cache diff tools are good for output diffs, but the remaining typedtree parity issues also need inspectable intermediate module-resolution state (for example local alias families like `Backdrop.Word.props` and `Atoms.action`).
 
 **Session progress (2026-02-08) - newest:**
 - Fixed remaining full-scope `sexp-locs` parser diff and aligned OCaml int32 marshal for `@inline` constants:

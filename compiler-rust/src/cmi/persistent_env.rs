@@ -145,7 +145,7 @@ impl PersistentEnv {
         &mut self,
         name: &str,
         ps_name: String,
-        signature: Signature,
+        mut signature: Signature,
         ps_filename: String,
         ctx: &'a TypeContext<'a>,
     ) -> PersStruct {
@@ -154,6 +154,7 @@ impl PersistentEnv {
         // Apply path substitution: rewrite Tconstr paths from internal
         // (e.g., Pident "ref") to qualified (e.g., Pdot(Pident "Pervasives") "ref").
         substitute_type_paths_in_sig(&signature, &module_path, ctx);
+        substitute_sig_decl_paths_in_place(&mut signature, &module_path);
 
         // Also recursively substitute paths in sub-module signatures.
         substitute_submodule_paths(&signature, &module_path, ctx);
@@ -653,6 +654,96 @@ pub fn substitute_sig_path(path: &Path, sig_items: &[SignatureItem], module_path
         &maps.module_stamp_map,
         &maps.module_name_map,
     )
+}
+
+fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &SubstMaps) {
+    match module_type {
+        ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
+            *path = substitute_type_path(
+                path,
+                &maps.type_stamp_map,
+                &maps.type_name_map,
+                &maps.module_stamp_map,
+                &maps.module_name_map,
+            );
+        }
+        ModuleType::MtySignature(sig) => {
+            substitute_sig_decl_paths_in_place_with_maps(sig, maps);
+        }
+        ModuleType::MtyFunctor {
+            param_type, result, ..
+        } => {
+            if let Some(param_type) = param_type.as_mut() {
+                substitute_module_type_paths_with_maps(param_type, maps);
+            }
+            substitute_module_type_paths_with_maps(result, maps);
+        }
+    }
+}
+
+fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem], maps: &SubstMaps) {
+    if maps.is_empty() {
+        return;
+    }
+
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_, desc) => {
+                if let Some(path) = desc.val_path.as_mut() {
+                    *path = substitute_type_path(
+                        path,
+                        &maps.type_stamp_map,
+                        &maps.type_name_map,
+                        &maps.module_stamp_map,
+                        &maps.module_name_map,
+                    );
+                }
+            }
+            SignatureItem::SigType(_, decl, _) => {
+                if let Some(path) = decl.type_path.as_mut() {
+                    *path = substitute_type_path(
+                        path,
+                        &maps.type_stamp_map,
+                        &maps.type_name_map,
+                        &maps.module_stamp_map,
+                        &maps.module_name_map,
+                    );
+                }
+            }
+            SignatureItem::SigTypext(_, ext, _) => {
+                ext.ext_type_path = substitute_type_path(
+                    &ext.ext_type_path,
+                    &maps.type_stamp_map,
+                    &maps.type_name_map,
+                    &maps.module_stamp_map,
+                    &maps.module_name_map,
+                );
+            }
+            SignatureItem::SigModule(_, md, _) => {
+                if let Some(path) = md.md_path.as_mut() {
+                    *path = substitute_type_path(
+                        path,
+                        &maps.type_stamp_map,
+                        &maps.type_name_map,
+                        &maps.module_stamp_map,
+                        &maps.module_name_map,
+                    );
+                }
+                substitute_module_type_paths_with_maps(&mut md.md_type, maps);
+            }
+            SignatureItem::SigModtype(_, mtd) => {
+                if let Some(module_type) = mtd.mtd_type.as_mut() {
+                    substitute_module_type_paths_with_maps(module_type, maps);
+                }
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        }
+    }
+}
+
+pub fn substitute_sig_decl_paths_in_place(sig_items: &mut [SignatureItem], module_path: &Path) {
+    let maps = build_subst_maps_for_module(sig_items, module_path);
+    substitute_sig_decl_paths_in_place_with_maps(sig_items, &maps);
 }
 
 fn substitute_type_paths_in_sig_with_maps(
@@ -1469,6 +1560,77 @@ fn rewrite_path_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Option
     }
 }
 
+fn rewrite_module_type_prefix_paths(
+    module_type: &mut ModuleType,
+    old_name: &str,
+    new_prefix: &Path,
+) {
+    match module_type {
+        ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
+            if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix) {
+                *path = rewritten;
+            }
+        }
+        ModuleType::MtySignature(sig) => {
+            rewrite_module_prefix_paths_in_sig(sig, old_name, new_prefix);
+        }
+        ModuleType::MtyFunctor {
+            param_type, result, ..
+        } => {
+            if let Some(param_type) = param_type.as_mut() {
+                rewrite_module_type_prefix_paths(param_type, old_name, new_prefix);
+            }
+            rewrite_module_type_prefix_paths(result, old_name, new_prefix);
+        }
+    }
+}
+
+pub fn rewrite_module_prefix_paths_in_sig(
+    sig_items: &mut [SignatureItem],
+    old_name: &str,
+    new_prefix: &Path,
+) {
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_, desc) => {
+                if let Some(path) = desc.val_path.as_mut() {
+                    if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix) {
+                        *path = rewritten;
+                    }
+                }
+            }
+            SignatureItem::SigType(_, decl, _) => {
+                if let Some(path) = decl.type_path.as_mut() {
+                    if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix) {
+                        *path = rewritten;
+                    }
+                }
+            }
+            SignatureItem::SigTypext(_, ext, _) => {
+                if let Some(rewritten) =
+                    rewrite_path_prefix(&ext.ext_type_path, old_name, new_prefix)
+                {
+                    ext.ext_type_path = rewritten;
+                }
+            }
+            SignatureItem::SigModule(_, md, _) => {
+                if let Some(path) = md.md_path.as_mut() {
+                    if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix) {
+                        *path = rewritten;
+                    }
+                }
+                rewrite_module_type_prefix_paths(&mut md.md_type, old_name, new_prefix);
+            }
+            SignatureItem::SigModtype(_, mtd) => {
+                if let Some(module_type) = mtd.mtd_type.as_mut() {
+                    rewrite_module_type_prefix_paths(module_type, old_name, new_prefix);
+                }
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        }
+    }
+}
+
 /// Rewrite all type paths in a signature from one module prefix to another.
 /// Used when resolving module aliases: e.g., Belt.Array is aliased to Belt_Array,
 /// so types from Belt_Array.cmi need their paths rewritten from
@@ -1593,6 +1755,83 @@ fn rewrite_path_by_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path
                 .map(|new_inner| Path::Pdot(Box::new(new_inner), name.clone(), *pos))
         }
         _ => None,
+    }
+}
+
+fn rewrite_module_type_by_path_prefix(
+    module_type: &mut ModuleType,
+    old_prefix: &Path,
+    new_prefix: &Path,
+) {
+    match module_type {
+        ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
+            if let Some(rewritten) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
+                *path = rewritten;
+            }
+        }
+        ModuleType::MtySignature(sig) => {
+            rewrite_sig_paths_by_path_prefix(sig, old_prefix, new_prefix);
+        }
+        ModuleType::MtyFunctor {
+            param_type, result, ..
+        } => {
+            if let Some(param_type) = param_type.as_mut() {
+                rewrite_module_type_by_path_prefix(param_type, old_prefix, new_prefix);
+            }
+            rewrite_module_type_by_path_prefix(result, old_prefix, new_prefix);
+        }
+    }
+}
+
+pub fn rewrite_sig_paths_by_path_prefix(
+    sig_items: &mut [SignatureItem],
+    old_prefix: &Path,
+    new_prefix: &Path,
+) {
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_, desc) => {
+                if let Some(path) = desc.val_path.as_mut() {
+                    if let Some(rewritten) =
+                        rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+                    {
+                        *path = rewritten;
+                    }
+                }
+            }
+            SignatureItem::SigType(_, decl, _) => {
+                if let Some(path) = decl.type_path.as_mut() {
+                    if let Some(rewritten) =
+                        rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+                    {
+                        *path = rewritten;
+                    }
+                }
+            }
+            SignatureItem::SigTypext(_, ext, _) => {
+                if let Some(rewritten) =
+                    rewrite_path_by_path_prefix(&ext.ext_type_path, old_prefix, new_prefix)
+                {
+                    ext.ext_type_path = rewritten;
+                }
+            }
+            SignatureItem::SigModule(_, md, _) => {
+                if let Some(path) = md.md_path.as_mut() {
+                    if let Some(rewritten) =
+                        rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+                    {
+                        *path = rewritten;
+                    }
+                }
+                rewrite_module_type_by_path_prefix(&mut md.md_type, old_prefix, new_prefix);
+            }
+            SignatureItem::SigModtype(_, mtd) => {
+                if let Some(module_type) = mtd.mtd_type.as_mut() {
+                    rewrite_module_type_by_path_prefix(module_type, old_prefix, new_prefix);
+                }
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        }
     }
 }
 

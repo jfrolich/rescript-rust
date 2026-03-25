@@ -5425,12 +5425,17 @@ fn localize_exported_structure_module_type(
         return mty;
     };
 
-    let sig = crate::types::typecore::copy_lookup_signature_for_subst(&sig, type_ctx);
+    let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(&sig, type_ctx);
     crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
         &sig,
         &path,
         &Path::pident(local_id.clone()),
         type_ctx,
+    );
+    crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+        &mut sig,
+        &path,
+        &Path::pident(local_id.clone()),
     );
     strip_self_module_prefix_in_sig(&sig, local_id, type_ctx);
     DeclMty::MtySignature(sig)
@@ -5645,6 +5650,129 @@ where
             }
             _ => None,
         }
+    }
+
+    fn debug_structure_module_sig_paths(
+        module_id: &Ident,
+        mty: &crate::types::decl::ModuleType,
+        type_ctx: Option<&crate::types::context::TypeContext<'_>>,
+    ) {
+        let Some(type_ctx) = type_ctx else {
+            return;
+        };
+        let enabled = std::env::var("RUST_DEBUG_STRUCTURE_ALIAS_SIG")
+            .ok()
+            .is_some_and(|raw| {
+                raw.split(',')
+                    .map(|part| part.trim())
+                    .filter(|part| !part.is_empty())
+                    .any(|part| module_id.name() == part)
+            });
+        if !enabled {
+            return;
+        }
+
+        fn collect_paths(
+            ty: crate::types::TypeExprRef,
+            type_ctx: &crate::types::context::TypeContext<'_>,
+            seen: &mut std::collections::HashSet<crate::types::TypeExprRef>,
+            out: &mut std::collections::BTreeSet<String>,
+        ) {
+            let ty = type_ctx.repr(ty);
+            if !seen.insert(ty) {
+                return;
+            }
+            use crate::types::type_expr::TypeDesc;
+            match &*type_ctx.get_desc(ty) {
+                TypeDesc::Tconstr { path, args, .. } => {
+                    let last = path.last();
+                    if last == "props" || last == "action" {
+                        out.insert(path.name());
+                    }
+                    for arg in args {
+                        collect_paths(*arg, type_ctx, seen, out);
+                    }
+                }
+                TypeDesc::Tarrow { arg, ret, .. } => {
+                    collect_paths(arg.typ, type_ctx, seen, out);
+                    collect_paths(*ret, type_ctx, seen, out);
+                }
+                TypeDesc::Ttuple(items) => {
+                    for item in items {
+                        collect_paths(*item, type_ctx, seen, out);
+                    }
+                }
+                TypeDesc::Tlink(target)
+                | TypeDesc::Tsubst(target)
+                | TypeDesc::Tobject { fields: target, .. } => {
+                    collect_paths(*target, type_ctx, seen, out);
+                }
+                TypeDesc::Tpoly { body, vars } => {
+                    collect_paths(*body, type_ctx, seen, out);
+                    for var in vars {
+                        collect_paths(*var, type_ctx, seen, out);
+                    }
+                }
+                TypeDesc::Tfield { typ, rest, .. } => {
+                    collect_paths(*typ, type_ctx, seen, out);
+                    collect_paths(*rest, type_ctx, seen, out);
+                }
+                TypeDesc::Tvariant(row) => {
+                    let row = crate::types::btype::row_repr(type_ctx, row);
+                    collect_paths(row.row_more, type_ctx, seen, out);
+                    for (_, field) in &row.row_fields {
+                        match field {
+                            crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
+                                collect_paths(*ty, type_ctx, seen, out);
+                            }
+                            crate::types::type_expr::RowField::Reither { types, .. } => {
+                                for ty in types {
+                                    collect_paths(*ty, type_ctx, seen, out);
+                                }
+                            }
+                            crate::types::type_expr::RowField::Rpresent(None)
+                            | crate::types::type_expr::RowField::Rabsent => {}
+                        }
+                    }
+                }
+                TypeDesc::Tpackage { args, .. } => {
+                    for arg in args {
+                        collect_paths(*arg, type_ctx, seen, out);
+                    }
+                }
+                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+            }
+        }
+
+        let crate::types::decl::ModuleType::MtySignature(sig) = mty else {
+            eprintln!(
+                "[structure-alias-sig] module={} non_signature={:?}",
+                module_id.name(),
+                mty
+            );
+            return;
+        };
+
+        let mut hits = std::collections::BTreeSet::new();
+        let mut seen = std::collections::HashSet::new();
+        for item in sig {
+            match item {
+                SigItem::SigValue(_, desc) => {
+                    collect_paths(desc.val_type, type_ctx, &mut seen, &mut hits);
+                }
+                SigItem::SigType(_, decl, _) => {
+                    if let Some(manifest) = decl.type_manifest {
+                        collect_paths(manifest, type_ctx, &mut seen, &mut hits);
+                    }
+                }
+                _ => {}
+            }
+        }
+        eprintln!(
+            "[structure-alias-sig] module={} hits=[{}]",
+            module_id.name(),
+            hits.into_iter().collect::<Vec<_>>().join(", ")
+        );
     }
 
     use crate::types::decl::ModuleType as DeclMty;
@@ -5951,7 +6079,7 @@ where
                                             )
                                         })
                                         .map(|sig| {
-                                        let sig = crate::types::typecore::copy_lookup_signature_for_subst(
+                                        let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(
                                             &sig,
                                             type_ctx,
                                         );
@@ -5960,6 +6088,11 @@ where
                                             path,
                                             &Path::pident(mb.mb_id.clone()),
                                             type_ctx,
+                                        );
+                                        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+                                            &mut sig,
+                                            path,
+                                            &Path::pident(mb.mb_id.clone()),
                                         );
                                         strip_self_module_prefix_in_sig(&sig, &mb.mb_id, type_ctx);
                                         DeclMty::MtySignature(sig)
@@ -6019,7 +6152,7 @@ where
                                                 )
                                             })
                                             .map(|sig| {
-                                            let sig = crate::types::typecore::copy_lookup_signature_for_subst(
+                                            let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(
                                                 &sig,
                                                 type_ctx,
                                             );
@@ -6028,6 +6161,11 @@ where
                                                 path,
                                                 &Path::pident(mb.mb_id.clone()),
                                                 type_ctx,
+                                            );
+                                            crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+                                                &mut sig,
+                                                path,
+                                                &Path::pident(mb.mb_id.clone()),
                                             );
                                             strip_self_module_prefix_in_sig(
                                                 &sig,
