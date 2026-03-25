@@ -20666,7 +20666,16 @@ fn extract_concrete_record_type_info<'a>(
                 match decl.type_kind {
                     crate::types::TypeKind::TypeRecord(_, _) => return Some((path, args, decl)),
                     crate::types::TypeKind::TypeAbstract => {
-                        let expanded = crate::types::ctype::expand_head(ctx, env, current);
+                        let expanded = if let Some(manifest) = decl.type_manifest {
+                            crate::types::ctype::subst_type_params(
+                                ctx,
+                                &decl.type_params,
+                                &args,
+                                manifest,
+                            )
+                        } else {
+                            crate::types::ctype::expand_head(ctx, env, current)
+                        };
                         let expanded = ctx.repr(expanded);
                         if expanded == current {
                             return None;
@@ -20769,23 +20778,25 @@ fn lookup_label_by_expected_type<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<crate::types::LabelDescription> {
-    let type_path =
+    let visible_path =
         extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx)?;
-    let type_decl = lookup_type_decl_for_path(&type_path, env, pers_env, ctx)?;
+    let (_concrete_path, actual_args, type_decl) =
+        extract_concrete_record_type_info(record_ty, env, pers_env, ctx)?;
     let (labels, repr) = match &type_decl.type_kind {
         crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
         _ => return None,
     };
-    let res_ty = ctx.new_generic_constr(type_path, type_decl.type_params.clone());
+    let res_ty = ctx.new_constr(visible_path, actual_args.clone());
     for (pos, ld) in labels.iter().enumerate() {
         if ld.ld_id.name() == label_name {
             let mut selected = crate::types::LabelDescription {
                 lbl_name: ld.ld_id.name().to_string(),
                 lbl_res: res_ty,
-                lbl_arg: crate::types::ctype::remap_label_type_to_params(
+                lbl_arg: crate::types::ctype::subst_type_params(
                     ctx,
-                    ld.ld_type,
                     &type_decl.type_params,
+                    &actual_args,
+                    ld.ld_type,
                 ),
                 lbl_mut: ld.ld_mutable,
                 lbl_optional: ld.ld_optional,
@@ -22267,12 +22278,18 @@ fn resolve_module_signature_for_path<'a>(
                             sig =
                                 strengthen_signature_for_module_access_path(ctx, &access_path, &sig);
                         }
-                        rebind_direct_sig_type_family_to_access_path(
-                            ctx,
-                            &access_path,
-                            &sig,
-                            module_type_has_hidden_unpack_ident(&md.md_type),
-                        );
+                        if matches!(
+                            &md.md_type,
+                            crate::types::decl::ModuleType::MtyAlias(..)
+                                | crate::types::decl::ModuleType::MtyIdent(..)
+                        ) {
+                            rebind_direct_sig_type_family_to_access_path(
+                                ctx,
+                                &access_path,
+                                &sig,
+                                module_type_has_hidden_unpack_ident(&md.md_type),
+                            );
+                        }
                         if let Some(ref old_name) = resolved_name {
                             if should_rewrite_nested_alias_self_path(
                                 old_name,
@@ -22434,6 +22451,29 @@ fn lookup_type_decl_for_path<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<crate::types::decl::TypeDeclaration> {
+    fn lookup_raw_type_decl_from_module_path<'a>(
+        module_path: &Path,
+        type_name: &str,
+        env: &Env,
+        ctx: &'a crate::types::context::TypeContext<'a>,
+    ) -> Option<crate::types::decl::TypeDeclaration> {
+        use crate::types::decl::{ModuleType, SignatureItem};
+
+        match crate::types::ctype::resolve_module_type_through_env(ctx, env, module_path)? {
+            ModuleType::MtySignature(sig) => sig.iter().find_map(|item| match item {
+                SignatureItem::SigType(id, decl, _) if id.name() == type_name => Some(decl.clone()),
+                _ => None,
+            }),
+            ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => {
+                let resolved_path = Path::pdot(target.clone(), type_name);
+                ctx.find_type_decl_by_path(&resolved_path.name())
+                    .map(|decl| decl.clone())
+                    .or_else(|| crate::types::ctype::resolve_type_through_modules(ctx, &resolved_path))
+            }
+            _ => None,
+        }
+    }
+
     let debug_lookup_options = std::env::var_os("RUST_DEBUG_LOOKUP_OPTIONS").is_some()
         && matches!(type_path.last(), "options" | "compactDisplay" | "currency");
     // Only use env.lookup_type directly for simple identifiers. For qualified
@@ -22602,23 +22642,16 @@ fn lookup_type_decl_for_path<'a>(
                                         }
                                         return Some(decl.clone());
                                     }
-                                    if let crate::types::decl::ModuleType::MtySignature(raw_sig) =
-                                        &md.md_type
-                                    {
-                                        for raw_item in raw_sig {
-                                            if let crate::types::decl::SignatureItem::SigType(
-                                                raw_id,
-                                                raw_decl,
-                                                _,
-                                            ) = raw_item
-                                            {
-                                                if raw_id.name() == type_name.as_str() {
-                                                    return Some(raw_decl.clone());
-                                                }
-                                            }
-                                        }
-                                    }
                                 }
+                            }
+
+                            if let Some(raw_decl) = lookup_raw_type_decl_from_module_path(
+                                parent,
+                                type_name.as_str(),
+                                env,
+                                ctx,
+                            ) {
+                                return Some(raw_decl);
                             }
 
                             if decl
