@@ -6845,7 +6845,10 @@ fn type_structure_item<'a>(
                                                         ctyp_type: texpr,
                                                         ctyp_env: EnvRef(0),
                                                         ctyp_loc: source_cd_loc,
-                                                        ctyp_attributes: Attributes::new(),
+                                                        ctyp_attributes: decl_attrs_to_parser_attrs(
+                                                            arena,
+                                                            &source_cstr.cd_attributes,
+                                                        ),
                                                     })
                                                     .collect();
                                                 let internal_cd_args = if is_pdot_source {
