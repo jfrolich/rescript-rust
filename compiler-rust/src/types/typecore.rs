@@ -20281,6 +20281,7 @@ fn qualify_label_description_paths<'a>(
     let mut module_access_paths = Vec::new();
     let mut anchor_prefixes = Vec::new();
     let mut has_unresolved_local_path = false;
+    let mut has_visible_alias_anchor = false;
 
     match res_path {
         Path::Pdot(_, _, _) => {
@@ -20288,13 +20289,21 @@ fn qualify_label_description_paths<'a>(
             has_unresolved_local_path =
                 type_contains_unresolved_local_path(ctx, env, pers_env, label.lbl_arg, &mut probe_visited);
             if let Some(parent) = res_path.parent() {
-                if has_unresolved_local_path {
+                let parent_has_alias_target =
+                    alias_target_for_module_path(&parent, env, pers_env, ctx).is_some();
+                has_visible_alias_anchor |= parent_has_alias_target;
+                if has_unresolved_local_path || parent_has_alias_target {
                     module_access_paths.push(parent.clone());
                 }
                 anchor_prefixes.push(parent);
             }
             let root = path_root_module(res_path);
-            if has_unresolved_local_path && !module_access_paths.iter().any(|p| p.same(&root)) {
+            let root_has_alias_target =
+                alias_target_for_module_path(&root, env, pers_env, ctx).is_some();
+            has_visible_alias_anchor |= root_has_alias_target;
+            if (has_unresolved_local_path || root_has_alias_target)
+                && !module_access_paths.iter().any(|p| p.same(&root))
+            {
                 module_access_paths.push(root.clone());
             }
             if !anchor_prefixes.iter().any(|p| p.same(&root)) {
@@ -20342,7 +20351,7 @@ fn qualify_label_description_paths<'a>(
     // Only rewrite canonical paths through visible local aliases when the
     // argument type still contains unresolved local heads. Otherwise preserve
     // the already-qualified family path OCaml keeps in the typedtree.
-    if !has_unresolved_local_path {
+    if !has_unresolved_local_path && !has_visible_alias_anchor {
         return;
     }
 
@@ -20989,7 +20998,6 @@ fn qualify_module_local_type_paths_in_place<'a>(
     visited: &mut HashSet<TypeExprRef>,
 ) {
     use crate::types::type_expr::RowField;
-    use crate::types::ModuleType;
 
     fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
         if path.same(old_prefix) {
@@ -21091,28 +21099,26 @@ fn qualify_module_local_type_paths_in_place<'a>(
             }
             let mut rewritten_path: Option<Path> = None;
 
-            if let Path::Pident(module_id) = module_access_path {
-                if let Ok(md) = env.find_module(module_id.name()) {
-                    if let ModuleType::MtyAlias(_, alias_target) = &md.md_type {
-                        let normalized_alias_target = env.normalize_path(alias_target);
-                        rewritten_path = rewrite_path_prefix(&path, alias_target, module_access_path);
-                        if rewritten_path.is_none() {
-                            rewritten_path = rewrite_with_flattened_heads(
-                                &path,
-                                alias_target,
-                                module_access_path,
-                                pers_env,
-                            );
-                        }
-                        if rewritten_path.is_none() && !normalized_alias_target.same(alias_target) {
-                            rewritten_path = rewrite_with_flattened_heads(
-                                &path,
-                                &normalized_alias_target,
-                                module_access_path,
-                                pers_env,
-                            );
-                        }
-                    }
+            if let Some(alias_target) =
+                alias_target_for_module_path(module_access_path, env, pers_env, ctx)
+            {
+                let normalized_alias_target = env.normalize_path(&alias_target);
+                rewritten_path = rewrite_path_prefix(&path, &alias_target, module_access_path);
+                if rewritten_path.is_none() {
+                    rewritten_path = rewrite_with_flattened_heads(
+                        &path,
+                        &alias_target,
+                        module_access_path,
+                        pers_env,
+                    );
+                }
+                if rewritten_path.is_none() && !normalized_alias_target.same(&alias_target) {
+                    rewritten_path = rewrite_with_flattened_heads(
+                        &path,
+                        &normalized_alias_target,
+                        module_access_path,
+                        pers_env,
+                    );
                 }
             }
 
