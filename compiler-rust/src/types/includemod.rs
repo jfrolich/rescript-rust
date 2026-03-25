@@ -399,13 +399,6 @@ fn signature_item<'a>(
                         // Check that the type declarations are compatible
                         type_declarations(type_ctx, env, id.clone(), impl_type_decl, type_decl)?;
                         let subst_path = Path::pident(impl_id.clone());
-                        if std::env::var_os("RUST_DEBUG_INCLUDE_TYPE_SUBST").is_some() {
-                            eprintln!(
-                                "[include-type-subst] {} -> {}",
-                                id.name(),
-                                subst_path.name()
-                            );
-                        }
                         type_subst.insert(id.name().to_string(), subst_path);
                         return Ok((pos, ModuleCoercion::Tcoerce_none));
                     }
@@ -618,18 +611,6 @@ fn value_descriptions<'a>(
     if std::env::var_os("RUST_DEBUG_INCLUDE_VALUE_TYPES").is_some()
         && matches!(id.name(), "t_encode" | "t_decode")
     {
-        if std::env::var_os("RUST_DEBUG_INCLUDE_TYPE_SUBST").is_some() {
-            let mut subst_entries = type_subst
-                .iter()
-                .map(|(name, path)| format!("{}->{}", name, path.name()))
-                .collect::<Vec<_>>();
-            subst_entries.sort();
-            eprintln!(
-                "[include-type-subst] before {} [{}]",
-                id.name(),
-                subst_entries.join(", ")
-            );
-        }
         eprintln!(
             "[include-value] {} impl={} expected={}",
             id.name(),

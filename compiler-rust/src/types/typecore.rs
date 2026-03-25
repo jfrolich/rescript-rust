@@ -18391,6 +18391,20 @@ impl Env {
                                 || resolved_name.is_some()
                                 || alias_target_pdot.is_some()
                                 || alias_target_pident.is_some());
+                        let should_rebind_direct_type_family = apply_subst
+                            && matches!(
+                                &md.md_type,
+                                crate::types::decl::ModuleType::MtyAlias(_, Path::Pdot(..))
+                                    | crate::types::decl::ModuleType::MtyIdent(Path::Pdot(..))
+                            );
+                        let allow_inferred_rebind_paths = apply_subst
+                            && match &md.md_type {
+                                crate::types::decl::ModuleType::MtyAlias(_, target @ Path::Pdot(..))
+                                | crate::types::decl::ModuleType::MtyIdent(target @ Path::Pdot(..)) => {
+                                    !target.head().is_persistent()
+                                }
+                                _ => false,
+                            };
                         if debug_module_sig {
                             eprintln!(
                                 "[local-module-sig] mod={} has_defs={} resolved_name={} alias_pdot={} alias_pident={} skip_self_manifest_subst={} needs_copy={}",
@@ -18417,6 +18431,14 @@ impl Env {
                             sig = strengthen_signature_for_module_access_path(ctx, &path, &sig);
                         }
                         if apply_subst {
+                            if should_rebind_direct_type_family {
+                                rebind_direct_sig_type_family_to_access_path(
+                                    ctx,
+                                    &path,
+                                    &sig,
+                                    allow_inferred_rebind_paths,
+                                );
+                            }
                             if let Some(ref old_name) = resolved_name {
                                 crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                                     &sig, old_name, &path, ctx,
@@ -18788,6 +18810,12 @@ impl Env {
                                         );
                                     }
                                     if apply_subst {
+                                        rebind_direct_sig_type_family_to_access_path(
+                                            ctx,
+                                            &sub_path,
+                                            &sig,
+                                            module_type_has_hidden_unpack_ident(&sub_md.md_type),
+                                        );
                                         // Match OCaml Subst behavior for nested module access:
                                         // when resolving A.B, first substitute parent-scope
                                         // type/module references inside B using A's signature.
@@ -19107,6 +19135,27 @@ impl Env {
                                     ctx,
                                     visiting,
                                 );
+                                let result = if module_type_has_hidden_unpack_ident(&sub_md.md_type)
+                                {
+                                    result.map(|(sig, resolved_name)| {
+                                        let access_path = path.clone();
+                                        let sig = copy_lookup_signature_for_subst(&sig, ctx);
+                                        rebind_direct_sig_type_family_to_access_path(
+                                            ctx,
+                                            &access_path,
+                                            &sig,
+                                            true,
+                                        );
+                                        crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                                            &sig,
+                                            &access_path,
+                                            ctx,
+                                        );
+                                        (sig, resolved_name)
+                                    })
+                                } else {
+                                    result
+                                };
                                 visiting.remove(path);
                                 return result;
                             }
@@ -21245,6 +21294,313 @@ fn strengthen_signature_for_module_access_path<'a>(
         .collect()
 }
 
+fn module_type_has_hidden_unpack_ident(mty: &crate::types::decl::ModuleType) -> bool {
+    match mty {
+        crate::types::decl::ModuleType::MtyIdent(Path::Pident(id))
+        | crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(id)) => {
+            id.name().starts_with("__")
+        }
+        _ => false,
+    }
+}
+
+fn rebind_direct_sig_type_family_to_access_path<'a>(
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    access_path: &Path,
+    sig_items: &[crate::types::decl::SignatureItem],
+    allow_inferred_paths: bool,
+) {
+    use crate::types::decl::SignatureItem;
+    use crate::types::type_expr::TypeDesc;
+
+    fn collect_matching_type_paths<'a>(
+        ctx: &'a crate::types::context::TypeContext<'a>,
+        ty: TypeExprRef,
+        type_name: &str,
+        arity: usize,
+        paths: &mut Vec<Path>,
+        visited: &mut HashSet<usize>,
+    ) {
+        let ty = ctx.repr(ty);
+        if !visited.insert(ty.0) {
+            return;
+        }
+        match &*ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, args, .. } => {
+                if path.last() == type_name && args.len() == arity {
+                    paths.push(path.clone());
+                }
+                for arg in args {
+                    collect_matching_type_paths(ctx, *arg, type_name, arity, paths, visited);
+                }
+            }
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                collect_matching_type_paths(ctx, arg.typ, type_name, arity, paths, visited);
+                collect_matching_type_paths(ctx, *ret, type_name, arity, paths, visited);
+            }
+            TypeDesc::Ttuple(types) => {
+                for ty in types {
+                    collect_matching_type_paths(ctx, *ty, type_name, arity, paths, visited);
+                }
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+                collect_matching_type_paths(ctx, *next, type_name, arity, paths, visited);
+            }
+            TypeDesc::Tvariant(row) => {
+                collect_matching_type_paths(ctx, row.row_more, type_name, arity, paths, visited);
+                for (_, field) in &row.row_fields {
+                    match field {
+                        crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
+                            collect_matching_type_paths(ctx, *ty, type_name, arity, paths, visited);
+                        }
+                        crate::types::type_expr::RowField::Reither { types, .. } => {
+                            for ty in types {
+                                collect_matching_type_paths(
+                                    ctx, *ty, type_name, arity, paths, visited,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TypeDesc::Tobject { fields, .. } => {
+                collect_matching_type_paths(ctx, *fields, type_name, arity, paths, visited);
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                collect_matching_type_paths(ctx, *typ, type_name, arity, paths, visited);
+                collect_matching_type_paths(ctx, *rest, type_name, arity, paths, visited);
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                collect_matching_type_paths(ctx, *body, type_name, arity, paths, visited);
+                for ty in vars {
+                    collect_matching_type_paths(ctx, *ty, type_name, arity, paths, visited);
+                }
+            }
+            TypeDesc::Tpackage { args, .. } => {
+                for ty in args {
+                    collect_matching_type_paths(ctx, *ty, type_name, arity, paths, visited);
+                }
+            }
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        }
+    }
+
+    fn infer_direct_sig_type_family_path<'a>(
+        ctx: &'a crate::types::context::TypeContext<'a>,
+        sig_items: &[crate::types::decl::SignatureItem],
+        type_name: &str,
+        arity: usize,
+    ) -> Option<Path> {
+        use crate::types::decl::SignatureItem;
+
+        let mut paths = Vec::<Path>::new();
+        let mut visited = HashSet::new();
+        for item in sig_items {
+            match item {
+                SignatureItem::SigValue(_, desc) => {
+                    collect_matching_type_paths(
+                        ctx,
+                        desc.val_type,
+                        type_name,
+                        arity,
+                        &mut paths,
+                        &mut visited,
+                    );
+                }
+                SignatureItem::SigType(_, decl, _) => {
+                    for ty in &decl.type_params {
+                        collect_matching_type_paths(
+                            ctx,
+                            *ty,
+                            type_name,
+                            arity,
+                            &mut paths,
+                            &mut visited,
+                        );
+                    }
+                    if let Some(manifest) = decl.type_manifest {
+                        collect_matching_type_paths(
+                            ctx,
+                            manifest,
+                            type_name,
+                            arity,
+                            &mut paths,
+                            &mut visited,
+                        );
+                    }
+                    match &decl.type_kind {
+                        crate::types::TypeKind::TypeVariant(constrs) => {
+                            for constr in constrs {
+                                match &constr.cd_args {
+                                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                                        for ty in args {
+                                            collect_matching_type_paths(
+                                                ctx,
+                                                *ty,
+                                                type_name,
+                                                arity,
+                                                &mut paths,
+                                                &mut visited,
+                                            );
+                                        }
+                                    }
+                                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                                        for label in labels {
+                                            collect_matching_type_paths(
+                                                ctx,
+                                                label.ld_type,
+                                                type_name,
+                                                arity,
+                                                &mut paths,
+                                                &mut visited,
+                                            );
+                                        }
+                                    }
+                                }
+                                if let Some(res) = constr.cd_res {
+                                    collect_matching_type_paths(
+                                        ctx,
+                                        res,
+                                        type_name,
+                                        arity,
+                                        &mut paths,
+                                        &mut visited,
+                                    );
+                                }
+                            }
+                        }
+                        crate::types::TypeKind::TypeRecord(labels, _) => {
+                            for label in labels {
+                                collect_matching_type_paths(
+                                    ctx,
+                                    label.ld_type,
+                                    type_name,
+                                    arity,
+                                    &mut paths,
+                                    &mut visited,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                SignatureItem::SigTypext(_, ext, _) => {
+                    for ty in &ext.ext_type_params {
+                        collect_matching_type_paths(
+                            ctx,
+                            *ty,
+                            type_name,
+                            arity,
+                            &mut paths,
+                            &mut visited,
+                        );
+                    }
+                    match &ext.ext_args {
+                        crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                            for ty in args {
+                                collect_matching_type_paths(
+                                    ctx,
+                                    *ty,
+                                    type_name,
+                                    arity,
+                                    &mut paths,
+                                    &mut visited,
+                                );
+                            }
+                        }
+                        crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                            for label in labels {
+                                collect_matching_type_paths(
+                                    ctx,
+                                    label.ld_type,
+                                    type_name,
+                                    arity,
+                                    &mut paths,
+                                    &mut visited,
+                                );
+                            }
+                        }
+                    }
+                    if let Some(ret) = ext.ext_ret_type {
+                        collect_matching_type_paths(
+                            ctx,
+                            ret,
+                            type_name,
+                            arity,
+                            &mut paths,
+                            &mut visited,
+                        );
+                    }
+                }
+                SignatureItem::SigModule(_, _, _)
+                | SignatureItem::SigModtype(_, _)
+                | SignatureItem::SigClass
+                | SignatureItem::SigClassType => {}
+            }
+        }
+
+        paths.sort_by(|left, right| left.name().cmp(&right.name()));
+        paths.dedup_by(|left, right| left.same(right));
+        (paths.len() == 1).then(|| paths.remove(0))
+    }
+
+    let mut rewrites = Vec::<(Path, Path)>::new();
+    for item in sig_items {
+        if let SignatureItem::SigType(id, decl, _) = item {
+            let rebound_path = Path::pdot(access_path.clone(), id.name());
+            if let Some(old_path) = decl.type_path.as_ref() {
+                if !old_path.same(&rebound_path) {
+                    rewrites.push((old_path.clone(), rebound_path.clone()));
+                }
+                continue;
+            }
+            if let Some(manifest) = decl.type_manifest {
+                let manifest = ctx.repr(manifest);
+                if let TypeDesc::Tconstr { path, args, .. } = &*ctx.get_desc(manifest) {
+                    if path.last() == id.name()
+                        && args.len() == decl.type_params.len()
+                        && !path.same(&rebound_path)
+                    {
+                        rewrites.push((path.clone(), rebound_path.clone()));
+                    }
+                }
+            }
+            if allow_inferred_paths {
+                if let Some(inferred_path) = infer_direct_sig_type_family_path(
+                    ctx,
+                    sig_items,
+                    id.name(),
+                    decl.type_params.len(),
+                ) {
+                    if !inferred_path.same(&rebound_path) {
+                        rewrites.push((inferred_path, rebound_path));
+                    }
+                }
+            }
+        }
+    }
+
+    rewrites.sort_by(|(left_old, left_new), (right_old, right_new)| {
+        left_old
+            .name()
+            .cmp(&right_old.name())
+            .then_with(|| left_new.name().cmp(&right_new.name()))
+    });
+    rewrites.dedup_by(|(left_old, left_new), (right_old, right_new)| {
+        left_old.same(right_old) && left_new.same(right_new)
+    });
+
+    for (old_path, rebound_path) in rewrites {
+        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+            sig_items,
+            &old_path,
+            &rebound_path,
+            ctx,
+        );
+    }
+}
+
 fn path_cache_key(path: &Path) -> Option<String> {
     if matches!(path, Path::Papply(_, _)) {
         return None;
@@ -21287,7 +21643,6 @@ fn resolve_module_signature_for_path<'a>(
     }
     let debug_module_sig = std::env::var_os("RUST_DEBUG_LOCAL_MODULE_SIG").is_some()
         && matches!(module_path.head().name(), "IntCmp" | "N" | "D");
-
     // Check module signature cache first
     let module_key = path_cache_key(module_path);
     if let Some(module_key) = module_key.as_deref() {
@@ -21327,6 +21682,25 @@ fn resolve_module_signature_for_path<'a>(
                     crate::types::decl::ModuleType::MtyAlias(..)
                 ) {
                     sig = strengthen_signature_for_module_access_path(ctx, &access_path, &sig);
+                }
+                if matches!(
+                    &md.md_type,
+                    crate::types::decl::ModuleType::MtyAlias(_, Path::Pdot(..))
+                        | crate::types::decl::ModuleType::MtyIdent(Path::Pdot(..))
+                ) {
+                    let allow_inferred_rebind_paths = match &md.md_type {
+                        crate::types::decl::ModuleType::MtyAlias(_, target @ Path::Pdot(..))
+                        | crate::types::decl::ModuleType::MtyIdent(target @ Path::Pdot(..)) => {
+                            !target.head().is_persistent()
+                        }
+                        _ => false,
+                    };
+                    rebind_direct_sig_type_family_to_access_path(
+                        ctx,
+                        &access_path,
+                        &sig,
+                        allow_inferred_rebind_paths,
+                    );
                 }
                 if let Some(ref old_name) = resolved_name {
                     crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
@@ -21419,6 +21793,12 @@ fn resolve_module_signature_for_path<'a>(
                             sig =
                                 strengthen_signature_for_module_access_path(ctx, &access_path, &sig);
                         }
+                        rebind_direct_sig_type_family_to_access_path(
+                            ctx,
+                            &access_path,
+                            &sig,
+                            module_type_has_hidden_unpack_ident(&md.md_type),
+                        );
                         if let Some(ref old_name) = resolved_name {
                             if should_rewrite_nested_alias_self_path(
                                 old_name,
