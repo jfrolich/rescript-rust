@@ -12720,6 +12720,7 @@ fn type_record(
         let resolved_lid = explicit_field.resolved_lid.clone();
         let field_name = explicit_field.field_name.clone();
         let disambiguated = explicit_field.disambiguated.clone();
+        let prefer_expected_closed_record_label = typed_base.is_none();
         if std::env::var_os("RUST_DEBUG_RECORD_FIELDS").is_some() {
             let summarize = |ty: TypeExprRef| {
                 let ty = ctx.repr(ty);
@@ -12794,6 +12795,18 @@ fn type_record(
                 ctx,
             )
             .filter(|expected_label| {
+                if prefer_expected_closed_record_label
+                    && should_force_expected_closed_record_label(
+                        expected_ty,
+                        expected_label,
+                        &env_label,
+                        env,
+                        &mut tctx.persistent_env,
+                        ctx,
+                    )
+                {
+                    return true;
+                }
                 should_prefer_expected_record_label(
                     expected_label,
                     &env_label,
@@ -19557,6 +19570,41 @@ fn should_prefer_expected_record_label<'a>(
     }
 
     is_local_module_access_path(&expected_path) && !is_local_module_access_path(&env_path)
+}
+
+fn should_force_expected_closed_record_label<'a>(
+    expected_ty: TypeExprRef,
+    expected_label: &crate::types::LabelDescription,
+    env_label: &crate::types::LabelDescription,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> bool {
+    let Some(_expected_record_info) =
+        extract_concrete_record_type_info(expected_ty, env, pers_env, ctx)
+    else {
+        return false;
+    };
+
+    let Some(expected_path) = label_result_path(ctx, expected_label) else {
+        return false;
+    };
+    let Some(env_path) = label_result_path(ctx, env_label) else {
+        return false;
+    };
+
+    if expected_path.same(&env_path) {
+        return false;
+    }
+
+    if compare_type_paths_for_disambiguation(&expected_path, &env_path, env, pers_env, ctx) {
+        return false;
+    }
+
+    // For closed record literals typed against a concrete expected record,
+    // OCaml prefers the expected record's labels over unrelated same-named
+    // labels that happen to be in lexical scope.
+    is_local_module_access_path(&env_path)
 }
 
 fn path_root_module(path: &Path) -> Path {
