@@ -16,7 +16,8 @@
 #   -j, --parallel N  Run N tests in parallel (default: 16)
 #   -v, --verbose     Show progress for each file
 #   -l, --locs        Test with locations (-dlambda-sexp-locs)
-#   -r, --raw         Test raw/unoptimized lambda (-drawlambda)
+#   -r, --raw         Test unoptimized lambda printer output (-drawlambda)
+#   -u, --unoptimized Alias for --raw; compare pre-optimization lambda
 #   -h, --help        Show this help message
 #
 # EXAMPLES:
@@ -57,12 +58,12 @@ while [[ $# -gt 0 ]]; do
             TEST_LOCS=true
             shift
             ;;
-        -r|--raw)
+        -r|--raw|-u|--unoptimized)
             TEST_RAW=true
             shift
             ;;
         -h|--help)
-            sed -n '10,31p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '11,27p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -134,11 +135,11 @@ fi
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
 if $TEST_RAW; then
-    echo "Testing: raw lambda (-drawlambda)"
+    echo "Testing: unoptimized lambda (-drawlambda)"
 elif $TEST_LOCS; then
     echo "Testing: sexp-locs (-dlambda-sexp-locs)"
 else
-    echo "Testing: sexp (-dlambda-sexp)"
+    echo "Testing: optimized lambda sexp (-dlambda-sexp)"
 fi
 echo "Artifact cache: $CACHE_DIR/lambda"
 echo ""
