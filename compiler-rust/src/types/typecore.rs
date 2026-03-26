@@ -20789,23 +20789,22 @@ fn lookup_label_by_expected_type<'a>(
 ) -> Option<crate::types::LabelDescription> {
     let visible_path =
         extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx)?;
-    let (_concrete_path, actual_args, type_decl) =
+    let (_concrete_path, _actual_args, type_decl) =
         extract_concrete_record_type_info(record_ty, env, pers_env, ctx)?;
     let (labels, repr) = match &type_decl.type_kind {
         crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
         _ => return None,
     };
-    let res_ty = ctx.new_constr(visible_path, actual_args.clone());
+    let res_ty = ctx.new_generic_constr(visible_path, type_decl.type_params.clone());
     for (pos, ld) in labels.iter().enumerate() {
         if ld.ld_id.name() == label_name {
             let mut selected = crate::types::LabelDescription {
                 lbl_name: ld.ld_id.name().to_string(),
                 lbl_res: res_ty,
-                lbl_arg: crate::types::ctype::subst_type_params(
+                lbl_arg: crate::types::ctype::remap_label_type_to_params(
                     ctx,
-                    &type_decl.type_params,
-                    &actual_args,
                     ld.ld_type,
+                    &type_decl.type_params,
                 ),
                 lbl_mut: ld.ld_mutable,
                 lbl_optional: ld.ld_optional,
