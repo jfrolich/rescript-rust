@@ -526,7 +526,7 @@ pub fn compile_source_to_js_with_options(
 
     // Print Lambda IR if requested
     if options.dump_lambda {
-        eprintln!("{}", crate::lambda::print::LambdaPrinter::new(&lambda));
+        eprintln!("{}", crate::lambda::print::RawLambdaPrinter::new(&lambda));
     }
 
     // Print Lambda sexp if requested
