@@ -21108,24 +21108,29 @@ fn qualify_module_local_type_paths_in_place<'a>(
         Some(flat)
     }
 
-    fn path_segments(path: &Path) -> Option<Vec<String>> {
-        let Ok((head, components)) = path.flatten() else {
-            return None;
-        };
-        let mut segments = Vec::with_capacity(components.len() + 1);
-        segments.push(head.name().to_string());
-        segments.extend(components.into_iter().map(|component| component.to_string()));
-        Some(segments)
-    }
-
     fn path_has_suffix(path: &Path, suffix: &Path) -> bool {
-        let Some(path_parts) = path_segments(path) else {
+        let Ok((path_head, path_components)) = path.flatten() else {
             return false;
         };
-        let Some(suffix_parts) = path_segments(suffix) else {
+        let Ok((suffix_head, suffix_components)) = suffix.flatten() else {
             return false;
         };
-        path_parts.ends_with(&suffix_parts)
+
+        if path_components.len() + 1 < suffix_components.len() + 1 {
+            return false;
+        }
+
+        let mut path_rev = path_components
+            .iter()
+            .rev()
+            .map(|component| component.as_ref())
+            .chain(std::iter::once(path_head.name()));
+        suffix_components
+            .iter()
+            .rev()
+            .map(|component| component.as_ref())
+            .chain(std::iter::once(suffix_head.name()))
+            .all(|suffix_component| path_rev.next() == Some(suffix_component))
     }
 
     fn flattened_alias_heads_from_persistent(
