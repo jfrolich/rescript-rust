@@ -5404,7 +5404,9 @@ fn localize_exported_structure_module_type(
 
     let (path, env, type_ctx) = match (mty.clone(), env, type_ctx) {
         (DeclMty::MtyAlias(_, path), Some(env), Some(type_ctx))
-        | (DeclMty::MtyIdent(path), Some(env), Some(type_ctx)) => (path, env, type_ctx),
+        | (DeclMty::MtyIdent(path), Some(env), Some(type_ctx)) => {
+            (path, env, type_ctx)
+        }
         _ => return mty,
     };
 
@@ -5439,6 +5441,125 @@ fn localize_exported_structure_module_type(
     );
     strip_self_module_prefix_in_sig(&sig, local_id, type_ctx);
     DeclMty::MtySignature(sig)
+}
+
+fn localize_alias_child_module_sig_paths_in_structure_sig(
+    sig: &mut [crate::types::decl::SignatureItem],
+    structure: &Structure,
+    module_path: &Path,
+    type_ctx: &crate::types::context::TypeContext<'_>,
+) {
+    use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
+
+    let mut sig_cursor = 0usize;
+    for item in &structure.str_items {
+        match &item.str_desc {
+            StructureItemDesc::Tstr_module(mb) => {
+                while sig_cursor < sig.len() {
+                    let current_index = sig_cursor;
+                    sig_cursor += 1;
+                    let SignatureItem::SigModule(id, md, _) = &mut sig[current_index] else {
+                        continue;
+                    };
+                    if id.name() != mb.mb_id.name() {
+                        continue;
+                    }
+                    if let DeclMty::MtySignature(sub_sig) = &mut md.md_type {
+                        let child_path = Path::pdot(module_path.clone(), id.name());
+                        if matches!(mb.mb_expr.mod_desc, ModuleExprDesc::Tmod_ident(Path::Pdot(..), _))
+                        {
+                            crate::types::typecore::rebind_direct_sig_type_family_to_access_path(
+                                type_ctx,
+                                &child_path,
+                                sub_sig,
+                                true,
+                            );
+                            crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                                sub_sig,
+                                &child_path,
+                                type_ctx,
+                            );
+                            crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(
+                                sub_sig,
+                                &child_path,
+                            );
+                        }
+                        if let ModuleExprDesc::Tmod_structure(sub_structure) = &mb.mb_expr.mod_desc {
+                            localize_alias_child_module_sig_paths_in_structure_sig(
+                                sub_sig,
+                                sub_structure,
+                                &child_path,
+                                type_ctx,
+                            );
+                        }
+                    }
+                    break;
+                }
+            }
+            StructureItemDesc::Tstr_recmodule(mbs) => {
+                for mb in mbs {
+                    while sig_cursor < sig.len() {
+                        let current_index = sig_cursor;
+                        sig_cursor += 1;
+                        let SignatureItem::SigModule(id, md, _) = &mut sig[current_index] else {
+                            continue;
+                        };
+                        if id.name() != mb.mb_id.name() {
+                            continue;
+                        }
+                        if let DeclMty::MtySignature(sub_sig) = &mut md.md_type {
+                            let child_path = Path::pdot(module_path.clone(), id.name());
+                            if matches!(
+                                mb.mb_expr.mod_desc,
+                                ModuleExprDesc::Tmod_ident(Path::Pdot(..), _)
+                            ) {
+                                crate::types::typecore::rebind_direct_sig_type_family_to_access_path(
+                                    type_ctx,
+                                    &child_path,
+                                    sub_sig,
+                                    true,
+                                );
+                                crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                                    sub_sig,
+                                    &child_path,
+                                    type_ctx,
+                                );
+                                crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(
+                                    sub_sig,
+                                    &child_path,
+                                );
+                            }
+                            if let ModuleExprDesc::Tmod_structure(sub_structure) = &mb.mb_expr.mod_desc
+                            {
+                                localize_alias_child_module_sig_paths_in_structure_sig(
+                                    sub_sig,
+                                    sub_structure,
+                                    &child_path,
+                                    type_ctx,
+                                );
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn structure_has_dotted_alias_child_modules(structure: &Structure) -> bool {
+    structure.str_items.iter().any(|item| match &item.str_desc {
+        StructureItemDesc::Tstr_module(mb) => {
+            matches!(mb.mb_expr.mod_desc, ModuleExprDesc::Tmod_ident(Path::Pdot(..), _))
+                || matches!(&mb.mb_expr.mod_desc, ModuleExprDesc::Tmod_structure(sub) if structure_has_dotted_alias_child_modules(sub))
+        }
+        StructureItemDesc::Tstr_recmodule(mbs) => mbs.iter().any(|mb| {
+            matches!(mb.mb_expr.mod_desc, ModuleExprDesc::Tmod_ident(Path::Pdot(..), _))
+                || matches!(&mb.mb_expr.mod_desc, ModuleExprDesc::Tmod_structure(sub) if structure_has_dotted_alias_child_modules(sub))
+        }),
+        _ => false,
+    })
 }
 
 fn module_expr_contains_unpack_for_sig_localization(mod_expr: &ModuleExpr) -> bool {
@@ -9901,6 +10022,31 @@ fn type_structure_item<'a>(
                     mod_id.binding_time() - 1,
                     &decl_mod_type,
                 );
+                let localized_decl_mod_type = match &decl_mod_type {
+                    crate::types::decl::ModuleType::MtySignature(sig) => {
+                        if let ModuleExprDesc::Tmod_structure(structure) = &typed_mod.mod_desc {
+                            if !structure_has_dotted_alias_child_modules(structure) {
+                                decl_mod_type.clone()
+                            } else {
+                            let mut sig =
+                                crate::types::typecore::copy_lookup_signature_for_subst(
+                                    sig,
+                                    tctx.type_ctx,
+                                );
+                            localize_alias_child_module_sig_paths_in_structure_sig(
+                                &mut sig,
+                                structure,
+                                &Path::pident(mod_id.clone()),
+                                tctx.type_ctx,
+                            );
+                            crate::types::decl::ModuleType::MtySignature(sig)
+                            }
+                        } else {
+                            decl_mod_type.clone()
+                        }
+                    }
+                    _ => decl_mod_type.clone(),
+                };
                 let item_sig_mod_type = match &decl_mod_type {
                     crate::types::decl::ModuleType::MtyIdent(_)
                     | crate::types::decl::ModuleType::MtyAlias(_, _) => resolve_mod_type_to_sig(
@@ -9922,12 +10068,12 @@ fn type_structure_item<'a>(
                         crate::types::decl::ModuleType::MtySignature(sig)
                     })
                     .unwrap_or_else(|| decl_mod_type.clone()),
-                    _ => decl_mod_type.clone(),
+                    _ => localized_decl_mod_type.clone(),
                 };
                 new_env.add_module(
                     mod_id.clone(),
                     crate::types::decl::ModuleDeclaration {
-                        md_type: decl_mod_type.clone(),
+                        md_type: localized_decl_mod_type,
                         md_attributes: vec![],
                         md_loc: crate::location::Location::none(),
                         md_path: None,

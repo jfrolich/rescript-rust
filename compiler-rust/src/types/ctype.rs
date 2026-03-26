@@ -5728,21 +5728,6 @@ fn generalize_structure_rec(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprR
             Action::LowerVar
         } else if level > ctx.current_level() {
             match &*desc {
-                TypeDesc::Tvariant(row0) => {
-                    let row = crate::types::btype::row_repr(ctx, row0);
-                    let more = crate::types::btype::row_more(ctx, &row);
-                    let more_level = ctx.get_level(ctx.repr(more));
-                    if more_level <= ctx.current_level() && !crate::types::btype::static_row(ctx, &row) {
-                        Action::LowerTo(more_level)
-                    } else {
-                        let mut children = Vec::new();
-                        iter_type_expr(ctx, ty, |child| children.push(child));
-                        Action::PromoteAndRecurse {
-                            children,
-                            clear_abbrev: None,
-                        }
-                    }
-                }
                 // Match OCaml ctype.ml is_object_type path guard in generalize_structure:
                 // object types (names starting with '#') are not promoted here.
                 TypeDesc::Tconstr { path, .. } if path.head_name().starts_with('#') => {
@@ -8190,17 +8175,13 @@ fn copy_type_cached(
         return cached;
     }
 
-    // OCaml ctype.ml copy fast-path for recursive variants:
+    // Match OCaml ctype.ml copy marker handling for recursive variants:
     // if row_more currently carries a temporary marker, reuse the
     // already-registered variant copy directly.
     if ctx.get_level(ty) == GENERIC_LEVEL {
         if let TypeDesc::Tvariant(row0) = &*ctx.get_desc(ty) {
             let row = row_repr(ctx, row0);
             let more = ctx.repr(row.row_more);
-            if ctx.get_level(more) != GENERIC_LEVEL && !super::btype::static_row(ctx, &row) {
-                cache.nodes.insert(ty, ty);
-                return ty;
-            }
             if let Some(marker) = cache.row_more_markers.get(&more).copied() {
                 cache.nodes.insert(ty, marker.variant);
                 return marker.variant;

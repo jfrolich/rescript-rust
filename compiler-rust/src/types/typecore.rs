@@ -4388,80 +4388,6 @@ pub fn type_expect<'a>(
             )?;
 
             let ty = crate::types::instance(ctx, desc.val_type);
-            let mut debug_ident = None;
-            if std::env::var_os("RUST_DEBUG_IDENT_TRACE").is_some() {
-                let path_name = path.name();
-                let debug_match = std::env::var("RUST_DEBUG_IDENT_MATCH").ok();
-                let should_debug = matches!(
-                    path_name.as_str(),
-                    "f"
-                        | "eq"
-                        | "setUnion2"
-                        | "dd"
-                        | "aa"
-                        | "bb"
-                        | "N.diff"
-                        | "N.intersect"
-                        | "N.union"
-                        | "N.make"
-                        | "N.fromArray"
-                        | "N.eq"
-                ) || debug_match.as_deref().is_some_and(|needle| {
-                    path_name == needle || path.last() == needle || path_name.contains(needle)
-                });
-                if should_debug {
-                    debug_ident = Some(path_name.clone());
-                    let loc = tctx.arena.to_location(expr.pexp_loc);
-                    let ty_repr = ctx.repr(ty);
-                    let summary = {
-                        let desc = ctx.get_desc(ty_repr);
-                        match &*desc {
-                            TypeDesc::Tarrow { arg, ret, .. } => {
-                                let arg_r = ctx.repr(arg.typ);
-                                let ret_r = ctx.repr(*ret);
-                                let ret_desc = ctx.get_desc(ret_r);
-                                let ret_summary = match &*ret_desc {
-                                    TypeDesc::Tconstr { path, .. } => {
-                                        format!("Tconstr({})", path.name())
-                                    }
-                                    TypeDesc::Tarrow {
-                                        arg: ret_arg,
-                                        ret: ret_ret,
-                                        ..
-                                    } => {
-                                        let nested_arg = ctx.repr(ret_arg.typ);
-                                        let nested_ret = ctx.repr(*ret_ret);
-                                        format!(
-                                            "Tarrow(arg={} ret={})",
-                                            nested_arg.0, nested_ret.0
-                                        )
-                                    }
-                                    TypeDesc::Tvar(_) => "Tvar".to_string(),
-                                    _ => "other".to_string(),
-                                };
-                                format!(
-                                    "Tarrow arg={} ret={} ret_summary={}",
-                                    arg_r.0, ret_r.0, ret_summary
-                                )
-                            }
-                            TypeDesc::Tconstr { path, .. } => format!("Tconstr({})", path.name()),
-                            TypeDesc::Tvar(_) => "Tvar".to_string(),
-                            _ => "other".to_string(),
-                        }
-                    };
-                    eprintln!(
-                        "[ident-trace] line={} col={} env={} name={} path={} desc_ty={} inst_ty={} summary={}",
-                        loc.loc_start.line,
-                        loc.loc_start.column(),
-                        env.id(),
-                        path.last(),
-                        path_name,
-                        ctx.repr(desc.val_type).0,
-                        ty_repr.0,
-                        summary
-                    );
-                }
-            }
             if std::env::var_os("RUST_DEBUG_IDENT_LEVELS").is_some() {
                 let path_name = path.name();
                 if path_name == "foo1"
@@ -4909,20 +4835,6 @@ pub fn type_expect<'a>(
                 }
             }
             rue_unify(tctx, loc, ty, expected_ty, context)?;
-            if let Some(path_name) = debug_ident.as_deref() {
-                let loc = tctx.arena.to_location(expr.pexp_loc);
-                eprintln!(
-                    "[ident-trace-post] line={} col={} env={} name={} path={} desc_repr={} inst_repr={} expected_repr={}",
-                    loc.loc_start.line,
-                    loc.loc_start.column(),
-                    env.id(),
-                    path.last(),
-                    path_name,
-                    ctx.repr(desc.val_type).0,
-                    ctx.repr(ty).0,
-                    ctx.repr(expected_ty).0,
-                );
-            }
 
             Ok(Expression::new(
                 ExpressionDesc::Texp_ident(path, lid.clone(), desc),
@@ -21196,6 +21108,26 @@ fn qualify_module_local_type_paths_in_place<'a>(
         Some(flat)
     }
 
+    fn path_segments(path: &Path) -> Option<Vec<String>> {
+        let Ok((head, components)) = path.flatten() else {
+            return None;
+        };
+        let mut segments = Vec::with_capacity(components.len() + 1);
+        segments.push(head.name().to_string());
+        segments.extend(components.into_iter().map(|component| component.to_string()));
+        Some(segments)
+    }
+
+    fn path_has_suffix(path: &Path, suffix: &Path) -> bool {
+        let Some(path_parts) = path_segments(path) else {
+            return false;
+        };
+        let Some(suffix_parts) = path_segments(suffix) else {
+            return false;
+        };
+        path_parts.ends_with(&suffix_parts)
+    }
+
     fn flattened_alias_heads_from_persistent(
         pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
         qualified_path: &Path,
@@ -21280,6 +21212,19 @@ fn qualify_module_local_type_paths_in_place<'a>(
                         module_access_path,
                         pers_env,
                     );
+                }
+            }
+
+            if rewritten_path.is_none() {
+                if let Path::Pdot(parent, type_name, _) = &path {
+                    if path_has_suffix(parent, module_access_path) {
+                        let candidate = Path::pdot(module_access_path.clone(), type_name.as_str());
+                        if !candidate.same(&path)
+                            && lookup_type_decl_for_path(&candidate, env, pers_env, ctx).is_some()
+                        {
+                            rewritten_path = Some(candidate);
+                        }
+                    }
                 }
             }
 
@@ -21893,7 +21838,7 @@ fn module_type_has_hidden_unpack_ident(mty: &crate::types::decl::ModuleType) -> 
     }
 }
 
-fn rebind_direct_sig_type_family_to_access_path<'a>(
+pub(crate) fn rebind_direct_sig_type_family_to_access_path<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
     access_path: &Path,
     sig_items: &[crate::types::decl::SignatureItem],
