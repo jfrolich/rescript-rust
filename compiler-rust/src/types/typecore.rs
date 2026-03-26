@@ -20273,15 +20273,208 @@ fn qualify_label_description_paths<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) {
+    fn rewrite_direct_root_type_family_in_place<'a>(
+        ctx: &'a crate::types::context::TypeContext<'a>,
+        ty: TypeExprRef,
+        old_root_path: &Path,
+        new_root_path: &Path,
+        visited: &mut HashSet<TypeExprRef>,
+    ) {
+        use crate::types::type_expr::RowField;
+
+        let repr = ctx.repr(ty);
+        if !visited.insert(repr) {
+            return;
+        }
+
+        let desc = ctx.get_desc(repr).clone();
+        match desc {
+            TypeDesc::Tconstr { path, args, abbrev } => {
+                for arg in &args {
+                    rewrite_direct_root_type_family_in_place(
+                        ctx,
+                        *arg,
+                        old_root_path,
+                        new_root_path,
+                        visited,
+                    );
+                }
+                let rewritten = path.parent().and_then(|parent| {
+                    (parent.same(old_root_path) || parent.name() == old_root_path.name())
+                        .then(|| Path::pdot(new_root_path.clone(), path.last()))
+                });
+                if let Some(rewritten) = rewritten {
+                    ctx.set_desc(
+                        repr,
+                        TypeDesc::Tconstr {
+                            path: rewritten,
+                            args,
+                            abbrev,
+                        },
+                    );
+                }
+            }
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                rewrite_direct_root_type_family_in_place(
+                    ctx,
+                    arg.typ,
+                    old_root_path,
+                    new_root_path,
+                    visited,
+                );
+                rewrite_direct_root_type_family_in_place(
+                    ctx,
+                    ret,
+                    old_root_path,
+                    new_root_path,
+                    visited,
+                );
+            }
+            TypeDesc::Ttuple(types) => {
+                for item in &types {
+                    rewrite_direct_root_type_family_in_place(
+                        ctx,
+                        *item,
+                        old_root_path,
+                        new_root_path,
+                        visited,
+                    );
+                }
+            }
+            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+                rewrite_direct_root_type_family_in_place(
+                    ctx,
+                    target,
+                    old_root_path,
+                    new_root_path,
+                    visited,
+                );
+            }
+            TypeDesc::Tobject { fields, name } => {
+                rewrite_direct_root_type_family_in_place(
+                    ctx,
+                    fields,
+                    old_root_path,
+                    new_root_path,
+                    visited,
+                );
+                if let Some((_, args)) = name {
+                    for item in &args {
+                        rewrite_direct_root_type_family_in_place(
+                            ctx,
+                            *item,
+                            old_root_path,
+                            new_root_path,
+                            visited,
+                        );
+                    }
+                }
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                rewrite_direct_root_type_family_in_place(
+                    ctx,
+                    typ,
+                    old_root_path,
+                    new_root_path,
+                    visited,
+                );
+                rewrite_direct_root_type_family_in_place(
+                    ctx,
+                    rest,
+                    old_root_path,
+                    new_root_path,
+                    visited,
+                );
+            }
+            TypeDesc::Tvariant(row) => {
+                for (_label, field) in &row.row_fields {
+                    match field {
+                        RowField::Rpresent(Some(ty)) => {
+                            rewrite_direct_root_type_family_in_place(
+                                ctx,
+                                *ty,
+                                old_root_path,
+                                new_root_path,
+                                visited,
+                            );
+                        }
+                        RowField::Reither { types, .. } => {
+                            for ty in types {
+                                rewrite_direct_root_type_family_in_place(
+                                    ctx,
+                                    *ty,
+                                    old_root_path,
+                                    new_root_path,
+                                    visited,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                rewrite_direct_root_type_family_in_place(
+                    ctx,
+                    row.row_more,
+                    old_root_path,
+                    new_root_path,
+                    visited,
+                );
+                if let Some((_, args)) = &row.row_name {
+                    for item in args {
+                        rewrite_direct_root_type_family_in_place(
+                            ctx,
+                            *item,
+                            old_root_path,
+                            new_root_path,
+                            visited,
+                        );
+                    }
+                }
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                rewrite_direct_root_type_family_in_place(
+                    ctx,
+                    body,
+                    old_root_path,
+                    new_root_path,
+                    visited,
+                );
+                for var in &vars {
+                    rewrite_direct_root_type_family_in_place(
+                        ctx,
+                        *var,
+                        old_root_path,
+                        new_root_path,
+                        visited,
+                    );
+                }
+            }
+            TypeDesc::Tpackage { args, .. } => {
+                for item in &args {
+                    rewrite_direct_root_type_family_in_place(
+                        ctx,
+                        *item,
+                        old_root_path,
+                        new_root_path,
+                        visited,
+                    );
+                }
+            }
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        }
+    }
+
+    let mut copy_cache = HashMap::new();
+    label.lbl_res = copy_lookup_type_expr(ctx, label.lbl_res, &mut copy_cache);
+    label.lbl_arg = copy_lookup_type_expr(ctx, label.lbl_arg, &mut copy_cache);
+
     let res_repr = ctx.repr(label.lbl_res);
     let res_desc = ctx.get_desc(res_repr);
     let TypeDesc::Tconstr { path: res_path, .. } = &*res_desc else {
         return;
     };
     let mut module_access_paths = Vec::new();
-    let mut anchor_prefixes = Vec::new();
     let mut has_unresolved_local_path = false;
-    let mut has_visible_alias_anchor = false;
 
     match res_path {
         Path::Pdot(_, _, _) => {
@@ -20291,44 +20484,43 @@ fn qualify_label_description_paths<'a>(
             if let Some(parent) = res_path.parent() {
                 let parent_has_alias_target =
                     alias_target_for_module_path(&parent, env, pers_env, ctx).is_some();
-                has_visible_alias_anchor |= parent_has_alias_target;
                 if has_unresolved_local_path || parent_has_alias_target {
                     module_access_paths.push(parent.clone());
                 }
-                anchor_prefixes.push(parent);
             }
             let root = path_root_module(res_path);
             let root_has_alias_target =
                 alias_target_for_module_path(&root, env, pers_env, ctx).is_some();
-            has_visible_alias_anchor |= root_has_alias_target;
-            if (has_unresolved_local_path || root_has_alias_target)
+            let is_top_level_alias_type = res_path
+                .parent()
+                .as_ref()
+                .is_some_and(|parent| parent.same(&root));
+            if (has_unresolved_local_path || (root_has_alias_target && is_top_level_alias_type))
                 && !module_access_paths.iter().any(|p| p.same(&root))
             {
                 module_access_paths.push(root.clone());
             }
-            if !anchor_prefixes.iter().any(|p| p.same(&root)) {
-                anchor_prefixes.push(root);
-            }
         }
-        Path::Pident(_) => {
-            if let Some(decl) = lookup_type_decl_for_path(res_path, env, pers_env, ctx) {
-                if let Some(manifest) = decl.type_manifest {
-                    let manifest_path = {
-                        let manifest_desc = ctx.get_desc(ctx.repr(manifest));
-                        match &*manifest_desc {
-                            TypeDesc::Tconstr { path, .. } => Some(path.clone()),
-                            _ => None,
-                        }
-                    };
-                    if let Some(manifest_path) = manifest_path {
-                        if let Some(parent) = manifest_path.parent() {
-                            anchor_prefixes.push(parent);
-                        }
-                    }
+        Path::Pident(_) => {}
+        Path::Papply(_, _) => return,
+    }
+
+    if let Path::Pdot(_, _, _) = res_path {
+        let root = path_root_module(res_path);
+        if !root.same(res_path) {
+            if let Some(alias_target) = alias_target_for_module_path(&root, env, pers_env, ctx) {
+                if alias_target.head().is_persistent() && !alias_target.same(&root) {
+                    let mut visited = HashSet::new();
+                    rewrite_direct_root_type_family_in_place(
+                        ctx,
+                        label.lbl_arg,
+                        &root,
+                        &alias_target,
+                        &mut visited,
+                    );
                 }
             }
         }
-        Path::Papply(_, _) => return,
     }
     drop(res_desc);
 
@@ -20340,36 +20532,6 @@ fn qualify_label_description_paths<'a>(
             pers_env,
             label.lbl_arg,
             &module_access_path,
-            &mut visited,
-        );
-    }
-
-    if anchor_prefixes.is_empty() {
-        return;
-    }
-
-    // Only rewrite canonical paths through visible local aliases when the
-    // argument type still contains unresolved local heads. Otherwise preserve
-    // the already-qualified family path OCaml keeps in the typedtree.
-    if !has_unresolved_local_path && !has_visible_alias_anchor {
-        return;
-    }
-
-    for (alias_id, alias_target) in env.current_local_module_aliases() {
-        if !anchor_prefixes
-            .iter()
-            .any(|anchor| path_has_prefix(&alias_target, anchor))
-        {
-            continue;
-        }
-
-        let mut visited = HashSet::new();
-        qualify_module_local_type_paths_in_place(
-            ctx,
-            env,
-            pers_env,
-            label.lbl_arg,
-            &Path::pident(alias_id),
             &mut visited,
         );
     }
