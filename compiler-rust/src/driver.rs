@@ -12,7 +12,6 @@ use crate::cmi::persistent_env::PersistentEnv;
 use crate::context::IdGenerator;
 use crate::js_ir::printer::print_program;
 use crate::lambda::compile::LambdaCompiler;
-use crate::lambda::convert::LambdaConverter;
 use crate::parser::ast::{
     Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature, Structure,
     SignatureItemDesc, StructureItemDesc,
@@ -520,14 +519,16 @@ pub fn compile_source_to_js_with_options(
         return Ok(String::new());
     }
 
-    // Typedtree -> Lambda
-    let mut converter = LambdaConverter::new(parser.arena());
-    let lambda = converter.convert_structure(&typed_structure);
+    // Typedtree -> raw lambda -> lowered lambda
+    let mut raw_converter = crate::raw_lambda::convert::RawLambdaConverter::new(parser.arena());
+    let raw_lambda = raw_converter.convert_structure(&typed_structure);
 
-    // Print Lambda IR if requested
+    // Print raw Lambda IR if requested
     if options.dump_lambda {
-        eprintln!("{}", crate::lambda::print::RawLambdaPrinter::new(&lambda));
+        eprintln!("{}", crate::raw_lambda::print::RawLambdaPrinter::new(&raw_lambda));
     }
+
+    let lambda = crate::raw_lambda::lower::lower_to_lambda(raw_lambda);
 
     // Print Lambda sexp if requested
     if options.dump_lambda_sexp {

@@ -53,6 +53,7 @@ pub mod lambda;
 pub mod location;
 pub mod parse_arena;
 pub mod parser;
+pub mod raw_lambda;
 pub mod types;
 
 // Re-exports for convenience
