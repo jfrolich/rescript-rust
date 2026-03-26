@@ -1,13 +1,12 @@
 #!/bin/bash
 
-# Lambda IR Parity Test Suite: Compare Rust and OCaml Lambda IR output
+# Lambda IR Parity Test Suite: Compare Lambda IR output between OCaml and Rust compilers.
 #
 # Tests performed:
-#
 # 1. sexp parity - Lambda IR structure matches between OCaml and Rust
 # 2. sexp-locs parity - Lambda IR structure + locations match
 #
-# Uses test files from tests/tests/src/
+# Uses rescript compiler-args to invoke both compilers with the same per-file arguments.
 #
 # USAGE:
 #   ./scripts/test_lambda_parity.sh [OPTIONS] [FILE|PATTERN]
@@ -21,21 +20,13 @@
 #   -h, --help        Show this help message
 #
 # EXAMPLES:
-#   # Test a single file (fastest for iteration):
 #   ./scripts/test_lambda_parity.sh tests/tests/src/core/Core_ArrayTest.res
-#
-#   # Test files matching a pattern:
 #   ./scripts/test_lambda_parity.sh "Core_"
-#
-#   # Run all tests, stop on first failure:
 #   ./scripts/test_lambda_parity.sh --quick
-#
-#   # Run all tests in parallel (default 16 jobs):
 #   ./scripts/test_lambda_parity.sh
 
 set -e
 
-# Parse command line arguments
 QUICK_MODE=false
 PARALLEL_JOBS=16
 VERBOSE=false
@@ -47,7 +38,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -q|--quick)
             QUICK_MODE=true
-            PARALLEL_JOBS=1  # Quick mode forces sequential for clean output
+            PARALLEL_JOBS=1
             shift
             ;;
         -j|--parallel)
@@ -71,7 +62,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            head -35 "$0" | tail -30
+            sed -n '10,31p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -84,20 +75,20 @@ done
 scriptDir=$(dirname "$0")
 PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
-RUST_BSC="$PROJECT_ROOT/compiler-rust/target/release/bsc"
-OCAML_BSC="$DUNE_BIN_DIR/bsc"
+OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/release/bsc}"
+RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe}"
+TEST_PROJECT="$PROJECT_ROOT/tests/tests"
+BUILD_DIR="$TEST_PROJECT"
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-# Configuration
 TIMEOUT_SECONDS=10
 
-# Check if compilers exist
 if [[ ! -x "$OCAML_BSC" ]]; then
     echo -e "${RED}Error: OCaml bsc not found at $OCAML_BSC${RESET}"
     echo "Run 'make' first to build the OCaml compiler."
@@ -105,19 +96,41 @@ if [[ ! -x "$OCAML_BSC" ]]; then
 fi
 
 if [[ ! -x "$RUST_BSC" ]]; then
-    echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}"
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml --release' first."
+    echo -e "${YELLOW}Warning: Rust bsc not found at $RUST_BSC${RESET}"
+    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml --release' to build the Rust compiler."
+    echo "For now, testing OCaml compiler only."
+    RUST_AVAILABLE=false
+else
+    RUST_AVAILABLE=true
+fi
+
+if [[ ! -x "$RESCRIPT_CLI" ]]; then
+    echo -e "${RED}Error: rescript CLI not found at $RESCRIPT_CLI${RESET}"
+    echo "Run 'make' first to build the toolchain."
     exit 1
 fi
 
-# Create temp directory
 TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+CACHE_DIR="$PROJECT_ROOT/.parity-cache"
+mkdir -p "$CACHE_DIR/lambda/diffs" "$CACHE_DIR/lambda/ocaml" "$CACHE_DIR/lambda/rust"
+
+cleanup_temp_dir() {
+    if [[ -n "${TEMP_DIR:-}" && -d "$TEMP_DIR" ]]; then
+        find "$TEMP_DIR" -type f -delete 2>/dev/null || true
+        find "$TEMP_DIR" -depth -type d -empty -delete 2>/dev/null || true
+        rmdir "$TEMP_DIR" 2>/dev/null || true
+    fi
+}
+trap cleanup_temp_dir EXIT
 
 echo -e "${BOLD}Lambda IR Parity Test${RESET}"
 echo "============================================"
 echo "OCaml bsc: $OCAML_BSC"
-echo "Rust bsc:  $RUST_BSC"
+if [[ "$RUST_AVAILABLE" == "true" ]]; then
+    echo "Rust bsc:  $RUST_BSC"
+else
+    echo "Rust bsc:  (not available)"
+fi
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
 if $TEST_RAW; then
@@ -127,20 +140,25 @@ elif $TEST_LOCS; then
 else
     echo "Testing: sexp (-dlambda-sexp)"
 fi
+echo "Artifact cache: $CACHE_DIR/lambda"
 echo ""
 
-# Find test files based on arguments
+echo -e "${BOLD}Step 1: Building project with rescript...${RESET}"
+cd "$BUILD_DIR"
+RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
+if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
+    echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
+fi
 cd "$PROJECT_ROOT"
+echo ""
 
 if [[ -n "$FILE_ARG" ]]; then
-    # Check if it's an absolute or relative path to a single file
     if [[ -f "$FILE_ARG" ]]; then
         echo "$FILE_ARG" > "$TEMP_DIR/files.txt"
     elif [[ -f "$PROJECT_ROOT/$FILE_ARG" ]]; then
         echo "$FILE_ARG" > "$TEMP_DIR/files.txt"
     else
-        # Treat as a pattern and use find with -path
-        find tests/tests/src -name "*.res" 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
+        find tests/tests/src -name "*.res" -type f 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
         if [[ ! -s "$TEMP_DIR/files.txt" ]]; then
             echo -e "${RED}Error: No files found matching '$FILE_ARG'${RESET}"
             echo "Hint: Try a pattern like 'Core_' or a full path"
@@ -148,8 +166,7 @@ if [[ -n "$FILE_ARG" ]]; then
         fi
     fi
 else
-    # Find all test files
-    find tests/tests/src -name "*.res" 2>/dev/null | sort > "$TEMP_DIR/files.txt"
+    find tests/tests/src -name "*.res" -type f 2>/dev/null | sort > "$TEMP_DIR/files.txt"
 fi
 
 TOTAL_FILES=$(wc -l < "$TEMP_DIR/files.txt" | tr -d ' ')
@@ -161,86 +178,162 @@ else
 fi
 echo ""
 
-# Create results directory
 RESULTS_DIR="$TEMP_DIR/results"
-mkdir -p "$RESULTS_DIR"
-mkdir -p "$TEMP_DIR/diffs"
+mkdir -p "$RESULTS_DIR" "$TEMP_DIR/work"
 
-# Export variables for parallel execution
-export OCAML_BSC RUST_BSC TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE TEST_LOCS TEST_RAW RESULTS_DIR
+export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT CACHE_DIR TEST_LOCS TEST_RAW
 
-# Function to test a single file - writes results to a file
 test_single_file() {
     local file="$1"
-    local safe_name=$(echo "$file" | sed 's/[\/]/_/g')
+    local safe_name
+    safe_name=$(echo "$file" | tr '/' '_')
     local result_file="$RESULTS_DIR/$safe_name.result"
 
-    # Initialize result
-    local pass=0 diff_fail=0
-    local ocaml_fail=0 rust_fail=0
+    local ocaml_pass=0 rust_pass=0 parity_pass=0
+    local ocaml_fail=0 rust_fail=0 parity_fail=0
+    local rust_timeout=0 rust_crash=0
 
-    # Create per-file temp directory for parallel safety
     local file_temp="$TEMP_DIR/work/$safe_name"
     mkdir -p "$file_temp"
 
-    # Determine flags
+    local full_file_path
+    if [[ "$file" = /* ]]; then
+        full_file_path="$file"
+    else
+        full_file_path="$PROJECT_ROOT/$file"
+    fi
+
+    local rel_path="${full_file_path#$TEST_PROJECT/}"
     local lambda_flag="-dlambda-sexp"
-    if $TEST_RAW; then
+    if [[ "$TEST_RAW" == "true" ]]; then
         lambda_flag="-drawlambda"
-    elif $TEST_LOCS; then
+    elif [[ "$TEST_LOCS" == "true" ]]; then
         lambda_flag="-dlambda-sexp-locs"
     fi
 
-    # Run OCaml compiler
-    local ocaml_success=false
-    if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $lambda_flag "$file" > /dev/null 2> "$file_temp/ocaml.sexp"; then
-        ocaml_success=true
-    else
-        ocaml_fail=1
-    fi
+    local ocaml_cache_base="$CACHE_DIR/lambda/ocaml/$safe_name"
+    local rust_cache_base="$CACHE_DIR/lambda/rust/$safe_name"
+    local diff_cache="$CACHE_DIR/lambda/diffs/$safe_name.diff"
+    rm -f "$ocaml_cache_base.sexp" "$ocaml_cache_base.stderr" "$rust_cache_base.sexp" "$rust_cache_base.stderr" "$diff_cache"
 
-    # Run Rust compiler
-    local rust_success=false
-    if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" $lambda_flag "$file" > /dev/null 2> "$file_temp/rust.sexp"; then
-        rust_success=true
-    else
-        rust_fail=1
-    fi
-
-    # Compare outputs if both succeeded
-    if $ocaml_success && $rust_success; then
-        if diff -q "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > /dev/null 2>&1; then
-            pass=1
+    run_rust_bsc() {
+        local rust_exit=0
+        timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "$@" || rust_exit=$?
+        if [[ "$rust_exit" -eq 0 ]]; then
+            rust_pass=1
+        elif [[ "$rust_exit" -eq 124 ]]; then
+            rust_timeout=1
+            rust_fail=1
         else
-            diff_fail=1
-            diff -u "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
+            rust_crash=1
+            rust_fail=1
+        fi
+    }
+
+    local compiler_args_json
+    compiler_args_json=$(cd "$TEST_PROJECT" && "$RESCRIPT_CLI" compiler-args "$rel_path" 2>/dev/null) || true
+
+    if [[ -n "$compiler_args_json" ]]; then
+        local -a compiler_args=()
+        while IFS= read -r arg; do
+            compiler_args+=("$arg")
+        done < <(
+            printf '%s' "$compiler_args_json" | python3 -c 'import json,sys; [print(arg) for arg in json.load(sys.stdin).get("compiler_args", [])]'
+        )
+
+        if [[ "${#compiler_args[@]}" -gt 0 ]]; then
+            cd "$TEST_PROJECT/lib/bs"
+            if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" "$lambda_flag" "${compiler_args[@]}" 2> "$file_temp/ocaml.out" 1>/dev/null; then
+                ocaml_pass=1
+            else
+                ocaml_fail=1
+                cp "$file_temp/ocaml.out" "$ocaml_cache_base.stderr" 2>/dev/null || true
+            fi
+
+            if [[ "$RUST_AVAILABLE" == "true" ]]; then
+                run_rust_bsc "$lambda_flag" "${compiler_args[@]}" 2> "$file_temp/rust.out" 1>/dev/null
+                if [[ "$rust_fail" -eq 1 ]]; then
+                    cp "$file_temp/rust.out" "$rust_cache_base.stderr" 2>/dev/null || true
+                fi
+            fi
+            cd "$PROJECT_ROOT"
+        else
+            ocaml_fail=1
+            if [[ "$RUST_AVAILABLE" == "true" ]]; then
+                rust_fail=1
+            fi
+        fi
+    else
+        if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" "$lambda_flag" "$full_file_path" 2> "$file_temp/ocaml.out" 1>/dev/null; then
+            ocaml_pass=1
+        else
+            ocaml_fail=1
+            cp "$file_temp/ocaml.out" "$ocaml_cache_base.stderr" 2>/dev/null || true
+        fi
+
+        if [[ "$RUST_AVAILABLE" == "true" ]]; then
+            run_rust_bsc "$lambda_flag" "$full_file_path" 2> "$file_temp/rust.out" 1>/dev/null
+            if [[ "$rust_fail" -eq 1 ]]; then
+                cp "$file_temp/rust.out" "$rust_cache_base.stderr" 2>/dev/null || true
+            fi
         fi
     fi
 
-    # Write results
-    echo "$pass $diff_fail $ocaml_fail $rust_fail" > "$result_file"
+    if [[ "$ocaml_pass" -eq 1 ]]; then
+        cp "$file_temp/ocaml.out" "$ocaml_cache_base.sexp" 2>/dev/null || true
+    fi
+    if [[ "$rust_pass" -eq 1 ]]; then
+        cp "$file_temp/rust.out" "$rust_cache_base.sexp" 2>/dev/null || true
+    fi
 
-    # Verbose output
-    if $VERBOSE; then
-        if [[ "$pass" -eq 1 ]]; then
-            echo -e "${GREEN}PASS${RESET} $file"
-        elif [[ "$ocaml_fail" -eq 1 ]]; then
-            echo -e "${YELLOW}SKIP${RESET} $file (OCaml failed)"
-        elif [[ "$rust_fail" -eq 1 ]]; then
-            echo -e "${YELLOW}SKIP${RESET} $file (Rust failed)"
+    if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
+        if diff -q "$file_temp/ocaml.out" "$file_temp/rust.out" > /dev/null 2>&1; then
+            parity_pass=1
         else
-            echo -e "${RED}FAIL${RESET} $file"
+            parity_fail=1
+            diff -ua "$file_temp/ocaml.out" "$file_temp/rust.out" > "$diff_cache" 2>&1 || true
         fi
     fi
 
-    # Quick mode - exit on failure
-    if $QUICK_MODE && [[ "$diff_fail" -eq 1 ]]; then
-        echo -e "\n${RED}FAILED: $file${RESET}"
-        echo ""
-        echo "Diff:"
-        head -50 "$TEMP_DIR/diffs/$safe_name.diff"
-        if [[ $(wc -l < "$TEMP_DIR/diffs/$safe_name.diff") -gt 50 ]]; then
-            echo "... (truncated, see full diff at $TEMP_DIR/diffs/$safe_name.diff)"
+    echo "$file:ocaml_pass=$ocaml_pass:ocaml_fail=$ocaml_fail:rust_pass=$rust_pass:rust_fail=$rust_fail:rust_timeout=$rust_timeout:rust_crash=$rust_crash:parity_pass=$parity_pass:parity_fail=$parity_fail" > "$result_file"
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        if [[ "$ocaml_pass" -eq 1 ]]; then
+            echo -e "${GREEN}PASS${RESET} [OCaml] $file"
+        else
+            echo -e "${RED}FAIL${RESET} [OCaml] $file"
+        fi
+
+        if [[ "$RUST_AVAILABLE" == "true" ]]; then
+            if [[ "$rust_pass" -eq 1 ]]; then
+                echo -e "${GREEN}PASS${RESET} [Rust] $file"
+            elif [[ "$rust_timeout" -eq 1 ]]; then
+                echo -e "${YELLOW}TIMEOUT${RESET} [Rust] $file"
+            elif [[ "$rust_crash" -eq 1 ]]; then
+                echo -e "${RED}CRASH${RESET} [Rust] $file"
+            else
+                echo -e "${RED}FAIL${RESET} [Rust] $file"
+            fi
+
+            if [[ "$parity_pass" -eq 1 ]]; then
+                echo -e "${GREEN}PASS${RESET} [Parity] $file"
+            elif [[ "$parity_fail" -eq 1 ]]; then
+                echo -e "${RED}FAIL${RESET} [Parity] $file"
+            fi
+        fi
+    fi
+
+    if [[ "$QUICK_MODE" == "true" && ("$ocaml_fail" -eq 1 || "$rust_fail" -eq 1 || "$parity_fail" -eq 1) ]]; then
+        echo -e "${RED}Quick mode: stopping on first failure${RESET}"
+        if [[ -f "$diff_cache" ]]; then
+            echo -e "\nParity diff:"
+            head -50 "$diff_cache"
+        elif [[ -f "$ocaml_cache_base.stderr" ]]; then
+            echo -e "\nOCaml stderr:"
+            head -50 "$ocaml_cache_base.stderr"
+        elif [[ -f "$rust_cache_base.stderr" ]]; then
+            echo -e "\nRust stderr:"
+            head -50 "$rust_cache_base.stderr"
         fi
         exit 1
     fi
@@ -248,58 +341,117 @@ test_single_file() {
 
 export -f test_single_file
 
-# Run tests
+echo -e "${BOLD}Step 2: Running lambda parity tests...${RESET}"
+echo ""
 if [[ "$PARALLEL_JOBS" -eq 1 ]]; then
-    # Sequential execution
     while IFS= read -r file; do
         test_single_file "$file"
     done < "$TEMP_DIR/files.txt"
 else
-    # Parallel execution
     cat "$TEMP_DIR/files.txt" | xargs -P "$PARALLEL_JOBS" -I {} bash -c 'test_single_file "$@"' _ {}
 fi
 
-# Aggregate results
-PASS=0
-DIFF_FAIL=0
+echo ""
+echo -e "${BOLD}Results${RESET}"
+echo "========"
+
+OCAML_PASS=0
 OCAML_FAIL=0
+RUST_PASS=0
 RUST_FAIL=0
+RUST_TIMEOUTS=0
+RUST_CRASHES=0
+PARITY_PASS=0
+PARITY_FAIL=0
+OCAML_FAILURES=""
+RUST_FAILURES=""
+RUST_TIMEOUT_LIST=""
+RUST_CRASH_LIST=""
+PARITY_FAILURES=""
 
 for result_file in "$RESULTS_DIR"/*.result; do
-    if [[ -f "$result_file" ]]; then
-        read p d o r < "$result_file"
-        PASS=$((PASS + p))
-        DIFF_FAIL=$((DIFF_FAIL + d))
-        OCAML_FAIL=$((OCAML_FAIL + o))
-        RUST_FAIL=$((RUST_FAIL + r))
+    [[ -f "$result_file" ]] || continue
+    result=$(cat "$result_file")
+    file=$(echo "$result" | cut -d: -f1)
+
+    if echo "$result" | grep -q "ocaml_pass=1"; then
+        OCAML_PASS=$((OCAML_PASS + 1))
+    elif echo "$result" | grep -q "ocaml_fail=1"; then
+        OCAML_FAIL=$((OCAML_FAIL + 1))
+        OCAML_FAILURES="$OCAML_FAILURES  $file\n"
+    fi
+
+    if [[ "$RUST_AVAILABLE" == "true" ]]; then
+        if echo "$result" | grep -q "rust_pass=1"; then
+            RUST_PASS=$((RUST_PASS + 1))
+        elif echo "$result" | grep -q "rust_fail=1"; then
+            RUST_FAIL=$((RUST_FAIL + 1))
+            if echo "$result" | grep -q "rust_timeout=1"; then
+                RUST_TIMEOUTS=$((RUST_TIMEOUTS + 1))
+                RUST_TIMEOUT_LIST="$RUST_TIMEOUT_LIST  $file\n"
+            elif echo "$result" | grep -q "rust_crash=1"; then
+                RUST_CRASHES=$((RUST_CRASHES + 1))
+                RUST_CRASH_LIST="$RUST_CRASH_LIST  $file\n"
+            else
+                RUST_FAILURES="$RUST_FAILURES  $file\n"
+            fi
+        fi
+
+        if echo "$result" | grep -q "parity_pass=1"; then
+            PARITY_PASS=$((PARITY_PASS + 1))
+        elif echo "$result" | grep -q "parity_fail=1"; then
+            PARITY_FAIL=$((PARITY_FAIL + 1))
+            PARITY_FAILURES="$PARITY_FAILURES  $file\n"
+        fi
     fi
 done
 
-# Print summary
-echo ""
-echo -e "${BOLD}=== Lambda IR Parity Test Results ===${RESET}"
-echo ""
-echo -e "Total files: $TOTAL_FILES"
-echo -e "${GREEN}Passed:${RESET}      $PASS"
-echo -e "${RED}Failed:${RESET}      $DIFF_FAIL"
-echo -e "${YELLOW}OCaml err:${RESET}   $OCAML_FAIL"
-echo -e "${YELLOW}Rust err:${RESET}    $RUST_FAIL"
+echo -e "OCaml bsc:    ${GREEN}${OCAML_PASS} passed${RESET}, ${RED}${OCAML_FAIL} failed${RESET}"
+if [[ "$RUST_AVAILABLE" == "true" ]]; then
+    echo -e "Rust bsc:     ${GREEN}${RUST_PASS} passed${RESET}, ${RED}${RUST_FAIL} failed${RESET}"
+    echo -e "Parity:       ${GREEN}${PARITY_PASS} passed${RESET}, ${RED}${PARITY_FAIL} failed${RESET}"
+else
+    echo "Rust bsc:     (not available)"
+fi
 echo ""
 
-# Print diff file locations if there were failures
-if [[ "$DIFF_FAIL" -gt 0 ]]; then
-    echo "Diff files saved to: $TEMP_DIR/diffs/"
-    echo ""
-    echo "First few failing files:"
-    ls "$TEMP_DIR/diffs/"/*.diff 2>/dev/null | head -10 | while read diff_file; do
-        echo "  $(basename "$diff_file" .diff | tr '_' '/')"
-    done
+if [[ "$OCAML_FAIL" -gt 0 ]]; then
+    echo -e "${YELLOW}OCaml failures:${RESET}"
+    printf "%b" "$OCAML_FAILURES"
     echo ""
 fi
 
-# Exit with error if any parity failures
-if [[ "$DIFF_FAIL" -gt 0 ]]; then
+if [[ "$RUST_AVAILABLE" == "true" && "$RUST_FAILURES" != "" ]]; then
+    echo -e "${YELLOW}Rust failures:${RESET}"
+    printf "%b" "$RUST_FAILURES"
+    echo ""
+fi
+
+if [[ "$RUST_TIMEOUTS" -gt 0 ]]; then
+    echo -e "${YELLOW}Rust timeouts:${RESET}"
+    printf "%b" "$RUST_TIMEOUT_LIST"
+    echo ""
+fi
+
+if [[ "$RUST_CRASHES" -gt 0 ]]; then
+    echo -e "${YELLOW}Rust crashes:${RESET}"
+    printf "%b" "$RUST_CRASH_LIST"
+    echo ""
+fi
+
+if [[ "$PARITY_FAIL" -gt 0 ]]; then
+    echo -e "${YELLOW}Parity failures:${RESET}"
+    printf "%b" "$PARITY_FAILURES"
+    echo ""
+    echo "Diff files saved to: $CACHE_DIR/lambda/diffs"
+fi
+
+if [[ "$OCAML_FAIL" -gt 0 || ("$RUST_AVAILABLE" == "true" && ("$RUST_FAIL" -gt 0 || "$PARITY_FAIL" -gt 0)) ]]; then
     exit 1
 fi
 
-echo -e "${GREEN}All tests passed!${RESET}"
+if [[ "$RUST_AVAILABLE" == "true" ]]; then
+    echo -e "${GREEN}${BOLD}SUCCESS: All ${PARITY_PASS} files have matching lambda IR!${RESET}"
+else
+    echo -e "${GREEN}${BOLD}SUCCESS: All ${OCAML_PASS} OCaml files compiled.${RESET}"
+fi
