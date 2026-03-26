@@ -592,6 +592,7 @@ impl PatternState {
     /// Takes parsed Located<StrIdx> (with LocIdx) and arena to convert to Location.
     pub fn enter_variable(
         &mut self,
+        type_ctx: &crate::types::TypeContext<'_>,
         loc: LocIdx,
         name: &Located<StrIdx>,
         ty: TypeExprRef,
@@ -609,7 +610,7 @@ impl PatternState {
             return Err(TypeCoreError::MultiplyBoundVariable(name_str.to_string()));
         }
 
-        let id = Ident::create_local(name_str);
+        let id = type_ctx.create_ident(name_str);
         let full_loc = arena.to_location(loc);
         let full_name = crate::parse_arena::Located {
             txt: name_str.to_string(),
@@ -2425,7 +2426,15 @@ fn type_pattern_inner(
 
         PD::Ppat_var(name) => {
             // Variable pattern
-            let id = state.enter_variable(loc, name, expected_ty, false, false, tctx.arena)?;
+            let id = state.enter_variable(
+                tctx.type_ctx,
+                loc,
+                name,
+                expected_ty,
+                false,
+                false,
+                tctx.arena,
+            )?;
             Ok(Pattern::new(
                 PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
                 loc,
@@ -2590,7 +2599,15 @@ fn type_pattern_inner(
             crate::types::ctype::generalize(ctx, ty_var);
 
             // Enter the variable with the as-type
-            let id = state.enter_variable(loc, name, ty_var, true, false, tctx.arena)?;
+            let id = state.enter_variable(
+                tctx.type_ctx,
+                loc,
+                name,
+                ty_var,
+                true,
+                false,
+                tctx.arena,
+            )?;
 
             Ok(Pattern::new(
                 PatternDesc::Tpat_alias(
@@ -2766,7 +2783,15 @@ fn type_pattern_inner(
 
         PD::Ppat_unpack(name) => {
             // Module unpack pattern: module(M)
-            let id = state.enter_variable(loc, name, expected_ty, false, true, tctx.arena)?;
+            let id = state.enter_variable(
+                tctx.type_ctx,
+                loc,
+                name,
+                expected_ty,
+                false,
+                true,
+                tctx.arena,
+            )?;
             let typed_pat = Pattern::new(
                 PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
                 loc,
@@ -4156,7 +4181,15 @@ fn type_pattern_constraint_poly_var(
             crate::types::ctype::generalize(ctx, ty_prime);
 
             // OCaml: let id = enter_variable lloc name ty' in
-            let id = state.enter_variable(lloc, &name, ty_prime, false, false, tctx.arena)?;
+            let id = state.enter_variable(
+                tctx.type_ctx,
+                lloc,
+                &name,
+                ty_prime,
+                false,
+                false,
+                tctx.arena,
+            )?;
 
             // OCaml: pat_desc = Tpat_var(id, name); pat_type = ty (the Tpoly type)
             // pat_extra = [(Tpat_constraint cty, loc, sp.ppat_attributes)]
@@ -16647,7 +16680,7 @@ fn type_let_bindings(
                 if let Some(name) =
                     extract_recursive_binding_name(tctx.arena.get_pat(binding.pvb_pat), tctx.arena)
                 {
-                    let id = Ident::create_local(tctx.arena.get_string(name.txt));
+                    let id = tctx.type_ctx.create_ident(tctx.arena.get_string(name.txt));
                     recursive_binding_ids.push(id.clone());
                     let desc = ValueDescription {
                         val_type: *ty,
@@ -23024,11 +23057,11 @@ mod tests {
         let x_idx = arena.intern("x");
         let name = Located { txt: x_idx, loc };
 
-        let id = state.enter_variable(loc, &name, ty, false, false, &arena);
+        let id = state.enter_variable(&ctx, loc, &name, ty, false, false, &arena);
         assert!(id.is_ok());
 
         // Duplicate should fail
-        let id2 = state.enter_variable(loc, &name, ty, false, false, &arena);
+        let id2 = state.enter_variable(&ctx, loc, &name, ty, false, false, &arena);
         assert!(matches!(id2, Err(TypeCoreError::MultiplyBoundVariable(_))));
     }
 

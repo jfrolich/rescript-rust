@@ -42,6 +42,14 @@ impl<'a> LambdaConverter<'a> {
         }
     }
 
+    /// Create a new converter with stamps continuing from an existing phase.
+    pub fn with_start_stamp(arena: &'a ParseArena, start_stamp: i32) -> Self {
+        Self {
+            id_gen: IdGenerator::with_start_stamp(start_stamp),
+            arena,
+        }
+    }
+
     /// Helper to convert a LocIdx to a Location.
     #[inline]
     fn loc(&self, idx: LocIdx) -> Location {
@@ -73,7 +81,7 @@ impl<'a> LambdaConverter<'a> {
         match &item.str_desc {
             StructureItemDesc::Tstr_eval(expr, _) => self.convert_expr(expr),
             StructureItemDesc::Tstr_value(rec_flag, bindings) => {
-                self.convert_let(*rec_flag, bindings, Lambda::unit())
+                self.convert_let_with_body(*rec_flag, bindings, Lambda::unit())
             }
             StructureItemDesc::Tstr_primitive(_) => Lambda::unit(),
             StructureItemDesc::Tstr_type(_, _) => Lambda::unit(),
@@ -98,7 +106,7 @@ impl<'a> LambdaConverter<'a> {
             ExpressionDesc::Texp_constant(cst) => Lambda::const_(self.convert_constant(cst)),
             ExpressionDesc::Texp_let(rec_flag, bindings, body) => {
                 let body_lam = self.convert_expr(body);
-                self.convert_let(*rec_flag, bindings, body_lam)
+                self.convert_let_with_body(*rec_flag, bindings, body_lam)
             }
             ExpressionDesc::Texp_function {
                 params,
@@ -237,7 +245,7 @@ impl<'a> LambdaConverter<'a> {
         }
     }
 
-    fn convert_let(
+    pub(crate) fn convert_let_with_body(
         &mut self,
         rec_flag: RecFlag,
         bindings: &[ValueBinding],
@@ -1019,7 +1027,7 @@ impl<'a> LambdaConverter<'a> {
         Lambda::prim(prim, vec![], loc)
     }
 
-    fn primitive_from_name(&self, name: &str) -> Option<Primitive> {
+    pub(crate) fn primitive_from_name(&self, name: &str) -> Option<Primitive> {
         use Primitive::*;
         Some(match name {
             "%sequand" => Psequand,

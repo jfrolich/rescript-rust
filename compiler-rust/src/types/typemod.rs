@@ -36,8 +36,8 @@ use crate::types::typedtree::{
     TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind,
     ValueBinding,
 };
-use std::collections::{HashMap, HashSet};
 use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
 
 // ============================================================================
 // Helper Functions for Path Conversion
@@ -138,6 +138,69 @@ fn decl_attr_to_parser_attr(
         Located::mknoloc(name_idx),
         ParsedPayload::PStr(Box::new(vec![])),
     )
+}
+
+fn arity_from_arrow_core_type(
+    arena: &ParseArena,
+    core_type: &crate::parser::ast::CoreType,
+) -> i32 {
+    match &*core_type.ptyp_desc {
+        crate::parser::ast::CoreTypeDesc::Ptyp_arrow(inner) => {
+            let (_, ret, _) = inner.as_ref();
+            1 + arity_from_arrow_core_type(arena, arena.get_core_type(*ret))
+        }
+        _ => 0,
+    }
+}
+
+fn get_primitive_arity_from_type(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+) -> Option<i32> {
+    let repr = ctx.repr(ty);
+    match &*ctx.get_desc(repr) {
+        crate::types::TypeDesc::Tarrow { arity, .. } => *arity,
+        crate::types::TypeDesc::Tlink(next) | crate::types::TypeDesc::Tsubst(next) => {
+            get_primitive_arity_from_type(ctx, env, *next)
+        }
+        crate::types::TypeDesc::Tconstr { .. } => {
+            let expanded = crate::types::ctype::expand_head(ctx, env, ty);
+            if expanded == ty {
+                None
+            } else {
+                get_primitive_arity_from_type(ctx, env, expanded)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn primitive_description_from_value_decl(
+    arena: &ParseArena,
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    val_prim: &[StrIdx],
+    core_type_idx: crate::parse_arena::CoreTypeIdx,
+    val_ty: TypeExprRef,
+) -> crate::types::PrimitiveDescription {
+    let prim_name = val_prim
+        .first()
+        .map(|s| arena.get_string(*s).to_string())
+        .unwrap_or_default();
+    let prim_native_name = val_prim
+        .get(1)
+        .map(|s| arena.get_string(*s).to_string())
+        .unwrap_or_default();
+    let prim_arity = get_primitive_arity_from_type(ctx, env, val_ty)
+        .unwrap_or_else(|| arity_from_arrow_core_type(arena, arena.get_core_type(core_type_idx)));
+
+    crate::types::PrimitiveDescription {
+        prim_name,
+        prim_arity,
+        prim_native_name,
+        prim_native_float: false,
+    }
 }
 
 fn decl_attrs_to_parser_attrs(
@@ -4402,7 +4465,7 @@ fn translate_module_type_to_decl<'a>(
                 match &*sig_item.psig_desc {
                     crate::parser::ast::SignatureItemDesc::Psig_value(vd) => {
                         let val_name = arena.get_string(vd.pval_name.txt);
-                        let val_id = Ident::create_persistent(val_name);
+                        let val_id = tctx.type_ctx.create_ident(val_name);
                         // Use transl_type_scheme pattern: begin_def/end_def/generalize
                         // OCaml: reset_type_variables() for each val declaration
                         tctx.type_variables.clear();
@@ -4426,16 +4489,14 @@ fn translate_module_type_to_decl<'a>(
                                     crate::types::decl::ValueKind::ValReg
                                 } else {
                                     crate::types::decl::ValueKind::ValPrim(
-                                        crate::types::decl::PrimitiveDescription {
-                                            prim_name: vd
-                                                .pval_prim
-                                                .first()
-                                                .map(|s| arena.get_string(*s).to_string())
-                                                .unwrap_or_default(),
-                                            prim_arity: 1,
-                                            prim_native_name: String::new(),
-                                            prim_native_float: false,
-                                        },
+                                        primitive_description_from_value_decl(
+                                            arena,
+                                            ctx,
+                                            &sig_env,
+                                            &vd.pval_prim,
+                                            vd.pval_type,
+                                            val_type,
+                                        ),
                                     )
                                 },
                                 val_loc: crate::location::Location::none(),
@@ -7592,7 +7653,7 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_primitive(vd) => {
             // Primitive declaration: external f : t = "..."
             let name_str = arena.get_string(vd.pval_name.txt).to_string();
-            let id = Ident::create_local(&name_str);
+            let id = tctx.type_ctx.create_ident(&name_str);
 
             // Translate the type annotation using transl_type_scheme pattern:
             // OCaml: reset_type_variables() clears type var map so each declaration
@@ -7718,14 +7779,14 @@ fn type_structure_item<'a>(
             let mut new_env = env.clone();
             let val_desc_for_env = crate::types::ValueDescription {
                 val_type: val_ty,
-                val_kind: crate::types::ValueKind::ValPrim(
-                    crate::types::PrimitiveDescription {
-                        prim_name: val_prim.first().cloned().unwrap_or_default(),
-                        prim_arity: 1,
-                        prim_native_name: String::new(),
-                        prim_native_float: false,
-                    },
-                ),
+                val_kind: crate::types::ValueKind::ValPrim(primitive_description_from_value_decl(
+                    arena,
+                    ctx,
+                    env,
+                    &vd.pval_prim,
+                    vd.pval_type,
+                    val_ty,
+                )),
                 val_loc: arena.to_location(loc),
                 val_attributes: vec![],
                 val_path: None,

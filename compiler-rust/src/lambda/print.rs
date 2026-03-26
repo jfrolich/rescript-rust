@@ -276,11 +276,7 @@ impl fmt::Display for LambdaPrinter<'_> {
 
 impl fmt::Display for RawLambdaPrinter<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(top_level) = rebuild_top_level_structure(self.lambda) {
-            format_raw_lambda(&top_level, f, 0)
-        } else {
-            format_raw_lambda(self.lambda, f, 0)
-        }
+        format_raw_lambda(self.lambda, f, 0)
     }
 }
 
@@ -585,6 +581,28 @@ fn format_raw_field_info(field_info: &FieldDbgInfo, f: &mut fmt::Formatter<'_>) 
 
 fn format_raw_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match p {
+        Primitive::PjsCall { prim_name, .. } => write!(f, "{prim_name}"),
+        Primitive::PjsFnMake(arity) => write!(f, "#fn_mk({arity})"),
+        Primitive::PjsFnMakeUnit => write!(f, "#fn_mk_unit"),
+        Primitive::PjsFnMethod => write!(f, "#fn_method"),
+        Primitive::Pjscomp(cmp) => write!(f, "{}", format_comparison(*cmp)),
+        Primitive::Pstringadd => write!(f, "string.concat"),
+        Primitive::PwrapExn => write!(f, "wrap_exn"),
+        Primitive::PinitMod => write!(f, "#init_mod"),
+        Primitive::PupdateMod => write!(f, "#update_mod"),
+        Primitive::PnullToOpt => write!(f, "null_to_opt"),
+        Primitive::PnullUndefinedToOpt => write!(f, "nullable_to_opt"),
+        Primitive::PisNotNone => write!(f, "#is_not_none"),
+        Primitive::PvalFromOption => write!(f, "#val_from_option"),
+        Primitive::PvalFromOptionNotNest => write!(f, "#val_from_option_not_nest"),
+        Primitive::PisPolyVarBlock => write!(f, "#is_poly_var_block"),
+        Primitive::PrawJsCode(info) => {
+            if info.is_stmt {
+                write!(f, "#raw_stmt")
+            } else {
+                write!(f, "#raw_expr")
+            }
+        }
         Primitive::Pmakeblock(_, tag_info, Mutable::Immutable) => {
             write!(f, "makeblock ")?;
             format_raw_tag_info(tag_info, f)
@@ -599,6 +617,49 @@ fn format_raw_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
             write!(f, "/{n}")
         }
         _ => format_primitive(p, f),
+    }
+}
+
+fn format_raw_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match c {
+        Constant::JsTrue => write!(f, "true"),
+        Constant::JsFalse => write!(f, "false"),
+        Constant::JsUndefined { .. } => write!(f, "0a"),
+        Constant::JsNull => write!(f, "null"),
+        Constant::Int { i, .. } => write!(f, "{i}"),
+        Constant::Char(c) => {
+            if let Some(ch) = char::from_u32(*c as u32) {
+                write!(f, "'{ch}'")
+            } else {
+                write!(f, "'\\x{c:02x}'")
+            }
+        }
+        Constant::String { s, .. } => write!(f, "{s:?}"),
+        Constant::Float(s) => write!(f, "{s}"),
+        Constant::BigInt { negative, value } => {
+            if *negative {
+                write!(f, "-{value}n")
+            } else {
+                write!(f, "{value}n")
+            }
+        }
+        Constant::Pointer(name) => write!(f, "{name}"),
+        Constant::Block { tag, elements, .. } => {
+            if elements.is_empty() {
+                write!(f, "[{tag}]")
+            } else {
+                write!(f, "[{tag}:")?;
+                for (i, elem) in elements.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    format_raw_constant(elem, f)?;
+                }
+                write!(f, "]")
+            }
+        }
+        Constant::Some(inner) => format_raw_constant(inner, f),
+        Constant::ModuleAlias => write!(f, "#alias"),
     }
 }
 
@@ -622,7 +683,7 @@ fn format_raw_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) ->
             }
             format_raw_ident(id, f)
         }
-        Lambda::Lconst(c) => format_constant(c, f),
+        Lambda::Lconst(c) => format_raw_constant(c, f),
         Lambda::Lapply(apply) => {
             write!(f, "(apply")?;
             if matches!(

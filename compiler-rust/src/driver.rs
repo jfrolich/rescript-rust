@@ -25,6 +25,9 @@ use crate::types::{
     TypeCheckContext, TypeContext, initial_env, transl_signature, type_structure,
 };
 
+// OCaml's Predef initializes non-predef identifiers at 1000.
+const OCAML_NON_PREDEF_STAMP_START: i32 = 1000;
+
 fn has_react_component_attr(attrs: &[Attribute], arena: &crate::parse_arena::ParseArena) -> bool {
     attrs.iter().any(|attr| {
         matches!(
@@ -459,7 +462,7 @@ pub fn compile_source_to_js_with_options(
         .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
 
     // Type check
-    let id_gen = IdGenerator::new();
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     let mut env = initial_env(&type_ctx);
@@ -519,16 +522,22 @@ pub fn compile_source_to_js_with_options(
         return Ok(String::new());
     }
 
-    // Typedtree -> raw lambda -> lowered lambda
-    let mut raw_converter = crate::raw_lambda::convert::RawLambdaConverter::new(parser.arena());
-    let raw_lambda = raw_converter.convert_structure(&typed_structure);
-
-    // Print raw Lambda IR if requested
     if options.dump_lambda {
+        let mut raw_converter = crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp(
+            parser.arena(),
+            id_gen.current_stamp(),
+        );
+        let raw_lambda = raw_converter.convert_structure(&typed_structure);
         eprintln!("{}", crate::raw_lambda::print::RawLambdaPrinter::new(&raw_lambda));
     }
 
-    let lambda = crate::raw_lambda::lower::lower_to_lambda(raw_lambda);
+    // Keep the lowered JS path on the existing Lambda converter while the
+    // OCaml-style raw lambda stage is being ported independently.
+    let mut lambda_converter = crate::lambda::convert::LambdaConverter::with_start_stamp(
+        parser.arena(),
+        id_gen.current_stamp(),
+    );
+    let lambda = lambda_converter.convert_structure(&typed_structure);
 
     // Print Lambda sexp if requested
     if options.dump_lambda_sexp {
@@ -567,7 +576,7 @@ pub fn typecheck_interface_source(
     }
 
     // Type check
-    let id_gen = IdGenerator::new();
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     let mut env = initial_env(&type_ctx);
@@ -709,7 +718,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         }
 
         // Type check
-        let id_gen = IdGenerator::new();
+        let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
         let type_ctx = TypeContext::new(&id_gen);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         let mut env = initial_env(&type_ctx);
@@ -751,7 +760,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
 
         // Type check
-        let id_gen = IdGenerator::new();
+        let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
         let type_ctx = TypeContext::new(&id_gen);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         let mut env = initial_env(&type_ctx);
@@ -1314,7 +1323,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     let structure = ppx::rewrite_structure(&structure, &mut arena)
         .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
 
-    let id_gen = IdGenerator::new();
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     let mut env = initial_env(&type_ctx);
@@ -1344,7 +1353,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     options: &CompilerOptions,
     writer: &mut W,
 ) -> Result<()> {
-    let id_gen = IdGenerator::new();
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     let mut env = initial_env(&type_ctx);

@@ -1053,6 +1053,11 @@ impl<'a> TypeContext<'a> {
         std::cmp::max(self.id_gen.current_stamp(), Ident::current_local_stamp())
     }
 
+    /// Create a new identifier using the typing context's shared stamp source.
+    pub fn create_ident(&self, name: &str) -> Ident {
+        self.id_gen.create(name)
+    }
+
     /// Initialize definition level (equivalent of OCaml's `Ctype.init_def`).
     pub fn init_def(&self, level: i32) {
         self.current_level.set(level);
