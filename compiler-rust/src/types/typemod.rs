@@ -203,6 +203,41 @@ fn primitive_description_from_value_decl(
     }
 }
 
+fn primitive_arity_from_typed_core_type(ty: &crate::types::typedtree::TypedCoreType) -> i32 {
+    match &ty.ctyp_desc {
+        crate::types::typedtree::TypedCoreTypeDesc::Ttyp_arrow(_, ret, Some(arity)) => *arity,
+        crate::types::typedtree::TypedCoreTypeDesc::Ttyp_arrow(_, ret, None) => {
+            1 + primitive_arity_from_typed_core_type(ret)
+        }
+        crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(_, inner)
+        | crate::types::typedtree::TypedCoreTypeDesc::Ttyp_alias(inner, _) => {
+            primitive_arity_from_typed_core_type(inner)
+        }
+        _ => 0,
+    }
+}
+
+fn primitive_description_from_typed_value_desc(
+    ctx: Option<&crate::types::context::TypeContext<'_>>,
+    env: Option<&Env>,
+    vd: &crate::types::typedtree::TypedValueDescription,
+) -> crate::types::PrimitiveDescription {
+    let prim_name = vd.val_prim.first().cloned().unwrap_or_default();
+    let prim_native_name = vd.val_prim.get(1).cloned().unwrap_or_default();
+    let prim_arity = match (ctx, env) {
+        (Some(ctx), Some(env)) => get_primitive_arity_from_type(ctx, env, vd.val_desc.ctyp_type)
+            .unwrap_or_else(|| primitive_arity_from_typed_core_type(&vd.val_desc)),
+        _ => primitive_arity_from_typed_core_type(&vd.val_desc),
+    };
+
+    crate::types::PrimitiveDescription {
+        prim_name,
+        prim_arity,
+        prim_native_name,
+        prim_native_float: false,
+    }
+}
+
 fn decl_attrs_to_parser_attrs(
     arena: &ParseArena,
     attrs: &[crate::types::decl::Attribute],
@@ -6186,7 +6221,13 @@ where
                         let id = vd.val_id.clone();
                         let value_desc = ValueDescription {
                             val_type: vd.val_desc.ctyp_type,
-                            val_kind: crate::types::decl::ValueKind::ValReg,
+                            val_kind: crate::types::decl::ValueKind::ValPrim(
+                                primitive_description_from_typed_value_desc(
+                                    type_ctx,
+                                    current_env,
+                                    vd,
+                                ),
+                            ),
                             val_loc: crate::location::Location::none(),
                             val_attributes: vec![],
                             val_path: None,

@@ -15698,6 +15698,21 @@ fn build_signature_from_structure(
     structure: &crate::types::typedtree::Structure,
 ) -> Vec<crate::types::decl::SignatureItem> {
     use crate::types::typedtree::StructureItemDesc;
+
+    fn primitive_arity_from_typed_core_type(ty: &crate::types::typedtree::TypedCoreType) -> i32 {
+        match &ty.ctyp_desc {
+            crate::types::typedtree::TypedCoreTypeDesc::Ttyp_arrow(_, ret, Some(arity)) => *arity,
+            crate::types::typedtree::TypedCoreTypeDesc::Ttyp_arrow(_, ret, None) => {
+                1 + primitive_arity_from_typed_core_type(ret)
+            }
+            crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(_, inner)
+            | crate::types::typedtree::TypedCoreTypeDesc::Ttyp_alias(inner, _) => {
+                primitive_arity_from_typed_core_type(inner)
+            }
+            _ => 0,
+        }
+    }
+
     let mut sig = Vec::new();
     for item in &structure.str_items {
         match &item.str_desc {
@@ -15707,8 +15722,8 @@ fn build_signature_from_structure(
                     val_kind: crate::types::decl::ValueKind::ValPrim(
                         crate::types::decl::PrimitiveDescription {
                             prim_name: tvd.val_prim.first().cloned().unwrap_or_default(),
-                            prim_arity: 1,
-                            prim_native_name: String::new(),
+                            prim_arity: primitive_arity_from_typed_core_type(&tvd.val_desc),
+                            prim_native_name: tvd.val_prim.get(1).cloned().unwrap_or_default(),
                             prim_native_float: false,
                         },
                     ),
