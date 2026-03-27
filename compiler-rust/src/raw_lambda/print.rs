@@ -1,8 +1,16 @@
 //! Raw Lambda printer.
 
 use std::fmt;
+use std::io::Write;
 
-use crate::raw_lambda::RawLambda;
+use crate::ident::Ident;
+use crate::lambda::compat::LetKind;
+use crate::lambda::constant::Constant;
+use crate::lambda::primitive::Mutable;
+use crate::lambda::print::primitive_to_string;
+use crate::lambda::{FieldDbgInfo, FunctionAttribute, InlineAttribute, Primitive, TagInfo};
+use crate::parser::formatter::{BoxKind, Formatter};
+use crate::raw_lambda::{RawApply, RawLFunction, RawLambda, RawLambdaSwitch, RawPrimInfo};
 
 /// Pretty-printer for raw lambda.
 pub struct RawLambdaPrinter<'a> {
@@ -18,7 +26,514 @@ impl<'a> RawLambdaPrinter<'a> {
 
 impl fmt::Display for RawLambdaPrinter<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let lowered = self.raw.clone().into_lowered();
-        write!(f, "{}", crate::lambda::print::RawLambdaPrinter::new(&lowered))
+        let mut out = Vec::new();
+        print_raw_lambda(self.raw, &mut out);
+        match String::from_utf8(out) {
+            Ok(s) => f.write_str(&s),
+            Err(err) => f.write_str(&String::from_utf8_lossy(&err.into_bytes())),
+        }
+    }
+}
+
+pub fn print_raw_lambda(raw: &RawLambda, out: &mut impl Write) {
+    let mut f = Formatter::new(out);
+    lam(&mut f, raw);
+    f.flush();
+}
+
+fn print_ident<W: Write>(f: &mut Formatter<W>, id: &Ident) {
+    f.print(format_args!("{id:?}"));
+}
+
+fn print_function_attribute<W: Write>(f: &mut Formatter<W>, attr: &FunctionAttribute) {
+    if attr.is_a_functor {
+        f.string("is_a_functor");
+        f.space();
+    }
+    if attr.return_unit {
+        f.string("void");
+        f.space();
+    }
+    match attr.inline {
+        InlineAttribute::Default => {}
+        InlineAttribute::Always => {
+            f.string("always_inline");
+            f.space();
+        }
+        InlineAttribute::Never => {
+            f.string("never_inline");
+            f.space();
+        }
+    }
+}
+
+fn print_apply_inline_attribute<W: Write>(f: &mut Formatter<W>, attr: InlineAttribute) {
+    match attr {
+        InlineAttribute::Default => {}
+        InlineAttribute::Always => f.string(" always_inline"),
+        InlineAttribute::Never => f.string(" never_inline"),
+    }
+}
+
+fn let_kind_suffix(kind: LetKind) -> &'static str {
+    match kind {
+        LetKind::Alias => "a",
+        LetKind::Strict => "",
+        LetKind::StrictOpt => "o",
+        LetKind::Variable => "v",
+    }
+}
+
+fn print_field_info<W: Write>(f: &mut Formatter<W>, field: &FieldDbgInfo) {
+    match field {
+        FieldDbgInfo::Record { name, .. }
+        | FieldDbgInfo::Module { name }
+        | FieldDbgInfo::RecordInline { name }
+        | FieldDbgInfo::RecordExtension { name } => f.string(name),
+        FieldDbgInfo::Tuple => f.string("[]"),
+        FieldDbgInfo::PolyVarTag => f.string("`"),
+        FieldDbgInfo::PolyVarContent => f.string("#"),
+        FieldDbgInfo::Extension => f.string("ext"),
+        FieldDbgInfo::Variant => f.string("var"),
+        FieldDbgInfo::VariantTag => f.string("tag"),
+        FieldDbgInfo::Cons => f.string("cons"),
+    }
+}
+
+fn print_tag_info<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
+    match tag_info {
+        TagInfo::Extension => f.string("ext"),
+        TagInfo::RecordExt { fields, .. } => {
+            f.string("[");
+            f.string(&fields.join(";"));
+            f.string("]");
+        }
+        TagInfo::Tuple => f.string("tuple"),
+        TagInfo::Constructor {
+            name, num_nonconst, ..
+        } => f.print(format_args!("{name}/{num_nonconst}")),
+        TagInfo::PolyVar(name) => {
+            f.string("`");
+            f.string(name);
+        }
+        TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
+            let names = fields
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(";");
+            f.string("[");
+            f.string(&names);
+            f.string("]");
+        }
+        TagInfo::Module(fields) => {
+            f.string("[");
+            f.string(&fields.join(";"));
+            f.string("]");
+        }
+        TagInfo::Some => f.string("some"),
+        TagInfo::SomeNotNested => f.string("some_not_nested"),
+        TagInfo::ModuleExport(_) => f.string("module/exports"),
+    }
+}
+
+fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
+    match cst {
+        Constant::Int { i, .. } => f.print(format_args!("{i}")),
+        Constant::Char(i) => {
+            if let Some(ch) = char::from_u32(*i as u32) {
+                f.print(format_args!("{ch:?}"));
+            } else {
+                f.print(format_args!("'\\x{i:02x}'"));
+            }
+        }
+        Constant::String { s, .. } => f.print(format_args!("{s:?}")),
+        Constant::Float(s) => f.string(s),
+        Constant::BigInt { negative, value } => {
+            if *negative {
+                f.print(format_args!("-{value}n"));
+            } else {
+                f.print(format_args!("{value}n"));
+            }
+        }
+        Constant::Pointer(name) => f.string(name),
+        Constant::Block { tag, elements, .. } if elements.is_empty() => {
+            f.print(format_args!("[{tag}]"));
+        }
+        Constant::Block { tag, elements, .. } => {
+            f.open_box(BoxKind::HOV, 1);
+            f.print(format_args!("[{tag}:"));
+            f.space();
+            f.open_box(BoxKind::HOV, 0);
+            if let Some((first, rest)) = elements.split_first() {
+                print_struct_const(f, first);
+                for elem in rest {
+                    f.space();
+                    print_struct_const(f, elem);
+                }
+            }
+            f.close_box();
+            f.string("]");
+            f.close_box();
+        }
+        Constant::JsFalse => f.string("false"),
+        Constant::JsTrue => f.string("true"),
+        Constant::JsUndefined { .. } => f.string("0a"),
+        Constant::JsNull => f.string("null"),
+        Constant::Some(inner) => print_struct_const(f, inner),
+        Constant::ModuleAlias => f.string("#alias"),
+    }
+}
+
+fn print_primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
+    match prim {
+        Primitive::PrawJsCode(info) => {
+            if info.is_stmt {
+                f.string("#raw_stmt");
+            } else {
+                f.string("#raw_expr");
+            }
+        }
+        Primitive::PjsFnMake(arity) => f.print(format_args!("#fn_mk({arity})")),
+        Primitive::PjsFnMakeUnit => f.string("#fn_mk_unit"),
+        Primitive::PjsFnMethod => f.string("#fn_method"),
+        Primitive::Pmakeblock(_, tag_info, Mutable::Immutable) => {
+            f.string("makeblock ");
+            print_tag_info(f, tag_info);
+        }
+        Primitive::Pmakeblock(_, tag_info, Mutable::Mutable) => {
+            f.string("makemutable ");
+            print_tag_info(f, tag_info);
+        }
+        Primitive::Pfield(n, field_info) => {
+            f.string("field:");
+            print_field_info(f, field_info);
+            f.print(format_args!("/{n}"));
+        }
+        Primitive::Psetfield(n, _) => f.print(format_args!("setfield {n}")),
+        _ => f.string(&primitive_to_string(prim)),
+    }
+}
+
+fn print_apply<W: Write>(f: &mut Formatter<W>, apply: &RawApply) {
+    f.open_box(BoxKind::HOV, 2);
+    f.string("(apply");
+    f.space();
+    lam(f, &apply.ap_func);
+    for arg in &apply.ap_args {
+        f.space();
+        lam(f, arg);
+    }
+    print_apply_inline_attribute(f, apply.ap_info.inlined);
+    f.string(")");
+    f.close_box();
+}
+
+fn print_function<W: Write>(f: &mut Formatter<W>, func: &RawLFunction) {
+    f.open_box(BoxKind::HOV, 2);
+    f.string("(function");
+    for param in &func.params {
+        f.space();
+        print_ident(f, param);
+    }
+    f.space();
+    print_function_attribute(f, &func.attr);
+    lam(f, &func.body);
+    f.string(")");
+    f.close_box();
+}
+
+fn print_let_bindings<'a, W: Write>(f: &mut Formatter<W>, lam0: &'a RawLambda) -> &'a RawLambda {
+    let mut current = lam0;
+    let mut first = true;
+    while let RawLambda::Llet(kind, id, arg, body) = current {
+        if !first {
+            f.space();
+        }
+        f.open_box(BoxKind::HOV, 2);
+        print_ident(f, id);
+        f.string(" =");
+        f.string(let_kind_suffix(*kind));
+        f.space();
+        lam(f, arg);
+        f.close_box();
+        current = body;
+        first = false;
+    }
+    current
+}
+
+fn print_switch_cases<W: Write>(f: &mut Formatter<W>, sw: &RawLambdaSwitch) {
+    let mut first = true;
+    for (n, l) in &sw.sw_consts {
+        if !first {
+            f.space();
+        }
+        f.open_box(BoxKind::HV, 1);
+        f.print(format_args!("case int {n}:"));
+        f.space();
+        lam(f, l);
+        f.close_box();
+        first = false;
+    }
+    for (n, l) in &sw.sw_blocks {
+        if !first {
+            f.space();
+        }
+        f.open_box(BoxKind::HV, 1);
+        f.print(format_args!("case tag {n}:"));
+        f.space();
+        lam(f, l);
+        f.close_box();
+        first = false;
+    }
+    if let Some(fail) = &sw.sw_failaction {
+        if !first {
+            f.space();
+        }
+        f.open_box(BoxKind::HV, 1);
+        f.string("default:");
+        f.space();
+        lam(f, fail);
+        f.close_box();
+    }
+}
+
+fn print_string_switch_cases<W: Write>(
+    f: &mut Formatter<W>,
+    cases: &[(String, RawLambda)],
+    default: &Option<Box<RawLambda>>,
+) {
+    let mut first = true;
+    for (s, l) in cases {
+        if !first {
+            f.space();
+        }
+        f.open_box(BoxKind::HV, 1);
+        f.print(format_args!("case {:?}:", s));
+        f.space();
+        lam(f, l);
+        f.close_box();
+        first = false;
+    }
+    if let Some(default) = default {
+        if !first {
+            f.space();
+        }
+        f.open_box(BoxKind::HV, 1);
+        f.string("default:");
+        f.space();
+        lam(f, default);
+        f.close_box();
+    }
+}
+
+fn sequence<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
+    match lam0 {
+        RawLambda::Lsequence(first, second) => {
+            sequence(f, first);
+            f.space();
+            sequence(f, second);
+        }
+        _ => lam(f, lam0),
+    }
+}
+
+fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
+    match lam0 {
+        RawLambda::Lvar(id) => print_ident(f, id),
+        RawLambda::LglobalModule(id, dynamic_import) => {
+            if *dynamic_import {
+                f.string("dynamic global ");
+            } else {
+                f.string("global ");
+            }
+            print_ident(f, id);
+        }
+        RawLambda::Lconst(cst) => print_struct_const(f, cst),
+        RawLambda::Lapply(apply) => print_apply(f, apply),
+        RawLambda::Lfunction(func) => print_function(f, func),
+        RawLambda::Llet(_, _, _, _) => {
+            f.open_box(BoxKind::HOV, 2);
+            f.string("(let");
+            f.space();
+            f.open_box(BoxKind::HV, 1);
+            f.string("(");
+            let body = print_let_bindings(f, lam0);
+            f.string(")");
+            f.close_box();
+            f.space();
+            lam(f, body);
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::Lletrec(bindings, body) => {
+            f.open_box(BoxKind::HOV, 2);
+            f.string("(letrec");
+            f.space();
+            f.string("(");
+            f.open_box(BoxKind::HV, 1);
+            let mut first = true;
+            for (id, expr) in bindings {
+                if !first {
+                    f.space();
+                }
+                f.open_box(BoxKind::HOV, 2);
+                print_ident(f, id);
+                f.space();
+                lam(f, expr);
+                f.close_box();
+                first = false;
+            }
+            f.close_box();
+            f.string(")");
+            f.space();
+            lam(f, body);
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::Lprim(RawPrimInfo {
+            primitive,
+            args,
+            loc: _,
+        }) => {
+            f.open_box(BoxKind::HOV, 2);
+            f.string("(");
+            print_primitive(f, primitive);
+            for arg in args {
+                f.space();
+                lam(f, arg);
+            }
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::Lswitch(arg, sw) => {
+            f.open_box(BoxKind::HOV, 1);
+            if sw.sw_failaction.is_some() {
+                f.string("(switch");
+            } else {
+                f.string("(switch*");
+            }
+            f.space();
+            lam(f, arg);
+            f.space();
+            f.open_vbox(0);
+            print_switch_cases(f, sw);
+            f.close_box();
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::LstringSwitch(arg, cases, default) => {
+            f.open_box(BoxKind::HOV, 1);
+            f.string("(stringswitch");
+            f.space();
+            lam(f, arg);
+            f.space();
+            f.open_vbox(0);
+            print_string_switch_cases(f, cases, default);
+            f.close_box();
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::LstaticRaise(i, ls) => {
+            f.open_box(BoxKind::HOV, 2);
+            f.print(format_args!("(exit {i}"));
+            for l in ls {
+                f.space();
+                lam(f, l);
+            }
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::LstaticCatch(body, (i, vars), handler) => {
+            f.open_box(BoxKind::HOV, 2);
+            f.string("(catch");
+            f.space();
+            lam(f, body);
+            f.break_(1, -1);
+            f.print(format_args!("with ({i}"));
+            for var in vars {
+                f.string(" ");
+                print_ident(f, var);
+            }
+            f.string(")");
+            f.space();
+            lam(f, handler);
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::LtryWith(body, param, handler) => {
+            f.open_box(BoxKind::HOV, 2);
+            f.string("(try");
+            f.space();
+            lam(f, body);
+            f.break_(1, -1);
+            f.string("with ");
+            print_ident(f, param);
+            f.space();
+            lam(f, handler);
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::LifThenElse(cond, ifso, ifnot) => {
+            f.open_box(BoxKind::HOV, 2);
+            f.string("(if");
+            f.space();
+            lam(f, cond);
+            f.space();
+            lam(f, ifso);
+            f.space();
+            lam(f, ifnot);
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::Lsequence(first, second) => {
+            f.open_box(BoxKind::HOV, 2);
+            f.string("(seq");
+            f.space();
+            sequence(f, first);
+            f.space();
+            sequence(f, second);
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::Lwhile(cond, body) => {
+            f.open_box(BoxKind::HOV, 2);
+            f.string("(while");
+            f.space();
+            lam(f, cond);
+            f.space();
+            lam(f, body);
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::Lfor(param, lo, hi, dir, body) => {
+            f.open_box(BoxKind::HOV, 2);
+            f.string("(for ");
+            print_ident(f, param);
+            f.space();
+            lam(f, lo);
+            f.space();
+            f.string(match dir {
+                crate::lambda::DirectionFlag::Upto => "to",
+                crate::lambda::DirectionFlag::Downto => "downto",
+            });
+            f.space();
+            lam(f, hi);
+            f.space();
+            lam(f, body);
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::Lassign(id, expr) => {
+            f.open_box(BoxKind::HOV, 2);
+            f.string("(assign");
+            f.space();
+            print_ident(f, id);
+            f.space();
+            lam(f, expr);
+            f.string(")");
+            f.close_box();
+        }
     }
 }
