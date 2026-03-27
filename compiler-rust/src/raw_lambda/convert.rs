@@ -1397,10 +1397,12 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn convert_constant(&self, cst: &TConstant) -> Constant {
         match cst {
-            TConstant::Int(i) => Constant::Int {
-                i: *i as i32,
-                comment: None,
-            },
+            TConstant::Int(i) => i32::try_from(*i)
+                .map(|i| Constant::Int { i, comment: None })
+                .unwrap_or(Constant::NativeInt {
+                    i: *i,
+                    comment: None,
+                }),
             TConstant::Char(c) => Constant::Char(*c),
             TConstant::String(s, delim) => Constant::String {
                 s: s.clone(),

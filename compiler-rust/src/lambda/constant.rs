@@ -68,6 +68,14 @@ pub enum Constant {
         comment: Option<PointerInfo>,
     },
 
+    /// Native integer constant kept at 64-bit width.
+    NativeInt {
+        /// The integer value (64-bit)
+        i: i64,
+        /// Optional comment/info about the integer
+        comment: Option<PointerInfo>,
+    },
+
     /// Character constant (stored as Unicode code point)
     Char(i32),
 
@@ -185,6 +193,7 @@ impl Constant {
             | Constant::JsTrue
             | Constant::JsFalse
             | Constant::Int { .. }
+            | Constant::NativeInt { .. }
             | Constant::Char(_)
             | Constant::String { .. }
             | Constant::ImmString(_)
@@ -203,6 +212,7 @@ impl Constant {
             (Constant::JsTrue, Constant::JsTrue) => true,
             (Constant::JsFalse, Constant::JsFalse) => true,
             (Constant::Int { i: a, .. }, Constant::Int { i: b, .. }) => a == b,
+            (Constant::NativeInt { i: a, .. }, Constant::NativeInt { i: b, .. }) => a == b,
             (Constant::Char(a), Constant::Char(b)) => a == b,
             (Constant::String { s: a, delim: da }, Constant::String { s: b, delim: db }) => {
                 a == b && da == db
@@ -246,6 +256,7 @@ impl Constant {
     pub fn eval_as_bool(&self) -> bool {
         match self {
             Constant::Int { i, .. } => *i != 0,
+            Constant::NativeInt { i, .. } => *i != 0,
             Constant::Char(c) => *c != 0,
             Constant::JsFalse
             | Constant::JsNull

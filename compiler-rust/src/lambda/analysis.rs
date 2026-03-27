@@ -16,6 +16,7 @@ use crate::lambda::{LFunction, Lambda};
 fn not_zero_constant(c: &Constant) -> bool {
     match c {
         Constant::Int { i, .. } => *i != 0,
+        Constant::NativeInt { i, .. } => *i != 0,
         Constant::BigInt { value, .. } => value != "0",
         _ => false,
     }
@@ -370,6 +371,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
 fn size_constant(c: &Constant) -> i32 {
     match c {
         Constant::Int { .. }
+        | Constant::NativeInt { .. }
         | Constant::Char(_)
         | Constant::Float(_)
         | Constant::BigInt { .. }

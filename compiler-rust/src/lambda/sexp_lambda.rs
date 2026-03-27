@@ -290,6 +290,11 @@ fn constant(c: &Constant) -> Sexp {
             Sexp::atom(i.to_string()),
             pointer_info(comment),
         ]),
+        Constant::NativeInt { i, comment } => Sexp::list(vec![
+            Sexp::atom("Const_int"),
+            Sexp::atom(i.to_string()),
+            pointer_info(comment),
+        ]),
         Constant::Char(c) => Sexp::list(vec![Sexp::atom("Const_char"), int(*c)]),
         Constant::String { s, delim } => Sexp::list(vec![
             Sexp::atom("Const_string"),

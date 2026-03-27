@@ -538,6 +538,10 @@ impl LambdaCompiler {
                 let _ = comment;
                 Expression::number(Number::int(*i))
             }
+            Constant::NativeInt { i, comment } => {
+                let _ = comment;
+                Expression::number(Number::float(i.to_string()))
+            }
             Constant::Char(c) => Expression::number(Number::Int { i: *c, c: Some(*c) }),
             Constant::String { s, delim } => {
                 let delim = match delim {

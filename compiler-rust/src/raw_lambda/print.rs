@@ -140,6 +140,7 @@ fn print_tag_info<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
 fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
     match cst {
         Constant::Int { i, .. } => f.print(format_args!("{i}")),
+        Constant::NativeInt { i, .. } => f.print(format_args!("{i}")),
         Constant::Char(i) => {
             if let Some(ch) = char::from_u32(*i as u32) {
                 f.print(format_args!("{ch:?}"));
