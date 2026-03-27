@@ -549,6 +549,10 @@ impl LambdaCompiler {
                     txt: s.clone(),
                 })
             }
+            Constant::ImmString(s) => Expression::new(ExpressionDesc::Str {
+                delim: Delim::None,
+                txt: s.clone(),
+            }),
             Constant::Float(f) => Expression::number(Number::float(f.clone())),
             Constant::BigInt { negative, value } => {
                 Expression::number(Number::bigint(!negative, value.clone()))

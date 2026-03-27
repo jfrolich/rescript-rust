@@ -381,6 +381,7 @@ fn size_constant(c: &Constant) -> i32 {
         | Constant::JsFalse => 1,
 
         Constant::String { .. } => 1,
+        Constant::ImmString(_) => 1,
 
         Constant::Some(inner) => size_constant(inner),
 

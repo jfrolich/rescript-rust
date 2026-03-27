@@ -147,7 +147,8 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
                 f.print(format_args!("'\\x{i:02x}'"));
             }
         }
-        Constant::String { s, .. } => {
+        Constant::String { s, .. } => f.print(format_args!("{s:?}")),
+        Constant::ImmString(s) => {
             f.string("#");
             f.print(format_args!("{s:?}"));
         }

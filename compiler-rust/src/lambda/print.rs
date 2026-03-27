@@ -64,6 +64,7 @@ pub fn format_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
             }
         }
         Constant::String { s, .. } => write!(f, "{s:?}"),
+        Constant::ImmString(s) => write!(f, "#{s:?}"),
         Constant::Float(s) => write!(f, "{s}"),
         Constant::BigInt { negative, value } => {
             if *negative {
@@ -635,6 +636,7 @@ fn format_raw_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
             }
         }
         Constant::String { s, .. } => write!(f, "{s:?}"),
+        Constant::ImmString(s) => write!(f, "#{s:?}"),
         Constant::Float(s) => write!(f, "{s}"),
         Constant::BigInt { negative, value } => {
             if *negative {

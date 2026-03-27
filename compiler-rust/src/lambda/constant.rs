@@ -79,6 +79,9 @@ pub enum Constant {
         delim: Option<StringDelim>,
     },
 
+    /// Immutable string constant (`Const_immstring` in OCaml lambda)
+    ImmString(String),
+
     /// Float constant (stored as string to preserve precision)
     Float(String),
 
@@ -140,6 +143,11 @@ impl Constant {
         }
     }
 
+    /// Create an immutable string constant.
+    pub fn immstring(s: impl Into<String>) -> Self {
+        Constant::ImmString(s.into())
+    }
+
     /// Create a float constant
     pub fn float(s: impl Into<String>) -> Self {
         Constant::Float(s.into())
@@ -179,6 +187,7 @@ impl Constant {
             | Constant::Int { .. }
             | Constant::Char(_)
             | Constant::String { .. }
+            | Constant::ImmString(_)
             | Constant::Float(_)
             | Constant::BigInt { .. }
             | Constant::Pointer(_)
@@ -198,6 +207,7 @@ impl Constant {
             (Constant::String { s: a, delim: da }, Constant::String { s: b, delim: db }) => {
                 a == b && da == db
             }
+            (Constant::ImmString(a), Constant::ImmString(b)) => a == b,
             (Constant::Float(a), Constant::Float(b)) => a == b,
             (
                 Constant::BigInt {
@@ -243,6 +253,7 @@ impl Constant {
             | Constant::JsUndefined { .. } => false,
             Constant::JsTrue
             | Constant::String { .. }
+            | Constant::ImmString(_)
             | Constant::Pointer(_)
             | Constant::Float(_)
             | Constant::BigInt { .. }
@@ -274,6 +285,15 @@ mod tests {
         match c {
             Constant::String { s, delim: None } => assert_eq!(s, "hello"),
             _ => panic!("Expected String"),
+        }
+    }
+
+    #[test]
+    fn test_immstring_constant() {
+        let c = Constant::immstring("hello");
+        match c {
+            Constant::ImmString(s) => assert_eq!(s, "hello"),
+            _ => panic!("Expected ImmString"),
         }
     }
 

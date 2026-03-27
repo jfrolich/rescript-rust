@@ -4513,7 +4513,7 @@ fn translate_module_type_to_decl<'a>(
                         // Predeclare names so manifests can refer to siblings (matching OCaml).
                         for decl in decls {
                             let type_name = arena.get_string(decl.ptype_name.txt);
-                            let type_id = Ident::create_local(type_name);
+                            let type_id = tctx.type_ctx.create_ident(type_name);
                             let placeholder_decl = crate::types::TypeDeclaration {
                                 type_params: vec![],
                                 type_arity: decl.ptype_params.len() as i32,
@@ -7266,7 +7266,7 @@ pub fn transl_signature<'a>(
         let desc = match &*item.psig_desc {
             PSigDesc::Psig_value(vd) => {
                 let name_str = arena.get_string(vd.pval_name.txt).to_string();
-                let id = Ident::create_local(&name_str);
+                let id = ctx.create_ident(&name_str);
                 // Use transl_type_scheme pattern: begin_def/end_def/generalize
                 // OCaml: reset_type_variables() for each val declaration
                 tctx.type_variables.clear();
@@ -7317,7 +7317,7 @@ pub fn transl_signature<'a>(
             }
             PSigDesc::Psig_module(md) => {
                 let name_str = arena.get_string(md.pmd_name.txt).to_string();
-                let id = Ident::create_local(&name_str);
+                let id = ctx.create_ident(&name_str);
                 let typed_mty = transl_modtype(tctx, &sig_env, arena, arena.get_mod_type(md.pmd_type))?;
                 // Add module to sig_env so subsequent items (Psig_open etc.) can find it.
                 // This matches OCaml's transl_sig: `let newenv = Env.enter_module_declaration id md env`.
@@ -7345,7 +7345,7 @@ pub fn transl_signature<'a>(
             }
             PSigDesc::Psig_modtype(mtd) => {
                 let name_str = arena.get_string(mtd.pmtd_name.txt).to_string();
-                let id = Ident::create_local(&name_str);
+                let id = ctx.create_ident(&name_str);
                 let typed_mty = match &mtd.pmtd_type {
                     Some(mt) => Some(transl_modtype(tctx, &sig_env, arena, arena.get_mod_type(*mt))?),
                     None => None,
@@ -7873,7 +7873,7 @@ fn type_structure_item<'a>(
             for decl in decls.iter() {
                 let type_name = decl.ptype_name.txt;
                 let type_name_str = arena.get_string(type_name);
-                let type_id = Ident::create_local(type_name_str);
+                let type_id = ctx.create_ident(type_name_str);
                 if needs_placeholder {
                     let placeholder_decl = crate::types::TypeDeclaration {
                         type_params: vec![],
@@ -9280,7 +9280,7 @@ fn type_structure_item<'a>(
             let mut new_env = env.clone();
             for ec in &ext.ptyext_constructors {
                 let name_str = arena.get_string(ec.pext_name.txt).to_string();
-                let id = Ident::create_local(&name_str);
+                let id = ctx.create_ident(&name_str);
 
                 let (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) = match &ec.pext_kind
                 {
@@ -9317,8 +9317,9 @@ fn type_structure_item<'a>(
                                         crate::types::type_expr::TypeDesc::Tpoly { body, vars } if vars.is_empty() => *body,
                                         _ => poly_ty_ref,
                                     };
+                                    let label_id = ctx.create_ident(&label_name);
                                     typed_labels.push(crate::types::typedtree::LabelDeclaration {
-                                        ld_id: Ident::create_local(&label_name),
+                                        ld_id: label_id.clone(),
                                         ld_name: crate::parse_arena::Located {
                                             txt: label_name.clone(),
                                             loc: label.pld_name.loc,
@@ -9330,7 +9331,7 @@ fn type_structure_item<'a>(
                                         ld_attributes: label.pld_attributes.clone(),
                                     });
                                     decl_labels.push(crate::types::LabelDeclaration {
-                                        ld_id: Ident::create_local(&label_name),
+                                        ld_id: label_id,
                                         ld_mutable: match label.pld_mutable {
                                             crate::parser::ast::MutableFlag::Immutable => {
                                                 crate::types::MutableFlag::Immutable
@@ -9536,7 +9537,7 @@ fn type_structure_item<'a>(
             let ctx = tctx.type_ctx;
             // Exception declaration: exception C
             let name_str = arena.get_string(ext_constr.pext_name.txt).to_string();
-            let id = Ident::create_local(&name_str);
+            let id = ctx.create_ident(&name_str);
 
             // OCaml typedecl.ml:1839-1846: begin_def/end_def/generalize around
             // exception constructor type translation. This ensures arg types are
@@ -9579,8 +9580,9 @@ fn type_structure_item<'a>(
                                     crate::types::type_expr::TypeDesc::Tpoly { body, vars } if vars.is_empty() => *body,
                                     _ => poly_ty_ref,
                                 };
+                                let label_id = ctx.create_ident(&label_name);
                                 typed_labels.push(crate::types::typedtree::LabelDeclaration {
-                                    ld_id: Ident::create_local(&label_name),
+                                    ld_id: label_id.clone(),
                                     ld_name: crate::parse_arena::Located {
                                         txt: label_name.clone(),
                                         loc: label.pld_name.loc,
@@ -9592,7 +9594,7 @@ fn type_structure_item<'a>(
                                     ld_attributes: label.pld_attributes.clone(),
                                 });
                                 decl_labels.push(crate::types::LabelDeclaration {
-                                    ld_id: Ident::create_local(&label_name),
+                                    ld_id: label_id,
                                     ld_mutable: match label.pld_mutable {
                                         crate::parser::ast::MutableFlag::Immutable => {
                                             crate::types::MutableFlag::Immutable
@@ -10829,7 +10831,7 @@ fn transl_sig_type_declarations<'a>(
     for decl in decls {
         let type_name = decl.ptype_name.txt;
         let type_name_str = arena.get_string(type_name);
-        let type_id = Ident::create_local(type_name_str);
+        let type_id = ctx.create_ident(type_name_str);
 
         // OCaml: reset_type_variables() before each type declaration
         tctx.type_variables.clear();

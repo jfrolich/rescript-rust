@@ -265,31 +265,21 @@ impl<'a> RawLambdaConverter<'a> {
         let file = self.basename_for_loc(loc);
         let (line, start_col, end_col) = Self::loc_coords(loc);
         match kind {
-            RawLocKind::File => RawLambda::const_(Constant::String {
-                s: file,
-                delim: None,
-            }),
+            RawLocKind::File => RawLambda::const_(Constant::ImmString(file)),
             RawLocKind::Line => RawLambda::const_(Constant::int(line)),
-            RawLocKind::Module => RawLambda::const_(Constant::String {
-                s: if self.unit_name.is_empty() {
-                    format!("//{file}//")
-                } else {
-                    self.unit_name.clone()
-                },
-                delim: None,
-            }),
-            RawLocKind::Loc => RawLambda::const_(Constant::String {
-                s: format!("File {file:?}, line {line}, characters {start_col}-{end_col}"),
-                delim: None,
-            }),
+            RawLocKind::Module => RawLambda::const_(Constant::ImmString(if self.unit_name.is_empty() {
+                format!("//{file}//")
+            } else {
+                self.unit_name.clone()
+            })),
+            RawLocKind::Loc => RawLambda::const_(Constant::ImmString(format!(
+                "File {file:?}, line {line}, characters {start_col}-{end_col}"
+            ))),
             RawLocKind::Pos => RawLambda::const_(Constant::Block {
                 tag: 0,
                 tag_info: TagInfo::Tuple,
                 elements: vec![
-                    Constant::String {
-                        s: file,
-                        delim: None,
-                    },
+                    Constant::ImmString(file),
                     Constant::int(line),
                     Constant::int(start_col),
                     Constant::int(end_col),
