@@ -4767,7 +4767,7 @@ fn translate_module_type_to_decl<'a>(
                     }
                     crate::parser::ast::SignatureItemDesc::Psig_module(md) => {
                         let mod_name = arena.get_string(md.pmd_name.txt);
-                        let mod_id = Ident::create_local(mod_name);
+                        let mod_id = tctx.type_ctx.create_ident(mod_name);
                         let inner_mty =
                             translate_module_type_to_decl(tctx, &sig_env, arena, arena.get_mod_type(md.pmd_type))?;
                         sig_env.add_module(
@@ -4792,7 +4792,7 @@ fn translate_module_type_to_decl<'a>(
                     }
                     crate::parser::ast::SignatureItemDesc::Psig_modtype(pmtd) => {
                         let modtype_name = arena.get_string(pmtd.pmtd_name.txt);
-                        let modtype_id = Ident::create_local(modtype_name);
+                        let modtype_id = tctx.type_ctx.create_ident(modtype_name);
                         let mtd_type = pmtd
                             .pmtd_type
                             .as_ref()
@@ -4846,7 +4846,7 @@ fn translate_module_type_to_decl<'a>(
         }
         PMtyDesc::Pmty_functor(args) => {
             let (name, param_type, result_type_idx) = &**args;
-            let param_id = Ident::create_local(arena.get_string(name.txt));
+            let param_id = tctx.type_ctx.create_ident(arena.get_string(name.txt));
             let param_decl = match param_type {
                 Some(pt_idx) => Some(Box::new(translate_module_type_to_decl(
                     tctx, env, arena, arena.get_mod_type(*pt_idx),
@@ -6795,7 +6795,7 @@ fn type_module_expr_with_alias<'a>(
             let (ref name, ref param_type, ref body_idx) = **inner;
             // Functor: (X: S) => ME
             let param_name = arena.get_string(name.txt).to_string();
-            let param_id = Ident::create_local(&param_name);
+            let param_id = tctx.type_ctx.create_ident(&param_name);
 
             // Translate parameter type and extend environment with the functor parameter
             let typed_param_type = match param_type {
@@ -6974,7 +6974,6 @@ fn type_module_expr_with_alias<'a>(
             let mod_expr_inner = arena.get_mod_expr(*mod_expr_inner_idx);
             let typed_mod = type_module_expr_with_alias(tctx, env, arena, mod_expr_inner, alias)?;
             let typed_mty = transl_modtype(tctx, env, arena, arena.get_mod_type(*mod_type_idx))?;
-
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_constraint(
                     Box::new(typed_mod),
@@ -7042,6 +7041,39 @@ fn type_module_expr_with_alias<'a>(
             })
         }
     }
+}
+
+fn wrap_constraint<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arg: ModuleExpr,
+    mty: ModuleType,
+    explicit: crate::types::typedtree::ModuleTypeConstraint,
+    mod_loc: LocIdx,
+    mod_attributes: Attributes,
+) -> TypeModResult<ModuleExpr> {
+    let arg_mty = extract_module_type_from_mod_expr_with_ctx(&arg, Some(env), tctx.type_ctx)
+        .or_else(|| decl_module_type_from_typed(&arg.mod_type))
+        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+    let decl_mty =
+        decl_module_type_from_typed(&mty).unwrap_or(crate::types::decl::ModuleType::MtySignature(
+            vec![],
+        ));
+    let coercion =
+        crate::types::includemod::modtypes(tctx.type_ctx, env, &arg_mty, &decl_mty).map_err(
+            |err| TypeModError::SignatureMismatch {
+                expected: format!("{decl_mty:?}"),
+                found: format!("{err:?}"),
+            },
+        )?;
+
+    Ok(ModuleExpr {
+        mod_desc: ModuleExprDesc::Tmod_constraint(Box::new(arg), mty.clone(), explicit, coercion),
+        mod_loc,
+        mod_type: mty,
+        mod_env: EnvRef(0),
+        mod_attributes,
+    })
 }
 
 /// Type check a module expression.
@@ -7137,7 +7169,7 @@ fn transl_modtype<'a>(
         }
         PMtyDesc::Pmty_functor(inner) => {
             let (ref name, ref param_type, ref result_type_idx) = **inner;
-            let param_id = Ident::create_local(arena.get_string(name.txt));
+            let param_id = tctx.type_ctx.create_ident(arena.get_string(name.txt));
             let typed_param = match param_type {
                 Some(pt) => Some(Box::new(transl_modtype(tctx, env, arena, arena.get_mod_type(*pt))?)),
                 None => None,
@@ -7568,18 +7600,15 @@ fn type_structure_no_export<'a>(
         mty_loc: loc,
         mty_attributes: Attributes::new(),
     };
-    let mod_constraint = ModuleExpr {
-        mod_desc: ModuleExprDesc::Tmod_constraint(
-            Box::new(mod_structure),
-            ModuleType::placeholder(),
-            crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(empty_sig)),
-            ModuleCoercion::Tcoerce_none,
-        ),
-        mod_loc: loc,
-        mod_type: ModuleType::placeholder(),
-        mod_env: EnvRef(0),
-        mod_attributes: Attributes::new(),
-    };
+    let mod_constraint = wrap_constraint(
+        tctx,
+        env,
+        mod_structure,
+        empty_sig.clone(),
+        crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(empty_sig)),
+        loc,
+        Attributes::new(),
+    )?;
 
     // Build: Tstr_include(include_declaration(...))
     let include_item = StructureItem {
@@ -9776,7 +9805,7 @@ fn type_structure_item<'a>(
             // This ensures binding_time < all internal idents, so
             // lower_nongen(binding_time - 1) can reach internal non-generic Tvars.
             let mod_name_str = arena.get_string(mb.pmb_name.txt);
-            let mod_id = Ident::create_local(mod_name_str);
+            let mod_id = tctx.type_ctx.create_ident(mod_name_str);
 
             let typed_mod =
                 type_module_expr_with_alias(tctx, env, arena, arena.get_mod_expr(mb.pmb_expr), true)?;
@@ -10055,7 +10084,7 @@ fn type_structure_item<'a>(
             let mut mod_ids = Vec::new();
             for mb in mbs.iter() {
                 let mod_name_str = arena.get_string(mb.pmb_name.txt);
-                let mod_id = Ident::create_local(mod_name_str);
+                let mod_id = tctx.type_ctx.create_ident(mod_name_str);
                 // Try to extract type from Pmod_constraint (module rec A: SIG = BODY)
                 let init_mod_type = match &*arena.get_mod_expr(mb.pmb_expr).pmod_desc {
                     ParsedModuleExprDesc::Pmod_constraint(_, mty) => {
@@ -10226,7 +10255,7 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_modtype(mtd) => {
             // Module type declaration: module type S = MT
             let mtd_name_str = arena.get_string(mtd.pmtd_name.txt);
-            let mtd_id = Ident::create_local(mtd_name_str);
+            let mtd_id = tctx.type_ctx.create_ident(mtd_name_str);
 
             let typed_mty = match &mtd.pmtd_type {
                 Some(mt) => Some(transl_modtype(tctx, env, arena, arena.get_mod_type(*mt))?),

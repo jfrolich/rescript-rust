@@ -28,6 +28,19 @@ use crate::types::{
 // OCaml's Predef initializes non-predef identifiers at 1000.
 const OCAML_NON_PREDEF_STAMP_START: i32 = 1000;
 
+fn module_name_from_source_filename(path: &str) -> String {
+    let basename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path);
+    let name = basename.split('.').next().unwrap_or(basename);
+    let mut chars = name.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(ch) => ch.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
 fn has_react_component_attr(attrs: &[Attribute], arena: &crate::parse_arena::ParseArena) -> bool {
     attrs.iter().any(|attr| {
         matches!(
@@ -523,10 +536,17 @@ pub fn compile_source_to_js_with_options(
     }
 
     if options.dump_lambda {
-        let mut raw_converter = crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp(
-            parser.arena(),
-            id_gen.current_stamp(),
-        );
+        let unit_name = options
+            .source_filename
+            .as_deref()
+            .map(module_name_from_source_filename)
+            .unwrap_or_default();
+        let mut raw_converter =
+            crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
+                parser.arena(),
+                id_gen.current_stamp(),
+                unit_name,
+            );
         let raw_lambda = raw_converter.convert_structure(&typed_structure);
         eprintln!("{}", crate::raw_lambda::print::RawLambdaPrinter::new(&raw_lambda));
     }

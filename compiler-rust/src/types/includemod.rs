@@ -13,7 +13,7 @@
 use crate::ident::Ident;
 use crate::types::ctype::{self, UnifyState};
 use crate::types::decl::{
-    ExtensionConstructor, ModtypeDeclaration, ModuleType, Signature, SignatureItem,
+    ExtensionConstructor, ModtypeDeclaration, ModuleType, Signature, SignatureItem, ValueKind,
     TypeDeclaration, ValueDescription,
 };
 use crate::types::env::Env;
@@ -294,6 +294,34 @@ pub fn signatures<'a>(
     sig_impl: &Signature,
     sig_sig: &Signature,
 ) -> IncludeModResult<ModuleCoercion> {
+    fn is_runtime_component(item: &SignatureItem) -> bool {
+        match item {
+            SignatureItem::SigValue(_, desc) => !matches!(desc.val_kind, ValueKind::ValPrim(_)),
+            SignatureItem::SigType(_, _, _)
+            | SignatureItem::SigModtype(_, _)
+            | SignatureItem::SigClassType => false,
+            SignatureItem::SigTypext(_, _, _)
+            | SignatureItem::SigModule(_, _, _)
+            | SignatureItem::SigClass => true,
+        }
+    }
+
+    fn simplify_structure_coercion(
+        coercions: &[(usize, ModuleCoercion)],
+        len_impl: usize,
+        len_sig: usize,
+    ) -> ModuleCoercion {
+        let is_identity = coercions.iter().enumerate().all(|(expected_pos, (actual_pos, coercion))| {
+            *actual_pos == expected_pos && matches!(coercion, ModuleCoercion::Tcoerce_none)
+        });
+
+        if len_impl == len_sig && is_identity {
+            ModuleCoercion::Tcoerce_none
+        } else {
+            ModuleCoercion::Tcoerce_structure(coercions.to_vec(), vec![])
+        }
+    }
+
     if std::env::var_os("RUST_DEBUG_INCLUDE_SIG_ORDER").is_some() {
         let summarize = |sig: &Signature| {
             sig.iter()
@@ -324,6 +352,8 @@ pub fn signatures<'a>(
     let mut coercions = Vec::new();
     let mut include_env = env.clone();
     let mut type_subst = HashMap::new();
+    let len_impl = sig_impl.iter().filter(|item| is_runtime_component(item)).count();
+    let len_sig = sig_sig.iter().filter(|item| is_runtime_component(item)).count();
 
     for sig_item in sig_impl {
         add_sig_item_to_env(sig_item, &mut include_env);
@@ -339,7 +369,9 @@ pub fn signatures<'a>(
             &mut type_subst,
         ) {
             Ok((impl_pos, coercion)) => {
-                coercions.push((impl_pos, coercion));
+                if is_runtime_component(sig_item) {
+                    coercions.push((impl_pos, coercion));
+                }
             }
             Err(err) => {
                 errors.push(err);
@@ -348,14 +380,7 @@ pub fn signatures<'a>(
     }
 
     if errors.is_empty() {
-        if coercions
-            .iter()
-            .all(|(_, c)| matches!(c, ModuleCoercion::Tcoerce_none))
-        {
-            Ok(ModuleCoercion::Tcoerce_none)
-        } else {
-            Ok(ModuleCoercion::Tcoerce_structure(coercions, vec![]))
-        }
+        Ok(simplify_structure_coercion(&coercions, len_impl, len_sig))
     } else {
         Err(IncludeModError::SignatureMismatch(errors))
     }

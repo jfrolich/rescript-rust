@@ -28,8 +28,8 @@ use crate::types::ConstructorTag;
 use crate::types::decl::{LabelDescription, RecordRepresentation, ValueKind};
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, Expression, ExpressionDesc, FunctionParam,
-    FunctionParamPattern, MethKind, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc,
-    RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, ValueBinding,
+    FunctionParamPattern, MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern,
+    PatternDesc, RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, ValueBinding,
 };
 use crate::types::SignatureItem;
 
@@ -188,6 +188,7 @@ pub struct RawLambdaConverter<'a> {
     arena: &'a ParseArena,
     id_gen: IdGenerator,
     lowered: LambdaConverter<'a>,
+    unit_name: String,
 }
 
 impl<'a> RawLambdaConverter<'a> {
@@ -197,6 +198,7 @@ impl<'a> RawLambdaConverter<'a> {
             arena,
             id_gen: IdGenerator::new(),
             lowered: LambdaConverter::new(arena),
+            unit_name: String::new(),
         }
     }
 
@@ -206,6 +208,21 @@ impl<'a> RawLambdaConverter<'a> {
             arena,
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
+            unit_name: String::new(),
+        }
+    }
+
+    /// Create a new raw-lambda converter with the current compilation unit name.
+    pub fn with_start_stamp_and_unit_name(
+        arena: &'a ParseArena,
+        start_stamp: i32,
+        unit_name: String,
+    ) -> Self {
+        Self {
+            arena,
+            id_gen: IdGenerator::with_start_stamp(start_stamp),
+            lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
+            unit_name,
         }
     }
 
@@ -237,19 +254,6 @@ impl<'a> RawLambdaConverter<'a> {
             .to_string()
     }
 
-    fn module_name_for_loc(&self, loc: Location) -> String {
-        let file = self.basename_for_loc(loc);
-        let stem = StdPath::new(&file)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(file.as_str());
-        let mut chars = stem.chars();
-        match chars.next() {
-            None => String::new(),
-            Some(ch) => ch.to_uppercase().collect::<String>() + chars.as_str(),
-        }
-    }
-
     fn loc_coords(loc: Location) -> (i32, i32, i32) {
         let line = loc.loc_start.line;
         let start_col = loc.loc_start.column();
@@ -267,7 +271,11 @@ impl<'a> RawLambdaConverter<'a> {
             }),
             RawLocKind::Line => RawLambda::const_(Constant::int(line)),
             RawLocKind::Module => RawLambda::const_(Constant::String {
-                s: self.module_name_for_loc(loc),
+                s: if self.unit_name.is_empty() {
+                    format!("//{file}//")
+                } else {
+                    self.unit_name.clone()
+                },
                 delim: None,
             }),
             RawLocKind::Loc => RawLambda::const_(Constant::String {
@@ -330,7 +338,13 @@ impl<'a> RawLambdaConverter<'a> {
     /// Convert a structure into raw lambda.
     pub fn convert_structure(&mut self, structure: &Structure) -> RawLambda {
         let mut fields = Vec::new();
-        self.convert_structure_items_raw(&mut fields, &structure.str_items, true)
+        self.convert_structure_items_raw(
+            &mut fields,
+            &structure.str_items,
+            true,
+            &ModuleCoercion::Tcoerce_none,
+            Location::none(),
+        )
     }
 
     fn pure_module(module_expr: &ModuleExpr) -> LetKind {
@@ -368,13 +382,117 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn convert_module_expr_raw(&mut self, module_expr: &ModuleExpr) -> RawLambda {
+    fn compose_coercions_raw(
+        left: &ModuleCoercion,
+        right: &ModuleCoercion,
+    ) -> ModuleCoercion {
+        match (left, right) {
+            (ModuleCoercion::Tcoerce_none, other) => other.clone(),
+            (other, ModuleCoercion::Tcoerce_none) => other.clone(),
+            (
+                ModuleCoercion::Tcoerce_functor(left_arg, left_res),
+                ModuleCoercion::Tcoerce_functor(right_arg, right_res),
+            ) => ModuleCoercion::Tcoerce_functor(
+                Box::new(Self::compose_coercions_raw(right_arg, left_arg)),
+                Box::new(Self::compose_coercions_raw(left_res, right_res)),
+            ),
+            (coercion, ModuleCoercion::Tcoerce_alias(env, path, inner)) => {
+                ModuleCoercion::Tcoerce_alias(
+                    *env,
+                    path.clone(),
+                    Box::new(Self::compose_coercions_raw(coercion, inner)),
+                )
+            }
+            (_, other) => other.clone(),
+        }
+    }
+
+    fn make_module_block_raw(
+        &self,
+        fields: &[Ident],
+        is_top_level: bool,
+        cc: &ModuleCoercion,
+        loc: Location,
+    ) -> RawLambda {
+        match cc {
+            ModuleCoercion::Tcoerce_none => {
+                let block_fields = fields.iter().cloned().map(RawLambda::var).collect();
+                let tag = if is_top_level {
+                    TagInfo::ModuleExport(fields.to_vec())
+                } else {
+                    TagInfo::Module(fields.iter().map(|id| id.name().to_string()).collect())
+                };
+                RawLambda::prim(
+                    Primitive::Pmakeblock(0, tag, Mutable::Immutable),
+                    block_fields,
+                    loc,
+                )
+            }
+            ModuleCoercion::Tcoerce_structure(positions, _) => {
+                let block_fields = positions
+                    .iter()
+                    .filter_map(|(pos, _)| fields.get(*pos).cloned())
+                    .map(RawLambda::var)
+                    .collect::<Vec<_>>();
+                let tag = if is_top_level {
+                    let ids = positions
+                        .iter()
+                        .filter_map(|(pos, _)| fields.get(*pos).cloned())
+                        .collect::<Vec<_>>();
+                    TagInfo::ModuleExport(ids)
+                } else {
+                    TagInfo::Module(
+                        positions
+                            .iter()
+                            .filter_map(|(pos, _)| {
+                                fields.get(*pos).map(|id| id.name().to_string())
+                            })
+                            .collect(),
+                    )
+                };
+                RawLambda::prim(
+                    Primitive::Pmakeblock(0, tag, Mutable::Immutable),
+                    block_fields,
+                    loc,
+                )
+            }
+            _ => {
+                let block_fields = fields.iter().cloned().map(RawLambda::var).collect();
+                let tag = if is_top_level {
+                    TagInfo::ModuleExport(fields.to_vec())
+                } else {
+                    TagInfo::Module(fields.iter().map(|id| id.name().to_string()).collect())
+                };
+                RawLambda::prim(
+                    Primitive::Pmakeblock(0, tag, Mutable::Immutable),
+                    block_fields,
+                    loc,
+                )
+            }
+        }
+    }
+
+    fn convert_module_expr_raw_with_coercion(
+        &mut self,
+        module_expr: &ModuleExpr,
+        cc: &ModuleCoercion,
+    ) -> RawLambda {
         match &module_expr.mod_desc {
             ModuleExprDesc::Tmod_structure(structure) => {
                 let mut fields = Vec::new();
-                self.convert_structure_items_raw(&mut fields, &structure.str_items, false)
+                self.convert_structure_items_raw(
+                    &mut fields,
+                    &structure.str_items,
+                    false,
+                    cc,
+                    self.loc(module_expr.mod_loc),
+                )
             }
-            ModuleExprDesc::Tmod_constraint(inner, _, _, _) => self.convert_module_expr_raw(inner),
+            ModuleExprDesc::Tmod_constraint(inner, _, _, inner_cc) => self
+                .convert_module_expr_raw_with_coercion(
+                    inner,
+                    &Self::compose_coercions_raw(cc, inner_cc),
+                ),
             ModuleExprDesc::Tmod_ident(path, _) => {
                 self.translate_module_path_raw(path, self.loc(module_expr.mod_loc))
             }
@@ -385,35 +503,31 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn convert_module_expr_raw(&mut self, module_expr: &ModuleExpr) -> RawLambda {
+        self.convert_module_expr_raw_with_coercion(module_expr, &ModuleCoercion::Tcoerce_none)
+    }
+
     fn convert_structure_items_raw(
         &mut self,
         fields: &mut Vec<Ident>,
         items: &[StructureItem],
         is_top_level: bool,
+        cc: &ModuleCoercion,
+        loc: Location,
     ) -> RawLambda {
         let Some((item, rem)) = items.split_first() else {
-            let block_fields = fields.iter().cloned().map(RawLambda::var).collect();
-            let tag = if is_top_level {
-                TagInfo::ModuleExport(fields.clone())
-            } else {
-                TagInfo::Module(fields.iter().map(|id| id.name().to_string()).collect())
-            };
-            return RawLambda::prim(
-                Primitive::Pmakeblock(0, tag, Mutable::Immutable),
-                block_fields,
-                Location::none(),
-            );
+            return self.make_module_block_raw(fields, is_top_level, cc, loc);
         };
 
         match &item.str_desc {
             StructureItemDesc::Tstr_eval(expr, _) => RawLambda::seq(
                 self.convert_expr_raw(expr),
-                self.convert_structure_items_raw(fields, rem, is_top_level),
+                self.convert_structure_items_raw(fields, rem, is_top_level, cc, loc),
             ),
             StructureItemDesc::Tstr_value(rec_flag, bindings) => {
                 let old_len = fields.len();
                 fields.extend(let_bound_idents(bindings));
-                let body = self.convert_structure_items_raw(fields, rem, is_top_level);
+                let body = self.convert_structure_items_raw(fields, rem, is_top_level, cc, loc);
                 fields.truncate(old_len);
                 self.convert_let_with_body_raw(*rec_flag, bindings, body)
             }
@@ -422,7 +536,7 @@ impl<'a> RawLambdaConverter<'a> {
                 if !self.rescript_hide_attributes(&binding.mb_attributes) {
                     fields.push(binding.mb_id.clone());
                 }
-                let body = self.convert_structure_items_raw(fields, rem, is_top_level);
+                let body = self.convert_structure_items_raw(fields, rem, is_top_level, cc, loc);
                 fields.truncate(old_len);
                 RawLambda::let_(
                     Self::pure_module(&binding.mb_expr),
@@ -435,7 +549,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let ids = Self::include_bound_idents(&incl.incl_type);
                 let old_len = fields.len();
                 fields.extend(ids.iter().cloned());
-                let body = self.convert_structure_items_raw(fields, rem, is_top_level);
+                let body = self.convert_structure_items_raw(fields, rem, is_top_level, cc, loc);
                 fields.truncate(old_len);
                 let mid = self.id_gen.create("include");
                 let body = self.rebind_included_idents_raw(
@@ -459,7 +573,7 @@ impl<'a> RawLambdaConverter<'a> {
             | StructureItemDesc::Tstr_modtype(_)
             | StructureItemDesc::Tstr_open(_)
             | StructureItemDesc::Tstr_attribute(_) => {
-                self.convert_structure_items_raw(fields, rem, is_top_level)
+                self.convert_structure_items_raw(fields, rem, is_top_level, cc, loc)
             }
         }
     }
