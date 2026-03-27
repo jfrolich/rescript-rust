@@ -10120,29 +10120,7 @@ fn type_structure_item<'a>(
                     }
                     _ => decl_mod_type.clone(),
                 };
-                let item_sig_mod_type = match &decl_mod_type {
-                    crate::types::decl::ModuleType::MtyIdent(_)
-                    | crate::types::decl::ModuleType::MtyAlias(_, _) => resolve_mod_type_to_sig(
-                        &decl_mod_type,
-                        Some(env),
-                        &mut tctx.persistent_env,
-                        tctx.type_ctx,
-                    )
-                    .map(|sig| {
-                        let sig = crate::types::typecore::copy_lookup_signature_for_subst(
-                            &sig,
-                            tctx.type_ctx,
-                        );
-                        crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                            &sig,
-                            &Path::pident(mod_id.clone()),
-                            tctx.type_ctx,
-                        );
-                        crate::types::decl::ModuleType::MtySignature(sig)
-                    })
-                    .unwrap_or_else(|| decl_mod_type.clone()),
-                    _ => localized_decl_mod_type.clone(),
-                };
+                let item_sig_mod_type = localized_decl_mod_type.clone();
                 new_env.add_module(
                     mod_id.clone(),
                     crate::types::decl::ModuleDeclaration {

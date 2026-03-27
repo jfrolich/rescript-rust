@@ -175,19 +175,54 @@ fn modtypes_inner<'a>(
         expand_local(env, path, &mut visiting)
     }
 
+    fn normalized_alias_path(env: &Env, path: &Path) -> Path {
+        env.normalize_path(path)
+    }
+
     match (mty_impl, mty_sig) {
+        (
+            ModuleType::MtyAlias(pres_impl, impl_path),
+            ModuleType::MtyAlias(pres_sig, sig_path),
+        ) => {
+            let impl_path = normalized_alias_path(env, impl_path);
+            let sig_path = normalized_alias_path(env, sig_path);
+            if !impl_path.same(&sig_path) {
+                return Err(IncludeModError::ModuleTypeMismatch {
+                    name: Ident::create_local("module"),
+                    reason: "module aliases do not match".to_string(),
+                });
+            }
+            match (pres_impl, pres_sig) {
+                (
+                    crate::types::decl::AliasPresence::MtaAbsent,
+                    crate::types::decl::AliasPresence::MtaPresent,
+                ) => Ok(ModuleCoercion::Tcoerce_alias(
+                    crate::types::typedtree::EnvRef(0),
+                    impl_path,
+                    Box::new(ModuleCoercion::Tcoerce_none),
+                )),
+                _ => Ok(ModuleCoercion::Tcoerce_none),
+            }
+        }
+
+        (ModuleType::MtyAlias(pres_impl, impl_path), mty_sig) => {
+            let impl_path = normalized_alias_path(env, impl_path);
+            let expanded = expand_module_type_in_env(type_ctx, env, &impl_path)
+                .unwrap_or_else(|| ModuleType::MtyAlias(pres_impl.clone(), impl_path.clone()));
+            let coercion = modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)?;
+            match pres_impl {
+                crate::types::decl::AliasPresence::MtaPresent => Ok(coercion),
+                crate::types::decl::AliasPresence::MtaAbsent => Ok(ModuleCoercion::Tcoerce_alias(
+                    crate::types::typedtree::EnvRef(0),
+                    impl_path,
+                    Box::new(coercion),
+                )),
+            }
+        }
+
         // Identical module type identifiers
         (ModuleType::MtyIdent(p1), ModuleType::MtyIdent(p2)) if p1 == p2 => {
             Ok(ModuleCoercion::Tcoerce_none)
-        }
-
-        // Alias on the implementation side - expand and check
-        (ModuleType::MtyAlias(_, path), mty_sig) => {
-            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
-                modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)
-            } else {
-                Ok(ModuleCoercion::Tcoerce_none)
-            }
         }
 
         // Alias on the signature side - expand and check
@@ -287,6 +322,80 @@ fn modtypes_inner<'a>(
 // Signature Inclusion
 // ============================================================================
 
+fn is_runtime_component(item: &SignatureItem) -> bool {
+    match item {
+        SignatureItem::SigValue(_, desc) => !matches!(desc.val_kind, ValueKind::ValPrim(_)),
+        SignatureItem::SigType(_, _, _)
+        | SignatureItem::SigModtype(_, _)
+        | SignatureItem::SigClassType => false,
+        SignatureItem::SigTypext(_, _, _)
+        | SignatureItem::SigModule(_, _, _)
+        | SignatureItem::SigClass => true,
+    }
+}
+
+fn runtime_component_name(item: &SignatureItem) -> Option<String> {
+    match item {
+        SignatureItem::SigValue(id, _)
+        | SignatureItem::SigType(id, _, _)
+        | SignatureItem::SigTypext(id, _, _)
+        | SignatureItem::SigModule(id, _, _)
+        | SignatureItem::SigModtype(id, _) => Some(id.name().to_string()),
+        SignatureItem::SigClass | SignatureItem::SigClassType => None,
+    }
+}
+
+fn simplify_structure_coercion(
+    coercions: &[(usize, ModuleCoercion)],
+    id_pos_list: &[(Ident, usize, ModuleCoercion)],
+    runtime_fields: &[String],
+) -> ModuleCoercion {
+    let is_identity = coercions
+        .iter()
+        .enumerate()
+        .all(|(expected_pos, (actual_pos, coercion))| {
+            *actual_pos == expected_pos && matches!(coercion, ModuleCoercion::Tcoerce_none)
+        });
+
+    if is_identity {
+        ModuleCoercion::Tcoerce_none
+    } else {
+        ModuleCoercion::Tcoerce_structure(
+            coercions.to_vec(),
+            id_pos_list.to_vec(),
+            runtime_fields.to_vec(),
+        )
+    }
+}
+
+pub fn simplify_signature(sig: &Signature) -> Signature {
+    let mut seen_values = HashSet::new();
+    let mut simplified = Vec::with_capacity(sig.len());
+    for item in sig.iter().rev() {
+        match item {
+            SignatureItem::SigValue(id, _) => {
+                if seen_values.insert(id.name().to_string()) {
+                    simplified.push(item.clone());
+                }
+            }
+            _ => simplified.push(item.clone()),
+        }
+    }
+    simplified.reverse();
+    simplified
+}
+
+pub fn compunit<'a>(
+    type_ctx: &'a TypeContext<'a>,
+    env: &Env,
+    _impl_name: &str,
+    impl_sig: &Signature,
+    _intf_name: &str,
+    intf_sig: &Signature,
+) -> IncludeModResult<ModuleCoercion> {
+    signatures(type_ctx, env, impl_sig, intf_sig)
+}
+
 /// Check if signature `sig_impl` is a subtype of `sig_sig`.
 pub fn signatures<'a>(
     type_ctx: &'a TypeContext<'a>,
@@ -294,34 +403,6 @@ pub fn signatures<'a>(
     sig_impl: &Signature,
     sig_sig: &Signature,
 ) -> IncludeModResult<ModuleCoercion> {
-    fn is_runtime_component(item: &SignatureItem) -> bool {
-        match item {
-            SignatureItem::SigValue(_, desc) => !matches!(desc.val_kind, ValueKind::ValPrim(_)),
-            SignatureItem::SigType(_, _, _)
-            | SignatureItem::SigModtype(_, _)
-            | SignatureItem::SigClassType => false,
-            SignatureItem::SigTypext(_, _, _)
-            | SignatureItem::SigModule(_, _, _)
-            | SignatureItem::SigClass => true,
-        }
-    }
-
-    fn simplify_structure_coercion(
-        coercions: &[(usize, ModuleCoercion)],
-        len_impl: usize,
-        len_sig: usize,
-    ) -> ModuleCoercion {
-        let is_identity = coercions.iter().enumerate().all(|(expected_pos, (actual_pos, coercion))| {
-            *actual_pos == expected_pos && matches!(coercion, ModuleCoercion::Tcoerce_none)
-        });
-
-        if len_impl == len_sig && is_identity {
-            ModuleCoercion::Tcoerce_none
-        } else {
-            ModuleCoercion::Tcoerce_structure(coercions.to_vec(), vec![])
-        }
-    }
-
     if std::env::var_os("RUST_DEBUG_INCLUDE_SIG_ORDER").is_some() {
         let summarize = |sig: &Signature| {
             sig.iter()
@@ -354,6 +435,29 @@ pub fn signatures<'a>(
     let mut type_subst = HashMap::new();
     let len_impl = sig_impl.iter().filter(|item| is_runtime_component(item)).count();
     let len_sig = sig_sig.iter().filter(|item| is_runtime_component(item)).count();
+    let runtime_fields = sig_sig
+        .iter()
+        .filter(|item| is_runtime_component(item))
+        .filter_map(runtime_component_name)
+        .collect::<Vec<_>>();
+    let id_pos_list = sig_impl
+        .iter()
+        .scan(0usize, |runtime_pos, item| {
+            let current = match item {
+                SignatureItem::SigModule(id, _, _) => Some((
+                    id.clone(),
+                    *runtime_pos,
+                    ModuleCoercion::Tcoerce_none,
+                )),
+                _ => None,
+            };
+            if is_runtime_component(item) {
+                *runtime_pos += 1;
+            }
+            Some(current)
+        })
+        .flatten()
+        .collect::<Vec<_>>();
 
     for sig_item in sig_impl {
         add_sig_item_to_env(sig_item, &mut include_env);
@@ -380,7 +484,19 @@ pub fn signatures<'a>(
     }
 
     if errors.is_empty() {
-        Ok(simplify_structure_coercion(&coercions, len_impl, len_sig))
+        if len_impl == len_sig {
+            Ok(simplify_structure_coercion(
+                &coercions,
+                &id_pos_list,
+                &runtime_fields,
+            ))
+        } else {
+            Ok(ModuleCoercion::Tcoerce_structure(
+                coercions,
+                id_pos_list,
+                runtime_fields,
+            ))
+        }
     } else {
         Err(IncludeModError::SignatureMismatch(errors))
     }
@@ -396,24 +512,32 @@ fn signature_item<'a>(
 ) -> IncludeModResult<(usize, ModuleCoercion)> {
     match sig_item {
         SignatureItem::SigValue(id, val_desc) => {
-            // Find the value in the implementation
-            for (pos, impl_item) in sig_impl.iter().enumerate() {
+            let mut runtime_pos = 0usize;
+            let mut found = None;
+            for impl_item in sig_impl {
+                let current_runtime_pos = runtime_pos;
+                if is_runtime_component(impl_item) {
+                    runtime_pos += 1;
+                }
                 if let SignatureItem::SigValue(impl_id, impl_val_desc) = impl_item {
                     if impl_id.name() == id.name() {
-                        // Check that the types are compatible
-                        let coercion = value_descriptions(
-                            type_ctx,
-                            env,
-                            id.clone(),
-                            impl_val_desc,
-                            val_desc,
-                            type_subst,
-                        )?;
-                        return Ok((pos, coercion));
+                        found = Some((current_runtime_pos, impl_val_desc));
                     }
                 }
             }
-            Err(IncludeModError::MissingValue(id.clone()))
+            if let Some((pos, impl_val_desc)) = found {
+                let coercion = value_descriptions(
+                    type_ctx,
+                    env,
+                    id.clone(),
+                    impl_val_desc,
+                    val_desc,
+                    type_subst,
+                )?;
+                Ok((pos, coercion))
+            } else {
+                Err(IncludeModError::MissingValue(id.clone()))
+            }
         }
 
         SignatureItem::SigType(id, type_decl, rec_status) => {
@@ -433,38 +557,59 @@ fn signature_item<'a>(
         }
 
         SignatureItem::SigTypext(id, ext_constr, ext_status) => {
-            // Find the extension constructor in the implementation
-            for (pos, impl_item) in sig_impl.iter().enumerate() {
+            let mut runtime_pos = 0usize;
+            let mut found = None;
+            for impl_item in sig_impl {
+                let current_runtime_pos = runtime_pos;
+                if is_runtime_component(impl_item) {
+                    runtime_pos += 1;
+                }
                 if let SignatureItem::SigTypext(impl_id, impl_ext_constr, _) = impl_item {
                     if impl_id.name() == id.name() {
-                        // Check that the extension constructors are compatible
-                        extension_constructors(
-                            type_ctx,
-                            env,
-                            id.clone(),
-                            impl_ext_constr,
-                            ext_constr,
-                        )?;
-                        return Ok((pos, ModuleCoercion::Tcoerce_none));
+                        found = Some((current_runtime_pos, impl_ext_constr));
                     }
                 }
             }
-            Err(IncludeModError::MissingValue(id.clone()))
+            if let Some((pos, impl_ext_constr)) = found {
+                extension_constructors(
+                    type_ctx,
+                    env,
+                    id.clone(),
+                    impl_ext_constr,
+                    ext_constr,
+                )?;
+                Ok((pos, ModuleCoercion::Tcoerce_none))
+            } else {
+                Err(IncludeModError::MissingValue(id.clone()))
+            }
         }
 
         SignatureItem::SigModule(id, mod_decl, rec_status) => {
-            // Find the module in the implementation
-            for (pos, impl_item) in sig_impl.iter().enumerate() {
+            let mut runtime_pos = 0usize;
+            let mut found = None;
+            for impl_item in sig_impl {
+                let current_runtime_pos = runtime_pos;
+                if is_runtime_component(impl_item) {
+                    runtime_pos += 1;
+                }
                 if let SignatureItem::SigModule(impl_id, impl_mod_decl, _) = impl_item {
                     if impl_id.name() == id.name() {
-                        // Check that the module types are compatible
-                        let coercion =
-                            modtypes(type_ctx, env, &impl_mod_decl.md_type, &mod_decl.md_type)?;
-                        return Ok((pos, coercion));
+                        found = Some((current_runtime_pos, impl_id.clone(), impl_mod_decl));
                     }
                 }
             }
-            Err(IncludeModError::MissingModule(id.clone()))
+            if let Some((pos, impl_id, impl_mod_decl)) = found {
+                let strengthened_impl =
+                    crate::types::ctype::strengthen_module_type_for_inclusion_path(
+                        type_ctx,
+                        &Path::pident(impl_id),
+                        &impl_mod_decl.md_type,
+                    );
+                let coercion = modtypes(type_ctx, env, &strengthened_impl, &mod_decl.md_type)?;
+                Ok((pos, coercion))
+            } else {
+                Err(IncludeModError::MissingModule(id.clone()))
+            }
         }
 
         SignatureItem::SigModtype(id, modtype_decl) => {

@@ -1609,6 +1609,14 @@ fn strengthen_module_type_for_module_access_path<'a>(
     }
 }
 
+pub fn strengthen_module_type_for_inclusion_path<'a>(
+    ctx: &'a TypeContext<'a>,
+    module_access_path: &Path,
+    mty: &super::decl::ModuleType,
+) -> super::decl::ModuleType {
+    strengthen_module_type_for_module_access_path(ctx, module_access_path, mty)
+}
+
 fn strengthen_module_decl_for_module_access_path<'a>(
     ctx: &'a TypeContext<'a>,
     module_access_path: &Path,

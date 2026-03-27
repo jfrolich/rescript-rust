@@ -620,6 +620,7 @@ pub enum ModuleCoercion {
     Tcoerce_structure(
         Vec<(usize, ModuleCoercion)>,
         Vec<(Ident, usize, ModuleCoercion)>,
+        Vec<String>,
     ),
     /// Functor coercion.
     Tcoerce_functor(Box<ModuleCoercion>, Box<ModuleCoercion>),

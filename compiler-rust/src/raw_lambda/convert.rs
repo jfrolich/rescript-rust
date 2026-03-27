@@ -808,13 +808,21 @@ impl<'a> RawLambdaConverter<'a> {
 
     /// Convert a structure into raw lambda.
     pub fn convert_structure(&mut self, structure: &Structure) -> RawLambda {
+        self.convert_structure_with_coercion(structure, &ModuleCoercion::Tcoerce_none)
+    }
+
+    pub fn convert_structure_with_coercion(
+        &mut self,
+        structure: &Structure,
+        cc: &ModuleCoercion,
+    ) -> RawLambda {
         let mut fields = Vec::new();
         self.convert_structure_items_raw(
             &mut fields,
             &structure.str_items,
             true,
             &self.global_path(),
-            &ModuleCoercion::Tcoerce_none,
+            cc,
             Location::none(),
         )
     }
@@ -886,6 +894,52 @@ impl<'a> RawLambdaConverter<'a> {
         cc: &ModuleCoercion,
         loc: Location,
     ) -> RawLambda {
+        fn apply_coercion_raw(
+            this: &RawLambdaConverter<'_>,
+            coercion: &ModuleCoercion,
+            arg: RawLambda,
+            loc: Location,
+        ) -> RawLambda {
+            match coercion {
+                ModuleCoercion::Tcoerce_none => arg,
+                ModuleCoercion::Tcoerce_alias(_, path, inner) => {
+                    let alias = this.translate_module_path_raw(path, loc);
+                    apply_coercion_raw(this, inner, alias, loc)
+                }
+                ModuleCoercion::Tcoerce_structure(positions, _, runtime_fields) => {
+                    let block_fields = positions
+                        .iter()
+                        .map(|(pos, field_cc)| {
+                            let field = RawLambda::prim(
+                                Primitive::Pfield(
+                                    *pos as i32,
+                                    FieldDbgInfo::Module {
+                                        name: runtime_fields
+                                            .get(*pos)
+                                            .cloned()
+                                            .unwrap_or_else(|| format!("field{pos}")),
+                                    },
+                                ),
+                                vec![arg.clone()],
+                                loc,
+                            );
+                            apply_coercion_raw(this, field_cc, field, loc)
+                        })
+                        .collect::<Vec<_>>();
+                    RawLambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::Module(runtime_fields.clone()),
+                            Mutable::Immutable,
+                        ),
+                        block_fields,
+                        loc,
+                    )
+                }
+                _ => arg,
+            }
+        }
+
         match cc {
             ModuleCoercion::Tcoerce_none => {
                 let block_fields = fields.iter().cloned().map(RawLambda::var).collect();
@@ -900,11 +954,14 @@ impl<'a> RawLambdaConverter<'a> {
                     loc,
                 )
             }
-            ModuleCoercion::Tcoerce_structure(positions, _) => {
+            ModuleCoercion::Tcoerce_structure(positions, _, runtime_fields) => {
                 let block_fields = positions
                     .iter()
-                    .filter_map(|(pos, _)| fields.get(*pos).cloned())
-                    .map(RawLambda::var)
+                    .filter_map(|(pos, field_cc)| {
+                        fields.get(*pos).cloned().map(|id| {
+                            apply_coercion_raw(self, field_cc, RawLambda::var(id), loc)
+                        })
+                    })
                     .collect::<Vec<_>>();
                 let tag = if is_top_level {
                     let ids = positions
@@ -929,7 +986,11 @@ impl<'a> RawLambdaConverter<'a> {
                 )
             }
             _ => {
-                let block_fields = fields.iter().cloned().map(RawLambda::var).collect();
+                let block_fields = fields
+                    .iter()
+                    .cloned()
+                    .map(|id| apply_coercion_raw(self, cc, RawLambda::var(id), loc))
+                    .collect();
                 let tag = if is_top_level {
                     TagInfo::ModuleExport(fields.to_vec())
                 } else {

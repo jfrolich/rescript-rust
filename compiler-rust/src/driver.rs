@@ -541,6 +541,8 @@ pub fn compile_source_to_js_with_options(
             .as_deref()
             .map(module_name_from_source_filename)
             .unwrap_or_default();
+        let implementation_coercion =
+            compute_raw_implementation_coercion(&mut tctx, &type_ctx, &env, &typed_structure, options);
         let mut raw_converter =
             crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
                 parser.arena(),
@@ -548,7 +550,8 @@ pub fn compile_source_to_js_with_options(
                 id_gen.current_stamp(),
                 unit_name,
             );
-        let raw_lambda = raw_converter.convert_structure(&typed_structure);
+        let raw_lambda =
+            raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
         eprintln!("{}", crate::raw_lambda::print::RawLambdaPrinter::new(&raw_lambda));
     }
 
@@ -580,6 +583,58 @@ pub fn compile_source_to_js_with_options(
 
     // JS IR -> JS source
     Ok(print_program(&program))
+}
+
+fn compute_raw_implementation_coercion(
+    tctx: &mut TypeCheckContext<'_>,
+    type_ctx: &TypeContext<'_>,
+    env: &Env,
+    typed_structure: &crate::types::typedtree::Structure,
+    options: &CompilerOptions,
+) -> crate::types::typedtree::ModuleCoercion {
+    let Some(source_file) = &options.source_filename else {
+        return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
+    };
+    if !source_file.ends_with(".res") {
+        return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
+    }
+
+    let impl_sig = typed_structure.str_type.clone();
+    let target_sig = if std::path::Path::new(&format!("{source_file}i")).exists() {
+        let Some(module_name) = std::path::Path::new(source_file)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string()) else {
+            return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
+        };
+        let Some(pers) = &mut tctx.persistent_env else {
+            return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
+        };
+        let source_dir = std::path::Path::new(source_file)
+            .parent()
+            .map(|d| d.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        if !pers.load_path_contains(&source_dir) {
+            pers.add_load_path(source_dir);
+        }
+        let _ = pers.find_pers_struct(&module_name, type_ctx);
+        match pers.read_raw_sig(&module_name, type_ctx) {
+            Some(sig) => sig,
+            None => return crate::types::typedtree::ModuleCoercion::Tcoerce_none,
+        }
+    } else {
+        crate::types::includemod::simplify_signature(&impl_sig)
+    };
+
+    crate::types::includemod::compunit(
+        type_ctx,
+        env,
+        source_file,
+        &impl_sig,
+        "(inferred signature)",
+        &target_sig,
+    )
+    .unwrap_or(crate::types::typedtree::ModuleCoercion::Tcoerce_none)
 }
 
 /// Type-check an interface file and dump typed sexp if requested.
