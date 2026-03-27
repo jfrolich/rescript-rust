@@ -6802,11 +6802,33 @@ fn type_module_expr_with_alias<'a>(
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
             );
+            let typed_mod_type = if alias {
+                ModuleType {
+                    mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_alias(
+                        path.clone(),
+                        lid.clone(),
+                    ),
+                    mty_loc: loc,
+                    mty_attributes: mod_expr.pmod_attributes.clone(),
+                }
+            } else {
+                match mod_type.as_ref() {
+                    Some(crate::types::decl::ModuleType::MtyIdent(ident_path)) => ModuleType {
+                        mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_ident(
+                            ident_path.clone(),
+                            lid.clone(),
+                        ),
+                        mty_loc: loc,
+                        mty_attributes: mod_expr.pmod_attributes.clone(),
+                    },
+                    _ => ModuleType::placeholder(),
+                }
+            };
 
             let ident_mod = ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_ident(path, lid.clone()),
                 mod_loc: loc,
-                mod_type: ModuleType::placeholder(),
+                mod_type: typed_mod_type,
                 mod_env: EnvRef(0),
                 mod_attributes: mod_expr.pmod_attributes.clone(),
             };

@@ -186,7 +186,7 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
         Constant::JsUndefined { .. } => f.string("0a"),
         Constant::JsNull => f.string("null"),
         Constant::Some(inner) => print_struct_const(f, inner),
-        Constant::ModuleAlias => f.string("#alias"),
+        Constant::ModuleAlias => f.string("0a"),
     }
 }
 

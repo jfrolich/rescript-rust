@@ -30,8 +30,9 @@ use crate::types::decl::{LabelDescription, RecordRepresentation, ValueKind};
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, Expression, ExpressionDesc, FunctionParam,
-    FunctionParamPattern, MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern,
-    PatternDesc, RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, ValueBinding,
+    FunctionParamPattern, MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc, ModuleTypeDesc,
+    Partial, Pattern, PatternDesc, RecordLabelDefinition, Structure, StructureItem,
+    StructureItemDesc, ValueBinding,
 };
 use crate::types::SignatureItem;
 
@@ -891,6 +892,10 @@ impl<'a> RawLambdaConverter<'a> {
         module_expr: &ModuleExpr,
         cc: &ModuleCoercion,
     ) -> RawLambda {
+        if matches!(module_expr.mod_type.mty_desc, ModuleTypeDesc::Tmty_alias(_, _)) {
+            return RawLambda::const_(Constant::ModuleAlias);
+        }
+
         match &module_expr.mod_desc {
             ModuleExprDesc::Tmod_structure(structure) => {
                 let mut fields = Vec::new();
