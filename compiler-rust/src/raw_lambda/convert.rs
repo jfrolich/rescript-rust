@@ -629,6 +629,89 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn extract_constant_raw(lam: &RawLambda) -> Option<Constant> {
+        match lam {
+            RawLambda::Lconst(c) => Some(c.clone()),
+            _ => None,
+        }
+    }
+
+    fn raw_block_or_prim(
+        &self,
+        tag: i32,
+        tag_info: TagInfo,
+        elems: Vec<RawLambda>,
+        loc: Location,
+    ) -> RawLambda {
+        if let Some(constants) = elems
+            .iter()
+            .map(Self::extract_constant_raw)
+            .collect::<Option<Vec<_>>>()
+        {
+            RawLambda::const_(Constant::Block {
+                tag,
+                tag_info,
+                elements: constants,
+            })
+        } else {
+            RawLambda::prim(
+                Primitive::Pmakeblock(tag, tag_info, Mutable::Immutable),
+                elems,
+                loc,
+            )
+        }
+    }
+
+    fn raw_constructor_tag_info(&self, cstr: &crate::types::ConstructorDescription) -> TagInfo {
+        match &cstr.cstr_tag {
+            ConstructorTag::CstrBlock(tag)
+                if cstr.cstr_name == "Some" && cstr.cstr_nonconsts == 1 =>
+            {
+                TagInfo::Some
+            }
+            ConstructorTag::CstrBlock(tag) => TagInfo::constructor(
+                cstr.cstr_name.clone(),
+                cstr.cstr_nonconsts,
+                *tag,
+            ),
+            _ => TagInfo::constructor(cstr.cstr_name.clone(), cstr.cstr_nonconsts, 0),
+        }
+    }
+
+    fn convert_construct_raw(
+        &mut self,
+        loc: Location,
+        cstr: &crate::types::ConstructorDescription,
+        args: &[Expression],
+    ) -> RawLambda {
+        if cstr.cstr_inlined.is_some() {
+            return match args {
+                [arg] => self.convert_expr_raw(arg),
+                _ => RawLambda::unit(),
+            };
+        }
+
+        match &cstr.cstr_tag {
+            ConstructorTag::CstrConstant(tag) => match cstr.cstr_name.as_str() {
+                "true" => RawLambda::const_(Constant::JsTrue),
+                "false" => RawLambda::const_(Constant::JsFalse),
+                _ => RawLambda::const_(Constant::Pointer(format!("{tag}a"))),
+            },
+            ConstructorTag::CstrUnboxed => match args {
+                [arg] => self.convert_expr_raw(arg),
+                _ => RawLambda::unit(),
+            },
+            ConstructorTag::CstrBlock(tag) => {
+                let elems = args.iter().map(|arg| self.convert_expr_raw(arg)).collect();
+                let tag_info = self.raw_constructor_tag_info(cstr);
+                self.raw_block_or_prim(*tag, tag_info, elems, loc)
+            }
+            ConstructorTag::CstrExtension(_) => unreachable!(
+                "extension constructors stay on the lowered path for now"
+            ),
+        }
+    }
+
     fn include_bound_idents(sig: &[SignatureItem]) -> Vec<Ident> {
         sig.iter()
             .filter_map(|item| match item {
@@ -1048,6 +1131,33 @@ impl<'a> RawLambdaConverter<'a> {
                 *partial,
                 *transformed_jsx,
             ),
+            ExpressionDesc::Texp_tuple(items) => {
+                let elems = items
+                    .iter()
+                    .map(|item| self.convert_expr_raw(item))
+                    .collect::<Vec<_>>();
+                self.raw_block_or_prim(0, TagInfo::Tuple, elems, self.loc(expr.exp_loc))
+            }
+            ExpressionDesc::Texp_construct(_, cstr, args)
+                if !matches!(cstr.cstr_tag, ConstructorTag::CstrExtension(_)) =>
+            {
+                self.convert_construct_raw(self.loc(expr.exp_loc), cstr, args)
+            }
+            ExpressionDesc::Texp_variant(tag, arg) => match arg {
+                None => RawLambda::const_(Constant::Pointer(tag.to_string())),
+                Some(arg) => {
+                    let arg_lam = self.convert_expr_raw(arg);
+                    self.raw_block_or_prim(
+                        0,
+                        TagInfo::PolyVar(tag.to_string()),
+                        vec![
+                            RawLambda::const_(Constant::int(crate::types::btype::hash_variant(tag))),
+                            arg_lam,
+                        ],
+                        self.loc(expr.exp_loc),
+                    )
+                }
+            },
             ExpressionDesc::Texp_ifthenelse(cond, then_, else_) => {
                 let else_lam = else_
                     .as_ref()
