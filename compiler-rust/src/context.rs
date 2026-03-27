@@ -47,8 +47,8 @@ use crate::location::Location;
 /// ```
 #[derive(Debug)]
 pub struct IdGenerator {
-    /// Next stamp for identifiers. Starts at 1 (0 is reserved for persistent).
-    next_stamp: AtomicI32,
+    /// Current stamp for identifiers. Starts at 0 (0 is reserved for persistent).
+    current_stamp: AtomicI32,
     /// Next ID for type expressions.
     next_type_id: AtomicI32,
     /// Reinit level for reset functionality (-1 means not set).
@@ -56,30 +56,30 @@ pub struct IdGenerator {
 }
 
 impl IdGenerator {
-    /// Create a new ID generator with stamps starting at 1.
+    /// Create a new ID generator with the current stamp at 0.
     pub fn new() -> Self {
         Self {
-            next_stamp: AtomicI32::new(1),
+            current_stamp: AtomicI32::new(0),
             next_type_id: AtomicI32::new(1),
             reinit_level: AtomicI32::new(-1),
         }
     }
 
-    /// Create a new ID generator starting at a specific stamp.
+    /// Create a new ID generator with a specific current stamp.
     ///
     /// Useful for resuming compilation or testing.
     pub fn with_start_stamp(start: i32) -> Self {
         Self {
-            next_stamp: AtomicI32::new(start.max(1)),
+            current_stamp: AtomicI32::new(start.max(0)),
             next_type_id: AtomicI32::new(1),
             reinit_level: AtomicI32::new(-1),
         }
     }
 
-    /// Get the next stamp value and increment the counter.
+    /// Increment the stamp counter and return the new current stamp.
     #[inline]
     pub fn next_stamp(&self) -> i32 {
-        self.next_stamp.fetch_add(1, Ordering::Relaxed)
+        self.current_stamp.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Get the next type ID and increment the counter.
@@ -91,7 +91,7 @@ impl IdGenerator {
     /// Get the current stamp value without incrementing.
     #[inline]
     pub fn current_stamp(&self) -> i32 {
-        self.next_stamp.load(Ordering::Relaxed)
+        self.current_stamp.load(Ordering::Relaxed)
     }
 
     /// Set the current stamp to at least the given value.
@@ -100,9 +100,9 @@ impl IdGenerator {
     #[inline]
     pub fn set_current_stamp(&self, t: i32) {
         // Update to max of current and t
-        let mut current = self.next_stamp.load(Ordering::Relaxed);
+        let mut current = self.current_stamp.load(Ordering::Relaxed);
         while t > current {
-            match self.next_stamp.compare_exchange_weak(
+            match self.current_stamp.compare_exchange_weak(
                 current,
                 t,
                 Ordering::Relaxed,
@@ -118,7 +118,7 @@ impl IdGenerator {
     pub fn init_reinit_level(&self) {
         let current = self.reinit_level.load(Ordering::Relaxed);
         if current < 0 {
-            let stamp = self.next_stamp.load(Ordering::Relaxed);
+            let stamp = self.current_stamp.load(Ordering::Relaxed);
             self.reinit_level.store(stamp, Ordering::Relaxed);
         }
     }
@@ -129,7 +129,7 @@ impl IdGenerator {
     pub fn reinit(&self) {
         let level = self.reinit_level.load(Ordering::Relaxed);
         if level >= 0 {
-            self.next_stamp.store(level, Ordering::Relaxed);
+            self.current_stamp.store(level, Ordering::Relaxed);
         }
     }
 
@@ -161,7 +161,7 @@ impl Clone for IdGenerator {
     /// after cloning, as they maintain independent counters.
     fn clone(&self) -> Self {
         Self {
-            next_stamp: AtomicI32::new(self.next_stamp.load(Ordering::Relaxed)),
+            current_stamp: AtomicI32::new(self.current_stamp.load(Ordering::Relaxed)),
             next_type_id: AtomicI32::new(self.next_type_id.load(Ordering::Relaxed)),
             reinit_level: AtomicI32::new(self.reinit_level.load(Ordering::Relaxed)),
         }

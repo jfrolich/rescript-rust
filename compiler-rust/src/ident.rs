@@ -32,7 +32,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicI32, Ordering};
 
-static LOCAL_IDENT_COUNTER: AtomicI32 = AtomicI32::new(1);
+static LOCAL_IDENT_COUNTER: AtomicI32 = AtomicI32::new(0);
 
 /// Flags for identifier properties.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -141,7 +141,7 @@ impl Ident {
     pub fn create_local(name: impl Into<SmolStr>) -> Self {
         Self {
             name: name.into(),
-            stamp: LOCAL_IDENT_COUNTER.fetch_add(1, Ordering::Relaxed),
+            stamp: LOCAL_IDENT_COUNTER.fetch_add(1, Ordering::Relaxed) + 1,
             flags: IdentFlags::NONE,
         }
     }
