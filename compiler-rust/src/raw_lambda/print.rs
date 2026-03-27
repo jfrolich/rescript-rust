@@ -348,12 +348,16 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
     match lam0 {
         RawLambda::Lvar(id) => print_ident(f, id),
         RawLambda::LglobalModule(id, dynamic_import) => {
+            f.open_box(BoxKind::HOV, 2);
+            f.string("(");
             if *dynamic_import {
                 f.string("dynamic global ");
             } else {
                 f.string("global ");
             }
             print_ident(f, id);
+            f.string(")");
+            f.close_box();
         }
         RawLambda::Lconst(cst) => print_struct_const(f, cst),
         RawLambda::Lapply(apply) => print_apply(f, apply),
