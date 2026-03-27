@@ -108,6 +108,17 @@ fn format_comparison(cmp: Comparison) -> &'static str {
     }
 }
 
+fn format_float_comparison(cmp: Comparison) -> &'static str {
+    match cmp {
+        Comparison::Eq => "==.",
+        Comparison::Neq => "!=.",
+        Comparison::Lt => "<.",
+        Comparison::Gt => ">.",
+        Comparison::Le => "<=.",
+        Comparison::Ge => ">=.",
+    }
+}
+
 /// Format a primitive operation.
 pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match p {
@@ -186,7 +197,7 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Plslint => write!(f, "lsl"),
         Primitive::Plsrint => write!(f, "lsr"),
         Primitive::Pasrint => write!(f, "asr"),
-        Primitive::Pintcomp(cmp) => write!(f, "{}[int]", format_comparison(*cmp)),
+        Primitive::Pintcomp(cmp) => write!(f, "{}", format_comparison(*cmp)),
         Primitive::Pintorder => write!(f, "compare"),
         Primitive::Pintmin => write!(f, "min"),
         Primitive::Pintmax => write!(f, "max"),
@@ -201,7 +212,7 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Pdivfloat => write!(f, "/."),
         Primitive::Pmodfloat => write!(f, "mod"),
         Primitive::Ppowfloat => write!(f, "**"),
-        Primitive::Pfloatcomp(cmp) => write!(f, "{}..", format_comparison(*cmp)),
+        Primitive::Pfloatcomp(cmp) => write!(f, "{}", format_float_comparison(*cmp)),
         Primitive::Pfloatorder => write!(f, "compare"),
         Primitive::Pfloatmin => write!(f, "min"),
         Primitive::Pfloatmax => write!(f, "max"),
