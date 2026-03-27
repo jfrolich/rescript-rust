@@ -544,6 +544,7 @@ pub fn compile_source_to_js_with_options(
         let mut raw_converter =
             crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
                 parser.arena(),
+                &type_ctx,
                 id_gen.current_stamp(),
                 unit_name,
             );

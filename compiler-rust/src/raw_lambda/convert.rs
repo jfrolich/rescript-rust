@@ -23,9 +23,11 @@ use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
 use crate::parser::ast::{Arity, MutableFlag as ParserMutableFlag};
 use crate::raw_lambda::RawLambda;
+use crate::types::context::TypeContext;
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
 use crate::types::ConstructorTag;
 use crate::types::decl::{LabelDescription, RecordRepresentation, ValueKind};
+use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, Expression, ExpressionDesc, FunctionParam,
     FunctionParamPattern, MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern,
@@ -183,9 +185,21 @@ enum RawLocKind {
     Pos,
 }
 
+#[derive(Clone)]
+struct ComparisonSpecialization {
+    objcomp: Primitive,
+    intcomp: Primitive,
+    boolcomp: Primitive,
+    floatcomp: Primitive,
+    stringcomp: Primitive,
+    bigintcomp: Primitive,
+    simplify_constant_constructor: bool,
+}
+
 /// Converter from typedtree to raw lambda.
 pub struct RawLambdaConverter<'a> {
     arena: &'a ParseArena,
+    type_ctx: &'a TypeContext<'a>,
     id_gen: IdGenerator,
     lowered: LambdaConverter<'a>,
     unit_name: String,
@@ -193,9 +207,10 @@ pub struct RawLambdaConverter<'a> {
 
 impl<'a> RawLambdaConverter<'a> {
     /// Create a new raw-lambda converter.
-    pub fn new(arena: &'a ParseArena) -> Self {
+    pub fn new(arena: &'a ParseArena, type_ctx: &'a TypeContext<'a>) -> Self {
         Self {
             arena,
+            type_ctx,
             id_gen: IdGenerator::new(),
             lowered: LambdaConverter::new(arena),
             unit_name: String::new(),
@@ -203,9 +218,14 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     /// Create a new raw-lambda converter with stamps continuing from an existing phase.
-    pub fn with_start_stamp(arena: &'a ParseArena, start_stamp: i32) -> Self {
+    pub fn with_start_stamp(
+        arena: &'a ParseArena,
+        type_ctx: &'a TypeContext<'a>,
+        start_stamp: i32,
+    ) -> Self {
         Self {
             arena,
+            type_ctx,
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name: String::new(),
@@ -215,11 +235,13 @@ impl<'a> RawLambdaConverter<'a> {
     /// Create a new raw-lambda converter with the current compilation unit name.
     pub fn with_start_stamp_and_unit_name(
         arena: &'a ParseArena,
+        type_ctx: &'a TypeContext<'a>,
         start_stamp: i32,
         unit_name: String,
     ) -> Self {
         Self {
             arena,
+            type_ctx,
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name,
@@ -240,6 +262,31 @@ impl<'a> RawLambdaConverter<'a> {
             "%loc_POS" => Some(RawLocKind::Pos),
             _ => None,
         }
+    }
+
+    fn type_desc(&self, ty: TypeExprRef) -> TypeDesc {
+        (*self.type_ctx.get_desc(self.type_ctx.repr(ty))).clone()
+    }
+
+    fn is_function_type(&self, ty: TypeExprRef) -> Option<(TypeExprRef, TypeExprRef)> {
+        match self.type_desc(ty) {
+            TypeDesc::Tarrow { arg, ret, .. } => Some((arg.typ, ret)),
+            _ => None,
+        }
+    }
+
+    fn is_base_type(&self, ty: TypeExprRef, name: &str) -> bool {
+        match self.type_desc(ty) {
+            TypeDesc::Tconstr { path, .. } => path.head_name() == name || path.last() == name,
+            _ => false,
+        }
+    }
+
+    fn is_immediate_type(&self, ty: TypeExprRef) -> bool {
+        self.is_base_type(ty, "int")
+            || self.is_base_type(ty, "char")
+            || self.is_base_type(ty, "bool")
+            || self.is_base_type(ty, "unit")
     }
 
     fn basename_for_loc(&self, loc: Location) -> String {
@@ -285,6 +332,300 @@ impl<'a> RawLambdaConverter<'a> {
                     Constant::int(end_col),
                 ],
             }),
+        }
+    }
+
+    fn translate_unified_ops_primitive(
+        &self,
+        prim_name: &str,
+        lhs_type: TypeExprRef,
+    ) -> Option<Primitive> {
+        let choose = |int_prim: Primitive,
+                      bool_prim: Option<Primitive>,
+                      float_prim: Option<Primitive>,
+                      bigint_prim: Option<Primitive>,
+                      string_prim: Option<Primitive>| {
+            if self.is_base_type(lhs_type, "int") || self.is_immediate_type(lhs_type) {
+                int_prim
+            } else if self.is_base_type(lhs_type, "float") {
+                float_prim.unwrap_or(int_prim)
+            } else if self.is_base_type(lhs_type, "bigint") {
+                bigint_prim.unwrap_or(int_prim)
+            } else if self.is_base_type(lhs_type, "string") {
+                string_prim.unwrap_or(int_prim)
+            } else if self.is_base_type(lhs_type, "bool") {
+                bool_prim.unwrap_or(int_prim)
+            } else {
+                int_prim
+            }
+        };
+
+        Some(match prim_name {
+            "%neg" => choose(
+                Primitive::Pnegint,
+                None,
+                Some(Primitive::Pnegfloat),
+                Some(Primitive::Pnegbigint),
+                None,
+            ),
+            "%add" => choose(
+                Primitive::Paddint,
+                None,
+                Some(Primitive::Paddfloat),
+                Some(Primitive::Paddbigint),
+                Some(Primitive::Pstringadd),
+            ),
+            "%sub" => choose(
+                Primitive::Psubint,
+                None,
+                Some(Primitive::Psubfloat),
+                Some(Primitive::Psubbigint),
+                None,
+            ),
+            "%mul" => choose(
+                Primitive::Pmulint,
+                None,
+                Some(Primitive::Pmulfloat),
+                Some(Primitive::Pmulbigint),
+                None,
+            ),
+            "%div" => choose(
+                Primitive::Pdivint,
+                None,
+                Some(Primitive::Pdivfloat),
+                Some(Primitive::Pdivbigint),
+                None,
+            ),
+            "%mod" => choose(
+                Primitive::Pmodint,
+                None,
+                Some(Primitive::Pmodfloat),
+                Some(Primitive::Pmodbigint),
+                None,
+            ),
+            "%pow" => choose(
+                Primitive::Ppowint,
+                None,
+                Some(Primitive::Ppowfloat),
+                Some(Primitive::Ppowbigint),
+                None,
+            ),
+            "%lsl" => choose(
+                Primitive::Plslint,
+                None,
+                None,
+                Some(Primitive::Plslbigint),
+                None,
+            ),
+            "%asr" => choose(
+                Primitive::Pasrint,
+                None,
+                None,
+                Some(Primitive::Pasrbigint),
+                None,
+            ),
+            "%lsr" => Primitive::Plsrint,
+            "%bitnot" => choose(
+                Primitive::Pnotint,
+                None,
+                None,
+                Some(Primitive::Pnotbigint),
+                None,
+            ),
+            "%bitor" => choose(
+                Primitive::Porint,
+                None,
+                None,
+                Some(Primitive::Porbigint),
+                None,
+            ),
+            "%bitxor" => choose(
+                Primitive::Pxorint,
+                None,
+                None,
+                Some(Primitive::Pxorbigint),
+                None,
+            ),
+            "%bitand" => choose(
+                Primitive::Pandint,
+                None,
+                None,
+                Some(Primitive::Pandbigint),
+                None,
+            ),
+            _ => return None,
+        })
+    }
+
+    fn comparison_specialization(prim_name: &str) -> Option<ComparisonSpecialization> {
+        let table = |cmp: crate::lambda::Comparison,
+                     simplify_constant_constructor| ComparisonSpecialization {
+            objcomp: Primitive::Pobjcomp(cmp),
+            intcomp: Primitive::Pintcomp(cmp),
+            boolcomp: Primitive::Pboolcomp(cmp),
+            floatcomp: Primitive::Pfloatcomp(cmp),
+            stringcomp: Primitive::Pstringcomp(cmp),
+            bigintcomp: Primitive::Pbigintcomp(cmp),
+            simplify_constant_constructor,
+        };
+
+        Some(match prim_name {
+            "%equal" => table(crate::lambda::Comparison::Eq, true),
+            "%notequal" => table(crate::lambda::Comparison::Neq, true),
+            "%lessthan" => table(crate::lambda::Comparison::Lt, false),
+            "%greaterthan" => table(crate::lambda::Comparison::Gt, false),
+            "%lessequal" => table(crate::lambda::Comparison::Le, false),
+            "%greaterequal" => table(crate::lambda::Comparison::Ge, false),
+            "%equal_null" => table(crate::lambda::Comparison::Eq, false),
+            "%equal_undefined" => table(crate::lambda::Comparison::Eq, false),
+            "%equal_nullable" => table(crate::lambda::Comparison::Eq, false),
+            "%compare" => ComparisonSpecialization {
+                objcomp: Primitive::Pobjorder,
+                intcomp: Primitive::Pintorder,
+                boolcomp: Primitive::Pboolorder,
+                floatcomp: Primitive::Pfloatorder,
+                stringcomp: Primitive::Pstringorder,
+                bigintcomp: Primitive::Pbigintorder,
+                simplify_constant_constructor: false,
+            },
+            "%max" | "%bs_max" => ComparisonSpecialization {
+                objcomp: Primitive::Pobjmax,
+                intcomp: Primitive::Pintmax,
+                boolcomp: Primitive::Pboolmax,
+                floatcomp: Primitive::Pfloatmax,
+                stringcomp: Primitive::Pstringmax,
+                bigintcomp: Primitive::Pbigintmax,
+                simplify_constant_constructor: false,
+            },
+            "%min" | "%bs_min" => ComparisonSpecialization {
+                objcomp: Primitive::Pobjmin,
+                intcomp: Primitive::Pintmin,
+                boolcomp: Primitive::Pboolmin,
+                floatcomp: Primitive::Pfloatmin,
+                stringcomp: Primitive::Pstringmin,
+                bigintcomp: Primitive::Pbigintmin,
+                simplify_constant_constructor: false,
+            },
+            _ => return None,
+        })
+    }
+
+    fn specialize_comparison(
+        &self,
+        table: ComparisonSpecialization,
+        ty: TypeExprRef,
+    ) -> Primitive {
+        if self.is_base_type(ty, "int")
+            || self.is_base_type(ty, "char")
+            || self.is_immediate_type(ty)
+        {
+            table.intcomp
+        } else if self.is_base_type(ty, "float") {
+            table.floatcomp
+        } else if self.is_base_type(ty, "string") {
+            table.stringcomp
+        } else if self.is_base_type(ty, "bigint") {
+            table.bigintcomp
+        } else if self.is_base_type(ty, "bool") {
+            table.boolcomp
+        } else {
+            table.objcomp
+        }
+    }
+
+    fn has_constant_constructor_arg(expr: &Expression) -> bool {
+        matches!(
+            &expr.exp_desc,
+            ExpressionDesc::Texp_construct(
+                _,
+                crate::types::ConstructorDescription {
+                    cstr_tag: ConstructorTag::CstrConstant(_),
+                    ..
+                },
+                _
+            ) | ExpressionDesc::Texp_variant(_, None)
+        )
+    }
+
+    fn find_raw_primitive(&self, prim_name: &str) -> Option<Primitive> {
+        match prim_name {
+            "%makeref" => Some(Primitive::Pmakeblock(0, TagInfo::ref_tag(), Mutable::Mutable)),
+            "%refset" => Some(Primitive::Psetfield(
+                0,
+                crate::lambda::compat::SetFieldDbgInfo::RecordSet("contents".to_string()),
+            )),
+            "%refget" => Some(Primitive::Pfield(
+                0,
+                FieldDbgInfo::Record {
+                    name: "contents".to_string(),
+                    mutable_flag: ParserMutableFlag::Mutable,
+                },
+            )),
+            "%incr" => Some(Primitive::Poffsetref(1)),
+            "%decr" => Some(Primitive::Poffsetref(-1)),
+            _ => self.lowered.primitive_from_name(prim_name),
+        }
+    }
+
+    fn specialize_primitive_raw(
+        &self,
+        prim: &crate::types::PrimitiveDescription,
+        ty: TypeExprRef,
+    ) -> Option<Primitive> {
+        let prim_name = Self::raw_primitive_name(&prim.prim_name);
+        if let Some((lhs, _)) = self.is_function_type(ty) {
+            if let Some(primitive) = self.translate_unified_ops_primitive(prim_name, lhs) {
+                return Some(primitive);
+            }
+            if let Some(table) = Self::comparison_specialization(prim_name) {
+                return Some(self.specialize_comparison(table, lhs));
+            }
+        } else if let Some(table) = Self::comparison_specialization(prim_name) {
+            return Some(table.objcomp);
+        }
+
+        self.find_raw_primitive(prim_name)
+    }
+
+    fn translate_primitive_application_raw(
+        &self,
+        prim: &crate::types::PrimitiveDescription,
+        ty: TypeExprRef,
+        args: &[&Expression],
+        transformed_jsx: bool,
+    ) -> Primitive {
+        let prim_name = Self::raw_primitive_name(&prim.prim_name);
+
+        if let [arg1] | [arg1, _] = args {
+            if let Some(primitive) = self.translate_unified_ops_primitive(prim_name, arg1.exp_type)
+            {
+                return primitive;
+            }
+        }
+
+        if let [arg1, _] = args {
+            if let Some(table) = Self::comparison_specialization(prim_name) {
+                if self.is_base_type(arg1.exp_type, "bool") {
+                    return table.boolcomp;
+                }
+                if args.iter().any(|arg| Self::has_constant_constructor_arg(arg))
+                    && table.simplify_constant_constructor
+                {
+                    return table.intcomp;
+                }
+            }
+        }
+
+        if let Some(primitive) = self.specialize_primitive_raw(prim, ty) {
+            primitive
+        } else {
+            Primitive::PjsCall {
+                prim_name: prim_name.to_string(),
+                arg_types: vec![ExternalArgSpec { label: None }; prim.prim_arity.max(0) as usize],
+                ffi: ExternalFfiSpec { module_name: None },
+                dynamic_import: false,
+                transformed_jsx,
+            }
         }
     }
 
@@ -668,7 +1009,9 @@ impl<'a> RawLambdaConverter<'a> {
     fn convert_expr_raw(&mut self, expr: &Expression) -> RawLambda {
         match &expr.exp_desc {
             ExpressionDesc::Texp_ident(path, _, desc) => match &desc.val_kind {
-                ValueKind::ValPrim(prim) => self.translate_primitive_raw(self.loc(expr.exp_loc), prim),
+                ValueKind::ValPrim(prim) => {
+                    self.translate_primitive_raw(self.loc(expr.exp_loc), prim, expr.exp_type)
+                }
                 ValueKind::ValReg => RawLambda::from_lowered(self.translate_value_path(expr.exp_loc, path)),
             },
             ExpressionDesc::Texp_constant(cst) => RawLambda::const_(self.convert_constant(cst)),
@@ -1733,6 +2076,10 @@ impl<'a> RawLambdaConverter<'a> {
                     && args.iter().take(prim_arity).all(|arg| arg.expression.is_some())
                 {
                     let (applied, rest) = args.split_at(prim_arity);
+                    let applied_exprs = applied
+                        .iter()
+                        .map(|arg| arg.expression.as_ref().expect("checked above"))
+                        .collect::<Vec<_>>();
                     if let Some(kind) = Self::raw_loc_kind(raw_name) {
                         let base = match applied {
                             [] => self.raw_loc_constant(kind, loc),
@@ -1765,14 +2112,15 @@ impl<'a> RawLambdaConverter<'a> {
                         };
                     }
                     let base = RawLambda::prim(
-                        self.translate_primitive_application(prim, transformed_jsx),
-                        applied
+                        self.translate_primitive_application_raw(
+                            prim,
+                            funct.exp_type,
+                            &applied_exprs,
+                            transformed_jsx,
+                        ),
+                        applied_exprs
                             .iter()
-                            .map(|arg| {
-                                self.convert_expr_raw(
-                                    arg.expression.as_ref().expect("checked above"),
-                                )
-                            })
+                            .map(|expr| self.convert_expr_raw(expr))
                             .collect(),
                         loc,
                     );
@@ -2273,6 +2621,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         loc: Location,
         prim: &crate::types::PrimitiveDescription,
+        ty: TypeExprRef,
     ) -> RawLambda {
         let raw_name = Self::raw_primitive_name(&prim.prim_name);
         if let Some(kind) = Self::raw_loc_kind(raw_name) {
@@ -2320,7 +2669,36 @@ impl<'a> RawLambdaConverter<'a> {
             );
         }
 
-        RawLambda::from_lowered(self.translate_primitive(loc, prim))
+        let primitive = if let Some(primitive) = self.specialize_primitive_raw(prim, ty) {
+            primitive
+        } else {
+            Primitive::PjsCall {
+                prim_name: raw_name.to_string(),
+                arg_types: vec![ExternalArgSpec { label: None }; prim.prim_arity.max(0) as usize],
+                ffi: ExternalFfiSpec { module_name: None },
+                dynamic_import: false,
+                transformed_jsx: false,
+            }
+        };
+
+        if prim.prim_arity == 0 {
+            RawLambda::prim(primitive, vec![], loc)
+        } else {
+            let params = if prim.prim_arity == 1 {
+                vec![self.id_gen.create("prim")]
+            } else {
+                (0..prim.prim_arity)
+                    .map(|i| self.id_gen.create(&format!("prim{i}")))
+                    .collect::<Vec<_>>()
+            };
+            let args = params.iter().cloned().map(RawLambda::var).collect::<Vec<_>>();
+            RawLambda::function_(
+                prim.prim_arity,
+                params,
+                RawLambda::prim(primitive, args, loc),
+                FunctionAttribute::default(),
+            )
+        }
     }
 
     fn translate_primitive(
