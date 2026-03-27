@@ -10,6 +10,7 @@
 pub mod convert;
 pub mod lower;
 pub mod print;
+pub(crate) mod typeopt;
 
 use crate::ident::Ident;
 use crate::lambda::{ApInfo, DirectionFlag, FunctionAttribute, Lambda, LetKind};

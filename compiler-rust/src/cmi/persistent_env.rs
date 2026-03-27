@@ -2571,7 +2571,10 @@ pub fn add_signature_to_env(
                                 cstr_generalized: cd.cd_res.is_some(),
                                 cstr_private: decl.type_private,
                                 cstr_loc: crate::location::Location::none(),
-                                cstr_attributes: vec![],
+                                cstr_attributes:
+                                    crate::types::decl::constructor_description_attrs_for_variant(
+                                        constrs, cd,
+                                    ),
                                 cstr_inlined,
                             };
 

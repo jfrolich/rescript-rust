@@ -450,6 +450,55 @@ pub enum AttributePayload {
     Structure(Vec<(String, String)>),
 }
 
+pub const INTERNAL_OPTIONAL_ATTR_NAME: &str = "internal.optional";
+
+pub fn has_internal_optional_attr(attrs: &[Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| attr.attr_name.txt == INTERNAL_OPTIONAL_ATTR_NAME)
+}
+
+pub fn internal_optional_attr() -> Attribute {
+    Attribute {
+        attr_name: Located::noloc(INTERNAL_OPTIONAL_ATTR_NAME.to_string()),
+        attr_payload: AttributePayload::Structure(vec![]),
+        attr_loc: Location::none(),
+    }
+}
+
+pub fn variant_has_optional_shape(cdecls: &[ConstructorDeclaration]) -> bool {
+    matches!(
+        cdecls,
+        [
+            ConstructorDeclaration {
+                cd_id,
+                cd_args: ConstructorArguments::CstrTuple(args1),
+                ..
+            },
+            ConstructorDeclaration {
+                cd_id: cd_id2,
+                cd_args: ConstructorArguments::CstrTuple(args2),
+                ..
+            }
+        ] if (
+            cd_id.name() == "None" && args1.is_empty() && cd_id2.name() == "Some" && args2.len() == 1
+        ) || (
+            cd_id.name() == "Some" && args1.len() == 1 && cd_id2.name() == "None" && args2.is_empty()
+        )
+    )
+}
+
+pub fn constructor_description_attrs_for_variant(
+    cdecls: &[ConstructorDeclaration],
+    cd: &ConstructorDeclaration,
+) -> Vec<Attribute> {
+    let mut attrs = cd.cd_attributes.clone();
+    if variant_has_optional_shape(cdecls) && !has_internal_optional_attr(&attrs) {
+        attrs.insert(0, internal_optional_attr());
+    }
+    attrs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -23,6 +23,9 @@ use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
 use crate::parser::ast::{Arity, MutableFlag as ParserMutableFlag};
 use crate::raw_lambda::RawLambda;
+use crate::raw_lambda::typeopt::{
+    constructor_has_optional_shape, type_cannot_contain_undefined,
+};
 use crate::types::context::TypeContext;
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
 use crate::types::ConstructorTag;
@@ -838,12 +841,27 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn raw_constructor_tag_info(&self, cstr: &crate::types::ConstructorDescription) -> TagInfo {
+    fn raw_constructor_tag_info(
+        &self,
+        cstr: &crate::types::ConstructorDescription,
+        args: &[Expression],
+    ) -> TagInfo {
         match &cstr.cstr_tag {
-            ConstructorTag::CstrBlock(tag)
-                if cstr.cstr_name == "Some" && cstr.cstr_nonconsts == 1 =>
+            ConstructorTag::CstrBlock(_)
+                if constructor_has_optional_shape(cstr) =>
             {
-                TagInfo::Some
+                match args {
+                    [arg]
+                        if type_cannot_contain_undefined(
+                            self.type_ctx,
+                            self.env,
+                            arg.exp_type,
+                        ) =>
+                    {
+                        TagInfo::SomeNotNested
+                    }
+                    _ => TagInfo::Some,
+                }
             }
             ConstructorTag::CstrBlock(tag) => TagInfo::constructor(
                 cstr.cstr_name.clone(),
@@ -879,7 +897,7 @@ impl<'a> RawLambdaConverter<'a> {
             },
             ConstructorTag::CstrBlock(tag) => {
                 let elems = args.iter().map(|arg| self.convert_expr_raw(arg)).collect();
-                let tag_info = self.raw_constructor_tag_info(cstr);
+                let tag_info = self.raw_constructor_tag_info(cstr, args);
                 self.raw_block_or_prim(*tag, tag_info, elems, loc)
             }
             ConstructorTag::CstrExtension(_) => unreachable!(

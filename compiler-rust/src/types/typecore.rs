@@ -13633,7 +13633,7 @@ fn make_some_constructor(
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
         cstr_loc: crate::location::Location::none(),
-        cstr_attributes: vec![],
+        cstr_attributes: vec![crate::types::decl::internal_optional_attr()],
         cstr_inlined: None,
     }
 }
@@ -13655,7 +13655,7 @@ fn make_none_constructor(
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
         cstr_loc: crate::location::Location::none(),
-        cstr_attributes: vec![],
+        cstr_attributes: vec![crate::types::decl::internal_optional_attr()],
         cstr_inlined: None,
     }
 }
@@ -19543,7 +19543,10 @@ fn lookup_constructor_in_module<'b>(
                                     cstr_generalized: cd.cd_res.is_some(),
                                     cstr_private: type_decl.type_private,
                                     cstr_loc: cd.cd_loc,
-                                    cstr_attributes: cd.cd_attributes.clone(),
+                                    cstr_attributes:
+                                        crate::types::decl::constructor_description_attrs_for_variant(
+                                            constrs, cd,
+                                        ),
                                     cstr_inlined,
                                 };
                                 let path = Path::pident(Ident::create_persistent(cstr_name));
@@ -19711,7 +19714,7 @@ fn lookup_predef_option_constructor<'b>(
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
         cstr_loc: crate::location::Location::none(),
-        cstr_attributes: vec![],
+        cstr_attributes: vec![crate::types::decl::internal_optional_attr()],
         cstr_inlined: None,
     };
     let path = Path::pident(Ident::create_persistent(cstr_name));
@@ -21819,7 +21822,10 @@ fn lookup_constructor_by_expected_type<'b>(
                     cstr_generalized: cd.cd_res.is_some(),
                     cstr_private: concrete_type_decl.type_private,
                     cstr_loc: cd.cd_loc,
-                    cstr_attributes: cd.cd_attributes.clone(),
+                    cstr_attributes:
+                        crate::types::decl::constructor_description_attrs_for_variant(
+                            constrs, cd,
+                        ),
                     cstr_inlined,
                 };
                 let path = Path::pident(Ident::create_persistent(cstr_name));

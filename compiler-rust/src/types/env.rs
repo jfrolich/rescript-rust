@@ -1003,7 +1003,10 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
                         cstr_generalized: cd.cd_res.is_some(),
                         cstr_private: decl.type_private,
                         cstr_loc: Location::none(),
-                        cstr_attributes: vec![],
+                        cstr_attributes:
+                            crate::types::decl::constructor_description_attrs_for_variant(
+                                constrs, cd,
+                            ),
                         cstr_inlined: None,
                     };
 

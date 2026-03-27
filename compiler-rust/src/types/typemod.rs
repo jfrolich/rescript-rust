@@ -8967,7 +8967,11 @@ fn type_structure_item<'a>(
                                     cstr_generalized: internal_cd_res.is_some(),
                                     cstr_private: crate::types::PrivateFlag::Public,
                                     cstr_loc: arena.to_location(cstr.pcd_loc),
-                                    cstr_attributes: vec![],
+                                    cstr_attributes:
+                                        crate::types::decl::constructor_description_attrs_for_variant(
+                                            &internal_cstrs,
+                                            internal_cstrs.last().expect("constructor just pushed"),
+                                        ),
                                     cstr_inlined,
                                 },
                             ));
@@ -10789,7 +10793,10 @@ fn type_structure_item<'a>(
                                         cstr_generalized: cd.cd_res.is_some(),
                                         cstr_private: decl.type_private,
                                         cstr_loc: cd.cd_loc,
-                                        cstr_attributes: cd.cd_attributes.clone(),
+                                        cstr_attributes:
+                                            crate::types::decl::constructor_description_attrs_for_variant(
+                                                constructors, cd,
+                                            ),
                                         cstr_inlined: None,
                                     };
                                     new_env.add_constructor(cd.cd_id.clone(), cstr_desc);
