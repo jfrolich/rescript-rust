@@ -8,7 +8,7 @@ use std::path::Path as StdPath;
 use std::sync::{Mutex, OnceLock};
 
 use crate::context::IdGenerator;
-use crate::ident::Ident;
+use crate::ident::{Ident, IdentFlags};
 use crate::lambda::constant::StringDelim;
 use crate::lambda::Constant;
 use crate::lambda::compat::LetKind;
@@ -35,6 +35,13 @@ use crate::types::typedtree::{
     StructureItemDesc, ValueBinding,
 };
 use crate::types::SignatureItem;
+
+const PREDEF_MATCH_FAILURE_STAMP: i32 = 17;
+const PREDEF_ASSERT_FAILURE_STAMP: i32 = 27;
+
+fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
+    Ident::new(name, stamp, IdentFlags::PREDEF_EXN.with_global())
+}
 
 fn iter_bound_pattern_idents<'a, F>(pat: &'a Pattern, f: &mut F)
 where
@@ -471,6 +478,37 @@ impl<'a> RawLambdaConverter<'a> {
                 ],
             }),
         }
+    }
+
+    fn failure_payload(&self, loc: Location) -> Constant {
+        Constant::Block {
+            tag: 0,
+            tag_info: TagInfo::Tuple,
+            elements: vec![
+                Constant::string(self.basename_for_loc(loc)),
+                Constant::int(loc.loc_start.line),
+                Constant::int(loc.loc_start.column()),
+            ],
+        }
+    }
+
+    fn raise_predef_exception(&self, name: &str, stamp: i32, loc: Location) -> Lambda {
+        let exn = Lambda::global_module(predef_exception_ident(name, stamp), false);
+        let payload = Lambda::const_(self.failure_payload(loc));
+        let block = Lambda::prim(
+            Primitive::Pmakeblock(0, TagInfo::Extension, Mutable::Immutable),
+            vec![exn, payload],
+            loc,
+        );
+        Lambda::prim(Primitive::Praise, vec![block], loc)
+    }
+
+    fn raw_assert_failure(&self, loc: Location) -> RawLambda {
+        RawLambda::from_lowered(self.raise_predef_exception(
+            "Assert_failure",
+            PREDEF_ASSERT_FAILURE_STAMP,
+            loc,
+        ))
     }
 
     fn translate_unified_ops_primitive(
@@ -1497,12 +1535,20 @@ impl<'a> RawLambdaConverter<'a> {
             }
             ExpressionDesc::Texp_pack(modl) => self.convert_module_expr_raw(modl, &None),
             ExpressionDesc::Texp_assert(inner_expr) => {
-                let failure = RawLambda::from_lowered(self.match_failure(self.loc(inner_expr.exp_loc)));
-                RawLambda::LifThenElse(
-                    Box::new(self.convert_expr_raw(inner_expr)),
-                    Box::new(RawLambda::unit()),
-                    Box::new(failure),
-                )
+                if matches!(
+                    inner_expr.exp_desc,
+                    ExpressionDesc::Texp_construct(_, ref cstr, ref args)
+                        if cstr.cstr_name == "false" && args.is_empty()
+                ) {
+                    self.raw_assert_failure(self.loc(expr.exp_loc))
+                } else {
+                    let failure = self.raw_assert_failure(self.loc(expr.exp_loc));
+                    RawLambda::LifThenElse(
+                        Box::new(self.convert_expr_raw(inner_expr)),
+                        Box::new(RawLambda::unit()),
+                        Box::new(failure),
+                    )
+                }
             }
             _ => RawLambda::from_lowered(self.convert_expr(expr)),
         }
@@ -1713,11 +1759,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn match_failure(&mut self, loc: Location) -> Lambda {
-        let msg = Lambda::const_(Constant::String {
-            s: "Match_failure".to_string(),
-            delim: None,
-        });
-        Lambda::prim(Primitive::Praise, vec![msg], loc)
+        self.raise_predef_exception("Match_failure", PREDEF_MATCH_FAILURE_STAMP, loc)
     }
 
     fn compile_simple_constructor_match(

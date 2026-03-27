@@ -4,8 +4,10 @@
 //! typed AST into Lambda IR. The goal is to preserve semantics while
 //! keeping the translation straightforward and easy to extend.
 
+use std::path::Path as StdPath;
+
 use crate::context::IdGenerator;
-use crate::ident::Ident;
+use crate::ident::{Ident, IdentFlags};
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::constant::{Constant, StringDelim};
 use crate::lambda::primitive::{ExternalArgSpec, ExternalFfiSpec, Mutable, Primitive};
@@ -26,6 +28,13 @@ use crate::types::typedtree::{
     Pattern, PatternDesc, RecordLabelDefinition, Structure, StructureItem, StructureItemDesc,
     ValueBinding,
 };
+
+const PREDEF_MATCH_FAILURE_STAMP: i32 = 17;
+const PREDEF_ASSERT_FAILURE_STAMP: i32 = 27;
+
+fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
+    Ident::new(name, stamp, IdentFlags::PREDEF_EXN.with_global())
+}
 
 /// Lambda conversion state.
 pub struct LambdaConverter<'a> {
@@ -54,6 +63,41 @@ impl<'a> LambdaConverter<'a> {
     #[inline]
     fn loc(&self, idx: LocIdx) -> Location {
         self.arena.to_location(idx)
+    }
+
+    fn basename_for_loc(&self, loc: Location) -> String {
+        if loc.file_name_idx().0 == 0 {
+            return String::new();
+        }
+        let file = self.arena.get_string(loc.file_name_idx());
+        StdPath::new(file)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(file)
+            .to_string()
+    }
+
+    fn failure_payload(&self, loc: Location) -> Constant {
+        Constant::Block {
+            tag: 0,
+            tag_info: TagInfo::Tuple,
+            elements: vec![
+                Constant::string(self.basename_for_loc(loc)),
+                Constant::int(loc.loc_start.line),
+                Constant::int(loc.loc_start.column()),
+            ],
+        }
+    }
+
+    fn raise_predef_exception(&self, name: &str, stamp: i32, loc: Location) -> Lambda {
+        let exn = Lambda::global_module(predef_exception_ident(name, stamp), false);
+        let payload = Lambda::const_(self.failure_payload(loc));
+        let block = Lambda::prim(
+            Primitive::Pmakeblock(0, TagInfo::Extension, Mutable::Immutable),
+            vec![exn, payload],
+            loc,
+        );
+        Lambda::prim(Primitive::Praise, vec![block], loc)
     }
 
     /// Convert a structure into a Lambda expression.
@@ -214,9 +258,25 @@ impl<'a> LambdaConverter<'a> {
             ExpressionDesc::Texp_letmodule(_, _, _, body) => self.convert_expr(body),
             ExpressionDesc::Texp_letexception(_, body) => self.convert_expr(body),
             ExpressionDesc::Texp_assert(inner_expr) => {
-                let cond = self.convert_expr(inner_expr);
-                let failure = self.match_failure(self.loc(inner_expr.exp_loc));
-                Lambda::if_(cond, Lambda::unit(), failure)
+                if matches!(
+                    inner_expr.exp_desc,
+                    ExpressionDesc::Texp_construct(_, ref cstr, ref args)
+                        if cstr.cstr_name == "false" && args.is_empty()
+                ) {
+                    self.raise_predef_exception(
+                        "Assert_failure",
+                        PREDEF_ASSERT_FAILURE_STAMP,
+                        self.loc(expr.exp_loc),
+                    )
+                } else {
+                    let cond = self.convert_expr(inner_expr);
+                    let failure = self.raise_predef_exception(
+                        "Assert_failure",
+                        PREDEF_ASSERT_FAILURE_STAMP,
+                        self.loc(expr.exp_loc),
+                    );
+                    Lambda::if_(cond, Lambda::unit(), failure)
+                }
             }
             ExpressionDesc::Texp_pack(_) => Lambda::unit(),
             ExpressionDesc::Texp_extension_constructor(_, _) => Lambda::unit(),
@@ -1121,11 +1181,7 @@ impl<'a> LambdaConverter<'a> {
     }
 
     fn match_failure(&mut self, loc: Location) -> Lambda {
-        let msg = Lambda::const_(Constant::String {
-            s: "Match_failure".to_string(),
-            delim: None,
-        });
-        Lambda::prim(Primitive::Praise, vec![msg], loc)
+        self.raise_predef_exception("Match_failure", PREDEF_MATCH_FAILURE_STAMP, loc)
     }
 }
 
