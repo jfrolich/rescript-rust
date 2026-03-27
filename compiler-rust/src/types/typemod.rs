@@ -10264,12 +10264,14 @@ fn type_structure_item<'a>(
                 None => None,
             };
 
-            // Convert the typed module type to a decl-level modtype declaration
-            let decl_mtd_type = if let Some(mt) = &mtd.pmtd_type {
-                translate_module_type_to_decl(tctx, env, arena, arena.get_mod_type(*mt)).ok()
-            } else {
-                None
-            };
+            let decl_mtd_type = typed_mty
+                .as_ref()
+                .and_then(decl_module_type_from_typed)
+                .or_else(|| {
+                    mtd.pmtd_type.and_then(|mt| {
+                        translate_module_type_to_decl(tctx, env, arena, arena.get_mod_type(mt)).ok()
+                    })
+                });
 
             let desc = StructureItemDesc::Tstr_modtype(ModuleTypeDeclaration {
                 mtd_id: mtd_id.clone(),
