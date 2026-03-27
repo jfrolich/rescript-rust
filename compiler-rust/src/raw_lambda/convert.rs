@@ -254,6 +254,62 @@ impl<'a> RawLambdaConverter<'a> {
         self.arena.to_location(idx)
     }
 
+    fn global_path(&self) -> Option<crate::types::Path> {
+        if self.unit_name.is_empty() {
+            None
+        } else {
+            Some(crate::types::Path::pident(Ident::create_persistent(
+                self.unit_name.clone(),
+            )))
+        }
+    }
+
+    fn field_path(rootpath: &Option<crate::types::Path>, field: &Ident) -> Option<crate::types::Path> {
+        rootpath
+            .as_ref()
+            .map(|path| crate::types::Path::pdot(path.clone(), field.name().to_string()))
+    }
+
+    fn transl_extension_constructor_raw(
+        &self,
+        path: Option<crate::types::Path>,
+        ext: &crate::types::typedtree::ExtensionConstructor,
+    ) -> RawLambda {
+        let name = path
+            .as_ref()
+            .map(crate::types::Path::name)
+            .unwrap_or_else(|| ext.ext_id.name().to_string());
+        let loc = self.loc(ext.ext_loc);
+        match &ext.ext_kind {
+            crate::types::typedtree::ExtensionConstructorKind::Text_decl(_, _) => {
+                RawLambda::prim(Primitive::PcreateExtension(name), vec![], loc)
+            }
+            crate::types::typedtree::ExtensionConstructorKind::Text_rebind(path, _) => {
+                self.translate_module_path_raw(path, loc)
+            }
+        }
+    }
+
+    fn transl_type_extension_raw(
+        &self,
+        rootpath: &Option<crate::types::Path>,
+        tyext: &crate::types::typedtree::TypeExtension,
+        body: RawLambda,
+    ) -> RawLambda {
+        tyext
+            .tyext_constructors
+            .iter()
+            .rev()
+            .fold(body, |acc, ext| {
+                RawLambda::let_(
+                    LetKind::Strict,
+                    ext.ext_id.clone(),
+                    self.transl_extension_constructor_raw(Self::field_path(rootpath, &ext.ext_id), ext),
+                    acc,
+                )
+            })
+    }
+
     fn raw_loc_kind(name: &str) -> Option<RawLocKind> {
         match name {
             "%loc_FILE" => Some(RawLocKind::File),
@@ -757,6 +813,7 @@ impl<'a> RawLambdaConverter<'a> {
             &mut fields,
             &structure.str_items,
             true,
+            &self.global_path(),
             &ModuleCoercion::Tcoerce_none,
             Location::none(),
         )
@@ -890,6 +947,7 @@ impl<'a> RawLambdaConverter<'a> {
     fn convert_module_expr_raw_with_coercion(
         &mut self,
         module_expr: &ModuleExpr,
+        rootpath: &Option<crate::types::Path>,
         cc: &ModuleCoercion,
     ) -> RawLambda {
         if matches!(module_expr.mod_type.mty_desc, ModuleTypeDesc::Tmty_alias(_, _)) {
@@ -903,6 +961,7 @@ impl<'a> RawLambdaConverter<'a> {
                     &mut fields,
                     &structure.str_items,
                     false,
+                    rootpath,
                     cc,
                     self.loc(module_expr.mod_loc),
                 )
@@ -910,6 +969,7 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleExprDesc::Tmod_constraint(inner, _, _, inner_cc) => self
                 .convert_module_expr_raw_with_coercion(
                     inner,
+                    rootpath,
                     &Self::compose_coercions_raw(cc, inner_cc),
                 ),
             ModuleExprDesc::Tmod_ident(path, _) => {
@@ -922,8 +982,12 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn convert_module_expr_raw(&mut self, module_expr: &ModuleExpr) -> RawLambda {
-        self.convert_module_expr_raw_with_coercion(module_expr, &ModuleCoercion::Tcoerce_none)
+    fn convert_module_expr_raw(
+        &mut self,
+        module_expr: &ModuleExpr,
+        rootpath: &Option<crate::types::Path>,
+    ) -> RawLambda {
+        self.convert_module_expr_raw_with_coercion(module_expr, rootpath, &ModuleCoercion::Tcoerce_none)
     }
 
     fn convert_structure_items_raw(
@@ -931,6 +995,7 @@ impl<'a> RawLambdaConverter<'a> {
         fields: &mut Vec<Ident>,
         items: &[StructureItem],
         is_top_level: bool,
+        rootpath: &Option<crate::types::Path>,
         cc: &ModuleCoercion,
         loc: Location,
     ) -> RawLambda {
@@ -941,12 +1006,13 @@ impl<'a> RawLambdaConverter<'a> {
         match &item.str_desc {
             StructureItemDesc::Tstr_eval(expr, _) => RawLambda::seq(
                 self.convert_expr_raw(expr),
-                self.convert_structure_items_raw(fields, rem, is_top_level, cc, loc),
+                self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc),
             ),
             StructureItemDesc::Tstr_value(rec_flag, bindings) => {
                 let old_len = fields.len();
                 fields.extend(let_bound_idents(bindings));
-                let body = self.convert_structure_items_raw(fields, rem, is_top_level, cc, loc);
+                let body =
+                    self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
                 self.convert_let_with_body_raw(*rec_flag, bindings, body)
             }
@@ -955,12 +1021,40 @@ impl<'a> RawLambdaConverter<'a> {
                 if !self.rescript_hide_attributes(&binding.mb_attributes) {
                     fields.push(binding.mb_id.clone());
                 }
-                let body = self.convert_structure_items_raw(fields, rem, is_top_level, cc, loc);
+                let body =
+                    self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
                 RawLambda::let_(
                     Self::pure_module(&binding.mb_expr),
                     binding.mb_id.clone(),
-                    self.convert_module_expr_raw(&binding.mb_expr),
+                    self.convert_module_expr_raw(
+                        &binding.mb_expr,
+                        &Self::field_path(rootpath, &binding.mb_id),
+                    ),
+                    body,
+                )
+            }
+            StructureItemDesc::Tstr_typext(tyext) => {
+                let old_len = fields.len();
+                fields.extend(tyext.tyext_constructors.iter().map(|ext| ext.ext_id.clone()));
+                let body =
+                    self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
+                fields.truncate(old_len);
+                self.transl_type_extension_raw(rootpath, tyext, body)
+            }
+            StructureItemDesc::Tstr_exception(ext) => {
+                let old_len = fields.len();
+                fields.push(ext.ext_id.clone());
+                let body =
+                    self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
+                fields.truncate(old_len);
+                RawLambda::let_(
+                    LetKind::Strict,
+                    ext.ext_id.clone(),
+                    self.transl_extension_constructor_raw(
+                        Self::field_path(rootpath, &ext.ext_id),
+                        ext,
+                    ),
                     body,
                 )
             }
@@ -968,7 +1062,8 @@ impl<'a> RawLambdaConverter<'a> {
                 let ids = Self::include_bound_idents(&incl.incl_type);
                 let old_len = fields.len();
                 fields.extend(ids.iter().cloned());
-                let body = self.convert_structure_items_raw(fields, rem, is_top_level, cc, loc);
+                let body =
+                    self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
                 let mid = self.id_gen.create("include");
                 let body = self.rebind_included_idents_raw(
@@ -980,19 +1075,17 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::let_(
                     Self::pure_module(&incl.incl_mod),
                     mid,
-                    self.convert_module_expr_raw(&incl.incl_mod),
+                    self.convert_module_expr_raw(&incl.incl_mod, &None),
                     body,
                 )
             }
             StructureItemDesc::Tstr_primitive(_)
             | StructureItemDesc::Tstr_type(_, _)
-            | StructureItemDesc::Tstr_typext(_)
-            | StructureItemDesc::Tstr_exception(_)
             | StructureItemDesc::Tstr_recmodule(_)
             | StructureItemDesc::Tstr_modtype(_)
             | StructureItemDesc::Tstr_open(_)
             | StructureItemDesc::Tstr_attribute(_) => {
-                self.convert_structure_items_raw(fields, rem, is_top_level, cc, loc)
+                self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc)
             }
         }
     }
@@ -1143,11 +1236,19 @@ impl<'a> RawLambdaConverter<'a> {
                     .collect::<Vec<_>>();
                 self.raw_block_or_prim(0, TagInfo::Tuple, elems, self.loc(expr.exp_loc))
             }
-            ExpressionDesc::Texp_construct(_, cstr, args)
-                if !matches!(cstr.cstr_tag, ConstructorTag::CstrExtension(_)) =>
-            {
-                self.convert_construct_raw(self.loc(expr.exp_loc), cstr, args)
-            }
+            ExpressionDesc::Texp_construct(_, cstr, args) => match &cstr.cstr_tag {
+                ConstructorTag::CstrExtension(path) => {
+                    let mut args_lam = Vec::with_capacity(args.len() + 1);
+                    args_lam.push(self.translate_module_path_raw(path, self.loc(expr.exp_loc)));
+                    args_lam.extend(args.iter().map(|arg| self.convert_expr_raw(arg)));
+                    RawLambda::prim(
+                        Primitive::Pmakeblock(0, TagInfo::Extension, Mutable::Immutable),
+                        args_lam,
+                        self.loc(expr.exp_loc),
+                    )
+                }
+                _ => self.convert_construct_raw(self.loc(expr.exp_loc), cstr, args),
+            },
             ExpressionDesc::Texp_variant(tag, arg) => match arg {
                 None => RawLambda::const_(Constant::Pointer(tag.to_string())),
                 Some(arg) => {
@@ -1204,10 +1305,19 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_letmodule(id, _, modl, body) => RawLambda::let_(
                 LetKind::Strict,
                 id.clone(),
-                self.convert_module_expr_raw(modl),
+                self.convert_module_expr_raw(modl, &None),
                 self.convert_expr_raw(body),
             ),
-            ExpressionDesc::Texp_pack(modl) => self.convert_module_expr_raw(modl),
+            ExpressionDesc::Texp_letexception(ext, body) => RawLambda::let_(
+                LetKind::Strict,
+                ext.ext_id.clone(),
+                self.transl_extension_constructor_raw(None, ext),
+                self.convert_expr_raw(body),
+            ),
+            ExpressionDesc::Texp_extension_constructor(_, path) => {
+                self.translate_module_path_raw(path, self.loc(expr.exp_loc))
+            }
+            ExpressionDesc::Texp_pack(modl) => self.convert_module_expr_raw(modl, &None),
             ExpressionDesc::Texp_assert(inner_expr) => {
                 let failure = RawLambda::from_lowered(self.match_failure(self.loc(inner_expr.exp_loc)));
                 RawLambda::LifThenElse(

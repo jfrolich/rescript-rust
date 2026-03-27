@@ -203,6 +203,7 @@ fn print_primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
         Primitive::PjsFnMake(arity) => f.print(format_args!("#fn_mk({arity})")),
         Primitive::PjsFnMakeUnit => f.string("#fn_mk_unit"),
         Primitive::PjsFnMethod => f.string("#fn_method"),
+        Primitive::PcreateExtension(name) => f.print(format_args!("extension[{name}]")),
         Primitive::Pmakeblock(_, tag_info, Mutable::Immutable) => {
             f.string("makeblock ");
             print_tag_info(f, tag_info);
