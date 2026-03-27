@@ -1550,6 +1550,32 @@ impl<'a> RawLambdaConverter<'a> {
         loc: Location,
         prim: &crate::types::PrimitiveDescription,
     ) -> Lambda {
+        let raw_name = Self::raw_primitive_name(&prim.prim_name);
+        if raw_name == "%null" && prim.prim_arity == 0 {
+            return Lambda::const_(Constant::JsNull);
+        }
+        if raw_name == "%undefined" && prim.prim_arity == 0 {
+            return Lambda::const_(Constant::JsUndefined { is_unit: false });
+        }
+        if raw_name == "%identity" && prim.prim_arity == 1 {
+            let param = self.id_gen.create("prim");
+            return Lambda::function_(
+                1,
+                vec![param.clone()],
+                Lambda::var(param),
+                FunctionAttribute::default(),
+            );
+        }
+        if raw_name == "%ignore" && prim.prim_arity == 1 {
+            let param = self.id_gen.create("prim");
+            return Lambda::function_(
+                1,
+                vec![param.clone()],
+                Lambda::seq(Lambda::var(param), Lambda::unit()),
+                FunctionAttribute::default(),
+            );
+        }
+
         let primitive = self.translate_primitive_application(prim, false);
         if prim.prim_arity == 0 {
             Lambda::prim(primitive, vec![], loc)
@@ -1576,16 +1602,21 @@ impl<'a> RawLambdaConverter<'a> {
         prim: &crate::types::PrimitiveDescription,
         transformed_jsx: bool,
     ) -> Primitive {
-        if let Some(primitive) = self.lowered.primitive_from_name(&prim.prim_name) {
+        let raw_name = Self::raw_primitive_name(&prim.prim_name);
+        if let Some(primitive) = self.lowered.primitive_from_name(raw_name) {
             primitive
         } else {
             Primitive::PjsCall {
-                prim_name: prim.prim_name.clone(),
+                prim_name: raw_name.to_string(),
                 arg_types: vec![ExternalArgSpec { label: None }; prim.prim_arity.max(0) as usize],
                 ffi: ExternalFfiSpec { module_name: None },
                 dynamic_import: false,
                 transformed_jsx,
             }
         }
+    }
+
+    fn raw_primitive_name(name: &str) -> &str {
+        name.strip_suffix("[js]").unwrap_or(name)
     }
 }

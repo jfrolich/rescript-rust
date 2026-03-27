@@ -187,6 +187,7 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
 
 fn print_primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
     match prim {
+        Primitive::PjsCall { prim_name, .. } => f.string(prim_name),
         Primitive::PrawJsCode(info) => {
             if info.is_stmt {
                 f.string("#raw_stmt");
