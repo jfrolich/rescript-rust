@@ -2358,15 +2358,6 @@ impl<'a> RawLambdaConverter<'a> {
                             self.transl_apply_raw(base, rest, loc, transformed_jsx)
                         };
                     }
-                    if raw_name == "%identity" && applied.len() == 1 {
-                        let expr = applied[0].expression.as_ref().expect("checked above");
-                        let base = self.convert_expr_raw(expr);
-                        return if rest.is_empty() {
-                            base
-                        } else {
-                            self.transl_apply_raw(base, rest, loc, transformed_jsx)
-                        };
-                    }
                     let base = RawLambda::prim(
                         self.translate_primitive_application_raw(
                             prim,
@@ -2906,25 +2897,6 @@ impl<'a> RawLambdaConverter<'a> {
         if raw_name == "%undefined" && prim.prim_arity == 0 {
             return RawLambda::const_(Constant::JsUndefined { is_unit: false });
         }
-        if raw_name == "%identity" && prim.prim_arity == 1 {
-            let param = self.id_gen.create("prim");
-            return RawLambda::function_(
-                1,
-                vec![param.clone()],
-                RawLambda::var(param),
-                FunctionAttribute::default(),
-            );
-        }
-        if raw_name == "%ignore" && prim.prim_arity == 1 {
-            let param = self.id_gen.create("prim");
-            return RawLambda::function_(
-                1,
-                vec![param.clone()],
-                RawLambda::seq(RawLambda::var(param), RawLambda::unit()),
-                FunctionAttribute::default(),
-            );
-        }
-
         let primitive = if let Some(primitive) = self.specialize_primitive_raw(prim, ty) {
             primitive
         } else {
@@ -2969,25 +2941,6 @@ impl<'a> RawLambdaConverter<'a> {
         if raw_name == "%undefined" && prim.prim_arity == 0 {
             return Lambda::const_(Constant::JsUndefined { is_unit: false });
         }
-        if raw_name == "%identity" && prim.prim_arity == 1 {
-            let param = self.id_gen.create("prim");
-            return Lambda::function_(
-                1,
-                vec![param.clone()],
-                Lambda::var(param),
-                FunctionAttribute::default(),
-            );
-        }
-        if raw_name == "%ignore" && prim.prim_arity == 1 {
-            let param = self.id_gen.create("prim");
-            return Lambda::function_(
-                1,
-                vec![param.clone()],
-                Lambda::seq(Lambda::var(param), Lambda::unit()),
-                FunctionAttribute::default(),
-            );
-        }
-
         let primitive = self.translate_primitive_application(prim, false);
         if prim.prim_arity == 0 {
             Lambda::prim(primitive, vec![], loc)

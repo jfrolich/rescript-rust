@@ -265,6 +265,10 @@ pub enum Primitive {
     Pawait,
 
     // ==================== Misc Primitives ====================
+    /// Identity
+    Pidentity,
+    /// Ignore value, return unit
+    Pignore,
     /// Check if polyvar block
     PisPolyVarBlock,
     /// Check if out of range
@@ -344,6 +348,8 @@ impl Primitive {
         match (self, other) {
             // Simple primitives
             (Primitive::Praise, Primitive::Praise)
+            | (Primitive::Pidentity, Primitive::Pidentity)
+            | (Primitive::Pignore, Primitive::Pignore)
             | (Primitive::Psequand, Primitive::Psequand)
             | (Primitive::Psequor, Primitive::Psequor)
             | (Primitive::Pnot, Primitive::Pnot)

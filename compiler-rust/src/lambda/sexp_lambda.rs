@@ -329,6 +329,8 @@ fn constant(c: &Constant) -> Sexp {
 // Primitive
 fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
     match prim {
+        Primitive::Pidentity => Sexp::atom("Pidentity"),
+        Primitive::Pignore => Sexp::atom("Pignore"),
         Primitive::PcreateExtension(s) => {
             Sexp::list(vec![Sexp::atom("Pcreate_extension"), string(s)])
         }

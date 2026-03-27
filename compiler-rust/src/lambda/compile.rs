@@ -510,6 +510,19 @@ impl LambdaCompiler {
                 prelude.push(Statement::throw(expr));
                 Expression::undefined(false)
             }
+            Pidentity => compiled_args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| Expression::undefined(false)),
+            Pignore => Expression::new(ExpressionDesc::Seq(
+                Box::new(
+                    compiled_args
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| Expression::undefined(false)),
+                ),
+                Box::new(Expression::undefined(true)),
+            )),
             Ptypeof => Expression::new(ExpressionDesc::Typeof(Box::new(compiled_args[0].clone()))),
             Pawait => Expression::new(ExpressionDesc::Await(Box::new(compiled_args[0].clone()))),
             Pimport => Expression::call(

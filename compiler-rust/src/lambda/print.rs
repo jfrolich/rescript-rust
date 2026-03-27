@@ -111,7 +111,9 @@ fn format_comparison(cmp: Comparison) -> &'static str {
 /// Format a primitive operation.
 pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match p {
-        Primitive::PcreateExtension(s) => write!(f, "[ext-create]{s:?}"),
+        Primitive::Pidentity => write!(f, "id"),
+        Primitive::Pignore => write!(f, "ignore"),
+        Primitive::PcreateExtension(s) => write!(f, "extension[{s}]"),
         Primitive::PwrapExn => write!(f, "#exn"),
         Primitive::PinitMod => write!(f, "init_mod!"),
         Primitive::PupdateMod => write!(f, "update_mod!"),
@@ -141,7 +143,7 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::PvalFromOptionNotNest => write!(f, "[?unbox-not-nest]"),
         Primitive::PisUndefined => write!(f, "[?undefined]"),
         Primitive::PisNullUndefined => write!(f, "[?null?undefined]"),
-        Primitive::Pimport => write!(f, "[import]"),
+        Primitive::Pimport => write!(f, "import"),
         Primitive::Pmakeblock(tag, _, Mutable::Immutable) => write!(f, "makeblock {tag}"),
         Primitive::Pmakeblock(tag, _, Mutable::Mutable) => write!(f, "makemutable {tag}"),
         Primitive::Pfield(n, field_info) => {

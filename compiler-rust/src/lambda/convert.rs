@@ -985,25 +985,6 @@ impl<'a> LambdaConverter<'a> {
         if prim.prim_name == "%undefined" && prim.prim_arity == 0 {
             return Lambda::const_(Constant::JsUndefined { is_unit: false });
         }
-        if prim.prim_name == "%identity" && prim.prim_arity == 1 {
-            let param = self.id_gen.create("prim");
-            return Lambda::function_(
-                1,
-                vec![param.clone()],
-                Lambda::var(param),
-                FunctionAttribute::default(),
-            );
-        }
-        if prim.prim_name == "%ignore" && prim.prim_arity == 1 {
-            let param = self.id_gen.create("prim");
-            return Lambda::function_(
-                1,
-                vec![param.clone()],
-                Lambda::seq(Lambda::var(param), Lambda::unit()),
-                FunctionAttribute::default(),
-            );
-        }
-
         if let Some(primitive) = self.primitive_from_name(&prim.prim_name) {
             if prim.prim_arity == 0 {
                 return Lambda::prim(primitive, vec![], loc);
@@ -1032,6 +1013,8 @@ impl<'a> LambdaConverter<'a> {
         Some(match name {
             "%sequand" => Psequand,
             "%sequor" => Psequor,
+            "%identity" => Pidentity,
+            "%ignore" => Pignore,
             "%boolnot" => Pnot,
             "%obj_is_int" => Pisint,
             "%negint" => Pnegint,
