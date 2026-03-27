@@ -18069,7 +18069,7 @@ impl Env {
                     // Search for the value in the signature
                     // Signature lookup must respect shadowing order:
                     // later items in a structure/signature shadow earlier ones.
-                    for sig_item in sig.iter().rev() {
+                    for (pos, sig_item) in sig.iter().enumerate().rev() {
                         if let crate::types::decl::SignatureItem::SigValue(id, vd) = sig_item {
                             if id.name() == value_name {
                                 if std::env::var_os("RUST_DEBUG_LOOKUP_STDLIB_VALUES").is_some()
@@ -18170,7 +18170,11 @@ impl Env {
                                 };
                                 let persistent_module_lookup =
                                     effective_mod_path.head().is_persistent();
-                                let path = Path::pdot(effective_mod_path, value_name.to_string());
+                                let path = Path::Pdot(
+                                    Box::new(effective_mod_path),
+                                    value_name.to_string(),
+                                    pos as i32,
+                                );
                                 let debug_lookup_sig_value = std::env::var("RUST_DEBUG_LOOKUP_SIG_VALUE")
                                     .ok()
                                     .is_some_and(|raw| {
@@ -18837,13 +18841,16 @@ impl Env {
                         );
                     }
                     // Search for the sub-module in the parent's signature
-                    for sig_item in &parent_sig {
+                    for (pos, sig_item) in parent_sig.iter().enumerate().rev() {
                         if let crate::types::decl::SignatureItem::SigModule(id, sub_md, _) =
                             sig_item
                         {
                             if id.name() == submod_name {
-                                let sub_path =
-                                    Path::pdot(parent_path.clone(), submod_name.to_string());
+                                let sub_path = Path::Pdot(
+                                    Box::new(parent_path.clone()),
+                                    submod_name.to_string(),
+                                    pos as i32,
+                                );
                                 let result =
                                     self.resolve_module_type(&sub_md.md_type, pers_env, ctx);
                                 if let Some((sig, resolved_name)) = result {

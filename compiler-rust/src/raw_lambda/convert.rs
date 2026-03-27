@@ -201,6 +201,7 @@ struct ComparisonSpecialization {
 pub struct RawLambdaConverter<'a> {
     arena: &'a ParseArena,
     type_ctx: &'a TypeContext<'a>,
+    env: &'a crate::types::env::Env,
     id_gen: IdGenerator,
     lowered: LambdaConverter<'a>,
     unit_name: String,
@@ -208,10 +209,15 @@ pub struct RawLambdaConverter<'a> {
 
 impl<'a> RawLambdaConverter<'a> {
     /// Create a new raw-lambda converter.
-    pub fn new(arena: &'a ParseArena, type_ctx: &'a TypeContext<'a>) -> Self {
+    pub fn new(
+        arena: &'a ParseArena,
+        type_ctx: &'a TypeContext<'a>,
+        env: &'a crate::types::env::Env,
+    ) -> Self {
         Self {
             arena,
             type_ctx,
+            env,
             id_gen: IdGenerator::new(),
             lowered: LambdaConverter::new(arena),
             unit_name: String::new(),
@@ -222,11 +228,13 @@ impl<'a> RawLambdaConverter<'a> {
     pub fn with_start_stamp(
         arena: &'a ParseArena,
         type_ctx: &'a TypeContext<'a>,
+        env: &'a crate::types::env::Env,
         start_stamp: i32,
     ) -> Self {
         Self {
             arena,
             type_ctx,
+            env,
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name: String::new(),
@@ -237,12 +245,14 @@ impl<'a> RawLambdaConverter<'a> {
     pub fn with_start_stamp_and_unit_name(
         arena: &'a ParseArena,
         type_ctx: &'a TypeContext<'a>,
+        env: &'a crate::types::env::Env,
         start_stamp: i32,
         unit_name: String,
     ) -> Self {
         Self {
             arena,
             type_ctx,
+            env,
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name,
@@ -285,7 +295,7 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::prim(Primitive::PcreateExtension(name), vec![], loc)
             }
             crate::types::typedtree::ExtensionConstructorKind::Text_rebind(path, _) => {
-                self.translate_module_path_raw(path, loc)
+                self.translate_extension_path_raw(path, loc)
             }
         }
     }
@@ -841,7 +851,7 @@ impl<'a> RawLambdaConverter<'a> {
             .any(|(name, _)| self.arena.get_string(name.txt) == "internal.local")
     }
 
-    fn translate_module_path_raw(&self, path: &crate::types::Path, loc: Location) -> RawLambda {
+    fn translate_normal_path_raw(&self, path: &crate::types::Path, loc: Location) -> RawLambda {
         match path {
             crate::types::Path::Pident(id) => {
                 if id.is_global() {
@@ -850,16 +860,34 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::var(id.clone())
                 }
             }
-            crate::types::Path::Pdot(prefix, name, _) => {
-                let prefix_lam = self.translate_module_path_raw(prefix, loc);
+            crate::types::Path::Pdot(prefix, name, pos) => {
+                let prefix_lam = self.translate_normal_path_raw(prefix, loc);
                 RawLambda::prim(
-                    Primitive::Pfield(0, FieldDbgInfo::Module { name: name.clone() }),
+                    Primitive::Pfield(*pos, FieldDbgInfo::Module { name: name.clone() }),
                     vec![prefix_lam],
                     loc,
                 )
             }
             crate::types::Path::Papply(_, _) => RawLambda::unit(),
         }
+    }
+
+    fn translate_module_path_raw(&self, path: &crate::types::Path, loc: Location) -> RawLambda {
+        let normalized = self.env.normalize_path(path);
+        self.translate_normal_path_raw(&normalized, loc)
+    }
+
+    fn translate_value_path_raw(&self, path: &crate::types::Path, loc: Location) -> RawLambda {
+        let normalized = self.env.normalize_path_prefix(path);
+        self.translate_normal_path_raw(&normalized, loc)
+    }
+
+    fn translate_extension_path_raw(
+        &self,
+        path: &crate::types::Path,
+        loc: Location,
+    ) -> RawLambda {
+        self.translate_value_path_raw(path, loc)
     }
 
     fn compose_coercions_raw(
@@ -1254,7 +1282,7 @@ impl<'a> RawLambdaConverter<'a> {
                 ValueKind::ValPrim(prim) => {
                     self.translate_primitive_raw(self.loc(expr.exp_loc), prim, expr.exp_type)
                 }
-                ValueKind::ValReg => RawLambda::from_lowered(self.translate_value_path(expr.exp_loc, path)),
+                ValueKind::ValReg => self.translate_value_path_raw(path, self.loc(expr.exp_loc)),
             },
             ExpressionDesc::Texp_constant(cst) => RawLambda::const_(self.convert_constant(cst)),
             ExpressionDesc::Texp_let(rec_flag, bindings, body) => {
@@ -1300,7 +1328,7 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_construct(_, cstr, args) => match &cstr.cstr_tag {
                 ConstructorTag::CstrExtension(path) => {
                     let mut args_lam = Vec::with_capacity(args.len() + 1);
-                    args_lam.push(self.translate_module_path_raw(path, self.loc(expr.exp_loc)));
+                    args_lam.push(self.translate_extension_path_raw(path, self.loc(expr.exp_loc)));
                     args_lam.extend(args.iter().map(|arg| self.convert_expr_raw(arg)));
                     RawLambda::prim(
                         Primitive::Pmakeblock(0, TagInfo::Extension, Mutable::Immutable),
@@ -1376,7 +1404,7 @@ impl<'a> RawLambdaConverter<'a> {
                 self.convert_expr_raw(body),
             ),
             ExpressionDesc::Texp_extension_constructor(_, path) => {
-                self.translate_module_path_raw(path, self.loc(expr.exp_loc))
+                self.translate_extension_path_raw(path, self.loc(expr.exp_loc))
             }
             ExpressionDesc::Texp_pack(modl) => self.convert_module_expr_raw(modl, &None),
             ExpressionDesc::Texp_assert(inner_expr) => {

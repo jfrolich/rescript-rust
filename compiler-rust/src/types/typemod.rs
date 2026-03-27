@@ -2703,10 +2703,14 @@ pub fn lookup_module_path_by_lid<'b>(
             let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
             let parent_type = lookup_module_type_by_lid(prefix, arena, env, pers_env, ctx)?;
             let parent_sig = resolve_mod_type_to_sig(&parent_type, Some(env), pers_env, ctx)?;
-            for sig_item in &parent_sig {
+            for (pos, sig_item) in parent_sig.iter().enumerate().rev() {
                 if let crate::types::decl::SignatureItem::SigModule(id, _sub_md, _) = sig_item {
                     if id.name() == submod_name {
-                        return Some(Path::pdot(parent_path, submod_name));
+                        return Some(Path::Pdot(
+                            Box::new(parent_path.clone()),
+                            submod_name.to_string(),
+                            pos as i32,
+                        ));
                     }
                 }
             }

@@ -738,6 +738,23 @@ impl Env {
         self.normalize_path_inner(path, 0)
     }
 
+    /// Normalize the prefix of a value/extension path by following module aliases.
+    /// Equivalent to OCaml's `Env.normalize_path_prefix`.
+    pub fn normalize_path_prefix(&self, path: &Path) -> Path {
+        match path {
+            Path::Pdot(prefix, name, pos) => {
+                let normalized_prefix = self.normalize_path(prefix);
+                if normalized_prefix == **prefix {
+                    path.clone()
+                } else {
+                    Path::Pdot(Box::new(normalized_prefix), name.clone(), *pos)
+                }
+            }
+            Path::Pident(_) => path.clone(),
+            Path::Papply(_, _) => panic!("normalize_path_prefix called on Papply"),
+        }
+    }
+
     fn normalize_path_inner(&self, path: &Path, depth: usize) -> Path {
         if depth > 20 {
             return path.clone(); // Prevent infinite loops

@@ -2402,12 +2402,15 @@ pub fn add_signature_to_env(
             .collect()
     }
 
-    for item in sig_items {
+    for (pos, item) in sig_items.iter().enumerate() {
+        let slot_path = |name: &str| {
+            Path::Pdot(Box::new(module_path.clone()), name.to_string(), pos as i32)
+        };
         match item {
             SignatureItem::SigValue(id, desc) => {
                 // Add value binding with qualified path
                 let mut desc = desc.clone();
-                desc.val_path = Some(Path::pdot(module_path.clone(), id.name()));
+                desc.val_path = Some(slot_path(id.name()));
                 if std::env::var_os("RUST_DEBUG_OPEN_SIG_VALUES").is_some()
                     && (id.name() == "someElement"
                         || id.name() == "element"
@@ -2653,7 +2656,7 @@ pub fn add_signature_to_env(
                 // Set the qualified path so that when this module is accessed
                 // via Lident (e.g. "Console" from opened Stdlib), we produce
                 // the correct Pdot path (e.g. Pdot(Pident("Stdlib"), "Console"))
-                let access_path = Path::pdot(module_path.clone(), id.name());
+                let access_path = slot_path(id.name());
                 md.md_path = Some(access_path.clone());
                 // Rewrite module-type paths against the opened signature.
                 // Some CMI signatures use hidden self-alias heads (e.g. `ArrayExt!`)
