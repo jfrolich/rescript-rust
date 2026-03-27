@@ -115,6 +115,8 @@ pub enum RawLambda {
     ),
     /// Assignment.
     Lassign(Ident, Box<RawLambda>),
+    /// Method send.
+    Lsend(String, Box<RawLambda>, Location),
 }
 
 impl RawLambda {
@@ -389,6 +391,19 @@ impl RawLambda {
                 Box::new(body.into_lowered()),
             ),
             RawLambda::Lassign(id, value) => Lambda::Lassign(id, Box::new(value.into_lowered())),
+            RawLambda::Lsend(name, obj, loc) => Lambda::Lprim(
+                crate::lambda::PrimInfo {
+                    primitive: Primitive::PjsCall {
+                        prim_name: format!("send{name}"),
+                        arg_types: vec![crate::lambda::primitive::ExternalArgSpec { label: None }],
+                        ffi: crate::lambda::primitive::ExternalFfiSpec { module_name: None },
+                        dynamic_import: false,
+                        transformed_jsx: false,
+                    },
+                    args: vec![obj.into_lowered()],
+                    loc,
+                },
+            ),
         }
     }
 }

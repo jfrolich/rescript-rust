@@ -4,6 +4,7 @@
 //! incrementally ports expression lowering from `translcore.ml`.
 
 use std::collections::BTreeSet;
+use std::path::Path as StdPath;
 use std::sync::{Mutex, OnceLock};
 
 use crate::context::IdGenerator;
@@ -27,9 +28,10 @@ use crate::types::ConstructorTag;
 use crate::types::decl::{LabelDescription, RecordRepresentation, ValueKind};
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, Expression, ExpressionDesc, FunctionParam,
-    FunctionParamPattern, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc,
+    FunctionParamPattern, MethKind, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc,
     RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, ValueBinding,
 };
+use crate::types::SignatureItem;
 
 fn iter_bound_pattern_idents<'a, F>(pat: &'a Pattern, f: &mut F)
 where
@@ -172,6 +174,15 @@ fn wrap_aliases(aliases: &[Ident], scrut: Lambda, body: Lambda) -> Lambda {
     })
 }
 
+#[derive(Clone, Copy)]
+enum RawLocKind {
+    File,
+    Line,
+    Module,
+    Loc,
+    Pos,
+}
+
 /// Converter from typedtree to raw lambda.
 pub struct RawLambdaConverter<'a> {
     arena: &'a ParseArena,
@@ -203,14 +214,123 @@ impl<'a> RawLambdaConverter<'a> {
         self.arena.to_location(idx)
     }
 
+    fn raw_loc_kind(name: &str) -> Option<RawLocKind> {
+        match name {
+            "%loc_FILE" => Some(RawLocKind::File),
+            "%loc_LINE" => Some(RawLocKind::Line),
+            "%loc_MODULE" => Some(RawLocKind::Module),
+            "%loc_LOC" => Some(RawLocKind::Loc),
+            "%loc_POS" => Some(RawLocKind::Pos),
+            _ => None,
+        }
+    }
+
+    fn basename_for_loc(&self, loc: Location) -> String {
+        if loc.file_name_idx().0 == 0 {
+            return String::new();
+        }
+        let file = self.arena.get_string(loc.file_name_idx());
+        StdPath::new(file)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(file)
+            .to_string()
+    }
+
+    fn module_name_for_loc(&self, loc: Location) -> String {
+        let file = self.basename_for_loc(loc);
+        let stem = StdPath::new(&file)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(file.as_str());
+        let mut chars = stem.chars();
+        match chars.next() {
+            None => String::new(),
+            Some(ch) => ch.to_uppercase().collect::<String>() + chars.as_str(),
+        }
+    }
+
+    fn loc_coords(loc: Location) -> (i32, i32, i32) {
+        let line = loc.loc_start.line;
+        let start_col = loc.loc_start.column();
+        let end_col = loc.loc_end.cnum - loc.loc_start.cnum + start_col;
+        (line, start_col, end_col)
+    }
+
+    fn raw_loc_constant(&self, kind: RawLocKind, loc: Location) -> RawLambda {
+        let file = self.basename_for_loc(loc);
+        let (line, start_col, end_col) = Self::loc_coords(loc);
+        match kind {
+            RawLocKind::File => RawLambda::const_(Constant::String {
+                s: file,
+                delim: None,
+            }),
+            RawLocKind::Line => RawLambda::const_(Constant::int(line)),
+            RawLocKind::Module => RawLambda::const_(Constant::String {
+                s: self.module_name_for_loc(loc),
+                delim: None,
+            }),
+            RawLocKind::Loc => RawLambda::const_(Constant::String {
+                s: format!("File {file:?}, line {line}, characters {start_col}-{end_col}"),
+                delim: None,
+            }),
+            RawLocKind::Pos => RawLambda::const_(Constant::Block {
+                tag: 0,
+                tag_info: TagInfo::Tuple,
+                elements: vec![
+                    Constant::String {
+                        s: file,
+                        delim: None,
+                    },
+                    Constant::int(line),
+                    Constant::int(start_col),
+                    Constant::int(end_col),
+                ],
+            }),
+        }
+    }
+
+    fn include_bound_idents(sig: &[SignatureItem]) -> Vec<Ident> {
+        sig.iter()
+            .filter_map(|item| match item {
+                SignatureItem::SigValue(id, _) | SignatureItem::SigModule(id, _, _) => {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rebind_included_idents_raw(
+        &self,
+        mid: &Ident,
+        ids: &[Ident],
+        body: RawLambda,
+        loc: Location,
+    ) -> RawLambda {
+        ids.iter().enumerate().rev().fold(body, |acc, (pos, id)| {
+            RawLambda::let_(
+                LetKind::Alias,
+                id.clone(),
+                RawLambda::prim(
+                    Primitive::Pfield(
+                        pos as i32,
+                        FieldDbgInfo::Module {
+                            name: id.name().to_string(),
+                        },
+                    ),
+                    vec![RawLambda::var(mid.clone())],
+                    loc,
+                ),
+                acc,
+            )
+        })
+    }
+
     /// Convert a structure into raw lambda.
     pub fn convert_structure(&mut self, structure: &Structure) -> RawLambda {
         let mut fields = Vec::new();
-        RawLambda::from_lowered(self.convert_structure_items(
-            &mut fields,
-            &structure.str_items,
-            true,
-        ))
+        self.convert_structure_items_raw(&mut fields, &structure.str_items, true)
     }
 
     fn pure_module(module_expr: &ModuleExpr) -> LetKind {
@@ -225,6 +345,123 @@ impl<'a> RawLambdaConverter<'a> {
         attrs
             .iter()
             .any(|(name, _)| self.arena.get_string(name.txt) == "internal.local")
+    }
+
+    fn translate_module_path_raw(&self, path: &crate::types::Path, loc: Location) -> RawLambda {
+        match path {
+            crate::types::Path::Pident(id) => {
+                if id.is_global() {
+                    RawLambda::global_module(id.clone(), false)
+                } else {
+                    RawLambda::var(id.clone())
+                }
+            }
+            crate::types::Path::Pdot(prefix, name, _) => {
+                let prefix_lam = self.translate_module_path_raw(prefix, loc);
+                RawLambda::prim(
+                    Primitive::Pfield(0, FieldDbgInfo::Module { name: name.clone() }),
+                    vec![prefix_lam],
+                    loc,
+                )
+            }
+            crate::types::Path::Papply(_, _) => RawLambda::unit(),
+        }
+    }
+
+    fn convert_module_expr_raw(&mut self, module_expr: &ModuleExpr) -> RawLambda {
+        match &module_expr.mod_desc {
+            ModuleExprDesc::Tmod_structure(structure) => {
+                let mut fields = Vec::new();
+                self.convert_structure_items_raw(&mut fields, &structure.str_items, false)
+            }
+            ModuleExprDesc::Tmod_constraint(inner, _, _, _) => self.convert_module_expr_raw(inner),
+            ModuleExprDesc::Tmod_ident(path, _) => {
+                self.translate_module_path_raw(path, self.loc(module_expr.mod_loc))
+            }
+            ModuleExprDesc::Tmod_unpack(expr, _) => self.convert_expr_raw(expr),
+            ModuleExprDesc::Tmod_apply(_, _, _) | ModuleExprDesc::Tmod_functor(_, _, _, _) => {
+                RawLambda::from_lowered(self.convert_module_expr(module_expr))
+            }
+        }
+    }
+
+    fn convert_structure_items_raw(
+        &mut self,
+        fields: &mut Vec<Ident>,
+        items: &[StructureItem],
+        is_top_level: bool,
+    ) -> RawLambda {
+        let Some((item, rem)) = items.split_first() else {
+            let block_fields = fields.iter().cloned().map(RawLambda::var).collect();
+            let tag = if is_top_level {
+                TagInfo::ModuleExport(fields.clone())
+            } else {
+                TagInfo::Module(fields.iter().map(|id| id.name().to_string()).collect())
+            };
+            return RawLambda::prim(
+                Primitive::Pmakeblock(0, tag, Mutable::Immutable),
+                block_fields,
+                Location::none(),
+            );
+        };
+
+        match &item.str_desc {
+            StructureItemDesc::Tstr_eval(expr, _) => RawLambda::seq(
+                self.convert_expr_raw(expr),
+                self.convert_structure_items_raw(fields, rem, is_top_level),
+            ),
+            StructureItemDesc::Tstr_value(rec_flag, bindings) => {
+                let old_len = fields.len();
+                fields.extend(let_bound_idents(bindings));
+                let body = self.convert_structure_items_raw(fields, rem, is_top_level);
+                fields.truncate(old_len);
+                self.convert_let_with_body_raw(*rec_flag, bindings, body)
+            }
+            StructureItemDesc::Tstr_module(binding) => {
+                let old_len = fields.len();
+                if !self.rescript_hide_attributes(&binding.mb_attributes) {
+                    fields.push(binding.mb_id.clone());
+                }
+                let body = self.convert_structure_items_raw(fields, rem, is_top_level);
+                fields.truncate(old_len);
+                RawLambda::let_(
+                    Self::pure_module(&binding.mb_expr),
+                    binding.mb_id.clone(),
+                    self.convert_module_expr_raw(&binding.mb_expr),
+                    body,
+                )
+            }
+            StructureItemDesc::Tstr_include(incl) => {
+                let ids = Self::include_bound_idents(&incl.incl_type);
+                let old_len = fields.len();
+                fields.extend(ids.iter().cloned());
+                let body = self.convert_structure_items_raw(fields, rem, is_top_level);
+                fields.truncate(old_len);
+                let mid = self.id_gen.create("include");
+                let body = self.rebind_included_idents_raw(
+                    &mid,
+                    &ids,
+                    body,
+                    self.loc(incl.incl_loc),
+                );
+                RawLambda::let_(
+                    Self::pure_module(&incl.incl_mod),
+                    mid,
+                    self.convert_module_expr_raw(&incl.incl_mod),
+                    body,
+                )
+            }
+            StructureItemDesc::Tstr_primitive(_)
+            | StructureItemDesc::Tstr_type(_, _)
+            | StructureItemDesc::Tstr_typext(_)
+            | StructureItemDesc::Tstr_exception(_)
+            | StructureItemDesc::Tstr_recmodule(_)
+            | StructureItemDesc::Tstr_modtype(_)
+            | StructureItemDesc::Tstr_open(_)
+            | StructureItemDesc::Tstr_attribute(_) => {
+                self.convert_structure_items_raw(fields, rem, is_top_level)
+            }
+        }
     }
 
     fn translate_module_path(&self, path: &crate::types::Path, loc: Location) -> Lambda {
@@ -321,6 +558,95 @@ impl<'a> RawLambdaConverter<'a> {
             | StructureItemDesc::Tstr_open(_)
             | StructureItemDesc::Tstr_include(_)
             | StructureItemDesc::Tstr_attribute(_) => self.convert_structure_items(fields, rem, is_top_level),
+        }
+    }
+
+    fn convert_expr_raw(&mut self, expr: &Expression) -> RawLambda {
+        match &expr.exp_desc {
+            ExpressionDesc::Texp_ident(path, _, desc) => match &desc.val_kind {
+                ValueKind::ValPrim(prim) => self.translate_primitive_raw(self.loc(expr.exp_loc), prim),
+                ValueKind::ValReg => RawLambda::from_lowered(self.translate_value_path(expr.exp_loc, path)),
+            },
+            ExpressionDesc::Texp_constant(cst) => RawLambda::const_(self.convert_constant(cst)),
+            ExpressionDesc::Texp_let(rec_flag, bindings, body) => {
+                let body_lam = self.convert_expr_raw(body);
+                self.convert_let_with_body_raw(*rec_flag, bindings, body_lam)
+            }
+            ExpressionDesc::Texp_function {
+                params,
+                body,
+                partial,
+                arity,
+                ..
+            } if body.len() == 1 && body[0].c_guard.is_none() => {
+                self.convert_function_raw(params, body, *partial, *arity, self.loc(expr.exp_loc))
+            }
+            ExpressionDesc::Texp_apply {
+                funct,
+                args,
+                partial,
+                transformed_jsx,
+            } => self.convert_apply_raw(
+                self.loc(expr.exp_loc),
+                funct,
+                args,
+                *partial,
+                *transformed_jsx,
+            ),
+            ExpressionDesc::Texp_ifthenelse(cond, then_, else_) => {
+                let else_lam = else_
+                    .as_ref()
+                    .map(|e| self.convert_expr_raw(e))
+                    .unwrap_or_else(RawLambda::unit);
+                RawLambda::LifThenElse(
+                    Box::new(self.convert_expr_raw(cond)),
+                    Box::new(self.convert_expr_raw(then_)),
+                    Box::new(else_lam),
+                )
+            }
+            ExpressionDesc::Texp_sequence(a, b) => {
+                RawLambda::seq(self.convert_expr_raw(a), self.convert_expr_raw(b))
+            }
+            ExpressionDesc::Texp_while(cond, body) => RawLambda::Lwhile(
+                Box::new(self.convert_expr_raw(cond)),
+                Box::new(self.convert_expr_raw(body)),
+            ),
+            ExpressionDesc::Texp_for(var, _pat, start, end, dir, body) => {
+                let dir = match dir {
+                    crate::parser::ast::DirectionFlag::Upto => crate::lambda::DirectionFlag::Upto,
+                    crate::parser::ast::DirectionFlag::Downto => {
+                        crate::lambda::DirectionFlag::Downto
+                    }
+                };
+                RawLambda::Lfor(
+                    var.clone(),
+                    Box::new(self.convert_expr_raw(start)),
+                    Box::new(self.convert_expr_raw(end)),
+                    dir,
+                    Box::new(self.convert_expr_raw(body)),
+                )
+            }
+            ExpressionDesc::Texp_send(obj_expr, MethKind::Tmeth_name(name), _) => RawLambda::Lsend(
+                name.clone(),
+                Box::new(self.convert_expr_raw(obj_expr)),
+                self.loc(expr.exp_loc),
+            ),
+            ExpressionDesc::Texp_letmodule(id, _, modl, body) => RawLambda::let_(
+                LetKind::Strict,
+                id.clone(),
+                self.convert_module_expr_raw(modl),
+                self.convert_expr_raw(body),
+            ),
+            ExpressionDesc::Texp_pack(modl) => self.convert_module_expr_raw(modl),
+            ExpressionDesc::Texp_assert(inner_expr) => {
+                let failure = RawLambda::from_lowered(self.match_failure(self.loc(inner_expr.exp_loc)));
+                RawLambda::LifThenElse(
+                    Box::new(self.convert_expr_raw(inner_expr)),
+                    Box::new(RawLambda::unit()),
+                    Box::new(failure),
+                )
+            }
+            _ => RawLambda::from_lowered(self.convert_expr(expr)),
         }
     }
 
@@ -1206,6 +1532,159 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn convert_let_with_body_raw(
+        &mut self,
+        rec_flag: crate::parser::ast::RecFlag,
+        bindings: &[ValueBinding],
+        body: RawLambda,
+    ) -> RawLambda {
+        match rec_flag {
+            crate::parser::ast::RecFlag::Nonrecursive => {
+                if bindings.iter().all(|binding| simple_let_binding_id(binding).is_some()) {
+                    bindings.iter().rev().fold(body, |acc, binding| {
+                        let id = simple_let_binding_id(binding).expect("checked above");
+                        let value = self.convert_expr_raw(&binding.vb_expr);
+                        RawLambda::let_(LetKind::Strict, id, value, acc)
+                    })
+                } else {
+                    RawLambda::from_lowered(
+                        self.lowered
+                            .convert_let_with_body(rec_flag, bindings, body.into_lowered()),
+                    )
+                }
+            }
+            crate::parser::ast::RecFlag::Recursive => {
+                if bindings.iter().all(|binding| simple_let_binding_id(binding).is_some()) {
+                    let lam_bindings = bindings
+                        .iter()
+                        .map(|binding| {
+                            (
+                                simple_let_binding_id(binding).expect("checked above"),
+                                self.convert_expr_raw(&binding.vb_expr),
+                            )
+                        })
+                        .collect();
+                    RawLambda::letrec(lam_bindings, body)
+                } else {
+                    RawLambda::from_lowered(
+                        self.lowered
+                            .convert_let_with_body(rec_flag, bindings, body.into_lowered()),
+                    )
+                }
+            }
+        }
+    }
+
+    fn convert_function_raw(
+        &mut self,
+        params: &[FunctionParam],
+        cases: &[Case],
+        partial: Partial,
+        arity: Arity,
+        loc: Location,
+    ) -> RawLambda {
+        let (all_params, final_body, _partial) =
+            self.flatten_function_by_arity(params, cases, partial, arity);
+
+        let mut param_ids = Vec::new();
+        for (idx, param) in all_params.iter().enumerate() {
+            let pat = Self::param_pattern(param);
+            let id = match &pat.pat_desc {
+                PatternDesc::Tpat_var(id, _) => id.clone(),
+                PatternDesc::Tpat_alias(_, id, _) => id.clone(),
+                _ => self.id_gen.create(&format!("param{idx}")),
+            };
+            param_ids.push(id);
+        }
+
+        let body = final_body
+            .map(|expr| self.convert_expr_raw(expr))
+            .unwrap_or_else(RawLambda::unit);
+        let lambda = RawLambda::function_(
+            param_ids.len() as i32,
+            param_ids,
+            body,
+            FunctionAttribute::default(),
+        );
+
+        match self.arena.get_arity(arity) {
+            Some(n) => RawLambda::prim(Primitive::PjsFnMake(n as i32), vec![lambda], loc),
+            None => lambda,
+        }
+    }
+
+    fn convert_apply_raw(
+        &mut self,
+        loc: Location,
+        funct: &Expression,
+        args: &[ApplyArg],
+        _partial: bool,
+        transformed_jsx: bool,
+    ) -> RawLambda {
+        if let ExpressionDesc::Texp_ident(_, _, desc) = &funct.exp_desc {
+            if let ValueKind::ValPrim(prim) = &desc.val_kind {
+                let raw_name = Self::raw_primitive_name(&prim.prim_name);
+                let prim_arity = prim.prim_arity.max(0) as usize;
+                if args.len() >= prim_arity
+                    && args.iter().take(prim_arity).all(|arg| arg.expression.is_some())
+                {
+                    let (applied, rest) = args.split_at(prim_arity);
+                    if let Some(kind) = Self::raw_loc_kind(raw_name) {
+                        let base = match applied {
+                            [] => self.raw_loc_constant(kind, loc),
+                            [arg] => {
+                                let expr = arg.expression.as_ref().expect("checked above");
+                                RawLambda::prim(
+                                    Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+                                    vec![
+                                        self.raw_loc_constant(kind, self.loc(expr.exp_loc)),
+                                        self.convert_expr_raw(expr),
+                                    ],
+                                    loc,
+                                )
+                            }
+                            _ => RawLambda::unit(),
+                        };
+                        return if rest.is_empty() {
+                            base
+                        } else {
+                            self.transl_apply_raw(base, rest, loc, transformed_jsx)
+                        };
+                    }
+                    if raw_name == "%identity" && applied.len() == 1 {
+                        let expr = applied[0].expression.as_ref().expect("checked above");
+                        let base = self.convert_expr_raw(expr);
+                        return if rest.is_empty() {
+                            base
+                        } else {
+                            self.transl_apply_raw(base, rest, loc, transformed_jsx)
+                        };
+                    }
+                    let base = RawLambda::prim(
+                        self.translate_primitive_application(prim, transformed_jsx),
+                        applied
+                            .iter()
+                            .map(|arg| {
+                                self.convert_expr_raw(
+                                    arg.expression.as_ref().expect("checked above"),
+                                )
+                            })
+                            .collect(),
+                        loc,
+                    );
+                    return if rest.is_empty() {
+                        base
+                    } else {
+                        self.transl_apply_raw(base, rest, loc, transformed_jsx)
+                    };
+                }
+            }
+        }
+
+        let funct_lam = self.convert_expr_raw(funct);
+        self.transl_apply_raw(funct_lam, args, loc, transformed_jsx)
+    }
+
     fn convert_let_with_body(
         &mut self,
         rec_flag: crate::parser::ast::RecFlag,
@@ -1543,6 +2022,201 @@ impl<'a> RawLambdaConverter<'a> {
             })
             .collect::<Vec<_>>();
         build_apply(self, lam, Vec::new(), &pending, loc, transformed_jsx)
+    }
+
+    fn transl_apply_raw(
+        &mut self,
+        lam: RawLambda,
+        sargs: &[ApplyArg],
+        loc: Location,
+        transformed_jsx: bool,
+    ) -> RawLambda {
+        fn lapply(
+            loc: Location,
+            func: RawLambda,
+            args: Vec<RawLambda>,
+            transformed_jsx: bool,
+        ) -> RawLambda {
+            RawLambda::Lapply(crate::raw_lambda::RawApply {
+                ap_func: Box::new(func),
+                ap_args: args,
+                ap_info: ApInfo {
+                    loc,
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: transformed_jsx,
+            })
+        }
+
+        fn is_simple(lam: &RawLambda) -> bool {
+            matches!(lam, RawLambda::Lvar(_) | RawLambda::Lconst(_))
+        }
+
+        fn may_map<T, U, F>(value: Option<T>, f: F) -> Option<U>
+        where
+            F: FnOnce(T) -> U,
+        {
+            value.map(f)
+        }
+
+        fn build_apply(
+            conv: &mut RawLambdaConverter<'_>,
+            lam: RawLambda,
+            mut args_rev: Vec<(RawLambda, bool)>,
+            pending: &[(Option<RawLambda>, bool)],
+            loc: Location,
+            transformed_jsx: bool,
+        ) -> RawLambda {
+            match pending.split_first() {
+                Some(((None, optional), tail)) => {
+                    let mut defs: Vec<(Ident, RawLambda)> = Vec::new();
+                    let protect = |conv: &mut RawLambdaConverter<'_>,
+                                   name: &str,
+                                   lam: RawLambda,
+                                   defs: &mut Vec<(Ident, RawLambda)>| {
+                        if is_simple(&lam) {
+                            lam
+                        } else {
+                            let id = conv.id_gen.create(name);
+                            defs.push((id.clone(), lam));
+                            RawLambda::var(id)
+                        }
+                    };
+
+                    let all_optional = args_rev.iter().all(|(_, is_optional)| *is_optional);
+                    let remaining_args = if all_optional {
+                        std::mem::take(&mut args_rev)
+                    } else {
+                        Vec::new()
+                    };
+                    let applied = if args_rev.is_empty() {
+                        lam
+                    } else {
+                        lapply(
+                            loc,
+                            lam,
+                            args_rev.into_iter().rev().map(|(arg, _)| arg).collect(),
+                            transformed_jsx,
+                        )
+                    };
+                    let handle = protect(conv, "func", applied, &mut defs);
+                    let protected_tail = tail
+                        .iter()
+                        .map(|(arg, is_optional)| {
+                            (
+                                arg.as_ref()
+                                    .map(|lam| protect(conv, "arg", lam.clone(), &mut defs)),
+                                *is_optional,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let id_arg = conv.id_gen.create("param");
+                    let mut next_args_rev = Vec::with_capacity(1 + remaining_args.len());
+                    next_args_rev.push((RawLambda::var(id_arg.clone()), *optional));
+                    next_args_rev.extend(remaining_args);
+                    let body = match build_apply(
+                        conv,
+                        handle,
+                        next_args_rev,
+                        &protected_tail,
+                        loc,
+                        transformed_jsx,
+                    ) {
+                        RawLambda::Lfunction(func) => RawLambda::Lfunction(crate::raw_lambda::RawLFunction {
+                            arity: func.arity + 1,
+                            params: std::iter::once(id_arg).chain(func.params).collect(),
+                            body: func.body,
+                            attr: func.attr,
+                        }),
+                        lam => RawLambda::function_(
+                            1,
+                            vec![id_arg],
+                            lam,
+                            FunctionAttribute::default(),
+                        ),
+                    };
+                    defs.into_iter().fold(body, |body, (id, lam)| {
+                        RawLambda::let_(LetKind::Strict, id, lam, body)
+                    })
+                }
+                Some(((Some(arg), optional), tail)) => {
+                    args_rev.insert(0, (arg.clone(), *optional));
+                    build_apply(conv, lam, args_rev, tail, loc, transformed_jsx)
+                }
+                None => lapply(
+                    loc,
+                    lam,
+                    args_rev.into_iter().rev().map(|(arg, _)| arg).collect(),
+                    transformed_jsx,
+                ),
+            }
+        }
+
+        let pending = sargs
+            .iter()
+            .map(|arg| {
+                (
+                    may_map(arg.expression.clone(), |expr| self.convert_expr_raw(&expr)),
+                    arg.label.is_optional(),
+                )
+            })
+            .collect::<Vec<_>>();
+        build_apply(self, lam, Vec::new(), &pending, loc, transformed_jsx)
+    }
+
+    fn translate_primitive_raw(
+        &mut self,
+        loc: Location,
+        prim: &crate::types::PrimitiveDescription,
+    ) -> RawLambda {
+        let raw_name = Self::raw_primitive_name(&prim.prim_name);
+        if let Some(kind) = Self::raw_loc_kind(raw_name) {
+            let lam = self.raw_loc_constant(kind, loc);
+            return match prim.prim_arity {
+                0 => lam,
+                1 => {
+                    let param = self.id_gen.create("prim");
+                    RawLambda::function_(
+                        1,
+                        vec![param.clone()],
+                        RawLambda::prim(
+                            Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+                            vec![lam, RawLambda::var(param)],
+                            loc,
+                        ),
+                        FunctionAttribute::default(),
+                    )
+                }
+                _ => RawLambda::unit(),
+            };
+        }
+        if raw_name == "%null" && prim.prim_arity == 0 {
+            return RawLambda::const_(Constant::JsNull);
+        }
+        if raw_name == "%undefined" && prim.prim_arity == 0 {
+            return RawLambda::const_(Constant::JsUndefined { is_unit: false });
+        }
+        if raw_name == "%identity" && prim.prim_arity == 1 {
+            let param = self.id_gen.create("prim");
+            return RawLambda::function_(
+                1,
+                vec![param.clone()],
+                RawLambda::var(param),
+                FunctionAttribute::default(),
+            );
+        }
+        if raw_name == "%ignore" && prim.prim_arity == 1 {
+            let param = self.id_gen.create("prim");
+            return RawLambda::function_(
+                1,
+                vec![param.clone()],
+                RawLambda::seq(RawLambda::var(param), RawLambda::unit()),
+                FunctionAttribute::default(),
+            );
+        }
+
+        RawLambda::from_lowered(self.translate_primitive(loc, prim))
     }
 
     fn translate_primitive(

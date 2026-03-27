@@ -147,7 +147,10 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
                 f.print(format_args!("'\\x{i:02x}'"));
             }
         }
-        Constant::String { s, .. } => f.print(format_args!("{s:?}")),
+        Constant::String { s, .. } => {
+            f.string("#");
+            f.print(format_args!("{s:?}"));
+        }
         Constant::Float(s) => f.string(s),
         Constant::BigInt { negative, value } => {
             if *negative {
@@ -533,6 +536,16 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             print_ident(f, id);
             f.space();
             lam(f, expr);
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::Lsend(name, obj, _) => {
+            f.open_box(BoxKind::HOV, 2);
+            f.string("(send");
+            f.string(name);
+            f.space();
+            lam(f, obj);
+            f.space();
             f.string(")");
             f.close_box();
         }
