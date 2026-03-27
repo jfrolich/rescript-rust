@@ -1024,9 +1024,17 @@ impl<'a> RawLambdaConverter<'a> {
                 body,
                 partial,
                 arity,
-                ..
+                async_,
             } if body.len() == 1 && body[0].c_guard.is_none() => {
-                self.convert_function_raw(params, body, *partial, *arity, self.loc(expr.exp_loc))
+                self.convert_function_raw(
+                    params,
+                    body,
+                    *partial,
+                    *arity,
+                    expr.exp_type,
+                    *async_,
+                    self.loc(expr.exp_loc),
+                )
             }
             ExpressionDesc::Texp_apply {
                 funct,
@@ -2028,6 +2036,8 @@ impl<'a> RawLambdaConverter<'a> {
         cases: &[Case],
         partial: Partial,
         arity: Arity,
+        function_type: TypeExprRef,
+        async_: bool,
         loc: Location,
     ) -> RawLambda {
         let (all_params, final_body, _partial) =
@@ -2039,11 +2049,15 @@ impl<'a> RawLambdaConverter<'a> {
             let id = match &pat.pat_desc {
                 PatternDesc::Tpat_var(id, _) => id.clone(),
                 PatternDesc::Tpat_alias(_, id, _) => id.clone(),
+                _ if all_params.len() == 1 => self.id_gen.create("param"),
                 _ => self.id_gen.create(&format!("param{idx}")),
             };
             param_ids.push(id);
         }
 
+        let return_unit = final_body
+            .map(|expr| self.is_base_type(expr.exp_type, "unit"))
+            .unwrap_or(false);
         let body = final_body
             .map(|expr| self.convert_expr_raw(expr))
             .unwrap_or_else(RawLambda::unit);
@@ -2051,11 +2065,26 @@ impl<'a> RawLambdaConverter<'a> {
             param_ids.len() as i32,
             param_ids,
             body,
-            FunctionAttribute::default(),
+            FunctionAttribute {
+                return_unit,
+                async_,
+                ..FunctionAttribute::default()
+            },
         );
 
         match self.arena.get_arity(arity) {
-            Some(n) => RawLambda::prim(Primitive::PjsFnMake(n as i32), vec![lambda], loc),
+            Some(n) => {
+                let prim = if let Some((lhs, _)) = self.is_function_type(function_type) {
+                    if self.is_base_type(lhs, "unit") {
+                        Primitive::PjsFnMakeUnit
+                    } else {
+                        Primitive::PjsFnMake(n as i32)
+                    }
+                } else {
+                    Primitive::PjsFnMake(n as i32)
+                };
+                RawLambda::prim(prim, vec![lambda], loc)
+            }
             None => lambda,
         }
     }
