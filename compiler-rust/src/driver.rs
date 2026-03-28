@@ -526,6 +526,13 @@ pub fn compile_source_to_js_with_options(
         );
     }
 
+    prepare_inferred_signature_for_saving(
+        &type_ctx,
+        &typed_structure,
+        options.source_filename.as_deref(),
+        has_resi,
+    );
+
     // Typedtree parity runs only need typechecking output.
     // Skipping Lambda/JS lowering avoids unrelated downstream failures
     // (timeouts/crashes) from obscuring typedtree parity results.
@@ -1577,4 +1584,94 @@ pub(crate) fn normalize_signature_types(
     }
 
     norm_structure(type_ctx, final_env, typed_structure, false);
+}
+
+fn rename_ident_for_save_signature(
+    type_ctx: &TypeContext<'_>,
+    id: &crate::ident::Ident,
+) -> crate::ident::Ident {
+    let fresh = type_ctx.create_ident(id.name());
+    if fresh.flags() == id.flags() {
+        fresh
+    } else {
+        crate::ident::Ident::new(id.name(), fresh.stamp(), id.flags())
+    }
+}
+
+fn consume_module_type_save_signature_renames(
+    type_ctx: &TypeContext<'_>,
+    mty: &crate::types::decl::ModuleType,
+) {
+    use crate::types::decl::ModuleType;
+
+    match mty {
+        ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
+        ModuleType::MtySignature(sig) => consume_signature_save_renames(type_ctx, sig),
+        ModuleType::MtyFunctor {
+            param,
+            param_type,
+            result,
+        } => {
+            let _ = rename_ident_for_save_signature(type_ctx, param);
+            if let Some(param_type) = param_type.as_deref() {
+                consume_module_type_save_signature_renames(type_ctx, param_type);
+            }
+            consume_module_type_save_signature_renames(type_ctx, result);
+        }
+    }
+}
+
+fn consume_signature_save_renames(
+    type_ctx: &TypeContext<'_>,
+    sig: &[crate::types::decl::SignatureItem],
+) {
+    use crate::types::decl::SignatureItem;
+
+    for item in sig {
+        match item {
+            SignatureItem::SigType(id, _, _)
+            | SignatureItem::SigModule(id, _, _)
+            | SignatureItem::SigModtype(id, _)
+            | SignatureItem::SigValue(id, _)
+            | SignatureItem::SigTypext(id, _, _) => {
+                let _ = rename_ident_for_save_signature(type_ctx, id);
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        }
+    }
+
+    for item in sig {
+        match item {
+            SignatureItem::SigModule(_, md, _) => {
+                consume_module_type_save_signature_renames(type_ctx, &md.md_type);
+            }
+            SignatureItem::SigModtype(_, mtd) => {
+                if let Some(mty) = &mtd.mtd_type {
+                    consume_module_type_save_signature_renames(type_ctx, mty);
+                }
+            }
+            SignatureItem::SigValue(_, _)
+            | SignatureItem::SigType(_, _, _)
+            | SignatureItem::SigTypext(_, _, _)
+            | SignatureItem::SigClass
+            | SignatureItem::SigClassType => {}
+        }
+    }
+}
+
+fn prepare_inferred_signature_for_saving(
+    type_ctx: &TypeContext<'_>,
+    typed_structure: &crate::types::typedtree::Structure,
+    source_filename: Option<&str>,
+    has_resi: bool,
+) {
+    let Some(source_filename) = source_filename else {
+        return;
+    };
+    if has_resi || !source_filename.ends_with(".res") {
+        return;
+    }
+
+    let simple_sig = crate::types::includemod::simplify_signature(&typed_structure.str_type);
+    consume_signature_save_renames(type_ctx, &simple_sig);
 }
