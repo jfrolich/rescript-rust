@@ -1916,6 +1916,9 @@ impl<'a> RawLambdaConverter<'a> {
                     self.compile_simple_string_match(self.loc(expr.exp_loc), scrut, cases, *partial)
                 })
                 .or_else(|| {
+                    self.compile_simple_variant_match_raw(self.loc(expr.exp_loc), scrut, cases, *partial)
+                })
+                .or_else(|| {
                     self.compile_simple_tuple_match_raw(self.loc(expr.exp_loc), scrut, cases, *partial)
                 })
                 .or_else(|| {
@@ -1944,7 +1947,10 @@ impl<'a> RawLambdaConverter<'a> {
                 self.convert_construct_raw(self.loc(expr.exp_loc), cstr, args)
             }
             ExpressionDesc::Texp_variant(tag, arg) => match arg {
-                None => RawLambda::const_(Constant::Pointer(tag.to_string())),
+                None => RawLambda::const_(Constant::Pointer(format!(
+                    "{}a",
+                    crate::types::btype::hash_variant(tag)
+                ))),
                 Some(arg) => {
                     let arg_lam = self.convert_expr_raw(arg);
                     self.raw_block_or_prim(
@@ -2714,6 +2720,149 @@ impl<'a> RawLambdaConverter<'a> {
         RawLambda::let_(LetKind::Alias, tmp, RawLambda::var(scrut_id.clone()), result)
     }
 
+    fn compile_simple_variant_match_raw(
+        &mut self,
+        loc: Location,
+        scrut: &Expression,
+        cases: &[Case],
+        partial: Partial,
+    ) -> Option<RawLambda> {
+        let scrut_lam = self.convert_expr_raw(scrut);
+        self.compile_simple_variant_match_raw_from_scrut(loc, scrut_lam, cases, partial)
+    }
+
+    fn compile_simple_variant_match_raw_from_scrut(
+        &mut self,
+        loc: Location,
+        scrut_lam: RawLambda,
+        cases: &[Case],
+        partial: Partial,
+    ) -> Option<RawLambda> {
+        #[derive(Clone)]
+        enum DefaultCase {
+            Any(RawLambda),
+            Bind(Ident, RawLambda),
+        }
+
+        let mut seen_tags = std::collections::BTreeSet::new();
+        let mut const_cases = Vec::<(i32, RawLambda)>::new();
+        let mut default_case = None;
+        let mut variant_pat_type = None;
+
+        for case in cases {
+            if case.c_guard.is_some() {
+                return None;
+            }
+
+            let body = self.convert_expr_raw(&case.c_rhs);
+            let (pat, aliases) = peel_aliases(&case.c_lhs);
+            match &pat.pat_desc {
+                PatternDesc::Tpat_variant(label, None, _) => {
+                    let tag = crate::types::btype::hash_variant(label);
+                    if !seen_tags.insert(tag) {
+                        return None;
+                    }
+                    if variant_pat_type.is_none() {
+                        variant_pat_type = Some(pat.pat_type);
+                    }
+                    const_cases.push((
+                        tag,
+                        wrap_aliases_raw(&aliases, RawLambda::const_(Constant::Pointer(format!("{tag}a"))), body),
+                    ));
+                }
+                PatternDesc::Tpat_any => {
+                    if default_case.is_some() {
+                        return None;
+                    }
+                    default_case = Some(DefaultCase::Any(body));
+                }
+                PatternDesc::Tpat_var(id, _) => {
+                    if default_case.is_some() {
+                        return None;
+                    }
+                    default_case = Some(DefaultCase::Bind(id.clone(), body));
+                }
+                PatternDesc::Tpat_alias(inner, id, _) if matches!(inner.pat_desc, PatternDesc::Tpat_any) => {
+                    if default_case.is_some() {
+                        return None;
+                    }
+                    default_case = Some(DefaultCase::Bind(id.clone(), body));
+                }
+                _ => return None,
+            }
+        }
+
+        if const_cases.is_empty() {
+            return None;
+        }
+
+        let row_complete = variant_pat_type.is_some_and(|pat_type| {
+            let expanded = crate::types::ctype::expand_head(self.type_ctx, self.env, pat_type);
+            let repr = self.type_ctx.repr(expanded);
+            let desc = self.type_ctx.get_desc(repr);
+            let row_complete = match &*desc {
+                TypeDesc::Tvariant(row) => {
+                    let row = crate::types::btype::row_repr(self.type_ctx, row);
+                    row.row_closed
+                        && row
+                            .row_fields
+                            .iter()
+                            .filter(|(_, field)| {
+                                !matches!(
+                                    crate::types::btype::row_field_repr(self.type_ctx, field),
+                                    crate::types::type_expr::RowField::Rabsent
+                                )
+                            })
+                            .count()
+                            == const_cases.len()
+                }
+                _ => false,
+            };
+            drop(desc);
+            row_complete
+        });
+
+        let failaction = match default_case {
+            Some(DefaultCase::Any(body)) => Some(body),
+            Some(DefaultCase::Bind(id, body)) => Some(RawLambda::let_(
+                LetKind::Alias,
+                id,
+                scrut_lam.clone(),
+                body,
+            )),
+            None if row_complete || matches!(partial, Partial::Total) => None,
+            None => Some(RawLambda::from_lowered(self.match_failure(loc))),
+        };
+
+        let result = if failaction.is_none() && const_cases.len() == 1 {
+            const_cases.into_iter().next()?.1
+        } else {
+            let cases_to_test = if let Some(default) = failaction {
+                (const_cases, default)
+            } else {
+                let mut iter = const_cases.into_iter();
+                let (_, first_body) = iter.next()?;
+                (iter.collect(), first_body)
+            };
+            cases_to_test.0.into_iter().rev().fold(cases_to_test.1, |else_, (tag, body)| {
+                RawLambda::LifThenElse(
+                    Box::new(RawLambda::prim(
+                        Primitive::Pjscomp(Comparison::Eq),
+                        vec![
+                            scrut_lam.clone(),
+                            RawLambda::const_(Constant::Pointer(format!("{tag}a"))),
+                        ],
+                        loc,
+                    )),
+                    Box::new(body),
+                    Box::new(else_),
+                )
+            })
+        };
+
+        Some(result)
+    }
+
     fn compile_simple_constructor_match_raw(
         &mut self,
         loc: Location,
@@ -3179,8 +3328,15 @@ impl<'a> RawLambdaConverter<'a> {
                 .iter()
                 .all(|(_, _, pat, _)| Self::is_irrefutable_pattern(pat)),
             PatternDesc::Tpat_construct(_, cstr, args) => {
-                matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed)
-                    && args.iter().all(Self::is_irrefutable_pattern)
+                match cstr.cstr_tag {
+                    ConstructorTag::CstrUnboxed => args.iter().all(Self::is_irrefutable_pattern),
+                    ConstructorTag::CstrConstant(_) => {
+                        args.is_empty()
+                            && cstr.cstr_consts == 1
+                            && cstr.cstr_nonconsts == 0
+                    }
+                    ConstructorTag::CstrBlock(_) | ConstructorTag::CstrExtension(_) => false,
+                }
             }
             PatternDesc::Tpat_variant(_, Some(inner), _) => Self::is_irrefutable_pattern(inner),
             PatternDesc::Tpat_variant(_, None, _) => false,
@@ -3254,6 +3410,14 @@ impl<'a> RawLambdaConverter<'a> {
                 } else {
                     body
                 }
+            }
+            PatternDesc::Tpat_construct(_, cstr, args)
+                if matches!(cstr.cstr_tag, ConstructorTag::CstrConstant(_))
+                    && args.is_empty()
+                    && cstr.cstr_consts == 1
+                    && cstr.cstr_nonconsts == 0 =>
+            {
+                body
             }
             PatternDesc::Tpat_variant(_, Some(inner), _) => {
                 let payload = Lambda::prim(
@@ -3370,6 +3534,14 @@ impl<'a> RawLambdaConverter<'a> {
                 } else {
                     body
                 }
+            }
+            PatternDesc::Tpat_construct(_, cstr, args)
+                if matches!(cstr.cstr_tag, ConstructorTag::CstrConstant(_))
+                    && args.is_empty()
+                    && cstr.cstr_consts == 1
+                    && cstr.cstr_nonconsts == 0 =>
+            {
+                body
             }
             PatternDesc::Tpat_variant(_, Some(inner), _) => {
                 let payload = RawLambda::prim(
