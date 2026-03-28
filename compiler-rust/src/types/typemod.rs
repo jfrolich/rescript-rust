@@ -4713,8 +4713,9 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                             crate::types::MutableFlag::Mutable
                                                         }
                                                     };
+                                                    let label_id = tctx.type_ctx.create_ident(lbl_name);
                                                     record_labels.push(crate::types::LabelDeclaration {
-                                                        ld_id: Ident::create_persistent(lbl_name),
+                                                        ld_id: label_id,
                                                         ld_mutable: mutable_flag,
                                                         ld_optional: label.pld_optional,
                                                         ld_type: lbl_type,
@@ -4727,8 +4728,9 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                 )
                                             }
                                         };
+                                        let cstr_id = tctx.type_ctx.create_ident(cstr_name);
                                         constructors.push(crate::types::ConstructorDeclaration {
-                                            cd_id: Ident::create_persistent(cstr_name),
+                                            cd_id: cstr_id,
                                             cd_args: cstr_args,
                                             cd_res: match &cstr.pcd_res {
                                                 Some(res_core_type_idx) => {
@@ -4767,8 +4769,9 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                 crate::types::MutableFlag::Mutable
                                             }
                                         };
+                                        let label_id = tctx.type_ctx.create_ident(lbl_name);
                                         record_labels.push(crate::types::LabelDeclaration {
-                                            ld_id: Ident::create_persistent(lbl_name),
+                                            ld_id: label_id,
                                             ld_mutable: mutable_flag,
                                             ld_optional: label.pld_optional,
                                             ld_type: lbl_type,
@@ -8356,7 +8359,7 @@ fn type_structure_item<'a>(
                                 // The spread marker itself is NOT included in any output
                                 for source_cstr in source_cstrs {
                                     let sc_name = source_cstr.cd_id.name().to_string();
-                                    let sc_id = Ident::create_persistent(&sc_name);
+                                    let sc_id = ctx.create_ident(&sc_name);
                                     let spread_constructor_attr = (
                                         Located::mknoloc(
                                             arena.constructor_from_spread_attr_str(),
@@ -8627,7 +8630,7 @@ fn type_structure_item<'a>(
                             }
 
                             let cstr_name_str = arena.get_string(cstr.pcd_name.txt);
-                            let cstr_id = Ident::create_persistent(cstr_name_str);
+                            let cstr_id = ctx.create_ident(cstr_name_str);
                             let is_constant = matches!(cstr.pcd_args, crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) if args.is_empty());
 
                             // Convert constructor arguments using transl_type
@@ -8701,8 +8704,9 @@ fn type_structure_item<'a>(
                                             crate::types::type_expr::TypeDesc::Tpoly { body, vars } if vars.is_empty() => *body,
                                             _ => poly_type_ref,
                                         };
+                                        let label_id = ctx.create_ident(lbl_name_str);
                                         internal_labels.push(crate::types::LabelDeclaration {
-                                            ld_id: Ident::create_persistent(lbl_name_str),
+                                            ld_id: label_id.clone(),
                                             ld_mutable: mutable_flag,
                                             ld_optional: lbl.pld_optional,
                                             ld_type: internal_type_ref,
@@ -8713,7 +8717,7 @@ fn type_structure_item<'a>(
                                             ),
                                         });
                                         typed_labels.push(TypedLabelDeclaration {
-                                            ld_id: Ident::create_persistent(lbl_name_str),
+                                            ld_id: label_id,
                                             ld_name: crate::parse_arena::Located {
                                                 txt: lbl_name_str.to_string(),
                                                 loc: lbl.pld_name.loc,
@@ -9028,8 +9032,9 @@ fn type_structure_item<'a>(
                                 crate::types::type_expr::TypeDesc::Tpoly { body, vars } if vars.is_empty() => *body,
                                 _ => poly_type_ref,
                             };
+                            let label_id = ctx.create_ident(lbl_name_str);
                             internal_labels.push(crate::types::LabelDeclaration {
-                                ld_id: Ident::create_persistent(lbl_name_str),
+                                ld_id: label_id.clone(),
                                 ld_mutable: mutable_flag,
                                 ld_optional: lbl.pld_optional,
                                 ld_type: internal_type_ref,
@@ -9040,7 +9045,7 @@ fn type_structure_item<'a>(
                                 ),
                             });
                             typed_tree_labels.push(TypedLabelDeclaration {
-                                ld_id: Ident::create_persistent(lbl_name_str),
+                                ld_id: label_id,
                                 ld_name: crate::parse_arena::Located {
                                     txt: lbl_name_str.to_string(),
                                     loc: lbl.pld_name.loc,
@@ -11079,8 +11084,9 @@ fn transl_sig_type_declarations<'a>(
                             crate::types::MutableFlag::Mutable
                         }
                     };
+                    let label_id = ctx.create_ident(lbl_name);
                     internal_labels.push(crate::types::LabelDeclaration {
-                        ld_id: Ident::create_persistent(lbl_name),
+                        ld_id: label_id.clone(),
                         ld_mutable: mutable_flag,
                         ld_optional: label.pld_optional,
                         ld_type: internal_lbl_type,
@@ -11092,7 +11098,7 @@ fn transl_sig_type_declarations<'a>(
                     });
 
                     typed_tree_labels.push(TypedLabelDeclaration {
-                        ld_id: Ident::create_persistent(lbl_name),
+                        ld_id: label_id,
                         ld_name: Located {
                             txt: lbl_name.to_string(),
                             loc: label.pld_name.loc,
@@ -11168,8 +11174,9 @@ fn transl_sig_type_declarations<'a>(
                                         crate::types::MutableFlag::Mutable
                                     }
                                 };
+                                let label_id = ctx.create_ident(lbl_name);
                                 internal_record_labels.push(crate::types::LabelDeclaration {
-                                    ld_id: Ident::create_persistent(lbl_name),
+                                    ld_id: label_id.clone(),
                                     ld_mutable: mutable_flag,
                                     ld_optional: label.pld_optional,
                                     ld_type: internal_lbl_type,
@@ -11180,7 +11187,7 @@ fn transl_sig_type_declarations<'a>(
                                     ),
                                 });
                                 typed_record_labels.push(TypedLabelDeclaration {
-                                    ld_id: Ident::create_persistent(lbl_name),
+                                    ld_id: label_id,
                                     ld_name: Located {
                                         txt: lbl_name.to_string(),
                                         loc: label.pld_name.loc,
@@ -11209,8 +11216,9 @@ fn transl_sig_type_declarations<'a>(
                         None => (None, None),
                     };
 
+                    let cstr_id = ctx.create_ident(cstr_name);
                     internal_cstrs.push(crate::types::ConstructorDeclaration {
-                        cd_id: Ident::create_persistent(cstr_name),
+                        cd_id: cstr_id.clone(),
                         cd_args: internal_args,
                         cd_res: internal_res,
                         cd_loc: arena.to_location(cstr.pcd_loc),
@@ -11224,7 +11232,7 @@ fn transl_sig_type_declarations<'a>(
                         },
                     });
                     typed_tree_cstrs.push(TypedConstructorDeclaration {
-                        cd_id: Ident::create_persistent(cstr_name),
+                        cd_id: cstr_id,
                         cd_name: Located {
                             txt: cstr_name.to_string(),
                             loc: cstr.pcd_name.loc,
