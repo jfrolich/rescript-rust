@@ -204,12 +204,9 @@ fn print_primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
         Primitive::PjsFnMakeUnit => f.string("#fn_mk_unit"),
         Primitive::PjsFnMethod => f.string("#fn_method"),
         Primitive::PcreateExtension(name) => f.print(format_args!("extension[{name}]")),
-        Primitive::Pmakeblock(_, tag_info, Mutable::Immutable) => {
+        Primitive::Pmakeblock(_, tag_info, Mutable::Immutable)
+        | Primitive::Pmakeblock(_, tag_info, Mutable::Mutable) => {
             f.string("makeblock ");
-            print_tag_info(f, tag_info);
-        }
-        Primitive::Pmakeblock(_, tag_info, Mutable::Mutable) => {
-            f.string("makemutable ");
             print_tag_info(f, tag_info);
         }
         Primitive::Pfield(n, field_info) => {
