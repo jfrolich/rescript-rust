@@ -16840,33 +16840,10 @@ fn type_let_bindings(
         // Create type variables for all bindings
         let binding_types: Vec<TypeExprRef> = bindings.iter().map(|_| ctx.new_var(None)).collect();
 
-        // For recursive bindings, extend environment first
-        let mut recursive_binding_ids = Vec::new();
-        let mut typing_env = if rec_flag == RecFlag::Recursive {
-            let mut new_env = env.clone();
-            for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
-                if let Some(name) =
-                    extract_recursive_binding_name(tctx.arena.get_pat(binding.pvb_pat), tctx.arena)
-                {
-                    let id = tctx.type_ctx.create_ident(tctx.arena.get_string(name.txt));
-                    recursive_binding_ids.push(id.clone());
-                    let desc = ValueDescription {
-                        val_type: *ty,
-                        val_kind: crate::types::ValueKind::ValReg,
-                        val_loc: tctx.arena.to_location(binding.pvb_loc),
-                        val_attributes: vec![],
-                        val_path: None,
-                    };
-                    new_env.add_value(id, desc);
-                }
-            }
-            tctx.active_recursive_value_ids.extend(recursive_binding_ids);
-            new_env
-        } else {
-            // Match OCaml type_let: nonrecursive patterns/RHS are typed in the
-            // original env, and only the let body gets the extended env.
-            env.clone_preserve_id()
-        };
+        // Match OCaml type_let: pattern typing always starts in the original
+        // environment. Recursive RHS typing switches to the environment built
+        // from the actual pattern-bound identifiers, not placeholder copies.
+        let mut typing_env = env.clone_preserve_id();
         if std::env::var_os("RUST_DEBUG_LET_ENVS").is_some() {
             let names: Vec<String> = bindings
                 .iter()
@@ -16915,11 +16892,9 @@ fn type_let_bindings(
             all_pattern_vars.push(state.pattern_variables.clone());
         }
 
-        // Match OCaml: update recursive env with pattern variable types.
-        // OCaml's type_pattern_list returns new_env with pattern variables
-        // (from enter_variable/build_as_type), used as exp_env for body typing.
-        // Without this, binding_type Tvars (linked to outer constraint_ty)
-        // are used instead of inner pattern types from enter_variable.
+        // Match OCaml type_let/type_pattern_list: recursive RHS typing uses the
+        // environment returned by pattern typing, which contains the real
+        // pattern-bound identifiers and types.
         if rec_flag == RecFlag::Recursive {
             for pvars in &all_pattern_vars {
                 for pv in pvars {
@@ -16931,6 +16906,7 @@ fn type_let_bindings(
                         val_path: None,
                     };
                     typing_env.add_value(pv.id.clone(), desc);
+                    tctx.active_recursive_value_ids.push(pv.id.clone());
                 }
             }
         }
