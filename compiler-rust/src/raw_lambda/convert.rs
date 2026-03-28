@@ -601,6 +601,31 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn value_path_loc_constant(
+        &self,
+        path: &crate::types::Path,
+        loc: Location,
+    ) -> Option<RawLambda> {
+        let crate::types::Path::Pdot(prefix, name, _) = path else {
+            return None;
+        };
+        let crate::types::Path::Pident(id) = &**prefix else {
+            return None;
+        };
+        if id.name() != "Pervasives" {
+            return None;
+        }
+        let kind = match name.as_str() {
+            "__FILE__" => RawLocKind::File,
+            "__LINE__" => RawLocKind::Line,
+            "__MODULE__" => RawLocKind::Module,
+            "__LOC__" => RawLocKind::Loc,
+            "__POS__" => RawLocKind::Pos,
+            _ => return None,
+        };
+        Some(self.raw_loc_constant(kind, loc))
+    }
+
     fn failure_payload(&self, loc: Location) -> Constant {
         Constant::Block {
             tag: 0,
@@ -1461,7 +1486,13 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn translate_value_path_raw(&mut self, path: &crate::types::Path, loc: Location) -> RawLambda {
+        if let Some(lam) = self.value_path_loc_constant(path, loc) {
+            return lam;
+        }
         let normalized = self.normalize_value_path_in_env(self.env, path);
+        if let Some(lam) = self.value_path_loc_constant(&normalized, loc) {
+            return lam;
+        }
         self.translate_normal_path_raw(&normalized, loc)
     }
 
@@ -1471,7 +1502,13 @@ impl<'a> RawLambdaConverter<'a> {
         path: &crate::types::Path,
         loc: Location,
     ) -> RawLambda {
+        if let Some(lam) = self.value_path_loc_constant(path, loc) {
+            return lam;
+        }
         let normalized = self.normalize_value_path_in_env(env, path);
+        if let Some(lam) = self.value_path_loc_constant(&normalized, loc) {
+            return lam;
+        }
         self.translate_normal_path_raw(&normalized, loc)
     }
 
@@ -4298,6 +4335,9 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn translate_value_path(&self, loc_idx: LocIdx, path: &crate::types::Path) -> Lambda {
+        if let Some(lam) = self.lowered.value_path_loc_constant(path, loc_idx) {
+            return lam;
+        }
         match path {
             crate::types::Path::Pident(id) => {
                 if id.is_global() {
@@ -4383,15 +4423,8 @@ impl<'a> RawLambdaConverter<'a> {
             self.flatten_function_by_arity(params, cases, partial, arity);
 
         let mut param_ids = Vec::new();
-        for (idx, param) in all_params.iter().enumerate() {
-            let pat = Self::param_pattern(param);
-            let id = match &pat.pat_desc {
-                PatternDesc::Tpat_var(id, _) => id.clone(),
-                PatternDesc::Tpat_alias(_, id, _) => id.clone(),
-                _ if idx == 0 => self.id_gen.create("param"),
-                _ => self.id_gen.create("param"),
-            };
-            param_ids.push(id);
+        for param in all_params.iter() {
+            param_ids.push(param.param_id.clone());
         }
 
         let return_unit = final_body

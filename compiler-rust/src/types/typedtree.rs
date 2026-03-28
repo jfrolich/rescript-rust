@@ -312,6 +312,8 @@ pub struct ApplyArg {
 /// A function parameter.
 #[derive(Debug, Clone)]
 pub struct FunctionParam {
+    /// Identifier OCaml uses to name this parameter during lambda translation.
+    pub param_id: Ident,
     /// Parameter label.
     pub label: ParserArgLabel,
     /// Default value for optional parameter.

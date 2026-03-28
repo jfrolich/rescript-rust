@@ -498,14 +498,8 @@ impl<'a> LambdaConverter<'a> {
             self.flatten_function_by_arity(params, cases, partial, arity);
 
         let mut param_ids = Vec::new();
-        for (idx, param) in all_params.iter().enumerate() {
-            let pat = Self::param_pattern(param);
-            let id = match &pat.pat_desc {
-                PatternDesc::Tpat_var(id, _) => id.clone(),
-                PatternDesc::Tpat_any => self.id_gen.create(&format!("_arg{}", idx)),
-                _ => self.id_gen.create(&format!("_arg{}", idx)),
-            };
-            param_ids.push(id);
+        for param in all_params.iter() {
+            param_ids.push(param.param_id.clone());
         }
 
         // Convert the body - if it's simple variable patterns, skip pattern matching
@@ -1014,6 +1008,9 @@ impl<'a> LambdaConverter<'a> {
     }
 
     fn translate_value_path(&self, loc_idx: LocIdx, path: &crate::types::Path) -> Lambda {
+        if let Some(lam) = self.value_path_loc_constant(path, loc_idx) {
+            return lam;
+        }
         match path {
             crate::types::Path::Pident(id) => {
                 if id.is_global() {
@@ -1129,6 +1126,10 @@ impl<'a> LambdaConverter<'a> {
             "%dict_has" => PdictHas,
             "%await" => Pawait,
             "%import" => Pimport,
+            "%hash" => Phash,
+            "%hash_mix_int" => PhashMixint,
+            "%hash_mix_string" => PhashMixstring,
+            "%hash_final_mix" => PhashFinalmix,
             "%typeof" => Ptypeof,
             "%debugger" => Pdebugger,
             "%intoffloat" => Pintoffloat,
@@ -1178,6 +1179,52 @@ impl<'a> LambdaConverter<'a> {
             "%raise" => Praise,
             _ => return None,
         })
+    }
+
+    pub(crate) fn value_path_loc_constant(
+        &self,
+        path: &crate::types::Path,
+        loc_idx: LocIdx,
+    ) -> Option<Lambda> {
+        let crate::types::Path::Pdot(prefix, name, _) = path else {
+            return None;
+        };
+        let crate::types::Path::Pident(id) = &**prefix else {
+            return None;
+        };
+        if id.name() != "Pervasives" {
+            return None;
+        }
+        let loc = self.loc(loc_idx);
+        let file = self.basename_for_loc(loc.clone());
+        let line = loc.loc_start.line;
+        let start_col = loc.loc_start.column();
+        let end_col = loc.loc_end.cnum - loc.loc_start.cnum + start_col;
+        match name.as_str() {
+            "__FILE__" => Some(Lambda::const_(Constant::ImmString(file))),
+            "__LINE__" => Some(Lambda::const_(Constant::int(line))),
+            "__MODULE__" => Some(Lambda::const_(Constant::ImmString(
+                if file.ends_with(".rei") {
+                    file.trim_end_matches(".rei").to_string()
+                } else {
+                    file.trim_end_matches(".res").to_string()
+                },
+            ))),
+            "__LOC__" => Some(Lambda::const_(Constant::ImmString(format!(
+                "File {file:?}, line {line}, characters {start_col}-{end_col}"
+            )))),
+            "__POS__" => Some(Lambda::const_(Constant::Block {
+                tag: 0,
+                tag_info: TagInfo::Tuple,
+                elements: vec![
+                    Constant::ImmString(file),
+                    Constant::int(line),
+                    Constant::int(start_col),
+                    Constant::int(end_col),
+                ],
+            })),
+            _ => None,
+        }
     }
 
     fn match_failure(&mut self, loc: Location) -> Lambda {

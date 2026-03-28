@@ -11760,20 +11760,43 @@ fn type_function(
         let _ = crate::types::ctype::expand_head(ctx, &body_env, typed_body.exp_type);
     }
 
-    // Build function parameter
-    let fp = FunctionParam {
-        label: arg_label.clone(),
-        default: typed_default,
-        pat: FunctionParamPattern::Simple(typed_param.clone()),
-    };
-    let exp_param_ty = typed_param.pat_type;
+    fn id_of_pattern(ctx: &TypeContext<'_>, pat: &Pattern) -> Option<Ident> {
+        match &pat.pat_desc {
+            PatternDesc::Tpat_var(id, _) => Some(id.clone()),
+            PatternDesc::Tpat_alias(_, id, _) => Some(id.clone()),
+            PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => match &args[0].pat_desc {
+                PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
+                    Some(ctx.rename_ident(id))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 
-    // Build single case for the body
+    fn name_pattern(ctx: &TypeContext<'_>, default: &str, cases: &[Case]) -> Ident {
+        for case in cases {
+            if let Some(id) = id_of_pattern(ctx, &case.c_lhs) {
+                return id;
+            }
+        }
+        ctx.create_ident(default)
+    }
+
+    // Build function parameter
+    let exp_param_ty = typed_param.pat_type;
     let cases = vec![Case {
-        c_lhs: typed_param,
+        c_lhs: typed_param.clone(),
         c_guard: None,
         c_rhs: typed_body,
     }];
+    let param_id = name_pattern(ctx, "param", &cases);
+    let fp = FunctionParam {
+        param_id,
+        label: arg_label.clone(),
+        default: typed_default,
+        pat: FunctionParamPattern::Simple(typed_param),
+    };
 
     // Match OCaml typecore.ml:
     //   exp_type = instance env (newgenty (Tarrow (...)))

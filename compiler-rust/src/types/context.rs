@@ -1092,6 +1092,11 @@ impl<'a> TypeContext<'a> {
         self.id_gen.create(name)
     }
 
+    /// Rename an identifier using the typing context's shared stamp source.
+    pub fn rename_ident(&self, id: &Ident) -> Ident {
+        id.rename(self.id_gen)
+    }
+
     /// Initialize definition level (equivalent of OCaml's `Ctype.init_def`).
     pub fn init_def(&self, level: i32) {
         self.current_level.set(level);

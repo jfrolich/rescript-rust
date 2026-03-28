@@ -288,25 +288,6 @@ fn sexp_arity(arena: &ParseArena, arity: &Arity) -> Sexp {
     }
 }
 
-/// Extract the param ident from a function param pattern.
-/// Returns the ident from Tpat_var, or creates a dummy ident for other patterns.
-fn extract_param_ident(param: &FunctionParam) -> Ident {
-    match &param.pat {
-        FunctionParamPattern::Simple(pat) => match &pat.pat_desc {
-            PatternDesc::Tpat_var(id, _) => id.clone(),
-            PatternDesc::Tpat_alias(_, id, _) => id.clone(),
-            // Match OCaml typecore `id_of_pattern`:
-            // Tpat_construct(_, _, [Tpat_var|Tpat_alias]) -> Some (Ident.rename id)
-            PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => match &args[0].pat_desc {
-                PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => id.clone(),
-                _ => Ident::create_persistent("param"),
-            },
-            _ => Ident::create_persistent("param"),
-        },
-        FunctionParamPattern::Nested(_) => Ident::create_persistent("param"),
-    }
-}
-
 // Attribute helper for decl.rs Attribute type
 fn sexp_decl_attributes(_with_locs: bool, attrs: &[DeclAttribute]) -> Sexp {
     if attrs.is_empty() {
@@ -1055,13 +1036,12 @@ fn sexp_expression_desc(
             if params.len() == 1 && body.len() == 1 {
                 let param = &params[0];
                 let case = &body[0];
-                let param_ident = extract_param_ident(param);
 
                 Sexp::list(vec![
                     Sexp::atom("Texp_function"),
                     sexp_arg_label(arena, &param.label),
                     sexp_arity(arena, arity),
-                    sexp_ident(&param_ident),
+                    sexp_ident(&param.param_id),
                     sexp_case(arena, ctx, with_locs, dedup, case),
                     sexp_partial(partial),
                     Sexp::atom(if *async_ { "async" } else { "sync" }),
