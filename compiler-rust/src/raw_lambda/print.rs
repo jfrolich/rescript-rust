@@ -166,7 +166,7 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
             f.print(format_args!("[{tag}]"));
         }
         Constant::Block { tag, elements, .. } => {
-            f.open_box(BoxKind::HOV, 1);
+            f.open_box(BoxKind::Box, 1);
             f.print(format_args!("[{tag}:"));
             f.space();
             f.open_box(BoxKind::HOV, 0);
@@ -223,7 +223,7 @@ fn print_primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
 }
 
 fn print_apply<W: Write>(f: &mut Formatter<W>, apply: &RawApply) {
-    f.open_box(BoxKind::HOV, 2);
+    f.open_box(BoxKind::Box, 2);
     f.string("(apply");
     f.space();
     lam(f, &apply.ap_func);
@@ -237,7 +237,7 @@ fn print_apply<W: Write>(f: &mut Formatter<W>, apply: &RawApply) {
 }
 
 fn print_function<W: Write>(f: &mut Formatter<W>, func: &RawLFunction) {
-    f.open_box(BoxKind::HOV, 2);
+    f.open_box(BoxKind::Box, 2);
     f.string("(function");
     for param in &func.params {
         f.space();
@@ -257,7 +257,7 @@ fn print_let_bindings<'a, W: Write>(f: &mut Formatter<W>, lam0: &'a RawLambda) -
         if !first {
             f.space();
         }
-        f.open_box(BoxKind::HOV, 2);
+        f.open_box(BoxKind::Box, 2);
         print_ident(f, id);
         f.string(" =");
         f.string(let_kind_suffix(*kind));
@@ -350,7 +350,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
     match lam0 {
         RawLambda::Lvar(id) => print_ident(f, id),
         RawLambda::LglobalModule(id, dynamic_import) => {
-            f.open_box(BoxKind::HOV, 2);
+            f.open_box(BoxKind::Box, 2);
             f.string("(");
             if *dynamic_import {
                 f.string("dynamic global ");
@@ -365,7 +365,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
         RawLambda::Lapply(apply) => print_apply(f, apply),
         RawLambda::Lfunction(func) => print_function(f, func),
         RawLambda::Llet(_, _, _, _) => {
-            f.open_box(BoxKind::HOV, 2);
+            f.open_box(BoxKind::Box, 2);
             f.string("(let");
             f.space();
             f.open_box(BoxKind::HV, 1);
@@ -379,7 +379,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.close_box();
         }
         RawLambda::Lletrec(bindings, body) => {
-            f.open_box(BoxKind::HOV, 2);
+            f.open_box(BoxKind::Box, 2);
             f.string("(letrec");
             f.space();
             f.string("(");
@@ -389,7 +389,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
                 if !first {
                     f.space();
                 }
-                f.open_box(BoxKind::HOV, 2);
+                f.open_box(BoxKind::Box, 2);
                 print_ident(f, id);
                 f.space();
                 lam(f, expr);
@@ -408,7 +408,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             args,
             loc: _,
         }) => {
-            f.open_box(BoxKind::HOV, 2);
+            f.open_box(BoxKind::Box, 2);
             f.string("(");
             print_primitive(f, primitive);
             for arg in args {
@@ -419,7 +419,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.close_box();
         }
         RawLambda::Lswitch(arg, sw) => {
-            f.open_box(BoxKind::HOV, 1);
+            f.open_box(BoxKind::Box, 1);
             if sw.sw_failaction.is_some() {
                 f.string("(switch");
             } else {
@@ -435,7 +435,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.close_box();
         }
         RawLambda::LstringSwitch(arg, cases, default) => {
-            f.open_box(BoxKind::HOV, 1);
+            f.open_box(BoxKind::Box, 1);
             f.string("(stringswitch");
             f.space();
             lam(f, arg);
@@ -447,7 +447,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.close_box();
         }
         RawLambda::LstaticRaise(i, ls) => {
-            f.open_box(BoxKind::HOV, 2);
+            f.open_box(BoxKind::Box, 2);
             f.print(format_args!("(exit {i}"));
             for l in ls {
                 f.space();
@@ -457,7 +457,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.close_box();
         }
         RawLambda::LstaticCatch(body, (i, vars), handler) => {
-            f.open_box(BoxKind::HOV, 2);
+            f.open_box(BoxKind::Box, 2);
             f.string("(catch");
             f.space();
             lam(f, body);
@@ -474,7 +474,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.close_box();
         }
         RawLambda::LtryWith(body, param, handler) => {
-            f.open_box(BoxKind::HOV, 2);
+            f.open_box(BoxKind::Box, 2);
             f.string("(try");
             f.space();
             lam(f, body);
@@ -487,7 +487,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.close_box();
         }
         RawLambda::LifThenElse(cond, ifso, ifnot) => {
-            f.open_box(BoxKind::HOV, 2);
+            f.open_box(BoxKind::Box, 2);
             f.string("(if");
             f.space();
             lam(f, cond);
@@ -499,7 +499,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.close_box();
         }
         RawLambda::Lsequence(first, second) => {
-            f.open_box(BoxKind::HOV, 2);
+            f.open_box(BoxKind::Box, 2);
             f.string("(seq");
             f.space();
             sequence(f, first);
@@ -509,7 +509,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.close_box();
         }
         RawLambda::Lwhile(cond, body) => {
-            f.open_box(BoxKind::HOV, 2);
+            f.open_box(BoxKind::Box, 2);
             f.string("(while");
             f.space();
             lam(f, cond);
@@ -519,7 +519,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.close_box();
         }
         RawLambda::Lfor(param, lo, hi, dir, body) => {
-            f.open_box(BoxKind::HOV, 2);
+            f.open_box(BoxKind::Box, 2);
             f.string("(for ");
             print_ident(f, param);
             f.space();
@@ -537,7 +537,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.close_box();
         }
         RawLambda::Lassign(id, expr) => {
-            f.open_box(BoxKind::HOV, 2);
+            f.open_box(BoxKind::Box, 2);
             f.string("(assign");
             f.space();
             print_ident(f, id);
@@ -547,7 +547,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.close_box();
         }
         RawLambda::Lsend(name, obj, _) => {
-            f.open_box(BoxKind::HOV, 2);
+            f.open_box(BoxKind::Box, 2);
             f.string("(send");
             f.string(name);
             f.space();

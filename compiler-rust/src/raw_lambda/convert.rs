@@ -2962,7 +2962,63 @@ impl<'a> RawLambdaConverter<'a> {
             },
         };
 
-        let result = if !has_non_ctor_constants {
+        let dense_const_partial = if block_cases.is_empty() {
+            failaction.as_ref().and_then(|default| {
+                let mut sorted_consts = const_cases.clone();
+                sorted_consts.sort_by_key(|(tag, _)| *tag);
+                let first = sorted_consts.first()?.0;
+                let last = sorted_consts.last()?.0;
+                let is_dense = sorted_consts
+                    .iter()
+                    .enumerate()
+                    .all(|(idx, (tag, _))| *tag == first + idx as i32);
+                if !is_dense {
+                    return None;
+                }
+
+                let exit_id = self.next_raise_count();
+                let offset_arg = if first == 0 {
+                    scrut_var.clone()
+                } else {
+                    RawLambda::prim(
+                        Primitive::Poffsetint(-first),
+                        vec![scrut_var.clone()],
+                        loc,
+                    )
+                };
+                let is_out = RawLambda::prim(
+                    Primitive::Pisout(last - first),
+                    vec![offset_arg],
+                    loc,
+                );
+                let switch = RawLambda::Lswitch(
+                    Box::new(scrut_var.clone()),
+                    crate::raw_lambda::RawLambdaSwitch {
+                        sw_consts_full: false,
+                        sw_consts: sorted_consts,
+                        sw_blocks_full: false,
+                        sw_blocks: Vec::new(),
+                        sw_failaction: None,
+                        sw_names: None,
+                    },
+                );
+                Some(RawLambda::LstaticCatch(
+                    Box::new(RawLambda::LifThenElse(
+                        Box::new(is_out),
+                        Box::new(RawLambda::LstaticRaise(exit_id, Vec::new())),
+                        Box::new(switch),
+                    )),
+                    (exit_id, Vec::new()),
+                    Box::new((**default).clone()),
+                ))
+            })
+        } else {
+            None
+        };
+
+        let result = if let Some(result) = dense_const_partial {
+            result
+        } else if !has_non_ctor_constants {
             if let Some(cstr) = repr_cstr.as_ref() {
                 match (
                     cstr.cstr_consts,
