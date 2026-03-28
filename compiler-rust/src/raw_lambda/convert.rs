@@ -1916,8 +1916,7 @@ impl<'a> RawLambdaConverter<'a> {
                     self.compile_simple_string_match(self.loc(expr.exp_loc), scrut, cases, *partial)
                 })
                 .or_else(|| {
-                    self.compile_simple_tuple_match(self.loc(expr.exp_loc), scrut, cases, *partial)
-                        .map(RawLambda::from_lowered)
+                    self.compile_simple_tuple_match_raw(self.loc(expr.exp_loc), scrut, cases, *partial)
                 })
                 .or_else(|| {
                     self.compile_simple_constructor_match_raw(
@@ -3238,7 +3237,7 @@ impl<'a> RawLambdaConverter<'a> {
                 };
                 let pat_loc = self.loc(pat.pat_loc);
                 let mut result = body;
-                for (idx, item) in items.iter().enumerate().rev() {
+                for (idx, item) in items.iter().enumerate() {
                     let field = RawLambda::prim(
                         Primitive::Pfield(idx as i32, FieldDbgInfo::Tuple),
                         vec![RawLambda::var(tmp.clone())],
@@ -3260,7 +3259,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 };
                 let mut result = body;
-                for (lid, lbl, inner_pat, _) in fields.iter().rev() {
+                for (lid, lbl, inner_pat, _) in fields.iter() {
                     let field = match &lbl.lbl_repres {
                         RecordRepresentation::RecordUnboxed(_) => RawLambda::var(tmp.clone()),
                         _ => {
@@ -3291,7 +3290,7 @@ impl<'a> RawLambdaConverter<'a> {
                 };
                 let pat_loc = self.loc(pat.pat_loc);
                 let mut result = body;
-                for (idx, item) in items.iter().enumerate().rev() {
+                for (idx, item) in items.iter().enumerate() {
                     let field = RawLambda::prim(
                         Primitive::Parrayrefs,
                         vec![
@@ -3346,6 +3345,40 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn bind_selected_tuple_pattern_raw(
+        &mut self,
+        scrut_id: &Ident,
+        pat: &Pattern,
+        body: RawLambda,
+    ) -> Option<RawLambda> {
+        let (inner, aliases) = peel_aliases(pat);
+        let scrut = RawLambda::var(scrut_id.clone());
+        let body = match &inner.pat_desc {
+            PatternDesc::Tpat_any => body,
+            PatternDesc::Tpat_var(_, _)
+            | PatternDesc::Tpat_tuple(_)
+            | PatternDesc::Tpat_record(_, _)
+            | PatternDesc::Tpat_array(_)
+            | PatternDesc::Tpat_variant(_, Some(_), _) => {
+                self.bind_irrefutable_pattern_raw(inner, scrut.clone(), body)
+            }
+            PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_tag {
+                ConstructorTag::CstrConstant(_) if args.is_empty() => body,
+                ConstructorTag::CstrBlock(_) if args.iter().all(Self::is_irrefutable_pattern) => {
+                    self.bind_constructor_args_irrefutably_raw(scrut_id, inner, cstr, args, body)
+                }
+                ConstructorTag::CstrUnboxed => {
+                    self.bind_irrefutable_pattern_raw(inner, scrut.clone(), body)
+                }
+                ConstructorTag::CstrExtension(_) => body,
+                _ => return None,
+            },
+            PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_variant(_, None, _) => body,
+            PatternDesc::Tpat_alias(_, _, _) | PatternDesc::Tpat_or(_, _, _) => return None,
+        };
+        Some(wrap_aliases_raw(&aliases, scrut, body))
+    }
+
     fn raw_lambda_key(&self, lam: &RawLambda) -> String {
         format!("{}", crate::raw_lambda::print::RawLambdaPrinter::new(lam))
     }
@@ -3395,6 +3428,57 @@ impl<'a> RawLambdaConverter<'a> {
                     Lambda::let_(LetKind::Alias, id.clone(), field, acc)
                 });
                 Lambda::let_(LetKind::Strict, tuple_id, self.convert_expr(scrut), with_fields)
+            }
+        };
+
+        Some(result)
+    }
+
+    fn compile_simple_tuple_match_raw(
+        &mut self,
+        loc: Location,
+        scrut: &Expression,
+        cases: &[Case],
+        partial: Partial,
+    ) -> Option<RawLambda> {
+        let expanded = Self::expand_tuple_cases(cases)?;
+        let arity = expanded.first()?.items.len();
+        if arity == 0 {
+            return None;
+        }
+
+        let ids = (0..arity)
+            .map(|_| self.id_gen.create("match"))
+            .collect::<Vec<_>>();
+        let states = expanded
+            .into_iter()
+            .map(|case| TupleCaseState {
+                case,
+                selected: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let body = self.compile_simple_tuple_components_raw(loc, &ids, &states, 0, partial)?;
+
+        let result = match &scrut.exp_desc {
+            ExpressionDesc::Texp_tuple(items) if items.len() == arity => items
+                .iter()
+                .zip(ids.iter())
+                .rev()
+                .fold(body, |acc, (item, id)| {
+                    RawLambda::let_(LetKind::Strict, id.clone(), self.convert_expr_raw(item), acc)
+                }),
+            _ => {
+                let tuple_id = self.id_gen.create("tuple");
+                let tuple_var = RawLambda::var(tuple_id.clone());
+                let with_fields = ids.iter().enumerate().rev().fold(body, |acc, (idx, id)| {
+                    let field = RawLambda::prim(
+                        Primitive::Pfield(idx as i32, FieldDbgInfo::Tuple),
+                        vec![tuple_var.clone()],
+                        loc,
+                    );
+                    RawLambda::let_(LetKind::Alias, id.clone(), field, acc)
+                });
+                RawLambda::let_(LetKind::Strict, tuple_id, self.convert_expr_raw(scrut), with_fields)
             }
         };
 
@@ -3504,6 +3588,121 @@ impl<'a> RawLambdaConverter<'a> {
         Some(Lambda::Lswitch(
             Box::new(Lambda::var(ids[idx].clone())),
             LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts,
+                sw_blocks_full: false,
+                sw_blocks,
+                sw_failaction: failaction,
+                sw_names: None,
+            },
+        ))
+    }
+
+    fn compile_simple_tuple_components_raw(
+        &mut self,
+        loc: Location,
+        ids: &[Ident],
+        states: &[TupleCaseState<'_>],
+        idx: usize,
+        partial: Partial,
+    ) -> Option<RawLambda> {
+        if states.is_empty() {
+            return Some(match partial {
+                Partial::Partial => RawLambda::from_lowered(self.match_failure(loc)),
+                Partial::Total => RawLambda::unit(),
+            });
+        }
+
+        if idx >= ids.len() {
+            let mut body = self.convert_expr_raw(&states[0].case.case.c_rhs);
+            for (pos, pat) in states[0].selected.iter().rev() {
+                body = self.bind_selected_tuple_pattern_raw(&ids[*pos], pat, body)?;
+            }
+            return Some(body);
+        }
+
+        let mut const_keys = Vec::new();
+        let mut block_keys = Vec::new();
+        let mut default_states = Vec::new();
+        for state in states {
+            let pat = state.case.items[idx];
+            match Self::simple_switch_key(pat) {
+                Some(key) => {
+                    if key.is_block() {
+                        if !block_keys.contains(&key) {
+                            block_keys.push(key);
+                        }
+                    } else if !const_keys.contains(&key) {
+                        const_keys.push(key);
+                    }
+                }
+                None if Self::is_default_pattern(pat) => default_states.push(state.clone()),
+                None => return None,
+            }
+        }
+
+        if const_keys.is_empty() && block_keys.is_empty() {
+            return self.compile_simple_tuple_components_raw(loc, ids, &default_states, idx + 1, partial);
+        }
+
+        let mut sw_consts = Vec::new();
+        for key in const_keys {
+            let branch_states = states
+                .iter()
+                .filter(|state| {
+                    let pat = state.case.items[idx];
+                    Self::is_default_pattern(pat)
+                        || Self::simple_switch_key(pat).as_ref() == Some(&key)
+                })
+                .cloned()
+                .map(|mut state| {
+                    state.selected.push((idx, state.case.items[idx]));
+                    state
+                })
+                .collect::<Vec<_>>();
+            let branch =
+                self.compile_simple_tuple_components_raw(loc, ids, &branch_states, idx + 1, partial)?;
+            sw_consts.push((key.tag(), branch));
+        }
+
+        let mut sw_blocks = Vec::new();
+        for key in block_keys {
+            let branch_states = states
+                .iter()
+                .filter(|state| {
+                    let pat = state.case.items[idx];
+                    Self::is_default_pattern(pat)
+                        || Self::simple_switch_key(pat).as_ref() == Some(&key)
+                })
+                .cloned()
+                .map(|mut state| {
+                    state.selected.push((idx, state.case.items[idx]));
+                    state
+                })
+                .collect::<Vec<_>>();
+            let branch =
+                self.compile_simple_tuple_components_raw(loc, ids, &branch_states, idx + 1, partial)?;
+            sw_blocks.push((key.tag(), branch));
+        }
+
+        let failaction = if default_states.is_empty() {
+            match partial {
+                Partial::Partial => Some(Box::new(RawLambda::from_lowered(self.match_failure(loc)))),
+                Partial::Total => None,
+            }
+        } else {
+            Some(Box::new(self.compile_simple_tuple_components_raw(
+                loc,
+                ids,
+                &default_states,
+                idx + 1,
+                partial,
+            )?))
+        };
+
+        Some(RawLambda::Lswitch(
+            Box::new(RawLambda::var(ids[idx].clone())),
+            crate::raw_lambda::RawLambdaSwitch {
                 sw_consts_full: false,
                 sw_consts,
                 sw_blocks_full: false,
@@ -3771,8 +3970,8 @@ impl<'a> RawLambdaConverter<'a> {
             let id = match &pat.pat_desc {
                 PatternDesc::Tpat_var(id, _) => id.clone(),
                 PatternDesc::Tpat_alias(_, id, _) => id.clone(),
-                _ if all_params.len() == 1 => self.id_gen.create("param"),
-                _ => self.id_gen.create(&format!("param{idx}")),
+                _ if idx == 0 => self.id_gen.create("param"),
+                _ => self.id_gen.create("param"),
             };
             param_ids.push(id);
         }
@@ -3780,9 +3979,21 @@ impl<'a> RawLambdaConverter<'a> {
         let return_unit = final_body
             .map(|expr| self.is_base_type(expr.exp_type, "unit"))
             .unwrap_or(false);
-        let body = final_body
+        let mut body = final_body
             .map(|expr| self.convert_expr_raw(expr))
             .unwrap_or_else(RawLambda::unit);
+        for (param, id) in all_params.iter().zip(param_ids.iter()).rev() {
+            let pat = Self::param_pattern(param);
+            body = match &pat.pat_desc {
+                PatternDesc::Tpat_any => body,
+                PatternDesc::Tpat_var(bound, _) if bound.same(id) => body,
+                PatternDesc::Tpat_alias(_, bound, _) if bound.same(id) => body,
+                _ if Self::is_irrefutable_pattern(&pat) => {
+                    self.raw_simple_for_let(&pat, RawLambda::var(id.clone()), body)
+                }
+                _ => body,
+            };
+        }
         let lambda = RawLambda::function_(
             param_ids.len() as i32,
             param_ids,
