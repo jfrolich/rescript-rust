@@ -123,6 +123,7 @@ fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
 
         // Creation and type checking primitives
         Primitive::PcreateExtension(_)
+        | Primitive::PextensionSlotEq
         | Primitive::Ptypeof
         | Primitive::PisNull
         | Primitive::PisNotNone

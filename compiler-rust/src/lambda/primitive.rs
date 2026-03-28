@@ -315,6 +315,8 @@ pub enum Primitive {
     PwrapExn,
     /// Create extension
     PcreateExtension(String),
+    /// Compare an extensible-constructor block against an extension slot
+    PextensionSlotEq,
     /// Is not none
     PisNotNone,
     /// Value from option
@@ -409,6 +411,7 @@ impl Primitive {
 
             // Extension
             (Primitive::PcreateExtension(a), Primitive::PcreateExtension(b)) => a == b,
+            (Primitive::PextensionSlotEq, Primitive::PextensionSlotEq) => true,
 
             // Unsafe downgrade
             (

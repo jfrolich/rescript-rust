@@ -16,8 +16,8 @@ use crate::lambda::convert::LambdaConverter;
 use crate::lambda::primitive::{ExternalArgSpec, ExternalFfiSpec, Mutable};
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::{
-    ApInfo, Apply, ApplyStatus, FieldDbgInfo, FunctionAttribute, InlineAttribute, Lambda,
-    LambdaSwitch, Primitive,
+    ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
+    Lambda, LambdaSwitch, Primitive, SetFieldDbgInfo,
 };
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
@@ -99,6 +99,61 @@ fn to_parser_mutable(flag: TypeMutableFlag) -> ParserMutableFlag {
         TypeMutableFlag::Mutable => ParserMutableFlag::Mutable,
         TypeMutableFlag::Immutable => ParserMutableFlag::Immutable,
     }
+}
+
+fn raw_record_field_access(lbl: &LabelDescription) -> Option<(i32, FieldDbgInfo)> {
+    let info = match &lbl.lbl_repres {
+        RecordRepresentation::RecordRegular => FieldDbgInfo::Record {
+            name: lbl.lbl_name.clone(),
+            mutable_flag: to_parser_mutable(lbl.lbl_mut),
+        },
+        RecordRepresentation::RecordFloatUnused => return None,
+        RecordRepresentation::RecordUnboxed(_) => FieldDbgInfo::Record {
+            name: lbl.lbl_name.clone(),
+            mutable_flag: to_parser_mutable(lbl.lbl_mut),
+        },
+        RecordRepresentation::RecordInlined { .. } => FieldDbgInfo::RecordInline {
+            name: lbl.lbl_name.clone(),
+        },
+        RecordRepresentation::RecordExtension => FieldDbgInfo::RecordExtension {
+            name: lbl.lbl_name.clone(),
+        },
+    };
+    let pos = match lbl.lbl_repres {
+        RecordRepresentation::RecordExtension => lbl.lbl_pos + 1,
+        _ => lbl.lbl_pos,
+    };
+    Some((pos, info))
+}
+
+fn raw_record_setfield_access(lbl: &LabelDescription) -> Option<(i32, SetFieldDbgInfo)> {
+    let info = match &lbl.lbl_repres {
+        RecordRepresentation::RecordRegular => SetFieldDbgInfo::RecordSet(lbl.lbl_name.clone()),
+        RecordRepresentation::RecordFloatUnused | RecordRepresentation::RecordUnboxed(_) => {
+            return None;
+        }
+        RecordRepresentation::RecordInlined { .. } => {
+            SetFieldDbgInfo::RecordInlineSet(lbl.lbl_name.clone())
+        }
+        RecordRepresentation::RecordExtension => {
+            SetFieldDbgInfo::RecordExtensionSet(lbl.lbl_name.clone())
+        }
+    };
+    let pos = match lbl.lbl_repres {
+        RecordRepresentation::RecordExtension => lbl.lbl_pos + 1,
+        _ => lbl.lbl_pos,
+    };
+    Some((pos, info))
+}
+
+fn raw_record_mutable_flag(
+    fields: &[(Located<LidentIdx>, LabelDescription, RecordLabelDefinition, bool)],
+) -> ParserMutableFlag {
+    fields
+        .iter()
+        .find(|(_, lbl, _, _)| lbl.lbl_mut == TypeMutableFlag::Mutable)
+        .map(|_| ParserMutableFlag::Mutable)
+        .unwrap_or(ParserMutableFlag::Immutable)
 }
 
 fn trace_raw_fallback(kind: &'static str) {
@@ -908,10 +963,155 @@ impl<'a> RawLambdaConverter<'a> {
                 let tag_info = self.raw_constructor_tag_info(cstr, args);
                 self.raw_block_or_prim(*tag, tag_info, elems, loc)
             }
-            ConstructorTag::CstrExtension(_) => unreachable!(
-                "extension constructors stay on the lowered path for now"
-            ),
+            ConstructorTag::CstrExtension(path) => {
+                let mut args_lam = Vec::with_capacity(args.len() + 1);
+                args_lam.push(self.translate_extension_path_raw(path, loc));
+                args_lam.extend(args.iter().map(|arg| self.convert_expr_raw(arg)));
+                RawLambda::prim(
+                    Primitive::Pmakeblock(0, TagInfo::Extension, Mutable::Immutable),
+                    args_lam,
+                    loc,
+                )
+            }
         }
+    }
+
+    fn convert_record_raw(
+        &mut self,
+        loc: Location,
+        fields: &[(Located<LidentIdx>, LabelDescription, RecordLabelDefinition, bool)],
+        base: Option<&Expression>,
+    ) -> RawLambda {
+        let Some((_, first_lbl, _, _)) = fields.first() else {
+            return RawLambda::unit();
+        };
+
+        let repres = first_lbl.lbl_repres.clone();
+        let mutable_flag = raw_record_mutable_flag(fields);
+        let base_lam = base.map(|expr| self.convert_expr_raw(expr));
+        let build_direct = base.is_none()
+            || fields
+                .iter()
+                .all(|(_, _, def, _)| matches!(def, RecordLabelDefinition::Overridden(_, _)));
+
+        if build_direct {
+            let mut elems = Vec::with_capacity(fields.len());
+            for (lid, lbl, def, _) in fields {
+                let value = match def {
+                    RecordLabelDefinition::Overridden(_, expr) => self.convert_expr_raw(expr),
+                    RecordLabelDefinition::Kept(_) => {
+                        let Some(base_expr) = &base_lam else {
+                            elems.push(RawLambda::unit());
+                            continue;
+                        };
+                        if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
+                            base_expr.clone()
+                        } else if let Some((pos, info)) = raw_record_field_access(lbl) {
+                            RawLambda::prim(
+                                Primitive::Pfield(pos, info),
+                                vec![base_expr.clone()],
+                                self.loc(lid.loc),
+                            )
+                        } else {
+                            RawLambda::unit()
+                        }
+                    }
+                };
+                elems.push(value);
+            }
+
+            let fields_info = fields
+                .iter()
+                .map(|(_, lbl, _, _)| (lbl.lbl_name.clone(), lbl.lbl_optional))
+                .collect::<Vec<_>>();
+
+            return match repres {
+                RecordRepresentation::RecordRegular => self.raw_block_or_prim(
+                    0,
+                    TagInfo::Record {
+                        fields: fields_info,
+                        mutable_flag,
+                    },
+                    elems,
+                    loc,
+                ),
+                RecordRepresentation::RecordFloatUnused => RawLambda::unit(),
+                RecordRepresentation::RecordUnboxed(_) => match elems.as_slice() {
+                    [value] => value.clone(),
+                    _ => RawLambda::unit(),
+                },
+                RecordRepresentation::RecordInlined {
+                    tag,
+                    name,
+                    num_nonconsts,
+                    ..
+                } => self.raw_block_or_prim(
+                    tag,
+                    TagInfo::RecordInlined {
+                        name,
+                        num_nonconst: num_nonconsts,
+                        tag,
+                        fields: fields_info,
+                        mutable_flag,
+                        attrs: vec![],
+                    },
+                    elems,
+                    loc,
+                ),
+                RecordRepresentation::RecordExtension => {
+                    let path = match self.type_desc(first_lbl.lbl_res) {
+                        TypeDesc::Tconstr { path, .. } => path,
+                        _ => return RawLambda::unit(),
+                    };
+                    let mut args = Vec::with_capacity(elems.len() + 1);
+                    args.push(self.translate_extension_path_raw(&path, loc));
+                    args.extend(elems);
+                    RawLambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::RecordExt {
+                                fields: fields
+                                    .iter()
+                                    .map(|(_, lbl, _, _)| lbl.lbl_name.clone())
+                                    .collect(),
+                                mutable_flag,
+                            },
+                            Mutable::Immutable,
+                        ),
+                        args,
+                        loc,
+                    )
+                }
+            };
+        }
+
+        let Some(init_expr) = base_lam else {
+            return RawLambda::unit();
+        };
+
+        let copy_id = self.id_gen.create("newrecord");
+        let mut body = RawLambda::var(copy_id.clone());
+        for (_, lbl, def, _) in fields.iter().rev() {
+            let RecordLabelDefinition::Overridden(_, expr) = def else {
+                continue;
+            };
+            let Some((pos, info)) = raw_record_setfield_access(lbl) else {
+                continue;
+            };
+            let update = RawLambda::prim(
+                Primitive::Psetfield(pos, info),
+                vec![RawLambda::var(copy_id.clone()), self.convert_expr_raw(expr)],
+                loc,
+            );
+            body = RawLambda::seq(update, body);
+        }
+
+        RawLambda::let_(
+            LetKind::Strict,
+            copy_id,
+            RawLambda::prim(Primitive::Pduprecord, vec![init_expr], loc),
+            body,
+        )
     }
 
     fn include_bound_idents(sig: &[SignatureItem]) -> Vec<(Ident, usize)> {
@@ -1578,8 +1778,7 @@ impl<'a> RawLambdaConverter<'a> {
                 *transformed_jsx,
             ),
             ExpressionDesc::Texp_match(scrut, cases, exn_cases, partial) if exn_cases.is_empty() => self
-                .compile_irrefutable_match(scrut, cases)
-                .map(RawLambda::from_lowered)
+                .compile_irrefutable_match_raw(scrut, cases)
                 .or_else(|| {
                     self.compile_simple_string_match(self.loc(expr.exp_loc), scrut, cases, *partial)
                 })
@@ -1588,13 +1787,20 @@ impl<'a> RawLambdaConverter<'a> {
                         .map(RawLambda::from_lowered)
                 })
                 .or_else(|| {
-                    self.compile_simple_constructor_match(self.loc(expr.exp_loc), scrut, cases, *partial)
-                        .map(RawLambda::from_lowered)
+                    self.compile_simple_constructor_match_raw(
+                        self.loc(expr.exp_loc),
+                        scrut,
+                        cases,
+                        *partial,
+                    )
                 })
                 .unwrap_or_else(|| {
                     trace_raw_match_fallback(&self.loc(expr.exp_loc), scrut, cases);
                     RawLambda::from_lowered(self.lowered.convert_expr(expr))
                 }),
+            ExpressionDesc::Texp_try(body, cases) => self
+                .compile_simple_trywith_raw(self.loc(expr.exp_loc), body, cases)
+                .unwrap_or_else(|| RawLambda::from_lowered(self.lowered.convert_expr(expr))),
             ExpressionDesc::Texp_tuple(items) => {
                 let elems = items
                     .iter()
@@ -1602,19 +1808,9 @@ impl<'a> RawLambdaConverter<'a> {
                     .collect::<Vec<_>>();
                 self.raw_block_or_prim(0, TagInfo::Tuple, elems, self.loc(expr.exp_loc))
             }
-            ExpressionDesc::Texp_construct(_, cstr, args) => match &cstr.cstr_tag {
-                ConstructorTag::CstrExtension(path) => {
-                    let mut args_lam = Vec::with_capacity(args.len() + 1);
-                    args_lam.push(self.translate_extension_path_raw(path, self.loc(expr.exp_loc)));
-                    args_lam.extend(args.iter().map(|arg| self.convert_expr_raw(arg)));
-                    RawLambda::prim(
-                        Primitive::Pmakeblock(0, TagInfo::Extension, Mutable::Immutable),
-                        args_lam,
-                        self.loc(expr.exp_loc),
-                    )
-                }
-                _ => self.convert_construct_raw(self.loc(expr.exp_loc), cstr, args),
-            },
+            ExpressionDesc::Texp_construct(_, cstr, args) => {
+                self.convert_construct_raw(self.loc(expr.exp_loc), cstr, args)
+            }
             ExpressionDesc::Texp_variant(tag, arg) => match arg {
                 None => RawLambda::const_(Constant::Pointer(tag.to_string())),
                 Some(arg) => {
@@ -1640,6 +1836,38 @@ impl<'a> RawLambdaConverter<'a> {
                     Box::new(self.convert_expr_raw(then_)),
                     Box::new(else_lam),
                 )
+            }
+            ExpressionDesc::Texp_record {
+                fields,
+                extended_expression,
+            } => self.convert_record_raw(
+                self.loc(expr.exp_loc),
+                fields,
+                extended_expression.as_deref(),
+            ),
+            ExpressionDesc::Texp_field(record, _, lbl) => {
+                if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
+                    self.convert_expr_raw(record)
+                } else if let Some((pos, info)) = raw_record_field_access(lbl) {
+                    RawLambda::prim(
+                        Primitive::Pfield(pos, info),
+                        vec![self.convert_expr_raw(record)],
+                        self.loc(expr.exp_loc),
+                    )
+                } else {
+                    RawLambda::unit()
+                }
+            }
+            ExpressionDesc::Texp_setfield(record, _, lbl, value) => {
+                if let Some((pos, info)) = raw_record_setfield_access(lbl) {
+                    RawLambda::prim(
+                        Primitive::Psetfield(pos, info),
+                        vec![self.convert_expr_raw(record), self.convert_expr_raw(value)],
+                        self.loc(expr.exp_loc),
+                    )
+                } else {
+                    RawLambda::unit()
+                }
             }
             ExpressionDesc::Texp_sequence(a, b) => {
                 RawLambda::seq(self.convert_expr_raw(a), self.convert_expr_raw(b))
@@ -2240,6 +2468,439 @@ impl<'a> RawLambdaConverter<'a> {
         })
     }
 
+    fn compile_irrefutable_match_raw(
+        &mut self,
+        scrut: &Expression,
+        cases: &[Case],
+    ) -> Option<RawLambda> {
+        if cases.len() != 1 || cases[0].c_guard.is_some() {
+            return None;
+        }
+
+        if !Self::is_irrefutable_pattern(&cases[0].c_lhs) {
+            return None;
+        }
+
+        let body = self.convert_expr_raw(&cases[0].c_rhs);
+        let scrut_lam = self.convert_expr_raw(scrut);
+        Some(self.bind_irrefutable_pattern_raw(&cases[0].c_lhs, scrut_lam, body))
+    }
+
+    fn compile_simple_trywith_raw(
+        &mut self,
+        loc: Location,
+        body: &Expression,
+        cases: &[Case],
+    ) -> Option<RawLambda> {
+        let exn_id = name_pattern("exn", cases).unwrap_or_else(|| self.id_gen.create("exn"));
+        let handler = self.compile_simple_constructor_match_raw_from_scrut(
+            loc.clone(),
+            RawLambda::var(exn_id.clone()),
+            cases,
+            Partial::Partial,
+        )?;
+        Some(RawLambda::LtryWith(
+            Box::new(self.convert_expr_raw(body)),
+            exn_id,
+            Box::new(handler),
+        ))
+    }
+
+    fn bind_constructor_args_irrefutably_raw(
+        &mut self,
+        scrut_id: &Ident,
+        pat: &Pattern,
+        cstr: &crate::types::ConstructorDescription,
+        args: &[Pattern],
+        body: RawLambda,
+    ) -> RawLambda {
+        if cstr.cstr_inlined.is_some() {
+            return match args {
+                [arg_pat] => {
+                    self.bind_irrefutable_pattern_raw(arg_pat, RawLambda::var(scrut_id.clone()), body)
+                }
+                [] => body,
+                _ => RawLambda::unit(),
+            };
+        }
+
+        let pat_loc = self.loc(pat.pat_loc);
+        let tmp = self.id_gen.create("ctor");
+        let mut result = body;
+
+        for (idx, arg_pat) in args.iter().enumerate().rev() {
+            let field = match &cstr.cstr_tag {
+                ConstructorTag::CstrBlock(_) => RawLambda::prim(
+                    Primitive::Pfield(
+                        idx as i32,
+                        if cstr.cstr_name == "::" {
+                            FieldDbgInfo::Cons
+                        } else {
+                            FieldDbgInfo::Variant
+                        },
+                    ),
+                    vec![RawLambda::var(tmp.clone())],
+                    pat_loc,
+                ),
+                ConstructorTag::CstrExtension(_) => RawLambda::prim(
+                    Primitive::Pfield(idx as i32 + 1, FieldDbgInfo::Extension),
+                    vec![RawLambda::var(tmp.clone())],
+                    pat_loc,
+                ),
+                ConstructorTag::CstrUnboxed => RawLambda::var(tmp.clone()),
+                ConstructorTag::CstrConstant(_) => {
+                    unreachable!("constructor payload binding only applies to non-constant constructors")
+                }
+            };
+            result = self.bind_irrefutable_pattern_raw(arg_pat, field, result);
+        }
+
+        RawLambda::let_(LetKind::Alias, tmp, RawLambda::var(scrut_id.clone()), result)
+    }
+
+    fn compile_simple_constructor_match_raw(
+        &mut self,
+        loc: Location,
+        scrut: &Expression,
+        cases: &[Case],
+        partial: Partial,
+    ) -> Option<RawLambda> {
+        let scrut_lam = self.convert_expr_raw(scrut);
+        self.compile_simple_constructor_match_raw_from_scrut(
+            loc,
+            scrut_lam,
+            cases,
+            partial,
+        )
+    }
+
+    fn compile_simple_constructor_match_raw_from_scrut(
+        &mut self,
+        loc: Location,
+        scrut_lam: RawLambda,
+        cases: &[Case],
+        partial: Partial,
+    ) -> Option<RawLambda> {
+        #[derive(Clone)]
+        enum DefaultCase {
+            Any(RawLambda),
+            Bind(Ident, RawLambda),
+        }
+
+        let mut seen_const_tags = std::collections::BTreeSet::new();
+        let mut seen_block_tags = std::collections::BTreeSet::new();
+        let mut seen_extensions = std::collections::BTreeSet::new();
+        let mut default_case = None;
+        let mut repr_cstr = None::<crate::types::ConstructorDescription>;
+        let mut has_non_ctor_constants = false;
+
+        for case in cases {
+            if case.c_guard.is_some() {
+                return None;
+            }
+
+            let (pat, _) = peel_aliases(&case.c_lhs);
+            match &pat.pat_desc {
+                PatternDesc::Tpat_construct(_, cstr, args) => {
+                    if repr_cstr.is_none() {
+                        repr_cstr = Some(cstr.clone());
+                    }
+                    match &cstr.cstr_tag {
+                        ConstructorTag::CstrConstant(tag) => {
+                            if !args.is_empty() || !seen_const_tags.insert(*tag) {
+                                return None;
+                            }
+                        }
+                        ConstructorTag::CstrBlock(tag) => {
+                            if !seen_block_tags.insert(*tag)
+                                || !args.iter().all(Self::is_irrefutable_pattern)
+                            {
+                                return None;
+                            }
+                        }
+                        ConstructorTag::CstrExtension(path) => {
+                            if !args.iter().all(Self::is_irrefutable_pattern)
+                                || !seen_extensions.insert(path.name())
+                            {
+                                return None;
+                            }
+                        }
+                        ConstructorTag::CstrUnboxed => return None,
+                    }
+                }
+                PatternDesc::Tpat_constant(TConstant::Int(i)) => {
+                    has_non_ctor_constants = true;
+                    if !seen_const_tags.insert(*i as i32) {
+                        return None;
+                    }
+                }
+                PatternDesc::Tpat_constant(TConstant::Char(c)) => {
+                    has_non_ctor_constants = true;
+                    if !seen_const_tags.insert(*c as i32) {
+                        return None;
+                    }
+                }
+                PatternDesc::Tpat_any => {
+                    if default_case.is_some() {
+                        return None;
+                    }
+                    default_case = Some(DefaultCase::Any(self.convert_expr_raw(&case.c_rhs)));
+                }
+                PatternDesc::Tpat_var(id, _) => {
+                    if default_case.is_some() {
+                        return None;
+                    }
+                    default_case =
+                        Some(DefaultCase::Bind(id.clone(), self.convert_expr_raw(&case.c_rhs)));
+                }
+                PatternDesc::Tpat_alias(inner, id, _)
+                    if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
+                {
+                    if default_case.is_some() {
+                        return None;
+                    }
+                    default_case =
+                        Some(DefaultCase::Bind(id.clone(), self.convert_expr_raw(&case.c_rhs)));
+                }
+                _ => return None,
+            }
+        }
+
+        if seen_const_tags.is_empty() && seen_block_tags.is_empty() && seen_extensions.is_empty() {
+            return None;
+        }
+
+        let scrut_name = self.fresh_name_from_cases("match", cases);
+        let (scrut_id, scrut_var, wrap_let) = match &scrut_lam {
+            RawLambda::Lvar(id) => (id.clone(), RawLambda::var(id.clone()), None),
+            _ => {
+                let scrut_id = self.id_gen.create(&scrut_name);
+                (
+                    scrut_id.clone(),
+                    RawLambda::var(scrut_id.clone()),
+                    Some((scrut_id, scrut_lam)),
+                )
+            }
+        };
+
+        if !seen_extensions.is_empty() {
+            let mut extension_cases = Vec::<(crate::types::Path, RawLambda)>::new();
+            for case in cases {
+                let body = self.convert_expr_raw(&case.c_rhs);
+                let (pat, aliases) = peel_aliases(&case.c_lhs);
+                if let PatternDesc::Tpat_construct(_, cstr, args) = &pat.pat_desc {
+                    if let ConstructorTag::CstrExtension(path) = &cstr.cstr_tag {
+                        let act = wrap_aliases_raw(
+                            &aliases,
+                            RawLambda::var(scrut_id.clone()),
+                            self.bind_constructor_args_irrefutably_raw(
+                                &scrut_id,
+                                pat,
+                                cstr,
+                                args,
+                                body,
+                            ),
+                        );
+                        extension_cases.push((path.clone(), act));
+                    }
+                }
+            }
+
+            let failaction = match default_case {
+                Some(DefaultCase::Any(body)) => Some(body),
+                Some(DefaultCase::Bind(id, body)) => Some(RawLambda::let_(
+                    LetKind::Alias,
+                    id,
+                    RawLambda::var(scrut_id.clone()),
+                    body,
+                )),
+                None => None,
+            };
+
+            let (default, remaining_cases) = match failaction {
+                Some(fail) => (fail, extension_cases),
+                None => {
+                    let mut iter = extension_cases.into_iter();
+                    let (_, default) = iter.next()?;
+                    (default, iter.collect())
+                }
+            };
+
+            let tests = remaining_cases.into_iter().rev().fold(default, |rem, (path, act)| {
+                RawLambda::LifThenElse(
+                    Box::new(RawLambda::prim(
+                        Primitive::PextensionSlotEq,
+                        vec![
+                            RawLambda::var(scrut_id.clone()),
+                            self.translate_extension_path_raw(&path, loc),
+                        ],
+                        loc,
+                    )),
+                    Box::new(act),
+                    Box::new(rem),
+                )
+            });
+
+            return Some(match wrap_let {
+                Some((id, value)) => RawLambda::let_(LetKind::Alias, id, value, tests),
+                None => tests,
+            });
+        }
+
+        let mut const_cases = Vec::new();
+        let mut block_cases = Vec::new();
+        for case in cases {
+            let body = self.convert_expr_raw(&case.c_rhs);
+            let (pat, aliases) = peel_aliases(&case.c_lhs);
+            match &pat.pat_desc {
+                PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_tag {
+                    ConstructorTag::CstrConstant(tag) => const_cases.push((
+                        *tag,
+                        wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), body),
+                    )),
+                    ConstructorTag::CstrBlock(tag) => block_cases.push((
+                        *tag,
+                        wrap_aliases_raw(
+                            &aliases,
+                            RawLambda::var(scrut_id.clone()),
+                            self.bind_constructor_args_irrefutably_raw(
+                                &scrut_id,
+                                pat,
+                                cstr,
+                                args,
+                                body,
+                            ),
+                        ),
+                    )),
+                    ConstructorTag::CstrUnboxed | ConstructorTag::CstrExtension(_) => {}
+                },
+                PatternDesc::Tpat_constant(TConstant::Int(i)) => {
+                    const_cases.push((
+                        *i as i32,
+                        wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), body),
+                    ));
+                }
+                PatternDesc::Tpat_constant(TConstant::Char(c)) => {
+                    const_cases.push((
+                        *c as i32,
+                        wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), body),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        let failaction = match default_case {
+            Some(DefaultCase::Any(body)) => Some(Box::new(body)),
+            Some(DefaultCase::Bind(id, body)) => Some(Box::new(RawLambda::let_(
+                LetKind::Alias,
+                id,
+                RawLambda::var(scrut_id.clone()),
+                body,
+            ))),
+            None => match partial {
+                Partial::Partial => Some(Box::new(RawLambda::from_lowered(self.match_failure(
+                    loc.clone(),
+                )))),
+                Partial::Total => None,
+            },
+        };
+
+        let result = if !has_non_ctor_constants {
+            if let Some(cstr) = repr_cstr.as_ref() {
+                match (
+                    cstr.cstr_consts,
+                    cstr.cstr_nonconsts,
+                    const_cases.as_slice(),
+                    block_cases.as_slice(),
+                    failaction.as_ref(),
+                ) {
+                    (1, 1, [(0, act1)], [(0, act2)], _) if
+                        cstr.cstr_name == "::"
+                            || cstr.cstr_name == "[]"
+                            || constructor_has_optional_shape(cstr) =>
+                    {
+                        let cond = if constructor_has_optional_shape(cstr) {
+                            RawLambda::prim(
+                                Primitive::PisNotNone,
+                                vec![scrut_var.clone()],
+                                loc,
+                            )
+                        } else {
+                            RawLambda::prim(
+                                Primitive::Pjscomp(Comparison::Neq),
+                                vec![scrut_var.clone(), RawLambda::const_(Constant::int(0))],
+                                loc,
+                            )
+                        };
+                        RawLambda::LifThenElse(
+                            Box::new(cond),
+                            Box::new(act2.clone()),
+                            Box::new(act1.clone()),
+                        )
+                    }
+                    (2, 0, [(i1, act1), (_, act2)], [], None)
+                        if cstr.cstr_name == "true" || cstr.cstr_name == "false" =>
+                    {
+                        if *i1 == 0 {
+                            RawLambda::LifThenElse(
+                                Box::new(scrut_var.clone()),
+                                Box::new(act2.clone()),
+                                Box::new(act1.clone()),
+                            )
+                        } else {
+                            RawLambda::LifThenElse(
+                                Box::new(scrut_var.clone()),
+                                Box::new(act1.clone()),
+                                Box::new(act2.clone()),
+                            )
+                        }
+                    }
+                    _ => RawLambda::Lswitch(
+                        Box::new(scrut_var.clone()),
+                        crate::raw_lambda::RawLambdaSwitch {
+                            sw_consts_full: false,
+                            sw_consts: const_cases,
+                            sw_blocks_full: false,
+                            sw_blocks: block_cases,
+                            sw_failaction: failaction,
+                            sw_names: None,
+                        },
+                    ),
+                }
+            } else {
+                RawLambda::Lswitch(
+                    Box::new(scrut_var.clone()),
+                    crate::raw_lambda::RawLambdaSwitch {
+                        sw_consts_full: false,
+                        sw_consts: const_cases,
+                        sw_blocks_full: false,
+                        sw_blocks: block_cases,
+                        sw_failaction: failaction,
+                        sw_names: None,
+                    },
+                )
+            }
+        } else {
+            RawLambda::Lswitch(
+                Box::new(scrut_var.clone()),
+                crate::raw_lambda::RawLambdaSwitch {
+                    sw_consts_full: false,
+                    sw_consts: const_cases,
+                    sw_blocks_full: false,
+                    sw_blocks: block_cases,
+                    sw_failaction: failaction,
+                    sw_names: None,
+                },
+            )
+        };
+
+        Some(match wrap_let {
+            Some((id, value)) => RawLambda::let_(LetKind::Strict, id, value, result),
+            None => result,
+        })
+    }
+
     fn compile_irrefutable_match(
         &mut self,
         scrut: &Expression,
@@ -2440,17 +3101,19 @@ impl<'a> RawLambdaConverter<'a> {
                 };
                 let mut result = body;
                 for (lid, lbl, inner_pat, _) in fields.iter().rev() {
-                    let field = RawLambda::prim(
-                        Primitive::Pfield(
-                            lbl.lbl_pos,
-                            FieldDbgInfo::Record {
-                                name: lbl.lbl_name.clone(),
-                                mutable_flag: to_parser_mutable(lbl.lbl_mut),
-                            },
-                        ),
-                        vec![RawLambda::var(tmp.clone())],
-                        self.loc(lid.loc),
-                    );
+                    let field = match &lbl.lbl_repres {
+                        RecordRepresentation::RecordUnboxed(_) => RawLambda::var(tmp.clone()),
+                        _ => {
+                            let Some((pos, info)) = raw_record_field_access(lbl) else {
+                                continue;
+                            };
+                            RawLambda::prim(
+                                Primitive::Pfield(pos, info),
+                                vec![RawLambda::var(tmp.clone())],
+                                self.loc(lid.loc),
+                            )
+                        }
+                    };
                     result = self.bind_irrefutable_pattern_raw(inner_pat, field, result);
                 }
                 match wrap_tmp {

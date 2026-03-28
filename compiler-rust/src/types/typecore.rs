@@ -13202,7 +13202,6 @@ fn type_record(
     {
         all_labels = None;
     }
-
     let mut typed_fields = Vec::new();
 
     // OCaml: unify_exp_types ty_record (instance env ty_expected)
@@ -13715,14 +13714,40 @@ fn get_record_labels<'a>(
     let desc = ctx.get_desc(repr);
     if let crate::types::TypeDesc::Tconstr { ref path, .. } = *desc {
         // For inline records in extension/exception constructors, the type path
-        // is the constructor name. Look up the constructor and check cstr_inlined.
-        let cstr_name = match path {
-            Path::Pident(id) => Some(id.name().to_string()),
-            Path::Pdot(_, name, _) => Some(name.clone()),
-            _ => None,
-        };
-        if let Some(name) = cstr_name {
-            if let Ok(cstr) = env.find_constructor(&name) {
+        // is the constructor path. Match the constructor by path, not by bare
+        // name, otherwise exception/extension inline records pick up unrelated
+        // constructors with the same short name.
+        let cstr_name = path.last();
+        let mut matches_inline_record_path =
+            |cstr: &crate::types::decl::ConstructorDescription| match &cstr.cstr_tag {
+                crate::types::decl::ConstructorTag::CstrExtension(ext_path) => {
+                    ext_path.same(path)
+                }
+                _ => {
+                    let cstr_res = ctx.repr(cstr.cstr_res);
+                    let cstr_res_desc = ctx.get_desc(cstr_res);
+                    let Some(matches_parent) = (match &*cstr_res_desc {
+                        TypeDesc::Tconstr { path: res_path, .. } => match path {
+                            Path::Pdot(parent, name, _) if name == &cstr.cstr_name => {
+                                Some(
+                                    parent.same(res_path)
+                                        || compare_type_paths_for_disambiguation(
+                                            parent, res_path, env, pers_env, ctx,
+                                        ),
+                                )
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    }) else {
+                        return false;
+                    };
+                    matches_parent
+                }
+            };
+
+        for cstr in env.find_all_constructors(cstr_name).iter().rev() {
+            if matches_inline_record_path(cstr) {
                 if let Some(ref inlined) = cstr.cstr_inlined {
                     if let crate::types::TypeKind::TypeRecord(ref labels, _) = inlined.type_kind {
                         return Some(labels.clone());
@@ -13731,6 +13756,134 @@ fn get_record_labels<'a>(
             }
         }
     }
+    None
+}
+
+fn constructor_matches_inline_record_path<'a>(
+    path: &Path,
+    cstr: &crate::types::decl::ConstructorDescription,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> bool {
+    if cstr.cstr_inlined.is_none() {
+        return false;
+    }
+
+    match &cstr.cstr_tag {
+        crate::types::decl::ConstructorTag::CstrExtension(ext_path) => ext_path.same(path),
+        _ => {
+            let cstr_res = ctx.repr(cstr.cstr_res);
+            let cstr_res_desc = ctx.get_desc(cstr_res);
+            match &*cstr_res_desc {
+                TypeDesc::Tconstr { path: res_path, .. } => match path {
+                    Path::Pdot(parent, name, _) if name == &cstr.cstr_name => {
+                        parent.same(res_path)
+                            || compare_type_paths_for_disambiguation(
+                                parent, res_path, env, pers_env, ctx,
+                            )
+                    }
+                    _ => false,
+                },
+                _ => false,
+            }
+        }
+    }
+}
+
+fn inline_record_decl_from_variant_type<'a>(
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    type_decl: &crate::types::TypeDeclaration,
+    cstr_name: &str,
+) -> Option<crate::types::TypeDeclaration> {
+    let crate::types::TypeKind::TypeVariant(ref constrs) = type_decl.type_kind else {
+        return None;
+    };
+
+    let num_consts = constrs
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.cd_args,
+                crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
+            ) && c.cd_res.is_none()
+        })
+        .count() as i32;
+    let num_nonconsts = constrs.len() as i32 - num_consts;
+
+    let mut block_tag = 0i32;
+    for cd in constrs {
+        let is_constant = matches!(
+            cd.cd_args,
+            crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
+        ) && cd.cd_res.is_none();
+
+        if cd.cd_id.name() == cstr_name {
+            let crate::types::ConstructorArguments::CstrRecord(ref labels) = cd.cd_args else {
+                return None;
+            };
+            let inline_params = inline_record_type_params(ctx, &type_decl.type_params, labels);
+            return Some(crate::types::TypeDeclaration {
+                type_params: inline_params.clone(),
+                type_arity: inline_params.len() as i32,
+                type_kind: crate::types::TypeKind::TypeRecord(
+                    labels.clone(),
+                    crate::types::RecordRepresentation::RecordInlined {
+                        tag: block_tag,
+                        name: cstr_name.to_string(),
+                        num_nonconsts,
+                        attrs: cd.cd_attributes.clone(),
+                    },
+                ),
+                type_private: type_decl.type_private,
+                type_manifest: None,
+                type_variance: inline_params
+                    .iter()
+                    .map(|_| crate::types::variance::Variance::full())
+                    .collect(),
+                type_newtype_level: None,
+                type_loc: cd.cd_loc,
+                type_attributes: vec![],
+                type_immediate: false,
+                type_unboxed: crate::types::UnboxedStatus::default(),
+                type_inlined_types: vec![],
+                type_path: None,
+            });
+        }
+
+        if !is_constant {
+            block_tag += 1;
+        }
+    }
+
+    None
+}
+
+fn lookup_inline_record_decl_for_path<'a>(
+    path: &Path,
+    actual_args: &[TypeExprRef],
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<(Path, Vec<TypeExprRef>, crate::types::TypeDeclaration)> {
+    if let Path::Pdot(parent_path, cstr_name, _) = path {
+        if let Some(parent_decl) = lookup_type_decl_for_path(parent_path, env, pers_env, ctx) {
+            if let Some(inline_decl) =
+                inline_record_decl_from_variant_type(ctx, &parent_decl, cstr_name)
+            {
+                return Some((path.clone(), actual_args.to_vec(), inline_decl));
+            }
+        }
+    }
+
+    for cstr in env.find_all_constructors(path.last()).iter().rev() {
+        if constructor_matches_inline_record_path(path, cstr, env, pers_env, ctx) {
+            if let Some(inlined) = &cstr.cstr_inlined {
+                return Some((path.clone(), actual_args.to_vec(), (**inlined).clone()));
+            }
+        }
+    }
+
     None
 }
 
@@ -20796,7 +20949,17 @@ fn extract_concrete_record_type_info<'a>(
                     return None;
                 }
 
-                let decl = lookup_type_decl_for_path(&path, env, pers_env, ctx)?;
+                let decl = match lookup_type_decl_for_path(&path, env, pers_env, ctx) {
+                    Some(decl) => decl,
+                    None => {
+                        if let Some((inline_path, inline_args, inline_decl)) =
+                            lookup_inline_record_decl_for_path(&path, &args, env, pers_env, ctx)
+                        {
+                            return Some((inline_path, inline_args, inline_decl));
+                        }
+                        return None;
+                    }
+                };
                 match decl.type_kind {
                     crate::types::TypeKind::TypeRecord(_, _) => return Some((path, args, decl)),
                     crate::types::TypeKind::TypeAbstract => {
@@ -22656,9 +22819,17 @@ fn lookup_type_decl_for_path<'a>(
         }
     }
 
-    // Try stamp-based lookup
+    // Try stamp-based lookup only for regular type identifiers. Constructor-like
+    // paths such as local exception inline-record paths (`C`) share the `Path`
+    // representation but are not type bindings, and imported CMI type stamps can
+    // collide with local constructor stamps.
     if let Path::Pident(id) = type_path {
-        if id.stamp() != 0 {
+        if id.stamp() != 0
+            && matches!(
+                type_path.constructor_typath(),
+                crate::types::path::Typath::Regular(_)
+            )
+        {
             if let Some(decl) = ctx.find_type_decl_by_stamp(id.stamp()) {
                 return Some(decl.clone());
             }
