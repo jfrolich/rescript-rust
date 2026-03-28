@@ -11915,7 +11915,7 @@ fn type_for(
             if !state.pattern_variables.is_empty() {
                 return Err(TypeCoreError::InvalidForLoopIndex);
             }
-            Ident::create_local("_for")
+            ctx.create_ident("_for")
         }
         crate::parser::ast::PatternDesc::Ppat_var(_) => {
             if state.pattern_variables.len() == 1 {
@@ -14737,7 +14737,7 @@ fn type_letexception(
     let arena = tctx.arena;
 
     let name_str = arena.get_string(ext_constr.pext_name.txt).to_string();
-    let id = Ident::create_local(&name_str);
+    let id = ctx.create_ident(&name_str);
 
     // Match OCaml's transl_exception: begin_def before creating arg types,
     // end_def + generalize after, so instance_constructor creates fresh copies.
@@ -15357,7 +15357,7 @@ fn type_letmodule(
     let arena = tctx.arena;
     let ctx = tctx.type_ctx;
     let mod_name_str = arena.get_string(name.txt).to_string();
-    let mod_id = Ident::create_local(&mod_name_str);
+    let mod_id = ctx.create_ident(&mod_name_str);
     let letmodule_ty = ctx.new_var(None);
 
     // Match OCaml `Pexp_letmodule` level scoping (`begin_def`/`end_def`).
@@ -16315,7 +16315,7 @@ fn type_expect_with_module_unpacks(
     let wrapped_ty = typed_body.exp_type;
     Ok(Expression::new(
         crate::types::typedtree::ExpressionDesc::Texp_letmodule(
-            Ident::create_local(unpack.id.name()),
+            tctx.type_ctx.create_ident(unpack.id.name()),
             unpack.name.clone(),
             Box::new(unpack_module),
             Box::new(typed_body),

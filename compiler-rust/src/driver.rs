@@ -535,6 +535,8 @@ pub fn compile_source_to_js_with_options(
         return Ok(String::new());
     }
 
+    let lambda_start_stamp = type_ctx.current_stamp();
+
     if options.dump_lambda {
         let unit_name = options
             .source_filename
@@ -548,7 +550,7 @@ pub fn compile_source_to_js_with_options(
                 parser.arena(),
                 &type_ctx,
                 &env,
-                id_gen.current_stamp(),
+                lambda_start_stamp,
                 unit_name,
             );
         if let Some(persistent_env) = tctx.persistent_env.clone() {
@@ -563,7 +565,7 @@ pub fn compile_source_to_js_with_options(
     // OCaml-style raw lambda stage is being ported independently.
     let mut lambda_converter = crate::lambda::convert::LambdaConverter::with_start_stamp(
         parser.arena(),
-        id_gen.current_stamp(),
+        lambda_start_stamp,
     );
     let lambda = lambda_converter.convert_structure(&typed_structure);
 
