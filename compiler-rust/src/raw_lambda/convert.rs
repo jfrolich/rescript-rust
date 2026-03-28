@@ -42,6 +42,12 @@ use crate::types::SignatureItem;
 const PREDEF_MATCH_FAILURE_STAMP: i32 = 17;
 const PREDEF_ASSERT_FAILURE_STAMP: i32 = 27;
 
+#[derive(Clone)]
+enum RawFunctionBinding {
+    Value(Vec<ValueBinding>),
+    Module(Ident, Located<String>, ModuleExpr),
+}
+
 fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
     Ident::new(name, stamp, IdentFlags::PREDEF_EXN.with_global())
 }
@@ -486,6 +492,29 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn get_function_arity_from_type(
+        &self,
+        env: &crate::types::env::Env,
+        ty: TypeExprRef,
+    ) -> Option<i32> {
+        let repr = self.type_ctx.repr(ty);
+        match &*self.type_ctx.get_desc(repr) {
+            TypeDesc::Tarrow { arity, .. } => *arity,
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+                self.get_function_arity_from_type(env, *next)
+            }
+            TypeDesc::Tconstr { .. } => {
+                let expanded = crate::types::ctype::expand_head(self.type_ctx, env, ty);
+                if expanded == ty {
+                    None
+                } else {
+                    self.get_function_arity_from_type(env, expanded)
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn is_base_type(&self, ty: TypeExprRef, name: &str) -> bool {
         match self.type_desc(ty) {
             TypeDesc::Tconstr { path, .. } => path.head_name() == name || path.last() == name,
@@ -575,6 +604,106 @@ impl<'a> RawLambdaConverter<'a> {
             PREDEF_ASSERT_FAILURE_STAMP,
             loc,
         ))
+    }
+
+    fn has_only_expr_attr(&self, expr: &Expression, name: &str) -> bool {
+        expr.exp_attributes.len() == 1
+            && self.arena.get_string(expr.exp_attributes[0].0.txt) == name
+    }
+
+    fn wrap_raw_function_bindings(
+        &self,
+        expr: Expression,
+        bindings: &[RawFunctionBinding],
+    ) -> Expression {
+        bindings.iter().fold(expr, |expr, binding| match binding {
+            RawFunctionBinding::Value(binds) => {
+                let mut wrapped = expr;
+                let body = wrapped.clone();
+                wrapped.exp_desc = ExpressionDesc::Texp_let(
+                    crate::parser::ast::RecFlag::Nonrecursive,
+                    binds.clone(),
+                    Box::new(body),
+                );
+                wrapped
+            }
+            RawFunctionBinding::Module(id, name, mexpr) => {
+                let mut wrapped = expr;
+                let body = wrapped.clone();
+                wrapped.exp_desc = ExpressionDesc::Texp_letmodule(
+                    id.clone(),
+                    name.clone(),
+                    Box::new(mexpr.clone()),
+                    Box::new(body),
+                );
+                wrapped
+            }
+        })
+    }
+
+    fn push_defaults_case(&self, bindings: Vec<RawFunctionBinding>, case: &Case) -> Case {
+        if case.c_guard.is_none() {
+            match &case.c_rhs.exp_desc {
+                ExpressionDesc::Texp_function {
+                    params,
+                    body,
+                    partial,
+                    arity,
+                    async_,
+                } => {
+                    let pushed_body = body
+                        .iter()
+                        .map(|inner_case| self.push_defaults_case(bindings.clone(), inner_case))
+                        .collect::<Vec<_>>();
+                    let mut rhs = case.c_rhs.clone();
+                    rhs.exp_desc = ExpressionDesc::Texp_function {
+                        params: params.clone(),
+                        body: pushed_body,
+                        partial: *partial,
+                        arity: *arity,
+                        async_: *async_,
+                    };
+                    return Case {
+                        c_lhs: case.c_lhs.clone(),
+                        c_guard: None,
+                        c_rhs: rhs,
+                    };
+                }
+                ExpressionDesc::Texp_let(crate::parser::ast::RecFlag::Nonrecursive, binds, inner)
+                    if self.has_only_expr_attr(&case.c_rhs, "#default")
+                        && matches!(inner.exp_desc, ExpressionDesc::Texp_function { .. }) =>
+                {
+                    let mut next_bindings = Vec::with_capacity(bindings.len() + 1);
+                    next_bindings.push(RawFunctionBinding::Value(binds.clone()));
+                    next_bindings.extend(bindings);
+                    let mut next_case = case.clone();
+                    next_case.c_rhs = (**inner).clone();
+                    return self.push_defaults_case(next_bindings, &next_case);
+                }
+                ExpressionDesc::Texp_letmodule(id, name, mexpr, inner)
+                    if self.has_only_expr_attr(&case.c_rhs, "#modulepat")
+                        && matches!(inner.exp_desc, ExpressionDesc::Texp_function { .. }) =>
+                {
+                    let mut next_bindings = Vec::with_capacity(bindings.len() + 1);
+                    next_bindings.push(RawFunctionBinding::Module(
+                        id.clone(),
+                        name.clone(),
+                        (**mexpr).clone(),
+                    ));
+                    next_bindings.extend(bindings);
+                    let mut next_case = case.clone();
+                    next_case.c_rhs = (**inner).clone();
+                    return self.push_defaults_case(next_bindings, &next_case);
+                }
+                _ => {}
+            }
+        }
+
+        Case {
+            c_lhs: case.c_lhs.clone(),
+            c_guard: case.c_guard.clone(),
+            c_rhs: self.wrap_raw_function_bindings(case.c_rhs.clone(), &bindings),
+        }
     }
 
     fn translate_unified_ops_primitive(
@@ -1755,9 +1884,13 @@ impl<'a> RawLambdaConverter<'a> {
                 arity,
                 async_,
             } if body.len() == 1 && body[0].c_guard.is_none() => {
+                let pushed_body = body
+                    .iter()
+                    .map(|case| self.push_defaults_case(Vec::new(), case))
+                    .collect::<Vec<_>>();
                 self.convert_function_raw(
                     params,
-                    body,
+                    &pushed_body,
                     *partial,
                     *arity,
                     expr.exp_type,
@@ -2528,6 +2661,30 @@ impl<'a> RawLambdaConverter<'a> {
         let tmp = self.id_gen.create("ctor");
         let mut result = body;
 
+        if constructor_has_optional_shape(cstr) {
+            if let [arg_pat] = args {
+                let from_option = self
+                    .type_ctx
+                    .get_typed_env(arg_pat.pat_env)
+                    .map(|env| {
+                        if type_cannot_contain_undefined(
+                            self.type_ctx,
+                            env.as_ref(),
+                            arg_pat.pat_type,
+                        ) {
+                            Primitive::PvalFromOptionNotNest
+                        } else {
+                            Primitive::PvalFromOption
+                        }
+                    })
+                    .unwrap_or(Primitive::PvalFromOption);
+                let payload =
+                    RawLambda::prim(from_option, vec![RawLambda::var(scrut_id.clone())], pat_loc);
+                result = self.bind_irrefutable_pattern_raw(arg_pat, payload, result);
+                return result;
+            }
+        }
+
         for (idx, arg_pat) in args.iter().enumerate().rev() {
             let field = match &cstr.cstr_tag {
                 ConstructorTag::CstrBlock(_) => RawLambda::prim(
@@ -3063,7 +3220,10 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> RawLambda {
         match &pat.pat_desc {
             PatternDesc::Tpat_any => body,
-            PatternDesc::Tpat_var(id, _) => RawLambda::let_(LetKind::Alias, id.clone(), scrut, body),
+            PatternDesc::Tpat_var(id, _) => match &body {
+                RawLambda::Lvar(body_id) if body_id == id => scrut,
+                _ => RawLambda::let_(LetKind::Alias, id.clone(), scrut, body),
+            },
             PatternDesc::Tpat_alias(inner, id, _) => {
                 let inner = self.bind_irrefutable_pattern_raw(inner, scrut.clone(), body);
                 RawLambda::let_(LetKind::Alias, id.clone(), scrut, inner)
@@ -3656,7 +3816,7 @@ impl<'a> RawLambdaConverter<'a> {
         loc: Location,
         funct: &Expression,
         args: &[ApplyArg],
-        _partial: bool,
+        partial: bool,
         transformed_jsx: bool,
     ) -> RawLambda {
         if let ExpressionDesc::Texp_ident(_, _, desc) = &funct.exp_desc {
@@ -3690,7 +3850,7 @@ impl<'a> RawLambdaConverter<'a> {
                         return if rest.is_empty() {
                             base
                         } else {
-                            self.transl_apply_raw(base, rest, loc, transformed_jsx)
+                            self.transl_apply_raw(base, rest, loc, transformed_jsx, None)
                         };
                     }
                     let base = RawLambda::prim(
@@ -3709,14 +3869,31 @@ impl<'a> RawLambdaConverter<'a> {
                     return if rest.is_empty() {
                         base
                     } else {
-                        self.transl_apply_raw(base, rest, loc, transformed_jsx)
+                        self.transl_apply_raw(base, rest, loc, transformed_jsx, None)
                     };
                 }
             }
         }
 
         let funct_lam = self.convert_expr_raw(funct);
-        self.transl_apply_raw(funct_lam, args, loc, transformed_jsx)
+        let uncurried_partial_application = if partial {
+            self.env_for_expr(funct).and_then(|env| {
+                self.get_function_arity_from_type(env.as_ref(), funct.exp_type)
+                    .and_then(|arity| {
+                        let real_args = args.iter().filter(|arg| arg.expression.is_some()).count() as i32;
+                        (arity > real_args).then_some(arity)
+                    })
+            })
+        } else {
+            None
+        };
+        self.transl_apply_raw(
+            funct_lam,
+            args,
+            loc,
+            transformed_jsx,
+            uncurried_partial_application,
+        )
     }
 
     fn convert_let_with_body(
@@ -4064,6 +4241,7 @@ impl<'a> RawLambdaConverter<'a> {
         sargs: &[ApplyArg],
         loc: Location,
         transformed_jsx: bool,
+        uncurried_partial_application: Option<i32>,
     ) -> RawLambda {
         fn lapply(
             loc: Location,
@@ -4187,16 +4365,47 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
 
-        let pending = sargs
-            .iter()
-            .map(|arg| {
-                (
-                    may_map(arg.expression.clone(), |expr| self.convert_expr_raw(&expr)),
-                    arg.label.is_optional(),
+        match uncurried_partial_application {
+            Some(arity) => {
+                let extra_arity = arity - sargs.len() as i32;
+                let mut none_ids = Vec::new();
+                let args = sargs
+                    .iter()
+                    .filter_map(|arg| match &arg.expression {
+                        Some(expr) => Some(self.convert_expr_raw(expr)),
+                        None => {
+                            let id = self.id_gen.create("none");
+                            none_ids.push(id.clone());
+                            Some(RawLambda::var(id))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let extra_ids = (0..extra_arity)
+                    .map(|_| self.id_gen.create("extra"))
+                    .collect::<Vec<_>>();
+                let mut ap_args = args;
+                ap_args.extend(extra_ids.iter().cloned().map(RawLambda::var));
+                let body = lapply(loc.clone(), lam, ap_args, transformed_jsx);
+                RawLambda::function_(
+                    (none_ids.len() + extra_ids.len()) as i32,
+                    none_ids.into_iter().chain(extra_ids).collect(),
+                    body,
+                    FunctionAttribute::default(),
                 )
-            })
-            .collect::<Vec<_>>();
-        build_apply(self, lam, Vec::new(), &pending, loc, transformed_jsx)
+            }
+            None => {
+                let pending = sargs
+                    .iter()
+                    .map(|arg| {
+                        (
+                            may_map(arg.expression.clone(), |expr| self.convert_expr_raw(&expr)),
+                            arg.label.is_optional(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                build_apply(self, lam, Vec::new(), &pending, loc, transformed_jsx)
+            }
+        }
     }
 
     fn translate_primitive_raw(
