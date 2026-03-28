@@ -551,6 +551,9 @@ pub fn compile_source_to_js_with_options(
                 id_gen.current_stamp(),
                 unit_name,
             );
+        if let Some(persistent_env) = tctx.persistent_env.clone() {
+            raw_converter.set_persistent_env(persistent_env);
+        }
         let raw_lambda =
             raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
         eprintln!("{}", crate::raw_lambda::print::RawLambdaPrinter::new(&raw_lambda));

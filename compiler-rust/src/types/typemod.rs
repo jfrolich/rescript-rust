@@ -2738,16 +2738,14 @@ pub fn lookup_module_path_by_lid<'b>(
             let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
             let parent_type = lookup_module_type_by_lid(prefix, arena, env, pers_env, ctx)?;
             let parent_sig = resolve_mod_type_to_sig(&parent_type, Some(env), pers_env, ctx)?;
-            for (pos, sig_item) in parent_sig.iter().enumerate().rev() {
-                if let crate::types::decl::SignatureItem::SigModule(id, _sub_md, _) = sig_item {
-                    if id.name() == submod_name {
-                        return Some(Path::Pdot(
-                            Box::new(parent_path.clone()),
-                            submod_name.to_string(),
-                            pos as i32,
-                        ));
-                    }
-                }
+            if let Some((pos, _sub_md)) =
+                crate::types::decl::signature_runtime_module(&parent_sig, submod_name)
+            {
+                return Some(Path::Pdot(
+                    Box::new(parent_path.clone()),
+                    submod_name.to_string(),
+                    pos as i32,
+                ));
             }
             None
         }
@@ -6874,7 +6872,7 @@ fn type_module_expr_with_alias<'a>(
                 mod_desc: ModuleExprDesc::Tmod_ident(path, lid.clone()),
                 mod_loc: loc,
                 mod_type: typed_mod_type,
-                mod_env: EnvRef(0),
+                mod_env: tctx.type_ctx.store_typed_env(env),
                 mod_attributes: mod_expr.pmod_attributes.clone(),
             };
 
@@ -7186,7 +7184,7 @@ fn type_module_expr_with_alias<'a>(
                 ),
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
-                mod_env: EnvRef(0),
+                mod_env: tctx.type_ctx.store_typed_env(env),
                 mod_attributes: mod_expr.pmod_attributes.clone(),
             })
         }
@@ -7274,7 +7272,7 @@ fn type_module_type_of_expr<'a>(
                 mod_desc: ModuleExprDesc::Tmod_ident(path, lid.clone()),
                 mod_loc: mod_expr.pmod_loc,
                 mod_type: ModuleType::placeholder(),
-                mod_env: EnvRef(0),
+                mod_env: tctx.type_ctx.store_typed_env(env),
                 mod_attributes: mod_expr.pmod_attributes.clone(),
             })
         }

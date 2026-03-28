@@ -4873,7 +4873,7 @@ pub fn type_expect<'a>(
                 ExpressionDesc::Texp_ident(path, lid.clone(), desc),
                 loc,
                 ty,
-                EnvRef(0),
+                tctx.type_ctx.store_typed_env(env),
                 expr.pexp_attributes.clone(),
             ))
         }
@@ -16289,7 +16289,7 @@ fn type_expect_with_module_unpacks(
         ExpressionDesc::Texp_ident(Path::pident(unpack.id.clone()), located_lid, value_desc),
         unpack.loc_idx,
         unpack_inst_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         Attributes::new(),
     );
     let unpack_module = crate::types::typedtree::ModuleExpr {
@@ -18081,12 +18081,11 @@ impl Env {
                             }
                         }
                     }
-                    // Search for the value in the signature
-                    // Signature lookup must respect shadowing order:
-                    // later items in a structure/signature shadow earlier ones.
-                    for (pos, sig_item) in sig.iter().enumerate().rev() {
-                        if let crate::types::decl::SignatureItem::SigValue(id, vd) = sig_item {
-                            if id.name() == value_name {
+                    // Search for the value in the signature using OCaml's
+                    // runtime slot accounting rather than raw signature index.
+                    if let Some((pos, vd)) =
+                        crate::types::decl::signature_runtime_value(&sig, value_name)
+                    {
                                 if std::env::var_os("RUST_DEBUG_LOOKUP_STDLIB_VALUES").is_some()
                                     && matches!(
                                         (prefix_str.as_str(), value_name),
@@ -18262,8 +18261,6 @@ impl Env {
                                     );
                                 }
                                 return Ok((path, vd.clone()));
-                            }
-                        }
                     }
                     if debug_lookup_value_lid {
                         eprintln!(
@@ -18855,20 +18852,18 @@ impl Env {
                             items
                         );
                     }
-                    // Search for the sub-module in the parent's signature
-                    for (pos, sig_item) in parent_sig.iter().enumerate().rev() {
-                        if let crate::types::decl::SignatureItem::SigModule(id, sub_md, _) =
-                            sig_item
-                        {
-                            if id.name() == submod_name {
-                                let sub_path = Path::Pdot(
-                                    Box::new(parent_path.clone()),
-                                    submod_name.to_string(),
-                                    pos as i32,
-                                );
-                                let result =
-                                    self.resolve_module_type(&sub_md.md_type, pers_env, ctx);
-                                if let Some((sig, resolved_name)) = result {
+                    // Search for the sub-module in the parent's signature using
+                    // OCaml runtime slot accounting.
+                    if let Some((pos, sub_md)) =
+                        crate::types::decl::signature_runtime_module(&parent_sig, submod_name)
+                    {
+                        let sub_path = Path::Pdot(
+                            Box::new(parent_path.clone()),
+                            submod_name.to_string(),
+                            pos as i32,
+                        );
+                        let result = self.resolve_module_type(&sub_md.md_type, pers_env, ctx);
+                        if let Some((sig, resolved_name)) = result {
                                     debug_stdlib_alias_sig("dot-before", &sub_path.name(), &sig, ctx);
                                     let (alias_target_pdot, alias_target_pident) = if apply_subst {
                                         match &sub_md.md_type {
@@ -19223,11 +19218,9 @@ impl Env {
                                             }
                                         }
                                     }
-                                    return Some((sub_path, sig));
-                                }
-                                return None;
-                            }
+                            return Some((sub_path, sig));
                         }
+                        return None;
                     }
                 }
                 None

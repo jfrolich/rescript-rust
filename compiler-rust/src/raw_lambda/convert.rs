@@ -3,7 +3,7 @@
 //! This stage ports the OCaml raw-lambda structure shape first and then
 //! incrementally ports expression lowering from `translcore.ml`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path as StdPath;
 use std::sync::{Mutex, OnceLock};
 
@@ -268,6 +268,7 @@ pub struct RawLambdaConverter<'a> {
     arena: &'a ParseArena,
     type_ctx: &'a TypeContext<'a>,
     env: &'a crate::types::env::Env,
+    persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
     id_gen: IdGenerator,
     next_static_raise: i32,
     lowered: LambdaConverter<'a>,
@@ -285,6 +286,7 @@ impl<'a> RawLambdaConverter<'a> {
             arena,
             type_ctx,
             env,
+            persistent_env: None,
             id_gen: IdGenerator::new(),
             next_static_raise: 0,
             lowered: LambdaConverter::new(arena),
@@ -303,6 +305,7 @@ impl<'a> RawLambdaConverter<'a> {
             arena,
             type_ctx,
             env,
+            persistent_env: None,
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
@@ -322,11 +325,16 @@ impl<'a> RawLambdaConverter<'a> {
             arena,
             type_ctx,
             env,
+            persistent_env: None,
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name,
         }
+    }
+
+    pub fn set_persistent_env(&mut self, persistent_env: crate::cmi::persistent_env::PersistentEnv) {
+        self.persistent_env = Some(persistent_env);
     }
 
     #[inline]
@@ -362,7 +370,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn transl_extension_constructor_raw(
-        &self,
+        &mut self,
         path: Option<crate::types::Path>,
         ext: &crate::types::typedtree::ExtensionConstructor,
     ) -> RawLambda {
@@ -382,7 +390,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn transl_type_extension_raw(
-        &self,
+        &mut self,
         rootpath: &Option<crate::types::Path>,
         tyext: &crate::types::typedtree::TypeExtension,
         body: RawLambda,
@@ -906,31 +914,24 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn include_bound_idents(sig: &[SignatureItem]) -> Vec<Ident> {
-        sig.iter()
-            .filter_map(|item| match item {
-                SignatureItem::SigValue(id, _) | SignatureItem::SigModule(id, _, _) => {
-                    Some(id.clone())
-                }
-                _ => None,
-            })
-            .collect()
+    fn include_bound_idents(sig: &[SignatureItem]) -> Vec<(Ident, usize)> {
+        crate::types::decl::signature_runtime_bound_idents(sig)
     }
 
     fn rebind_included_idents_raw(
         &self,
         mid: &Ident,
-        ids: &[Ident],
+        ids: &[(Ident, usize)],
         body: RawLambda,
         loc: Location,
     ) -> RawLambda {
-        ids.iter().enumerate().rev().fold(body, |acc, (pos, id)| {
+        ids.iter().rev().fold(body, |acc, (id, pos)| {
             RawLambda::let_(
                 LetKind::Alias,
                 id.clone(),
                 RawLambda::prim(
                     Primitive::Pfield(
-                        pos as i32,
+                        *pos as i32,
                         FieldDbgInfo::Module {
                             name: id.name().to_string(),
                         },
@@ -999,22 +1000,143 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn translate_module_path_raw(&self, path: &crate::types::Path, loc: Location) -> RawLambda {
-        let normalized = self.env.normalize_path(path);
+    fn resolve_module_type_for_path(
+        &mut self,
+        env: &crate::types::env::Env,
+        path: &crate::types::Path,
+        visiting: &mut HashSet<crate::types::Path>,
+    ) -> Option<crate::types::decl::ModuleType> {
+        use crate::types::decl::{ModuleType, SignatureItem};
+
+        if !visiting.insert(path.clone()) {
+            return None;
+        }
+
+        match path {
+            crate::types::Path::Pident(id) => {
+                if let Ok(md) = env.lookup_module(path) {
+                    Some(md.md_type.clone())
+                } else if id.is_persistent() {
+                    self.persistent_env
+                        .as_mut()
+                        .and_then(|pers| pers.find_pers_struct(id.name(), self.type_ctx))
+                        .map(|ps| ModuleType::MtySignature(ps.ps_sig.clone()))
+                } else {
+                    None
+                }
+            }
+            crate::types::Path::Pdot(parent, name, _) => {
+                let parent_mty = self.resolve_module_type_for_path(env, parent, visiting)?;
+                let parent_sig = match parent_mty {
+                    ModuleType::MtySignature(sig) => sig,
+                    ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                        match self.resolve_module_type_for_path(env, &alias_path, visiting)? {
+                            ModuleType::MtySignature(sig) => sig,
+                            _ => return None,
+                        }
+                    }
+                    ModuleType::MtyFunctor { .. } => return None,
+                };
+                parent_sig.iter().find_map(|item| match item {
+                    SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md.md_type.clone()),
+                    _ => None,
+                })
+            }
+            crate::types::Path::Papply(_, _) => None,
+        }
+    }
+
+    fn normalize_module_path_in_env(
+        &mut self,
+        env: &crate::types::env::Env,
+        path: &crate::types::Path,
+    ) -> crate::types::Path {
+        let path = match path {
+            crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
+                Box::new(self.normalize_module_path_in_env(env, prefix)),
+                name.clone(),
+                *pos,
+            ),
+            crate::types::Path::Papply(left, right) => crate::types::Path::Papply(
+                Box::new(self.normalize_module_path_in_env(env, left)),
+                Box::new(self.normalize_module_path_in_env(env, right)),
+            ),
+            _ => path.clone(),
+        };
+
+        let mut visiting = HashSet::new();
+        match self.resolve_module_type_for_path(env, &path, &mut visiting) {
+            Some(crate::types::decl::ModuleType::MtyAlias(_, alias_path))
+            | Some(crate::types::decl::ModuleType::MtyIdent(alias_path)) => {
+                self.normalize_module_path_in_env(env, &alias_path)
+            }
+            _ => path,
+        }
+    }
+
+    fn normalize_value_path_in_env(
+        &mut self,
+        env: &crate::types::env::Env,
+        path: &crate::types::Path,
+    ) -> crate::types::Path {
+        match path {
+            crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
+                Box::new(self.normalize_module_path_in_env(env, prefix)),
+                name.clone(),
+                *pos,
+            ),
+            crate::types::Path::Pident(_) => path.clone(),
+            crate::types::Path::Papply(_, _) => path.clone(),
+        }
+    }
+
+    fn translate_module_path_raw(&mut self, path: &crate::types::Path, loc: Location) -> RawLambda {
+        let normalized = self.normalize_module_path_in_env(self.env, path);
         self.translate_normal_path_raw(&normalized, loc)
     }
 
-    fn translate_value_path_raw(&self, path: &crate::types::Path, loc: Location) -> RawLambda {
-        let normalized = self.env.normalize_path_prefix(path);
+    fn translate_module_path_raw_in_env(
+        &mut self,
+        env: &crate::types::env::Env,
+        path: &crate::types::Path,
+        loc: Location,
+    ) -> RawLambda {
+        let normalized = self.normalize_module_path_in_env(env, path);
+        self.translate_normal_path_raw(&normalized, loc)
+    }
+
+    fn translate_value_path_raw(&mut self, path: &crate::types::Path, loc: Location) -> RawLambda {
+        let normalized = self.normalize_value_path_in_env(self.env, path);
+        self.translate_normal_path_raw(&normalized, loc)
+    }
+
+    fn translate_value_path_raw_in_env(
+        &mut self,
+        env: &crate::types::env::Env,
+        path: &crate::types::Path,
+        loc: Location,
+    ) -> RawLambda {
+        let normalized = self.normalize_value_path_in_env(env, path);
         self.translate_normal_path_raw(&normalized, loc)
     }
 
     fn translate_extension_path_raw(
-        &self,
+        &mut self,
         path: &crate::types::Path,
         loc: Location,
     ) -> RawLambda {
         self.translate_value_path_raw(path, loc)
+    }
+
+    fn env_for_expr(&self, expr: &Expression) -> Option<std::sync::Arc<crate::types::env::Env>> {
+        self.type_ctx.get_typed_env(expr.exp_env)
+    }
+
+    fn env_for_module_expr(
+        &self,
+        module_expr: &ModuleExpr,
+    ) -> Option<std::sync::Arc<crate::types::env::Env>> {
+        self.type_ctx.get_typed_env(module_expr.mod_env)
     }
 
     fn compose_coercions_raw(
@@ -1043,14 +1165,14 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn make_module_block_raw(
-        &self,
+        &mut self,
         fields: &[Ident],
         is_top_level: bool,
         cc: &ModuleCoercion,
         loc: Location,
     ) -> RawLambda {
         fn apply_coercion_raw(
-            this: &RawLambdaConverter<'_>,
+            this: &mut RawLambdaConverter<'_>,
             coercion: &ModuleCoercion,
             arg: RawLambda,
             loc: Location,
@@ -1189,7 +1311,11 @@ impl<'a> RawLambdaConverter<'a> {
                     &Self::compose_coercions_raw(cc, inner_cc),
                 ),
             ModuleExprDesc::Tmod_ident(path, _) => {
-                self.translate_module_path_raw(path, self.loc(module_expr.mod_loc))
+                if let Some(env) = self.env_for_module_expr(module_expr) {
+                    self.translate_module_path_raw_in_env(env.as_ref(), path, self.loc(module_expr.mod_loc))
+                } else {
+                    self.translate_module_path_raw(path, self.loc(module_expr.mod_loc))
+                }
             }
             ModuleExprDesc::Tmod_unpack(expr, _) => self.convert_expr_raw(expr),
             ModuleExprDesc::Tmod_apply(_, _, _) | ModuleExprDesc::Tmod_functor(_, _, _, _) => {
@@ -1277,7 +1403,7 @@ impl<'a> RawLambdaConverter<'a> {
             StructureItemDesc::Tstr_include(incl) => {
                 let ids = Self::include_bound_idents(&incl.incl_type);
                 let old_len = fields.len();
-                fields.extend(ids.iter().cloned());
+                fields.extend(ids.iter().map(|(id, _)| id.clone()));
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
@@ -1409,7 +1535,13 @@ impl<'a> RawLambdaConverter<'a> {
                 ValueKind::ValPrim(prim) => {
                     self.translate_primitive_raw(self.loc(expr.exp_loc), prim, expr.exp_type)
                 }
-                ValueKind::ValReg => self.translate_value_path_raw(path, self.loc(expr.exp_loc)),
+                ValueKind::ValReg => {
+                    if let Some(env) = self.env_for_expr(expr) {
+                        self.translate_value_path_raw_in_env(env.as_ref(), path, self.loc(expr.exp_loc))
+                    } else {
+                        self.translate_value_path_raw(path, self.loc(expr.exp_loc))
+                    }
+                }
             },
             ExpressionDesc::Texp_constant(cst) => RawLambda::const_(self.convert_constant(cst)),
             ExpressionDesc::Texp_let(rec_flag, bindings, body) => {

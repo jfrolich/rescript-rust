@@ -375,6 +375,105 @@ pub enum SignatureItem {
     SigClassType,
 }
 
+/// Return the runtime slot and declaration for the last value with the given
+/// name in a signature, using OCaml's component-table slot accounting.
+///
+/// Slots advance only for runtime-bearing items:
+/// - `SigValue` advances unless it is `ValPrim`
+/// - `SigTypext` advances
+/// - `SigModule` advances
+/// - `SigClass` advances
+pub fn signature_runtime_value<'a>(
+    sig: &'a [SignatureItem],
+    name: &str,
+) -> Option<(usize, &'a ValueDescription)> {
+    let mut runtime_pos = 0usize;
+    let mut found = None;
+    for item in sig {
+        match item {
+            SignatureItem::SigValue(id, desc) => {
+                let current = runtime_pos;
+                if id.name() == name {
+                    found = Some((current, desc));
+                }
+                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                    runtime_pos += 1;
+                }
+            }
+            SignatureItem::SigTypext(_, _, _)
+            | SignatureItem::SigModule(_, _, _)
+            | SignatureItem::SigClass => {
+                runtime_pos += 1;
+            }
+            SignatureItem::SigType(_, _, _)
+            | SignatureItem::SigModtype(_, _)
+            | SignatureItem::SigClassType => {}
+        }
+    }
+    found
+}
+
+/// Return the runtime slot and declaration for the last submodule with the
+/// given name in a signature, using OCaml's component-table slot accounting.
+pub fn signature_runtime_module<'a>(
+    sig: &'a [SignatureItem],
+    name: &str,
+) -> Option<(usize, &'a ModuleDeclaration)> {
+    let mut runtime_pos = 0usize;
+    let mut found = None;
+    for item in sig {
+        match item {
+            SignatureItem::SigValue(_, desc) => {
+                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                    runtime_pos += 1;
+                }
+            }
+            SignatureItem::SigModule(id, md, _) => {
+                let current = runtime_pos;
+                if id.name() == name {
+                    found = Some((current, md));
+                }
+                runtime_pos += 1;
+            }
+            SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
+                runtime_pos += 1;
+            }
+            SignatureItem::SigType(_, _, _)
+            | SignatureItem::SigModtype(_, _)
+            | SignatureItem::SigClassType => {}
+        }
+    }
+    found
+}
+
+/// Return runtime-bound identifiers from a signature, paired with their
+/// runtime slot, following OCaml `Translmod.bound_value_identifiers`.
+pub fn signature_runtime_bound_idents(sig: &[SignatureItem]) -> Vec<(Ident, usize)> {
+    let mut runtime_pos = 0usize;
+    let mut bound = Vec::new();
+    for item in sig {
+        match item {
+            SignatureItem::SigValue(id, desc) => {
+                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                    bound.push((id.clone(), runtime_pos));
+                    runtime_pos += 1;
+                }
+            }
+            SignatureItem::SigTypext(id, _, _) | SignatureItem::SigModule(id, _, _) => {
+                bound.push((id.clone(), runtime_pos));
+                runtime_pos += 1;
+            }
+            SignatureItem::SigClass => {
+                runtime_pos += 1;
+            }
+            SignatureItem::SigType(_, _, _)
+            | SignatureItem::SigModtype(_, _)
+            | SignatureItem::SigClassType => {}
+        }
+    }
+    bound
+}
+
 /// A module declaration.
 #[derive(Debug, Clone)]
 pub struct ModuleDeclaration {

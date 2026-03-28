@@ -19,16 +19,19 @@
 //! one per compilation unit.
 
 use super::asttypes::{ArgLabel, PrivateFlag};
+use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
     RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
+use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static SIMPLE_ABBREVS_DEBUG_EVENTS: AtomicUsize = AtomicUsize::new(0);
@@ -178,6 +181,12 @@ pub struct TypeContext<'a> {
     /// separate TypeExprRef nodes but record the alias here so the sexp serializer
     /// can use the original's dedup key.
     arity_aliases: RefCell<std::collections::HashMap<TypeExprRef, TypeExprRef>>,
+
+    /// Stored typedtree environment snapshots, keyed by EnvRef.
+    typed_envs: RefCell<Vec<Arc<Env>>>,
+
+    /// Reuse EnvRefs for identical logical environments.
+    typed_envs_by_id: RefCell<std::collections::HashMap<u64, EnvRef>>,
 }
 
 impl<'a> TypeContext<'a> {
@@ -224,7 +233,32 @@ impl<'a> TypeContext<'a> {
             predef_option_inner: Cell::new(None),
             predef_option_type: Cell::new(None),
             arity_aliases: RefCell::new(std::collections::HashMap::new()),
+            typed_envs: RefCell::new(Vec::new()),
+            typed_envs_by_id: RefCell::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Store a typedtree environment snapshot and return a stable reference.
+    pub fn store_typed_env(&self, env: &Env) -> EnvRef {
+        if let Some(existing) = self.typed_envs_by_id.borrow().get(&env.id()).copied() {
+            return existing;
+        }
+
+        let env_ref = {
+            let mut typed_envs = self.typed_envs.borrow_mut();
+            let env_ref = EnvRef(typed_envs.len());
+            typed_envs.push(Arc::new(env.clone_preserve_id()));
+            env_ref
+        };
+        self.typed_envs_by_id
+            .borrow_mut()
+            .insert(env.id(), env_ref);
+        env_ref
+    }
+
+    /// Resolve a typedtree environment reference.
+    pub fn get_typed_env(&self, env_ref: EnvRef) -> Option<Arc<Env>> {
+        self.typed_envs.borrow().get(env_ref.0).cloned()
     }
 
     /// Intern a CMI longident component and return a synthetic StrIdx.

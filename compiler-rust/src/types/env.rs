@@ -21,7 +21,7 @@ use super::context::TypeContext;
 use super::decl::{
     ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorTag,
     LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType, PrimitiveDescription,
-    TypeDeclaration, TypeKind, ValueDescription, ValueKind,
+    SignatureItem, TypeDeclaration, TypeKind, ValueDescription, ValueKind,
 };
 use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
@@ -713,20 +713,53 @@ impl Env {
 
     /// Find a module by path.
     pub fn lookup_module(&self, path: &Path) -> EnvResult<&ModuleDeclaration> {
-        match path {
-            Path::Pident(id) => self
-                .modules
-                .find_by_ident(id)
-                .map(|m| m.as_ref())
-                .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string())),
-            Path::Pdot(_, name, _) => self.find_module(name),
-            Path::Papply(_, _) => {
-                // For functor application, would need to evaluate the application
-                Err(EnvError::ModuleNotFound(
-                    "(functor application)".to_string(),
-                ))
+        fn lookup_submodule_in_module_type<'a>(
+            env: &'a Env,
+            mty: &'a ModuleType,
+            name: &str,
+            visiting: &mut HashSet<Path>,
+        ) -> Option<&'a ModuleDeclaration> {
+            match mty {
+                ModuleType::MtySignature(sig) => sig.iter().find_map(|item| match item {
+                    SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md),
+                    _ => None,
+                }),
+                ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                    let md = lookup_module_inner(env, alias_path, visiting).ok()?;
+                    lookup_submodule_in_module_type(env, &md.md_type, name, visiting)
+                }
+                ModuleType::MtyFunctor { .. } => None,
             }
         }
+
+        fn lookup_module_inner<'a>(
+            env: &'a Env,
+            path: &Path,
+            visiting: &mut HashSet<Path>,
+        ) -> EnvResult<&'a ModuleDeclaration> {
+            if !visiting.insert(path.clone()) {
+                return Err(EnvError::ModuleNotFound(path.name()));
+            }
+
+            match path {
+                Path::Pident(id) => env
+                    .modules
+                    .find_by_ident(id)
+                    .map(|m| m.as_ref())
+                    .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string())),
+                Path::Pdot(parent, name, _) => {
+                    let parent_md = lookup_module_inner(env, parent, visiting)?;
+                    lookup_submodule_in_module_type(env, &parent_md.md_type, name, visiting)
+                        .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+                }
+                Path::Papply(_, _) => Err(EnvError::ModuleNotFound(
+                    "(functor application)".to_string(),
+                )),
+            }
+        }
+
+        let mut visiting = HashSet::new();
+        lookup_module_inner(self, path, &mut visiting)
     }
 
     /// Normalize a path by following module aliases.
