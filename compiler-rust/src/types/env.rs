@@ -25,7 +25,7 @@ use super::decl::{
 };
 use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
-use crate::ident::Ident;
+use crate::ident::{Ident, IdentFlags};
 use crate::location::Location;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -37,6 +37,22 @@ fn free_vars(ctx: &TypeContext<'_>, ty: TypeExprRef) -> HashSet<TypeExprRef> {
     let mut visited = HashSet::new();
     free_vars_rec(ctx, ty, &mut result, &mut visited);
     result
+}
+
+fn predef_exception_ident(name: &str) -> Option<Ident> {
+    let stamp = match name {
+        "Match_failure" => 17,
+        "Invalid_argument" => 18,
+        "Failure" => 19,
+        "JsExn" => 23,
+        "Not_found" => 24,
+        "End_of_file" => 25,
+        "Division_by_zero" => 26,
+        "Assert_failure" => 27,
+        "Undefined_recursive_module" => 28,
+        _ => return None,
+    };
+    Some(Ident::new(name, stamp, IdentFlags::PREDEF_EXN.with_global()))
 }
 
 fn free_vars_rec(
@@ -1152,7 +1168,8 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
 
         let add_exception =
             |env: &mut Env, name: &str, args: Vec<TypeExprRef>, exn_ty: TypeExprRef| {
-                let id = Ident::create_persistent(name);
+                let id = predef_exception_ident(name)
+                    .unwrap_or_else(|| Ident::create_persistent(name));
                 let path = Path::pident(id.clone());
                 let cstr_desc = ConstructorDescription {
                     cstr_name: name.to_string(),

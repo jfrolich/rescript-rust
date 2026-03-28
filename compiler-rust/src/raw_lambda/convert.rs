@@ -283,25 +283,32 @@ fn collect_string_pattern_arms(pat: &Pattern) -> Option<Vec<(String, Vec<Ident>)
     Some(out)
 }
 
-fn id_of_pattern(pat: &Pattern) -> Option<Ident> {
+fn pattern_name_hint(pat: &Pattern) -> Option<String> {
     match &pat.pat_desc {
-        PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => Some(id.clone()),
+        PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
+            Some(id.name().to_string())
+        }
         PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => match &args[0].pat_desc {
-            PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => Some(id.clone()),
+            PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
+                Some(id.name().to_string())
+            }
             _ => None,
         },
         _ => None,
     }
 }
 
-fn name_pattern(default: &str, cases: &[Case]) -> Option<Ident> {
-    cases.iter().find_map(|case| id_of_pattern(&case.c_lhs)).or_else(|| {
-        if cases.is_empty() {
-            None
-        } else {
-            Some(Ident::create_persistent(default))
-        }
-    })
+fn case_name_hint(default: &str, cases: &[Case]) -> Option<String> {
+    cases
+        .iter()
+        .find_map(|case| pattern_name_hint(&case.c_lhs))
+        .or_else(|| {
+            if cases.is_empty() {
+                None
+            } else {
+                Some(default.to_string())
+            }
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -408,9 +415,28 @@ impl<'a> RawLambdaConverter<'a> {
         self.next_static_raise
     }
 
+    fn id_of_pattern(&mut self, pat: &Pattern) -> Option<Ident> {
+        match &pat.pat_desc {
+            PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => Some(id.clone()),
+            PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => match &args[0].pat_desc {
+                PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
+                    Some(id.rename(&self.id_gen))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn name_pattern_ident(&mut self, default: &str, cases: &[Case]) -> Ident {
+        cases
+            .iter()
+            .find_map(|case| self.id_of_pattern(&case.c_lhs))
+            .unwrap_or_else(|| self.id_gen.create(default))
+    }
+
     fn fresh_name_from_cases(&self, default: &str, cases: &[Case]) -> String {
-        name_pattern(default, cases)
-            .map(|id| id.name().to_string())
+        case_name_hint(default, cases)
             .unwrap_or_else(|| default.to_string())
     }
 
@@ -2630,18 +2656,182 @@ impl<'a> RawLambdaConverter<'a> {
         body: &Expression,
         cases: &[Case],
     ) -> Option<RawLambda> {
-        let exn_id = name_pattern("exn", cases).unwrap_or_else(|| self.id_gen.create("exn"));
-        let handler = self.compile_simple_constructor_match_raw_from_scrut(
-            loc.clone(),
-            RawLambda::var(exn_id.clone()),
-            cases,
-            Partial::Partial,
-        )?;
+        let exn_id = self.name_pattern_ident("exn", cases);
+        let handler = self
+            .compile_simple_trywith_extension_handler_raw(loc.clone(), &exn_id, cases)
+            .or_else(|| {
+                self.compile_simple_constructor_match_raw_from_scrut(
+                    loc.clone(),
+                    RawLambda::var(exn_id.clone()),
+                    cases,
+                    Partial::Partial,
+                )
+            })?;
         Some(RawLambda::LtryWith(
             Box::new(self.convert_expr_raw(body)),
             exn_id,
             Box::new(handler),
         ))
+    }
+
+    fn bind_match_arg_pattern_raw(
+        &mut self,
+        pat: &Pattern,
+        arg: RawLambda,
+        body: RawLambda,
+    ) -> RawLambda {
+        match arg {
+            RawLambda::Lvar(_) => self.bind_irrefutable_pattern_raw(pat, arg, body),
+            _ => {
+                let id = self
+                    .id_of_pattern(pat)
+                    .unwrap_or_else(|| self.id_gen.create("match"));
+                let bound = self.bind_irrefutable_pattern_raw(pat, RawLambda::var(id.clone()), body);
+                RawLambda::let_(LetKind::Alias, id, arg, bound)
+            }
+        }
+    }
+
+    fn bind_extension_args_trywith_raw(
+        &mut self,
+        scrut_id: &Ident,
+        args: &[Pattern],
+        body: RawLambda,
+        loc: Location,
+    ) -> RawLambda {
+        let mut result = body;
+        for (idx, arg_pat) in args.iter().enumerate().rev() {
+            let field = RawLambda::prim(
+                Primitive::Pfield(idx as i32 + 1, FieldDbgInfo::Extension),
+                vec![RawLambda::var(scrut_id.clone())],
+                loc,
+            );
+            result = self.bind_match_arg_pattern_raw(arg_pat, field, result);
+        }
+        result
+    }
+
+    fn compile_simple_trywith_extension_handler_raw(
+        &mut self,
+        loc: Location,
+        exn_id: &Ident,
+        cases: &[Case],
+    ) -> Option<RawLambda> {
+        #[derive(Clone)]
+        enum DefaultCase {
+            Any(RawLambda),
+            Bind(Ident, RawLambda),
+        }
+
+        let mut extension_cases = Vec::<(crate::types::Path, RawLambda)>::new();
+        let mut default_case = None;
+
+        for case in cases {
+            if case.c_guard.is_some() {
+                return None;
+            }
+
+            let body = self.convert_expr_raw(&case.c_rhs);
+            let (pat, aliases) = peel_aliases(&case.c_lhs);
+            match &pat.pat_desc {
+                PatternDesc::Tpat_construct(_, cstr, args) => {
+                    let ConstructorTag::CstrExtension(path) = &cstr.cstr_tag else {
+                        return None;
+                    };
+                    if !args.iter().all(Self::is_irrefutable_pattern) {
+                        return None;
+                    }
+                    let act = wrap_aliases_raw(
+                        &aliases,
+                        RawLambda::var(exn_id.clone()),
+                        self.bind_extension_args_trywith_raw(
+                            exn_id,
+                            args,
+                            body,
+                            self.loc(pat.pat_loc),
+                        ),
+                    );
+                    extension_cases.push((path.clone(), act));
+                }
+                PatternDesc::Tpat_any => {
+                    if default_case.is_some() {
+                        return None;
+                    }
+                    default_case = Some(DefaultCase::Any(body));
+                }
+                PatternDesc::Tpat_var(id, _) => {
+                    if default_case.is_some() {
+                        return None;
+                    }
+                    default_case = Some(DefaultCase::Bind(id.clone(), body));
+                }
+                PatternDesc::Tpat_alias(inner, id, _)
+                    if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
+                {
+                    if default_case.is_some() {
+                        return None;
+                    }
+                    default_case = Some(DefaultCase::Bind(id.clone(), body));
+                }
+                _ => return None,
+            }
+        }
+
+        if extension_cases.is_empty() {
+            return None;
+        }
+
+        let reraise = RawLambda::prim(
+            Primitive::Praise,
+            vec![RawLambda::var(exn_id.clone())],
+            loc,
+        );
+
+        let default = match default_case {
+            Some(DefaultCase::Any(body)) => body,
+            Some(DefaultCase::Bind(id, body)) => RawLambda::let_(
+                LetKind::Alias,
+                id,
+                RawLambda::var(exn_id.clone()),
+                body,
+            ),
+            None => RawLambda::LstaticRaise(self.next_raise_count(), Vec::new()),
+        };
+
+        let exit_id = match &default {
+            RawLambda::LstaticRaise(id, args) if args.is_empty() => Some(*id),
+            _ => None,
+        };
+
+        let tests = extension_cases
+            .into_iter()
+            .rev()
+            .fold(default, |rem, (path, act)| {
+                let tag_id = self.id_gen.create("tag");
+                let cond = RawLambda::prim(
+                    Primitive::PextensionSlotEq,
+                    vec![
+                        RawLambda::var(tag_id.clone()),
+                        self.translate_extension_path_raw(&path, loc),
+                    ],
+                    loc,
+                );
+                RawLambda::let_(
+                    LetKind::Alias,
+                    tag_id,
+                    RawLambda::var(exn_id.clone()),
+                    RawLambda::LifThenElse(Box::new(cond), Box::new(act), Box::new(rem)),
+                )
+            });
+
+        Some(match exit_id {
+            Some(exit_id) => RawLambda::LstaticCatch(
+                Box::new(tests),
+                (exit_id, Vec::new()),
+                Box::new(reraise),
+            ),
+            None => tests,
+        })
     }
 
     fn bind_constructor_args_irrefutably_raw(

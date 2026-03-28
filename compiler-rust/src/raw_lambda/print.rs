@@ -37,7 +37,7 @@ impl fmt::Display for RawLambdaPrinter<'_> {
 
 pub fn print_raw_lambda(raw: &RawLambda, out: &mut impl Write) {
     let mut f = Formatter::new(out);
-    lam(&mut f, raw);
+    lam(&mut f, raw, None);
     f.flush();
 }
 
@@ -222,21 +222,21 @@ fn print_primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
     }
 }
 
-fn print_apply<W: Write>(f: &mut Formatter<W>, apply: &RawApply) {
+fn print_apply<W: Write>(f: &mut Formatter<W>, apply: &RawApply, reraise_exn: Option<&Ident>) {
     f.open_box(BoxKind::Box, 2);
     f.string("(apply");
     f.space();
-    lam(f, &apply.ap_func);
+    lam(f, &apply.ap_func, reraise_exn);
     for arg in &apply.ap_args {
         f.space();
-        lam(f, arg);
+        lam(f, arg, reraise_exn);
     }
     print_apply_inline_attribute(f, apply.ap_info.inlined);
     f.string(")");
     f.close_box();
 }
 
-fn print_function<W: Write>(f: &mut Formatter<W>, func: &RawLFunction) {
+fn print_function<W: Write>(f: &mut Formatter<W>, func: &RawLFunction, reraise_exn: Option<&Ident>) {
     f.open_box(BoxKind::Box, 2);
     f.string("(function");
     for param in &func.params {
@@ -245,12 +245,16 @@ fn print_function<W: Write>(f: &mut Formatter<W>, func: &RawLFunction) {
     }
     f.space();
     print_function_attribute(f, &func.attr);
-    lam(f, &func.body);
+    lam(f, &func.body, reraise_exn);
     f.string(")");
     f.close_box();
 }
 
-fn print_let_bindings<'a, W: Write>(f: &mut Formatter<W>, lam0: &'a RawLambda) -> &'a RawLambda {
+fn print_let_bindings<'a, W: Write>(
+    f: &mut Formatter<W>,
+    lam0: &'a RawLambda,
+    reraise_exn: Option<&Ident>,
+) -> &'a RawLambda {
     let mut current = lam0;
     let mut first = true;
     while let RawLambda::Llet(kind, id, arg, body) = current {
@@ -262,7 +266,7 @@ fn print_let_bindings<'a, W: Write>(f: &mut Formatter<W>, lam0: &'a RawLambda) -
         f.string(" =");
         f.string(let_kind_suffix(*kind));
         f.space();
-        lam(f, arg);
+        lam(f, arg, reraise_exn);
         f.close_box();
         current = body;
         first = false;
@@ -270,7 +274,11 @@ fn print_let_bindings<'a, W: Write>(f: &mut Formatter<W>, lam0: &'a RawLambda) -
     current
 }
 
-fn print_switch_cases<W: Write>(f: &mut Formatter<W>, sw: &RawLambdaSwitch) {
+fn print_switch_cases_with_exn<W: Write>(
+    f: &mut Formatter<W>,
+    sw: &RawLambdaSwitch,
+    reraise_exn: Option<&Ident>,
+) {
     let mut first = true;
     for (n, l) in &sw.sw_consts {
         if !first {
@@ -279,7 +287,7 @@ fn print_switch_cases<W: Write>(f: &mut Formatter<W>, sw: &RawLambdaSwitch) {
         f.open_box(BoxKind::HV, 1);
         f.print(format_args!("case int {n}:"));
         f.space();
-        lam(f, l);
+        lam(f, l, reraise_exn);
         f.close_box();
         first = false;
     }
@@ -290,7 +298,7 @@ fn print_switch_cases<W: Write>(f: &mut Formatter<W>, sw: &RawLambdaSwitch) {
         f.open_box(BoxKind::HV, 1);
         f.print(format_args!("case tag {n}:"));
         f.space();
-        lam(f, l);
+        lam(f, l, reraise_exn);
         f.close_box();
         first = false;
     }
@@ -301,15 +309,16 @@ fn print_switch_cases<W: Write>(f: &mut Formatter<W>, sw: &RawLambdaSwitch) {
         f.open_box(BoxKind::HV, 1);
         f.string("default:");
         f.space();
-        lam(f, fail);
+        lam(f, fail, reraise_exn);
         f.close_box();
     }
 }
 
-fn print_string_switch_cases<W: Write>(
+fn print_string_switch_cases_with_exn<W: Write>(
     f: &mut Formatter<W>,
     cases: &[(String, RawLambda)],
     default: &Option<Box<RawLambda>>,
+    reraise_exn: Option<&Ident>,
 ) {
     let mut first = true;
     for (s, l) in cases {
@@ -319,7 +328,7 @@ fn print_string_switch_cases<W: Write>(
         f.open_box(BoxKind::HV, 1);
         f.print(format_args!("case {:?}:", s));
         f.space();
-        lam(f, l);
+        lam(f, l, reraise_exn);
         f.close_box();
         first = false;
     }
@@ -330,23 +339,23 @@ fn print_string_switch_cases<W: Write>(
         f.open_box(BoxKind::HV, 1);
         f.string("default:");
         f.space();
-        lam(f, default);
+        lam(f, default, reraise_exn);
         f.close_box();
     }
 }
 
-fn sequence<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
+fn sequence<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Ident>) {
     match lam0 {
         RawLambda::Lsequence(first, second) => {
-            sequence(f, first);
+            sequence(f, first, reraise_exn);
             f.space();
-            sequence(f, second);
+            sequence(f, second, reraise_exn);
         }
-        _ => lam(f, lam0),
+        _ => lam(f, lam0, reraise_exn),
     }
 }
 
-fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
+fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Ident>) {
     match lam0 {
         RawLambda::Lvar(id) => print_ident(f, id),
         RawLambda::LglobalModule(id, dynamic_import) => {
@@ -362,19 +371,19 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.close_box();
         }
         RawLambda::Lconst(cst) => print_struct_const(f, cst),
-        RawLambda::Lapply(apply) => print_apply(f, apply),
-        RawLambda::Lfunction(func) => print_function(f, func),
+        RawLambda::Lapply(apply) => print_apply(f, apply, reraise_exn),
+        RawLambda::Lfunction(func) => print_function(f, func, reraise_exn),
         RawLambda::Llet(_, _, _, _) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(let");
             f.space();
             f.open_box(BoxKind::HV, 1);
             f.string("(");
-            let body = print_let_bindings(f, lam0);
+            let body = print_let_bindings(f, lam0, reraise_exn);
             f.string(")");
             f.close_box();
             f.space();
-            lam(f, body);
+            lam(f, body, reraise_exn);
             f.string(")");
             f.close_box();
         }
@@ -392,14 +401,14 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
                 f.open_box(BoxKind::Box, 2);
                 print_ident(f, id);
                 f.space();
-                lam(f, expr);
+                lam(f, expr, reraise_exn);
                 f.close_box();
                 first = false;
             }
             f.close_box();
             f.string(")");
             f.space();
-            lam(f, body);
+            lam(f, body, reraise_exn);
             f.string(")");
             f.close_box();
         }
@@ -408,12 +417,25 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             args,
             loc: _,
         }) => {
+            if matches!(primitive, Primitive::Praise) {
+                if let ([RawLambda::Lvar(id)], Some(exn_id)) = (args.as_slice(), reraise_exn) {
+                    if id.same(exn_id) {
+                        f.open_box(BoxKind::Box, 2);
+                        f.string("(reraise");
+                        f.space();
+                        print_ident(f, id);
+                        f.string(")");
+                        f.close_box();
+                        return;
+                    }
+                }
+            }
             f.open_box(BoxKind::Box, 2);
             f.string("(");
             print_primitive(f, primitive);
             for arg in args {
                 f.space();
-                lam(f, arg);
+                lam(f, arg, reraise_exn);
             }
             f.string(")");
             f.close_box();
@@ -426,10 +448,10 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
                 f.string("(switch*");
             }
             f.space();
-            lam(f, arg);
+            lam(f, arg, reraise_exn);
             f.space();
             f.open_vbox(0);
-            print_switch_cases(f, sw);
+            print_switch_cases_with_exn(f, sw, reraise_exn);
             f.close_box();
             f.string(")");
             f.close_box();
@@ -438,10 +460,10 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.open_box(BoxKind::Box, 1);
             f.string("(stringswitch");
             f.space();
-            lam(f, arg);
+            lam(f, arg, reraise_exn);
             f.space();
             f.open_vbox(0);
-            print_string_switch_cases(f, cases, default);
+            print_string_switch_cases_with_exn(f, cases, default, reraise_exn);
             f.close_box();
             f.string(")");
             f.close_box();
@@ -451,7 +473,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.print(format_args!("(exit {i}"));
             for l in ls {
                 f.space();
-                lam(f, l);
+                lam(f, l, reraise_exn);
             }
             f.string(")");
             f.close_box();
@@ -460,7 +482,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.open_box(BoxKind::Box, 2);
             f.string("(catch");
             f.space();
-            lam(f, body);
+            lam(f, body, reraise_exn);
             f.break_(1, -1);
             f.print(format_args!("with ({i}"));
             for var in vars {
@@ -469,7 +491,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             }
             f.string(")");
             f.space();
-            lam(f, handler);
+            lam(f, handler, reraise_exn);
             f.string(")");
             f.close_box();
         }
@@ -477,12 +499,12 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.open_box(BoxKind::Box, 2);
             f.string("(try");
             f.space();
-            lam(f, body);
+            lam(f, body, None);
             f.break_(1, -1);
             f.string("with ");
             print_ident(f, param);
             f.space();
-            lam(f, handler);
+            lam(f, handler, Some(param));
             f.string(")");
             f.close_box();
         }
@@ -490,11 +512,11 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.open_box(BoxKind::Box, 2);
             f.string("(if");
             f.space();
-            lam(f, cond);
+            lam(f, cond, reraise_exn);
             f.space();
-            lam(f, ifso);
+            lam(f, ifso, reraise_exn);
             f.space();
-            lam(f, ifnot);
+            lam(f, ifnot, reraise_exn);
             f.string(")");
             f.close_box();
         }
@@ -502,9 +524,9 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.open_box(BoxKind::Box, 2);
             f.string("(seq");
             f.space();
-            sequence(f, first);
+            sequence(f, first, reraise_exn);
             f.space();
-            sequence(f, second);
+            sequence(f, second, reraise_exn);
             f.string(")");
             f.close_box();
         }
@@ -512,9 +534,9 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.open_box(BoxKind::Box, 2);
             f.string("(while");
             f.space();
-            lam(f, cond);
+            lam(f, cond, reraise_exn);
             f.space();
-            lam(f, body);
+            lam(f, body, reraise_exn);
             f.string(")");
             f.close_box();
         }
@@ -523,16 +545,16 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.string("(for ");
             print_ident(f, param);
             f.space();
-            lam(f, lo);
+            lam(f, lo, reraise_exn);
             f.space();
             f.string(match dir {
                 crate::lambda::DirectionFlag::Upto => "to",
                 crate::lambda::DirectionFlag::Downto => "downto",
             });
             f.space();
-            lam(f, hi);
+            lam(f, hi, reraise_exn);
             f.space();
-            lam(f, body);
+            lam(f, body, reraise_exn);
             f.string(")");
             f.close_box();
         }
@@ -542,7 +564,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.space();
             print_ident(f, id);
             f.space();
-            lam(f, expr);
+            lam(f, expr, reraise_exn);
             f.string(")");
             f.close_box();
         }
@@ -551,7 +573,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda) {
             f.string("(send");
             f.string(name);
             f.space();
-            lam(f, obj);
+            lam(f, obj, reraise_exn);
             f.space();
             f.string(")");
             f.close_box();
