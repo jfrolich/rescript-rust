@@ -554,6 +554,17 @@ pub fn primitive_to_string(p: &Primitive) -> String {
     format!("{}", PrimWrapper(p))
 }
 
+/// Convert a primitive to its OCaml raw-lambda printer spelling.
+pub fn raw_primitive_to_string(p: &Primitive) -> String {
+    struct PrimWrapper<'a>(&'a Primitive);
+    impl fmt::Display for PrimWrapper<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            format_raw_primitive(self.0, f)
+        }
+    }
+    format!("{}", PrimWrapper(p))
+}
+
 fn format_raw_ident(id: &Ident, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(f, "{id:?}")
 }

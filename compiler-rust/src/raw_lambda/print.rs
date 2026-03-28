@@ -7,7 +7,7 @@ use crate::ident::Ident;
 use crate::lambda::compat::LetKind;
 use crate::lambda::constant::Constant;
 use crate::lambda::primitive::Mutable;
-use crate::lambda::print::primitive_to_string;
+use crate::lambda::print::raw_primitive_to_string;
 use crate::lambda::{FieldDbgInfo, FunctionAttribute, InlineAttribute, Primitive, TagInfo};
 use crate::parser::formatter::{BoxKind, Formatter};
 use crate::raw_lambda::{RawApply, RawLFunction, RawLambda, RawLambdaSwitch, RawPrimInfo};
@@ -218,7 +218,7 @@ fn print_primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
             f.print(format_args!("/{n}"));
         }
         Primitive::Psetfield(n, _) => f.print(format_args!("setfield {n}")),
-        _ => f.string(&primitive_to_string(prim)),
+        _ => f.string(&raw_primitive_to_string(prim)),
     }
 }
 
