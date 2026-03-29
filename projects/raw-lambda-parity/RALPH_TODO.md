@@ -106,7 +106,7 @@ For each iteration:
 ### 2026-03-30
 
 Starting parity: **171/657** with **1028** hunks.
-Current parity: **172/657** with **1032** hunks.
+Current parity: **174/657** with **1038** hunks.
 
 **Analysis**: 485 failing files split into:
 - 211 **ident-only** files (333 hunks): Structurally identical, but different ident stamp numbers from type checker
@@ -131,6 +131,17 @@ Current parity: **172/657** with **1032** hunks.
    - Extract @inline(always/never) from mb_attributes
 4. `d02e9c688` raw-lambda: bind constructor fields for wildcard patterns
    - Create (let (match/N =a (field:var/K scrut)) body) for Tpat_any args
+5. `ea3dde17d` raw-lambda: wrap partial switch default in catch/exit (172→173)
+   - OCaml's matching.ml always uses catch/exit for switch defaults
+6. `4b9c3e931` raw-lambda: treat single-constructor block types as irrefutable (173→174)
+   - CstrBlock with 0 consts, 1 nonconst = irrefutable
+7. `be7710a59` raw-lambda: optimize single-case dense switch to direct comparison
+   - Single-constant match uses (!= tag) instead of isout + switch*
+8. `b13b86d98` raw-lambda: bind optional payload fields for wildcard patterns
+
+**Current breakdown (post-session):**
+- 221 ident-only files (structurally identical, stamp numbers differ)
+- 262 structural files (real raw lambda differences)
 
 **Key findings**:
 - Lowered Lambda fallback always produces JS-oriented if-chains, never switch/catch
