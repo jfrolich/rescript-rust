@@ -3,7 +3,7 @@
 //! This stage ports the OCaml raw-lambda structure shape first and then
 //! incrementally ports expression lowering from `translcore.ml`.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path as StdPath;
 use std::sync::{Mutex, OnceLock};
 
@@ -50,6 +50,237 @@ enum RawFunctionBinding {
 
 fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
     Ident::new(name, stamp, IdentFlags::PREDEF_EXN.with_global())
+}
+
+fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
+    fn collect(lam: &RawLambda, fv: &mut HashSet<Ident>) {
+        match lam {
+            RawLambda::Lvar(id) => {
+                fv.insert(id.clone());
+            }
+            RawLambda::LglobalModule(_, _) | RawLambda::Lconst(_) => {}
+            RawLambda::Lapply(apply) => {
+                collect(&apply.ap_func, fv);
+                for arg in &apply.ap_args {
+                    collect(arg, fv);
+                }
+            }
+            RawLambda::Lfunction(func) => {
+                collect(&func.body, fv);
+                for param in &func.params {
+                    fv.remove(param);
+                }
+            }
+            RawLambda::Llet(_, id, arg, body) => {
+                collect(arg, fv);
+                collect(body, fv);
+                fv.remove(id);
+            }
+            RawLambda::Lletrec(bindings, body) => {
+                collect(body, fv);
+                for (_, expr) in bindings {
+                    collect(expr, fv);
+                }
+                for (id, _) in bindings {
+                    fv.remove(id);
+                }
+            }
+            RawLambda::Lprim(info) => {
+                for arg in &info.args {
+                    collect(arg, fv);
+                }
+            }
+            RawLambda::Lswitch(arg, sw) => {
+                collect(arg, fv);
+                for (_, lam) in &sw.sw_consts {
+                    collect(lam, fv);
+                }
+                for (_, lam) in &sw.sw_blocks {
+                    collect(lam, fv);
+                }
+                if let Some(fail) = &sw.sw_failaction {
+                    collect(fail, fv);
+                }
+            }
+            RawLambda::LstringSwitch(arg, cases, default) => {
+                collect(arg, fv);
+                for (_, lam) in cases {
+                    collect(lam, fv);
+                }
+                if let Some(default) = default {
+                    collect(default, fv);
+                }
+            }
+            RawLambda::LstaticRaise(_, args) => {
+                for arg in args {
+                    collect(arg, fv);
+                }
+            }
+            RawLambda::LstaticCatch(body, (_, vars), handler) => {
+                collect(body, fv);
+                collect(handler, fv);
+                for var in vars {
+                    fv.remove(var);
+                }
+            }
+            RawLambda::LtryWith(body, exn, handler) => {
+                collect(body, fv);
+                collect(handler, fv);
+                fv.remove(exn);
+            }
+            RawLambda::LifThenElse(cond, ifso, ifnot) => {
+                collect(cond, fv);
+                collect(ifso, fv);
+                collect(ifnot, fv);
+            }
+            RawLambda::Lsequence(first, second) => {
+                collect(first, fv);
+                collect(second, fv);
+            }
+            RawLambda::Lwhile(cond, body) => {
+                collect(cond, fv);
+                collect(body, fv);
+            }
+            RawLambda::Lfor(var, lo, hi, _, body) => {
+                collect(lo, fv);
+                collect(hi, fv);
+                collect(body, fv);
+                fv.remove(var);
+            }
+            RawLambda::Lassign(id, expr) => {
+                collect(expr, fv);
+                fv.insert(id.clone());
+            }
+            RawLambda::Lsend(_, obj, _) => collect(obj, fv),
+        }
+    }
+
+    let mut fv = HashSet::new();
+    collect(lam, &mut fv);
+    fv
+}
+
+fn raw_subst_lambda(subst: &HashMap<Ident, RawLambda>, lam: &RawLambda) -> RawLambda {
+    if subst.is_empty() {
+        return lam.clone();
+    }
+
+    match lam {
+        RawLambda::Lvar(id) => subst.get(id).cloned().unwrap_or_else(|| lam.clone()),
+        RawLambda::LglobalModule(_, _) | RawLambda::Lconst(_) => lam.clone(),
+        RawLambda::Lapply(apply) => RawLambda::Lapply(crate::raw_lambda::RawApply {
+            ap_func: Box::new(raw_subst_lambda(subst, &apply.ap_func)),
+            ap_args: apply
+                .ap_args
+                .iter()
+                .map(|arg| raw_subst_lambda(subst, arg))
+                .collect(),
+            ap_info: apply.ap_info.clone(),
+            ap_transformed_jsx: apply.ap_transformed_jsx,
+        }),
+        RawLambda::Lfunction(func) => RawLambda::Lfunction(crate::raw_lambda::RawLFunction {
+            arity: func.arity,
+            params: func.params.clone(),
+            body: Box::new(raw_subst_lambda(subst, &func.body)),
+            attr: func.attr.clone(),
+        }),
+        RawLambda::Llet(kind, id, arg, body) => RawLambda::Llet(
+            *kind,
+            id.clone(),
+            Box::new(raw_subst_lambda(subst, arg)),
+            Box::new(raw_subst_lambda(subst, body)),
+        ),
+        RawLambda::Lletrec(bindings, body) => RawLambda::Lletrec(
+            bindings
+                .iter()
+                .map(|(id, expr)| (id.clone(), raw_subst_lambda(subst, expr)))
+                .collect(),
+            Box::new(raw_subst_lambda(subst, body)),
+        ),
+        RawLambda::Lprim(info) => RawLambda::Lprim(crate::raw_lambda::RawPrimInfo {
+            primitive: info.primitive.clone(),
+            args: info
+                .args
+                .iter()
+                .map(|arg| raw_subst_lambda(subst, arg))
+                .collect(),
+            loc: info.loc.clone(),
+        }),
+        RawLambda::Lswitch(arg, sw) => RawLambda::Lswitch(
+            Box::new(raw_subst_lambda(subst, arg)),
+            crate::raw_lambda::RawLambdaSwitch {
+                sw_consts_full: sw.sw_consts_full,
+                sw_consts: sw
+                    .sw_consts
+                    .iter()
+                    .map(|(tag, lam)| (*tag, raw_subst_lambda(subst, lam)))
+                    .collect(),
+                sw_blocks_full: sw.sw_blocks_full,
+                sw_blocks: sw
+                    .sw_blocks
+                    .iter()
+                    .map(|(tag, lam)| (*tag, raw_subst_lambda(subst, lam)))
+                    .collect(),
+                sw_failaction: sw
+                    .sw_failaction
+                    .as_ref()
+                    .map(|lam| Box::new(raw_subst_lambda(subst, lam))),
+                sw_names: sw.sw_names.clone(),
+            },
+        ),
+        RawLambda::LstringSwitch(arg, cases, default) => RawLambda::LstringSwitch(
+            Box::new(raw_subst_lambda(subst, arg)),
+            cases
+                .iter()
+                .map(|(name, lam)| (name.clone(), raw_subst_lambda(subst, lam)))
+                .collect(),
+            default
+                .as_ref()
+                .map(|lam| Box::new(raw_subst_lambda(subst, lam))),
+        ),
+        RawLambda::LstaticRaise(i, args) => RawLambda::LstaticRaise(
+            *i,
+            args.iter().map(|arg| raw_subst_lambda(subst, arg)).collect(),
+        ),
+        RawLambda::LstaticCatch(body, handler, on_raise) => RawLambda::LstaticCatch(
+            Box::new(raw_subst_lambda(subst, body)),
+            handler.clone(),
+            Box::new(raw_subst_lambda(subst, on_raise)),
+        ),
+        RawLambda::LtryWith(body, exn, handler) => RawLambda::LtryWith(
+            Box::new(raw_subst_lambda(subst, body)),
+            exn.clone(),
+            Box::new(raw_subst_lambda(subst, handler)),
+        ),
+        RawLambda::LifThenElse(cond, ifso, ifnot) => RawLambda::LifThenElse(
+            Box::new(raw_subst_lambda(subst, cond)),
+            Box::new(raw_subst_lambda(subst, ifso)),
+            Box::new(raw_subst_lambda(subst, ifnot)),
+        ),
+        RawLambda::Lsequence(first, second) => RawLambda::Lsequence(
+            Box::new(raw_subst_lambda(subst, first)),
+            Box::new(raw_subst_lambda(subst, second)),
+        ),
+        RawLambda::Lwhile(cond, body) => RawLambda::Lwhile(
+            Box::new(raw_subst_lambda(subst, cond)),
+            Box::new(raw_subst_lambda(subst, body)),
+        ),
+        RawLambda::Lfor(var, lo, hi, dir, body) => RawLambda::Lfor(
+            var.clone(),
+            Box::new(raw_subst_lambda(subst, lo)),
+            Box::new(raw_subst_lambda(subst, hi)),
+            *dir,
+            Box::new(raw_subst_lambda(subst, body)),
+        ),
+        RawLambda::Lassign(id, expr) => {
+            RawLambda::Lassign(id.clone(), Box::new(raw_subst_lambda(subst, expr)))
+        }
+        RawLambda::Lsend(name, obj, loc) => RawLambda::Lsend(
+            name.clone(),
+            Box::new(raw_subst_lambda(subst, obj)),
+            loc.clone(),
+        ),
+    }
 }
 
 fn iter_bound_pattern_idents<'a, F>(pat: &'a Pattern, f: &mut F)
@@ -1353,6 +1584,20 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn name_lambda_raw<F>(&mut self, strict: LetKind, arg: RawLambda, f: F) -> RawLambda
+    where
+        F: FnOnce(&mut Self, Ident) -> RawLambda,
+    {
+        match arg {
+            RawLambda::Lvar(id) => f(self, id),
+            _ => {
+                let id = self.id_gen.create("let");
+                let body = f(self, id.clone());
+                RawLambda::let_(strict, id, arg, body)
+            }
+        }
+    }
+
     fn rescript_hide_attributes(&self, attrs: &crate::parser::ast::Attributes) -> bool {
         attrs
             .iter()
@@ -1556,6 +1801,151 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn wrap_id_pos_list_raw<F>(
+        &mut self,
+        loc: Location,
+        id_pos_list: &[(Ident, usize, ModuleCoercion)],
+        mut get_field: F,
+        lam: RawLambda,
+    ) -> RawLambda
+    where
+        F: FnMut(&mut Self, &str, usize) -> RawLambda,
+    {
+        let fv = raw_free_variables(&lam);
+        let mut lam = lam;
+        let mut subst = HashMap::new();
+
+        for (id, pos, coercion) in id_pos_list {
+            if fv.contains(id) {
+                let rebound = self.id_gen.create(id.name());
+                let field = get_field(self, id.name(), *pos);
+                let value = self.apply_coercion_raw(loc.clone(), LetKind::Alias, coercion, field);
+                lam = RawLambda::let_(LetKind::Alias, rebound.clone(), value, lam);
+                subst.insert(id.clone(), RawLambda::var(rebound));
+            }
+        }
+
+        if subst.is_empty() {
+            lam
+        } else {
+            raw_subst_lambda(&subst, &lam)
+        }
+    }
+
+    fn apply_coercion_result_raw(
+        &mut self,
+        loc: Location,
+        strict: LetKind,
+        funct: RawLambda,
+        param: Ident,
+        arg: RawLambda,
+        cc_res: &ModuleCoercion,
+    ) -> RawLambda {
+        self.name_lambda_raw(strict, funct, |this, id| {
+            let body = this.apply_coercion_raw(
+                loc.clone(),
+                LetKind::Strict,
+                cc_res,
+                RawLambda::Lapply(crate::raw_lambda::RawApply {
+                    ap_func: Box::new(RawLambda::var(id)),
+                    ap_args: vec![arg],
+                    ap_info: ApInfo {
+                        loc: loc.clone(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Na,
+                    },
+                    ap_transformed_jsx: false,
+                }),
+            );
+            RawLambda::function_(
+                1,
+                vec![param],
+                body,
+                FunctionAttribute {
+                    is_a_functor: true,
+                    ..FunctionAttribute::default()
+                },
+            )
+        })
+    }
+
+    fn apply_coercion_raw(
+        &mut self,
+        loc: Location,
+        strict: LetKind,
+        coercion: &ModuleCoercion,
+        arg: RawLambda,
+    ) -> RawLambda {
+        match coercion {
+            ModuleCoercion::Tcoerce_none => arg,
+            ModuleCoercion::Tcoerce_structure(positions, id_pos_list, runtime_fields) => {
+                debug_assert_eq!(positions.len(), runtime_fields.len());
+                self.name_lambda_raw(strict, arg, |this, id| {
+                    let named = RawLambda::var(id.clone());
+                    let lam = RawLambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::Module(runtime_fields.clone()),
+                            Mutable::Immutable,
+                        ),
+                        positions
+                            .iter()
+                            .zip(runtime_fields.iter())
+                            .map(|((pos, cc), name)| {
+                                let field = RawLambda::prim(
+                                    Primitive::Pfield(
+                                        *pos as i32,
+                                        FieldDbgInfo::Module { name: name.clone() },
+                                    ),
+                                    vec![named.clone()],
+                                    loc.clone(),
+                                );
+                                this.apply_coercion_raw(loc.clone(), LetKind::Alias, cc, field)
+                            })
+                            .collect(),
+                        loc.clone(),
+                    );
+                    this.wrap_id_pos_list_raw(
+                        loc.clone(),
+                        id_pos_list,
+                        |_, name, pos| {
+                            RawLambda::prim(
+                                Primitive::Pfield(
+                                    pos as i32,
+                                    FieldDbgInfo::Module {
+                                        name: name.to_string(),
+                                    },
+                                ),
+                                vec![named.clone()],
+                                loc.clone(),
+                            )
+                        },
+                        lam,
+                    )
+                })
+            }
+            ModuleCoercion::Tcoerce_functor(cc_arg, cc_res) => {
+                let param = self.id_gen.create("funarg");
+                let carg = self.apply_coercion_raw(
+                    loc.clone(),
+                    LetKind::Alias,
+                    cc_arg,
+                    RawLambda::var(param.clone()),
+                );
+                self.apply_coercion_result_raw(loc, strict, arg, param, carg, cc_res)
+            }
+            ModuleCoercion::Tcoerce_primitive(_) => arg,
+            ModuleCoercion::Tcoerce_alias(_, path, inner) => self.name_lambda_raw(strict, arg, |this, _| {
+                this.apply_coercion_raw(
+                    loc.clone(),
+                    LetKind::Alias,
+                    inner,
+                    this.translate_normal_path_raw(path, loc.clone()),
+                )
+            }),
+        }
+    }
+
     fn make_module_block_raw(
         &mut self,
         fields: &[Ident],
@@ -1563,52 +1953,6 @@ impl<'a> RawLambdaConverter<'a> {
         cc: &ModuleCoercion,
         loc: Location,
     ) -> RawLambda {
-        fn apply_coercion_raw(
-            this: &mut RawLambdaConverter<'_>,
-            coercion: &ModuleCoercion,
-            arg: RawLambda,
-            loc: Location,
-        ) -> RawLambda {
-            match coercion {
-                ModuleCoercion::Tcoerce_none => arg,
-                ModuleCoercion::Tcoerce_alias(_, path, inner) => {
-                    let alias = this.translate_module_path_raw(path, loc);
-                    apply_coercion_raw(this, inner, alias, loc)
-                }
-                ModuleCoercion::Tcoerce_structure(positions, _, runtime_fields) => {
-                    let block_fields = positions
-                        .iter()
-                        .map(|(pos, field_cc)| {
-                            let field = RawLambda::prim(
-                                Primitive::Pfield(
-                                    *pos as i32,
-                                    FieldDbgInfo::Module {
-                                        name: runtime_fields
-                                            .get(*pos)
-                                            .cloned()
-                                            .unwrap_or_else(|| format!("field{pos}")),
-                                    },
-                                ),
-                                vec![arg.clone()],
-                                loc,
-                            );
-                            apply_coercion_raw(this, field_cc, field, loc)
-                        })
-                        .collect::<Vec<_>>();
-                    RawLambda::prim(
-                        Primitive::Pmakeblock(
-                            0,
-                            TagInfo::Module(runtime_fields.clone()),
-                            Mutable::Immutable,
-                        ),
-                        block_fields,
-                        loc,
-                    )
-                }
-                _ => arg,
-            }
-        }
-
         match cc {
             ModuleCoercion::Tcoerce_none => {
                 let block_fields = fields.iter().cloned().map(RawLambda::var).collect();
@@ -1623,12 +1967,20 @@ impl<'a> RawLambdaConverter<'a> {
                     loc,
                 )
             }
-            ModuleCoercion::Tcoerce_structure(positions, _, runtime_fields) => {
+            ModuleCoercion::Tcoerce_structure(positions, id_pos_list, runtime_fields) => {
+                debug_assert_eq!(positions.len(), runtime_fields.len());
+                let field_ids = fields.iter().cloned().collect::<HashSet<_>>();
                 let block_fields = positions
                     .iter()
-                    .filter_map(|(pos, field_cc)| {
+                    .zip(runtime_fields.iter())
+                    .filter_map(|((pos, field_cc), _name)| {
                         fields.get(*pos).cloned().map(|id| {
-                            apply_coercion_raw(self, field_cc, RawLambda::var(id), loc)
+                            self.apply_coercion_raw(
+                                loc.clone(),
+                                LetKind::Alias,
+                                field_cc,
+                                RawLambda::var(id),
+                            )
                         })
                     })
                     .collect::<Vec<_>>();
@@ -1648,17 +2000,36 @@ impl<'a> RawLambdaConverter<'a> {
                             .collect(),
                     )
                 };
-                RawLambda::prim(
+                let lam = RawLambda::prim(
                     Primitive::Pmakeblock(0, tag, Mutable::Immutable),
                     block_fields,
+                    loc.clone(),
+                );
+                let filtered_id_pos = id_pos_list
+                    .iter()
+                    .filter(|(id, _, _)| !field_ids.contains(id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.wrap_id_pos_list_raw(
                     loc,
+                    &filtered_id_pos,
+                    |_, _name, pos| {
+                        fields
+                            .get(pos)
+                            .cloned()
+                            .map(RawLambda::var)
+                            .unwrap_or_else(RawLambda::unit)
+                    },
+                    lam,
                 )
             }
             _ => {
                 let block_fields = fields
                     .iter()
                     .cloned()
-                    .map(|id| apply_coercion_raw(self, cc, RawLambda::var(id), loc))
+                    .map(|id| {
+                        self.apply_coercion_raw(loc.clone(), LetKind::Alias, cc, RawLambda::var(id))
+                    })
                     .collect();
                 let tag = if is_top_level {
                     TagInfo::ModuleExport(fields.to_vec())
@@ -1681,7 +2052,12 @@ impl<'a> RawLambdaConverter<'a> {
         cc: &ModuleCoercion,
     ) -> RawLambda {
         if matches!(module_expr.mod_type.mty_desc, ModuleTypeDesc::Tmty_alias(_, _)) {
-            return RawLambda::const_(Constant::ModuleAlias);
+            return self.apply_coercion_raw(
+                self.loc(module_expr.mod_loc),
+                LetKind::Alias,
+                cc,
+                RawLambda::const_(Constant::ModuleAlias),
+            );
         }
 
         match &module_expr.mod_desc {
@@ -1703,15 +2079,23 @@ impl<'a> RawLambdaConverter<'a> {
                     &Self::compose_coercions_raw(cc, inner_cc),
                 ),
             ModuleExprDesc::Tmod_ident(path, _) => {
-                if let Some(env) = self.env_for_module_expr(module_expr) {
-                    self.translate_module_path_raw_in_env(env.as_ref(), path, self.loc(module_expr.mod_loc))
+                let loc = self.loc(module_expr.mod_loc);
+                let arg = if let Some(env) = self.env_for_module_expr(module_expr) {
+                    self.translate_module_path_raw_in_env(env.as_ref(), path, loc.clone())
                 } else {
-                    self.translate_module_path_raw(path, self.loc(module_expr.mod_loc))
-                }
+                    self.translate_module_path_raw(path, loc.clone())
+                };
+                self.apply_coercion_raw(loc, LetKind::Strict, cc, arg)
             }
-            ModuleExprDesc::Tmod_unpack(expr, _) => self.convert_expr_raw(expr),
+            ModuleExprDesc::Tmod_unpack(expr, _) => {
+                let loc = self.loc(module_expr.mod_loc);
+                let arg = self.convert_expr_raw(expr);
+                self.apply_coercion_raw(loc, LetKind::Strict, cc, arg)
+            }
             ModuleExprDesc::Tmod_apply(_, _, _) | ModuleExprDesc::Tmod_functor(_, _, _, _) => {
-                RawLambda::from_lowered(self.convert_module_expr(module_expr))
+                let loc = self.loc(module_expr.mod_loc);
+                let arg = RawLambda::from_lowered(self.convert_module_expr(module_expr));
+                self.apply_coercion_raw(loc, LetKind::Strict, cc, arg)
             }
         }
     }
