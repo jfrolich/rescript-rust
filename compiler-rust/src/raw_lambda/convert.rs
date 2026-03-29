@@ -687,6 +687,15 @@ impl<'a> RawLambdaConverter<'a> {
             .map(|path| crate::types::Path::pdot(path.clone(), field.name().to_string()))
     }
 
+    fn functor_path(
+        rootpath: &Option<crate::types::Path>,
+        param: &Ident,
+    ) -> Option<crate::types::Path> {
+        rootpath.as_ref().map(|path| {
+            crate::types::Path::papply(path.clone(), crate::types::Path::pident(param.clone()))
+        })
+    }
+
     fn transl_extension_constructor_raw(
         &mut self,
         path: Option<crate::types::Path>,
@@ -2092,10 +2101,60 @@ impl<'a> RawLambdaConverter<'a> {
                 let arg = self.convert_expr_raw(expr);
                 self.apply_coercion_raw(loc, LetKind::Strict, cc, arg)
             }
-            ModuleExprDesc::Tmod_apply(_, _, _) | ModuleExprDesc::Tmod_functor(_, _, _, _) => {
+            ModuleExprDesc::Tmod_functor(param, _, _, body) => {
                 let loc = self.loc(module_expr.mod_loc);
-                let arg = RawLambda::from_lowered(self.convert_module_expr(module_expr));
-                self.apply_coercion_raw(loc, LetKind::Strict, cc, arg)
+                let (arg_coercion, res_coercion) = match cc {
+                    ModuleCoercion::Tcoerce_none => {
+                        (&ModuleCoercion::Tcoerce_none, &ModuleCoercion::Tcoerce_none)
+                    }
+                    ModuleCoercion::Tcoerce_functor(arg_coercion, res_coercion) => {
+                        (arg_coercion.as_ref(), res_coercion.as_ref())
+                    }
+                    _ => {
+                        panic!("raw compile_functor: bad coercion")
+                    }
+                };
+                let body_path = Self::functor_path(rootpath, param);
+                let renamed_param = param.rename(&self.id_gen);
+                let arg = self.apply_coercion_raw(
+                    loc.clone(),
+                    LetKind::Alias,
+                    arg_coercion,
+                    RawLambda::var(renamed_param.clone()),
+                );
+                let body = RawLambda::let_(
+                    LetKind::Alias,
+                    param.clone(),
+                    arg,
+                    self.convert_module_expr_raw_with_coercion(body, &body_path, res_coercion),
+                );
+                RawLambda::function_(
+                    1,
+                    vec![renamed_param],
+                    body,
+                    FunctionAttribute {
+                        is_a_functor: true,
+                        ..FunctionAttribute::default()
+                    },
+                )
+            }
+            ModuleExprDesc::Tmod_apply(funct, arg, ccarg) => {
+                let loc = self.loc(module_expr.mod_loc);
+                let apply = RawLambda::Lapply(crate::raw_lambda::RawApply {
+                    ap_func: Box::new(self.convert_module_expr_raw_with_coercion(
+                        funct,
+                        &None,
+                        &ModuleCoercion::Tcoerce_none,
+                    )),
+                    ap_args: vec![self.convert_module_expr_raw_with_coercion(arg, &None, ccarg)],
+                    ap_info: ApInfo {
+                        loc: loc.clone(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Na,
+                    },
+                    ap_transformed_jsx: false,
+                });
+                self.apply_coercion_raw(loc, LetKind::Strict, cc, apply)
             }
         }
     }
