@@ -4245,6 +4245,24 @@ fn scrape_alias_module_type<'b>(
             mty
         }
 
+        fn substituted_and_anchored(
+            parent_sig: &[crate::types::decl::SignatureItem],
+            parent_path: &Path,
+            owner_path: &Path,
+            mty: &DeclMty,
+            ctx: &crate::types::context::TypeContext<'_>,
+        ) -> DeclMty {
+            let mut mty = mty.clone();
+            crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+                &mut mty,
+                parent_sig,
+                parent_path,
+                ctx,
+            );
+            anchor_local_module_aliases_to_owner(&mut mty, owner_path);
+            mty
+        }
+
         if !visiting.insert(path.clone()) {
             return None;
         }
@@ -4278,7 +4296,13 @@ fn scrape_alias_module_type<'b>(
                             DeclMty::MtyAlias(_, alias_path) | DeclMty::MtyIdent(alias_path) => {
                                 resolve_path(alias_path, env, pers_env, ctx, visiting)
                             }
-                            other => Some(anchored(&owner_path, other)),
+                            other => Some(substituted_and_anchored(
+                                &parent_sig,
+                                parent,
+                                &owner_path,
+                                other,
+                                ctx,
+                            )),
                         }
                     }
                     _ => None,
