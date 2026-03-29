@@ -687,6 +687,81 @@ impl<'a> RawLambdaConverter<'a> {
             .map(|path| crate::types::Path::pdot(path.clone(), field.name().to_string()))
     }
 
+    /// Extract inline attribute from module attributes, matching OCaml's
+    /// Translattribute.get_inline_attribute.
+    fn get_inline_attribute_from(
+        attrs: &crate::parser::ast::Attributes,
+        arena: &ParseArena,
+    ) -> InlineAttribute {
+        use crate::parser::ast::{Payload, StructureItemDesc, ExpressionDesc};
+        use crate::parser::longident::Longident;
+        for (located_name, payload) in attrs.iter() {
+            let attr_name = arena.get_string(located_name.txt);
+            if attr_name == "inline" {
+                match payload {
+                    Payload::PStr(items) if items.is_empty() => {
+                        // @inline without arguments = always
+                        return InlineAttribute::Always;
+                    }
+                    Payload::PStr(items) if items.len() == 1 => {
+                        if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+                            let (expr_idx, _) = &**eval_inner;
+                            let expr = arena.get_expr(*expr_idx);
+                            if let ExpressionDesc::Pexp_ident(ident) = &*expr.pexp_desc {
+                                let lid = arena.get_longident(ident.txt);
+                                if let Longident::Lident(str_idx) = lid {
+                                    let name = arena.get_string(*str_idx);
+                                    if name == "always" {
+                                        return InlineAttribute::Always;
+                                    } else if name == "never" {
+                                        return InlineAttribute::Never;
+                                    }
+                                }
+                            }
+                        }
+                        return InlineAttribute::Default;
+                    }
+                    _ => return InlineAttribute::Default,
+                }
+            }
+        }
+        InlineAttribute::Default
+    }
+
+    /// Apply inline attribute to a raw lambda expression, matching OCaml's
+    /// Translattribute.add_inline_attribute. Walks through Lprim wrappers
+    /// to find the inner Lfunction.
+    fn apply_inline_attribute_raw(lam: RawLambda, inline: InlineAttribute) -> RawLambda {
+        if matches!(inline, InlineAttribute::Default) {
+            return lam;
+        }
+        match lam {
+            RawLambda::Lfunction(mut func) => {
+                func.attr.inline = inline;
+                RawLambda::Lfunction(func)
+            }
+            RawLambda::Lprim(prim) => {
+                // Walk through Pjs_fn_make wrappers
+                match &prim.primitive {
+                    Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit => {
+                        let mut args = prim.args;
+                        if let Some(last) = args.pop() {
+                            let inner = Self::apply_inline_attribute_raw(last, inline);
+                            args.push(inner);
+                        }
+                        RawLambda::Lprim(crate::raw_lambda::RawPrimInfo {
+                            primitive: prim.primitive,
+                            args,
+                            loc: prim.loc,
+                        })
+                    }
+                    _ => RawLambda::Lprim(prim),
+                }
+            }
+            other => other,
+        }
+    }
+
     fn functor_path(
         rootpath: &Option<crate::types::Path>,
         param: &Ident,
@@ -2109,6 +2184,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
             ModuleExprDesc::Tmod_functor(param, _, _, body) => {
                 let loc = self.loc(module_expr.mod_loc);
+                let inline_attribute = Self::get_inline_attribute_from(&module_expr.mod_attributes, self.arena);
                 let (arg_coercion, res_coercion) = match cc {
                     ModuleCoercion::Tcoerce_none => {
                         (&ModuleCoercion::Tcoerce_none, &ModuleCoercion::Tcoerce_none)
@@ -2140,6 +2216,7 @@ impl<'a> RawLambdaConverter<'a> {
                     body,
                     FunctionAttribute {
                         is_a_functor: true,
+                        inline: inline_attribute,
                         ..FunctionAttribute::default()
                     },
                 )
@@ -2207,13 +2284,20 @@ impl<'a> RawLambdaConverter<'a> {
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
+                let mut module_body = self.convert_module_expr_raw(
+                    &binding.mb_expr,
+                    &Self::field_path(rootpath, &binding.mb_id),
+                );
+                // Apply @inline attribute from module binding (matches OCaml's
+                // Translattribute.add_inline_attribute)
+                let inline_attr =
+                    Self::get_inline_attribute_from(&binding.mb_attributes, self.arena);
+                module_body =
+                    Self::apply_inline_attribute_raw(module_body, inline_attr);
                 RawLambda::let_(
                     Self::pure_module(&binding.mb_expr),
                     binding.mb_id.clone(),
-                    self.convert_module_expr_raw(
-                        &binding.mb_expr,
-                        &Self::field_path(rootpath, &binding.mb_id),
-                    ),
+                    module_body,
                     body,
                 )
             }
