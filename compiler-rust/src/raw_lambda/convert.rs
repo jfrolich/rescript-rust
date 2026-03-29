@@ -1934,6 +1934,12 @@ impl<'a> RawLambdaConverter<'a> {
                 })
             }
             ModuleCoercion::Tcoerce_functor(cc_arg, cc_res) => {
+                // Identity functor coercion: both arg and result are identity
+                if matches!(cc_arg.as_ref(), ModuleCoercion::Tcoerce_none)
+                    && matches!(cc_res.as_ref(), ModuleCoercion::Tcoerce_none)
+                {
+                    return arg;
+                }
                 let param = self.id_gen.create("funarg");
                 let carg = self.apply_coercion_raw(
                     loc.clone(),
