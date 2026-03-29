@@ -3340,7 +3340,6 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         let pat_loc = self.loc(pat.pat_loc);
-        let tmp = self.id_gen.create("ctor");
         let mut result = body;
 
         if constructor_has_optional_shape(cstr) {
@@ -3378,15 +3377,15 @@ impl<'a> RawLambdaConverter<'a> {
                             FieldDbgInfo::Variant
                         },
                     ),
-                    vec![RawLambda::var(tmp.clone())],
+                    vec![RawLambda::var(scrut_id.clone())],
                     pat_loc,
                 ),
                 ConstructorTag::CstrExtension(_) => RawLambda::prim(
                     Primitive::Pfield(idx as i32 + 1, FieldDbgInfo::Extension),
-                    vec![RawLambda::var(tmp.clone())],
+                    vec![RawLambda::var(scrut_id.clone())],
                     pat_loc,
                 ),
-                ConstructorTag::CstrUnboxed => RawLambda::var(tmp.clone()),
+                ConstructorTag::CstrUnboxed => RawLambda::var(scrut_id.clone()),
                 ConstructorTag::CstrConstant(_) => {
                     unreachable!("constructor payload binding only applies to non-constant constructors")
                 }
@@ -3394,7 +3393,7 @@ impl<'a> RawLambdaConverter<'a> {
             result = self.bind_irrefutable_pattern_raw(arg_pat, field, result);
         }
 
-        RawLambda::let_(LetKind::Alias, tmp, RawLambda::var(scrut_id.clone()), result)
+        result
     }
 
     fn compile_simple_variant_match_raw(
