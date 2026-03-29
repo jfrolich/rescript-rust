@@ -4352,21 +4352,11 @@ impl<'a> RawLambdaConverter<'a> {
                         loc,
                     )
                 };
-                // OCaml's Switch module uses (>= arg N) for bounds check when range
-                // starts at 0, rather than (isout N-1 arg). Match this for parity.
-                let is_out = if first == 0 {
-                    RawLambda::prim(
-                        Primitive::Pintcomp(Comparison::Ge),
-                        vec![scrut_var.clone(), RawLambda::const_(Constant::int(last + 1))],
-                        loc,
-                    )
-                } else {
-                    RawLambda::prim(
-                        Primitive::Pisout(last - first),
-                        vec![offset_arg],
-                        loc,
-                    )
-                };
+                let is_out = RawLambda::prim(
+                    Primitive::Pisout(last - first),
+                    vec![offset_arg],
+                    loc,
+                );
 
                 // If all cases map to the same static raise, use it directly
                 // instead of generating a switch (matches OCaml's share_actions)
