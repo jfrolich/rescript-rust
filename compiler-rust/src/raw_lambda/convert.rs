@@ -4115,10 +4115,7 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> RawLambda {
         match &pat.pat_desc {
             PatternDesc::Tpat_any => body,
-            PatternDesc::Tpat_var(id, _) => match &body {
-                RawLambda::Lvar(body_id) if body_id == id => scrut,
-                _ => RawLambda::let_(LetKind::Alias, id.clone(), scrut, body),
-            },
+            PatternDesc::Tpat_var(id, _) => RawLambda::let_(LetKind::Alias, id.clone(), scrut, body),
             PatternDesc::Tpat_alias(inner, id, _) => {
                 let inner = self.bind_irrefutable_pattern_raw(inner, scrut.clone(), body);
                 RawLambda::let_(LetKind::Alias, id.clone(), scrut, inner)
