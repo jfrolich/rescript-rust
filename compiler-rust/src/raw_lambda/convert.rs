@@ -3480,7 +3480,14 @@ impl<'a> RawLambdaConverter<'a> {
                     unreachable!("constructor payload binding only applies to non-constant constructors")
                 }
             };
-            result = self.bind_irrefutable_pattern_raw(arg_pat, field, result);
+            // For Tpat_any, OCaml's matching.ml still creates a binding
+            // (let (match/N =a (field:var/K scrut)) body). Match this behavior.
+            if matches!(arg_pat.pat_desc, PatternDesc::Tpat_any) {
+                let match_id = self.id_gen.create("match");
+                result = RawLambda::let_(LetKind::Alias, match_id, field, result);
+            } else {
+                result = self.bind_irrefutable_pattern_raw(arg_pat, field, result);
+            }
         }
 
         result
