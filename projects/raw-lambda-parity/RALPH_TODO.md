@@ -106,7 +106,7 @@ For each iteration:
 ### 2026-03-30
 
 Starting parity: **171/657** with **1028** hunks.
-Current parity: **174/657** with **1038** hunks.
+Current parity: **175/657** with **1037** hunks.
 
 **Analysis**: 485 failing files split into:
 - 211 **ident-only** files (333 hunks): Structurally identical, but different ident stamp numbers from type checker
@@ -139,15 +139,29 @@ Current parity: **174/657** with **1038** hunks.
    - Single-constant match uses (!= tag) instead of isout + switch*
 8. `b13b86d98` raw-lambda: bind optional payload fields for wildcard patterns
 
+9. `592d828b9` raw-lambda: port OCaml switch case sorting, share_actions_sw, reintroduce_fail (174→175)
+   - Sort switch cases by tag (matching OCaml's sort_int_lambda_list)
+   - share_actions_sw: deduplicate shared switch actions via catch/exit
+   - reintroduce_fail: extract most common exit (>=3 occurrences) as default
+   - sig_complete: fill missing constructor tags with exit to default handler
+
 **Current breakdown (post-session):**
-- 221 ident-only files (structurally identical, stamp numbers differ)
-- 262 structural files (real raw lambda differences)
+- 224 ident-only files (structurally identical, stamp numbers differ)
+- 258 structural files (391 structural hunks)
 
 **Key findings**:
 - Lowered Lambda fallback always produces JS-oriented if-chains, never switch/catch
 - All switch/catch in raw lambda must come from the raw lambda matchers, not fallback
 - Functor wrapper (eta-expansion) was caused by Rust's module typing producing Tcoerce_functor(none,none) instead of OCaml's Tcoerce_none
 - Field index differences (e.g. Pervasives field positions) are module system issues, not raw lambda
+- OCaml's switch cases are sorted by tag via sort_int_lambda_list/split_cases
+- OCaml's share_actions_sw deduplicates shared actions into catch/exit BEFORE reintroduce_fail
+- OCaml's reintroduce_fail extracts the most common exit (>=3 occurrences) as failaction
+- OCaml uses BOTH isout AND >= for bounds checks depending on Switch module's c_test path (Inter vs Sep)
+- 380/482 failing files have exactly 1 hunk (mostly ident-only)
+- 102 files have =a vs = binding differences from module coercion (wrap_id_pos_list uses Alias)
+- Using Alias for all var-to-var bindings REGRESSES (172→175), OCaml only uses Alias in specific coercion paths
+- Remaining structural patterns: field:tag (51 files from lowered fallback), isout/>= (12 files), switch structure (12 files)
 
 ### 2026-03-29
 
