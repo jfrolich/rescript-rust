@@ -3367,7 +3367,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
 
-        for (idx, arg_pat) in args.iter().enumerate().rev() {
+        for (idx, arg_pat) in args.iter().enumerate() {
             let field = match &cstr.cstr_tag {
                 ConstructorTag::CstrBlock(_) => RawLambda::prim(
                     Primitive::Pfield(
