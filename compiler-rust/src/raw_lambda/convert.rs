@@ -4121,6 +4121,26 @@ impl<'a> RawLambdaConverter<'a> {
                     return None;
                 }
 
+                // Single-case optimization: use direct comparison instead of isout+switch
+                if sorted_consts.len() == 1 {
+                    let (tag, action) = sorted_consts.into_iter().next()?;
+                    let exit_id = self.next_raise_count();
+                    let cond = RawLambda::prim(
+                        Primitive::Pjscomp(Comparison::Neq),
+                        vec![scrut_var.clone(), RawLambda::const_(Constant::int(tag))],
+                        loc,
+                    );
+                    return Some(RawLambda::LstaticCatch(
+                        Box::new(RawLambda::LifThenElse(
+                            Box::new(cond),
+                            Box::new(RawLambda::LstaticRaise(exit_id, Vec::new())),
+                            Box::new(action),
+                        )),
+                        (exit_id, Vec::new()),
+                        Box::new((**default).clone()),
+                    ));
+                }
+
                 let exit_id = self.next_raise_count();
                 let offset_arg = if first == 0 {
                     scrut_var.clone()
