@@ -17,8 +17,8 @@ This is parity for the **pre-optimization raw lambda stage** (`-drawlambda`), no
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **172/657**
-- Parity hunks: **1032**
+- Unoptimized lambda parity: **174/657**
+- Parity hunks: **1038**
 
 ## Working Rules
 
