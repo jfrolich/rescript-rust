@@ -51,6 +51,16 @@ Performance engineering of the Rust parser to achieve best-in-class speed. 4-tie
 | [RALPH_PROMPT.md](./parser-performance-engineering/RALPH_PROMPT.md) | Agent loop instructions for performance optimization |
 | [RALPH_TODO.md](./parser-performance-engineering/RALPH_TODO.md) | Agent task tracking for performance optimization |
 
+### [raw-lambda-parity](./raw-lambda-parity/)
+
+Achieve full unoptimized lambda parity between the Rust and OCaml compilers. Focuses on building a real OCaml-aligned raw lambda stage, grouped match compilation from `matching.ml`, and module/coercion lowering from `translmod.ml`. Current baseline: 171/657 files, 1028 hunks.
+
+| Document | Description |
+|----------|-------------|
+| [RALPH_PROMPT.md](./raw-lambda-parity/RALPH_PROMPT.md) | Agent loop instructions for raw lambda parity |
+| [RALPH_TODO.md](./raw-lambda-parity/RALPH_TODO.md) | Agent task tracking for raw lambda parity |
+| [RALPH_SETUP.md](./raw-lambda-parity/RALPH_SETUP.md) | Build, baseline, and cache inspection instructions |
+
 ### [printer-parity](./printer-parity/)
 
 Achieve byte-for-byte identical printer/formatter output between Rust and OCaml. Covers the AST printer, OCaml Format module compatibility, and roundtrip idempotence. Currently at 423/506 syntax tests passing (83%).
