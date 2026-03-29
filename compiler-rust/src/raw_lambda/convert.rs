@@ -2513,6 +2513,13 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::unit()
                 }
             }
+            ExpressionDesc::Texp_array(items) => {
+                let elems = items
+                    .iter()
+                    .map(|item| self.convert_expr_raw(item))
+                    .collect::<Vec<_>>();
+                RawLambda::prim(Primitive::Pmakearray, elems, self.loc(expr.exp_loc))
+            }
             ExpressionDesc::Texp_sequence(a, b) => {
                 RawLambda::seq(self.convert_expr_raw(a), self.convert_expr_raw(b))
             }
