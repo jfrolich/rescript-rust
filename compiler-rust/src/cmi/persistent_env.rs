@@ -932,6 +932,40 @@ pub fn substitute_type_paths_in_child_sig(
     substitute_type_paths_in_sig_with_maps(child_sig, &parent_maps, ctx);
 }
 
+/// Apply parent-scope substitutions to an entire child module type.
+///
+/// OCaml's `Subst.modtype` keeps parent-defined type/module paths visible when
+/// descending into a nested module or functor result. A child module type can
+/// therefore reference parent items using bare names (for example
+/// `comparator<key>` inside `Comparable.Make`), and those names must be
+/// rewritten through the enclosing parent module path.
+pub fn substitute_type_paths_in_child_module_type(
+    child_mty: &mut ModuleType,
+    parent_sig: &[SignatureItem],
+    parent_module_path: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    match child_mty {
+        ModuleType::MtySignature(sig) => {
+            substitute_type_paths_in_child_sig(sig, parent_sig, parent_module_path, ctx);
+        }
+        ModuleType::MtyFunctor {
+            param_type, result, ..
+        } => {
+            if let Some(param_type) = param_type.as_mut() {
+                substitute_type_paths_in_child_module_type(
+                    param_type,
+                    parent_sig,
+                    parent_module_path,
+                    ctx,
+                );
+            }
+            substitute_type_paths_in_child_module_type(result, parent_sig, parent_module_path, ctx);
+        }
+        ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
+    }
+}
+
 pub fn substitute_type_paths_in_sig(
     sig_items: &[SignatureItem],
     module_path: &Path,

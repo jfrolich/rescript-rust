@@ -2836,6 +2836,7 @@ pub fn lookup_module_type_by_lid<'b>(
             let submod_name = arena.get_string(*submod_idx);
             // Recursively resolve prefix to get parent module type
             let parent_type = lookup_module_type_by_lid(prefix, arena, env, pers_env, ctx)?;
+            let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
             // Keep alias identity for dotted module lookups through aliased parents.
             // OCaml `Env.find_module` preserves this (Belt.Id.MakeComparable is an alias
             // through Belt_Id.MakeComparable), which is required for implicit
@@ -2883,7 +2884,26 @@ pub fn lookup_module_type_by_lid<'b>(
                                 kind
                             );
                         }
-                        return Some(sub_md.md_type.clone());
+                        let mut child_mty = sub_md.md_type.clone();
+                        crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+                            &mut child_mty,
+                            &parent_sig,
+                            &parent_path,
+                            ctx,
+                        );
+                        return Some(child_mty);
+                    }
+                }
+                if let crate::types::decl::SignatureItem::SigModtype(id, mtd) = sig_item {
+                    if id.name() == submod_name {
+                        let mut child_mty = mtd.mtd_type.clone()?;
+                        crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+                            &mut child_mty,
+                            &parent_sig,
+                            &parent_path,
+                            ctx,
+                        );
+                        return Some(child_mty);
                     }
                 }
             }
@@ -3095,136 +3115,367 @@ fn nested_package_constraints(
         .collect()
 }
 
-fn copy_signature_for_package_constraints(
-    sig_items: &[crate::types::decl::SignatureItem],
-    ctx: &crate::types::context::TypeContext<'_>,
-) -> crate::types::decl::Signature {
-    // package_constraints mutates type nodes through later env substitutions.
-    // Copy the signature graph first so each package instantiation has isolated
-    // type nodes, matching OCaml's per-instantiation Subst behavior.
-    let dummy_param = Ident::create_local("__pkg_copy_param__");
-    let dummy_path = Path::pident(Ident::create_local("__pkg_copy_path__"));
-    substitute_functor_param_in_signature(sig_items, &dummy_param, &dummy_path, ctx)
+fn rewrite_package_freshened_type_path(
+    path: &Path,
+    fresh_type_ids: &HashMap<i32, Ident>,
+) -> Path {
+    match path {
+        Path::Pident(id) => fresh_type_ids
+            .get(&id.stamp())
+            .cloned()
+            .map(Path::pident)
+            .unwrap_or_else(|| path.clone()),
+        Path::Pdot(prefix, name, pos) => Path::Pdot(
+            Box::new(rewrite_package_freshened_type_path(prefix, fresh_type_ids)),
+            name.clone(),
+            *pos,
+        ),
+        Path::Papply(functor, arg) => Path::Papply(
+            Box::new(rewrite_package_freshened_type_path(functor, fresh_type_ids)),
+            Box::new(rewrite_package_freshened_type_path(arg, fresh_type_ids)),
+        ),
+    }
 }
 
-fn rewrite_parent_scoped_type_paths_for_package<'b>(
-    ctx: &'b crate::types::context::TypeContext<'b>,
-    ty: TypeExprRef,
-    local_type_ids: &HashMap<String, Ident>,
-    parent_path: &Path,
-    seen: &mut HashSet<TypeExprRef>,
+fn rewrite_package_freshened_type_expr(
+    ctx: &crate::types::context::TypeContext<'_>,
+    ty_ref: TypeExprRef,
+    fresh_type_ids: &HashMap<i32, Ident>,
+    visited: &mut HashSet<TypeExprRef>,
 ) {
-    let ty = ctx.repr(ty);
-    if !seen.insert(ty) {
+    use crate::types::type_expr::{RowField, TypeDesc};
+
+    let ty_ref = ctx.repr(ty_ref);
+    if !visited.insert(ty_ref) {
         return;
     }
 
-    let desc = ctx.get_desc(ty).clone();
-    if let crate::types::type_expr::TypeDesc::Tconstr { path, args, abbrev } = &desc {
-        for arg in args {
-            rewrite_parent_scoped_type_paths_for_package(
-                ctx,
-                *arg,
-                local_type_ids,
-                parent_path,
-                seen,
-            );
-        }
-        if let Path::Pident(id) = path {
-            if !id.is_persistent() && !local_type_ids.contains_key(id.name()) {
+    let desc = ctx.get_desc(ty_ref).clone();
+    match &desc {
+        TypeDesc::Tconstr { path, args, abbrev } => {
+            let rewritten_path = rewrite_package_freshened_type_path(path, fresh_type_ids);
+            if rewritten_path != *path {
                 ctx.set_desc(
-                    ty,
-                    crate::types::type_expr::TypeDesc::Tconstr {
-                        path: Path::pdot(parent_path.clone(), id.name()),
+                    ty_ref,
+                    TypeDesc::Tconstr {
+                        path: rewritten_path,
                         args: args.clone(),
                         abbrev: *abbrev,
                     },
                 );
             }
-        }
-        return;
-    }
-
-    crate::types::iter_type_expr(ctx, ty, |child| {
-        rewrite_parent_scoped_type_paths_for_package(ctx, child, local_type_ids, parent_path, seen);
-    });
-}
-
-fn rewrite_package_constrained_type_refs<'b>(
-    ctx: &'b crate::types::context::TypeContext<'b>,
-    ty: TypeExprRef,
-    constrained_type_map: &HashMap<i32, TypeExprRef>,
-    seen: &mut HashSet<TypeExprRef>,
-) {
-    use crate::types::type_expr::TypeDesc;
-
-    let ty = ctx.repr(ty);
-    if !seen.insert(ty) {
-        return;
-    }
-
-    let desc = ctx.get_desc(ty).clone();
-    match desc {
-        TypeDesc::Tconstr { path, args, .. } => {
-            for arg in &args {
-                rewrite_package_constrained_type_refs(ctx, *arg, constrained_type_map, seen);
-            }
-            if args.is_empty() {
-                if let Path::Pident(id) = &path {
-                    if let Some(&manifest_ty) = constrained_type_map.get(&id.stamp()) {
-                        crate::types::link_type(ctx, ty, manifest_ty);
-                        return;
-                    }
-                }
+            for arg in args {
+                rewrite_package_freshened_type_expr(ctx, *arg, fresh_type_ids, visited);
             }
         }
         TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_package_constrained_type_refs(ctx, arg.typ, constrained_type_map, seen);
-            rewrite_package_constrained_type_refs(ctx, ret, constrained_type_map, seen);
+            rewrite_package_freshened_type_expr(ctx, arg.typ, fresh_type_ids, visited);
+            rewrite_package_freshened_type_expr(ctx, *ret, fresh_type_ids, visited);
         }
         TypeDesc::Ttuple(types) => {
-            for child in &types {
-                rewrite_package_constrained_type_refs(ctx, *child, constrained_type_map, seen);
+            for ty in types {
+                rewrite_package_freshened_type_expr(ctx, *ty, fresh_type_ids, visited);
             }
         }
-        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-            rewrite_package_constrained_type_refs(ctx, target, constrained_type_map, seen);
+        TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => {
+            rewrite_package_freshened_type_expr(ctx, *ty, fresh_type_ids, visited);
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            rewrite_package_freshened_type_expr(ctx, *body, fresh_type_ids, visited);
+            for var in vars {
+                rewrite_package_freshened_type_expr(ctx, *var, fresh_type_ids, visited);
+            }
         }
         TypeDesc::Tobject { fields, .. } => {
-            rewrite_package_constrained_type_refs(ctx, fields, constrained_type_map, seen);
+            rewrite_package_freshened_type_expr(ctx, *fields, fresh_type_ids, visited);
         }
         TypeDesc::Tfield { typ, rest, .. } => {
-            rewrite_package_constrained_type_refs(ctx, typ, constrained_type_map, seen);
-            rewrite_package_constrained_type_refs(ctx, rest, constrained_type_map, seen);
+            rewrite_package_freshened_type_expr(ctx, *typ, fresh_type_ids, visited);
+            rewrite_package_freshened_type_expr(ctx, *rest, fresh_type_ids, visited);
         }
         TypeDesc::Tvariant(row) => {
-            rewrite_package_constrained_type_refs(ctx, row.row_more, constrained_type_map, seen);
+            rewrite_package_freshened_type_expr(ctx, row.row_more, fresh_type_ids, visited);
             for (_, field) in &row.row_fields {
                 match field {
-                    crate::types::type_expr::RowField::Rpresent(Some(t)) => {
-                        rewrite_package_constrained_type_refs(ctx, *t, constrained_type_map, seen);
+                    RowField::Rpresent(Some(ty)) => {
+                        rewrite_package_freshened_type_expr(ctx, *ty, fresh_type_ids, visited);
                     }
-                    crate::types::type_expr::RowField::Reither { types, .. } => {
-                        for t in types {
-                            rewrite_package_constrained_type_refs(ctx, *t, constrained_type_map, seen);
+                    RowField::Reither { types, .. } => {
+                        for ty in types {
+                            rewrite_package_freshened_type_expr(
+                                ctx,
+                                *ty,
+                                fresh_type_ids,
+                                visited,
+                            );
                         }
                     }
                     _ => {}
                 }
             }
         }
-        TypeDesc::Tpoly { body, vars } => {
-            rewrite_package_constrained_type_refs(ctx, body, constrained_type_map, seen);
-            for v in &vars {
-                rewrite_package_constrained_type_refs(ctx, *v, constrained_type_map, seen);
-            }
-        }
         TypeDesc::Tpackage { args, .. } => {
-            for arg in &args {
-                rewrite_package_constrained_type_refs(ctx, *arg, constrained_type_map, seen);
+            for arg in args {
+                rewrite_package_freshened_type_expr(ctx, *arg, fresh_type_ids, visited);
             }
         }
         TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+
+fn rewrite_package_freshened_constructor_args(
+    args: &mut crate::types::decl::ConstructorArguments,
+    ctx: &crate::types::context::TypeContext<'_>,
+    fresh_type_ids: &HashMap<i32, Ident>,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    match args {
+        crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+            for arg in args {
+                rewrite_package_freshened_type_expr(ctx, *arg, fresh_type_ids, visited);
+            }
+        }
+        crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+            for label in labels {
+                rewrite_package_freshened_type_expr(ctx, label.ld_type, fresh_type_ids, visited);
+            }
+        }
+    }
+}
+
+fn rewrite_package_freshened_type_kind(
+    kind: &mut crate::types::TypeKind,
+    ctx: &crate::types::context::TypeContext<'_>,
+    fresh_type_ids: &HashMap<i32, Ident>,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    match kind {
+        crate::types::TypeKind::TypeAbstract | crate::types::TypeKind::TypeOpen => {}
+        crate::types::TypeKind::TypeRecord(labels, _) => {
+            for label in labels {
+                rewrite_package_freshened_type_expr(ctx, label.ld_type, fresh_type_ids, visited);
+            }
+        }
+        crate::types::TypeKind::TypeVariant(constructors) => {
+            for ctor in constructors {
+                rewrite_package_freshened_constructor_args(
+                    &mut ctor.cd_args,
+                    ctx,
+                    fresh_type_ids,
+                    visited,
+                );
+                if let Some(res) = ctor.cd_res {
+                    rewrite_package_freshened_type_expr(ctx, res, fresh_type_ids, visited);
+                }
+            }
+        }
+    }
+}
+
+fn rewrite_package_freshened_type_inlined(
+    inlined: &mut crate::types::decl::TypeInlinedType,
+    ctx: &crate::types::context::TypeContext<'_>,
+    fresh_type_ids: &HashMap<i32, Ident>,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    match inlined {
+        crate::types::decl::TypeInlinedType::Record { labels, .. } => {
+            for label in labels {
+                rewrite_package_freshened_type_expr(ctx, label.ld_type, fresh_type_ids, visited);
+            }
+        }
+    }
+}
+
+fn collect_package_fresh_type_ids_in_module_type(
+    mty: &crate::types::decl::ModuleType,
+    ctx: &crate::types::context::TypeContext<'_>,
+    fresh_type_ids: &mut HashMap<i32, Ident>,
+) {
+    use crate::types::decl::ModuleType as DeclMty;
+
+    match mty {
+        DeclMty::MtySignature(sig_items) => {
+            for item in sig_items {
+                match item {
+                    crate::types::decl::SignatureItem::SigType(id, _, _) => {
+                        if id.stamp() != 0 {
+                            fresh_type_ids
+                                .entry(id.stamp())
+                                .or_insert_with(|| ctx.create_ident(id.name()));
+                        }
+                    }
+                    crate::types::decl::SignatureItem::SigModule(_, md, _) => {
+                        collect_package_fresh_type_ids_in_module_type(
+                            &md.md_type,
+                            ctx,
+                            fresh_type_ids,
+                        );
+                    }
+                    crate::types::decl::SignatureItem::SigModtype(_, mtd) => {
+                        if let Some(inner) = &mtd.mtd_type {
+                            collect_package_fresh_type_ids_in_module_type(
+                                inner,
+                                ctx,
+                                fresh_type_ids,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        DeclMty::MtyFunctor {
+            param_type, result, ..
+        } => {
+            if let Some(param_type) = param_type.as_deref() {
+                collect_package_fresh_type_ids_in_module_type(param_type, ctx, fresh_type_ids);
+            }
+            collect_package_fresh_type_ids_in_module_type(result, ctx, fresh_type_ids);
+        }
+        DeclMty::MtyIdent(_) | DeclMty::MtyAlias(_, _) => {}
+    }
+}
+
+fn freshen_package_type_ids_in_module_type(
+    mty: &mut crate::types::decl::ModuleType,
+    ctx: &crate::types::context::TypeContext<'_>,
+    fresh_type_ids: &HashMap<i32, Ident>,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    use crate::types::decl::ModuleType as DeclMty;
+
+    match mty {
+        DeclMty::MtySignature(sig_items) => {
+            for item in sig_items {
+                match item {
+                    crate::types::decl::SignatureItem::SigValue(_, desc) => {
+                        rewrite_package_freshened_type_expr(
+                            ctx,
+                            desc.val_type,
+                            fresh_type_ids,
+                            visited,
+                        );
+                    }
+                    crate::types::decl::SignatureItem::SigType(id, decl, _) => {
+                        if let Some(new_id) = fresh_type_ids.get(&id.stamp()) {
+                            *id = new_id.clone();
+                            decl.type_path = Some(Path::pident(new_id.clone()));
+                        }
+                        for param in &decl.type_params {
+                            rewrite_package_freshened_type_expr(
+                                ctx,
+                                *param,
+                                fresh_type_ids,
+                                visited,
+                            );
+                        }
+                        if let Some(manifest) = decl.type_manifest {
+                            rewrite_package_freshened_type_expr(
+                                ctx,
+                                manifest,
+                                fresh_type_ids,
+                                visited,
+                            );
+                        }
+                        rewrite_package_freshened_type_kind(
+                            &mut decl.type_kind,
+                            ctx,
+                            fresh_type_ids,
+                            visited,
+                        );
+                        for inlined in &mut decl.type_inlined_types {
+                            rewrite_package_freshened_type_inlined(
+                                inlined,
+                                ctx,
+                                fresh_type_ids,
+                                visited,
+                            );
+                        }
+                    }
+                    crate::types::decl::SignatureItem::SigTypext(_, ext, _) => {
+                        ext.ext_type_path = rewrite_package_freshened_type_path(
+                            &ext.ext_type_path,
+                            fresh_type_ids,
+                        );
+                        for param in &ext.ext_type_params {
+                            rewrite_package_freshened_type_expr(
+                                ctx,
+                                *param,
+                                fresh_type_ids,
+                                visited,
+                            );
+                        }
+                        rewrite_package_freshened_constructor_args(
+                            &mut ext.ext_args,
+                            ctx,
+                            fresh_type_ids,
+                            visited,
+                        );
+                        if let Some(ret) = ext.ext_ret_type {
+                            rewrite_package_freshened_type_expr(
+                                ctx,
+                                ret,
+                                fresh_type_ids,
+                                visited,
+                            );
+                        }
+                    }
+                    crate::types::decl::SignatureItem::SigModule(_, md, _) => {
+                        freshen_package_type_ids_in_module_type(
+                            &mut md.md_type,
+                            ctx,
+                            fresh_type_ids,
+                            visited,
+                        );
+                    }
+                    crate::types::decl::SignatureItem::SigModtype(_, mtd) => {
+                        if let Some(inner) = mtd.mtd_type.as_mut() {
+                            freshen_package_type_ids_in_module_type(
+                                inner,
+                                ctx,
+                                fresh_type_ids,
+                                visited,
+                            );
+                        }
+                    }
+                    crate::types::decl::SignatureItem::SigClass
+                    | crate::types::decl::SignatureItem::SigClassType => {}
+                }
+            }
+        }
+        DeclMty::MtyFunctor {
+            param_type, result, ..
+        } => {
+            if let Some(param_type) = param_type.as_mut() {
+                freshen_package_type_ids_in_module_type(
+                    param_type,
+                    ctx,
+                    fresh_type_ids,
+                    visited,
+                );
+            }
+            freshen_package_type_ids_in_module_type(result, ctx, fresh_type_ids, visited);
+        }
+        DeclMty::MtyIdent(_) | DeclMty::MtyAlias(_, _) => {}
+    }
+}
+
+fn copy_signature_for_package_constraints(
+    sig_items: &[crate::types::decl::SignatureItem],
+    ctx: &crate::types::context::TypeContext<'_>,
+) -> crate::types::decl::Signature {
+    let dummy_param = Ident::create_local("__pkg_copy_param__");
+    let dummy_path = Path::pident(Ident::create_local("__pkg_copy_path__"));
+    let copied = substitute_functor_param_in_signature(sig_items, &dummy_param, &dummy_path, ctx);
+    let mut fresh_type_ids = HashMap::new();
+    let mut copied_mty = crate::types::decl::ModuleType::MtySignature(copied);
+    collect_package_fresh_type_ids_in_module_type(&copied_mty, ctx, &mut fresh_type_ids);
+    let mut visited = HashSet::new();
+    freshen_package_type_ids_in_module_type(&mut copied_mty, ctx, &fresh_type_ids, &mut visited);
+    match copied_mty {
+        crate::types::decl::ModuleType::MtySignature(sig) => sig,
+        _ => unreachable!(),
     }
 }
 
@@ -3236,43 +3487,33 @@ fn apply_package_constraints_to_module_type<'b>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'b crate::types::context::TypeContext<'b>,
 ) -> Option<crate::types::decl::ModuleType> {
-    use crate::types::decl::ModuleType as DeclMty;
     use crate::types::decl::SignatureItem;
 
     if constraints.is_empty() {
         return Some(mty.clone());
     }
 
-    // Match OCaml Typemod.package_constraints:
-    // - extract signature for the module type
-    // - only rewrite constrained Sig_type manifests
-    // - recurse into Sig_module with nested constraints
+    // Direct port of OCaml Typemod.package_constraints.
     let sig = resolve_mod_type_to_sig(mty, Some(env), pers_env, ctx)?;
     let sig = copy_signature_for_package_constraints(&sig, ctx);
+    if let Some(parent_path) = package_parent_path {
+        let mut visiting = HashSet::new();
+        if let Some(parent_sig) =
+            resolve_path_to_sig_impl(parent_path, Some(env), pers_env, ctx, &mut visiting)
+        {
+            crate::cmi::persistent_env::substitute_type_paths_in_child_sig(
+                &sig,
+                &parent_sig,
+                parent_path,
+                ctx,
+            );
+        }
+    }
     let mut rewritten_sig = Vec::with_capacity(sig.len());
-    let local_type_ids: HashMap<String, Ident> = sig
-        .iter()
-        .filter_map(|item| match item {
-            SignatureItem::SigType(id, _, _) => Some((id.name().to_string(), id.clone())),
-            _ => None,
-        })
-        .collect();
-    let mut constrained_type_map: HashMap<i32, TypeExprRef> = HashMap::new();
+
     for item in sig {
         match item {
-            SignatureItem::SigValue(id, mut vd) => {
-                if let Some(parent_path) = package_parent_path {
-                    let mut seen = HashSet::new();
-                    rewrite_parent_scoped_type_paths_for_package(
-                        ctx,
-                        vd.val_type,
-                        &local_type_ids,
-                        parent_path,
-                        &mut seen,
-                    );
-                }
-                rewritten_sig.push(SignatureItem::SigValue(id, vd));
-            }
+            SignatureItem::SigValue(id, vd) => rewritten_sig.push(SignatureItem::SigValue(id, vd)),
             SignatureItem::SigType(id, mut td, rec_status) => {
                 if td.type_params.is_empty() {
                     if let Some((_, manifest_ty)) = constraints
@@ -3280,20 +3521,6 @@ fn apply_package_constraints_to_module_type<'b>(
                         .find(|(path, _)| path.len() == 1 && path[0] == id.name())
                     {
                         td.type_manifest = Some(*manifest_ty);
-                        if id.stamp() != 0 {
-                            let manifest = ctx.repr(*manifest_ty);
-                            let manifest_desc = ctx.get_desc(manifest);
-                            if matches!(
-                                &*manifest_desc,
-                                crate::types::type_expr::TypeDesc::Tconstr {
-                                    path: Path::Pident(manifest_id),
-                                    args,
-                                    ..
-                                } if args.is_empty() && !manifest_id.is_persistent() && id.name() == "state"
-                            ) {
-                                constrained_type_map.insert(id.stamp(), *manifest_ty);
-                            }
-                        }
                     }
                 }
                 rewritten_sig.push(SignatureItem::SigType(id, td, rec_status));
@@ -3301,13 +3528,11 @@ fn apply_package_constraints_to_module_type<'b>(
             SignatureItem::SigModule(id, mut md, rec_status) => {
                 let nested = nested_package_constraints(id.name(), constraints);
                 if !nested.is_empty() {
-                    let nested_parent_path =
-                        package_parent_path.map(|p| Path::pdot(p.clone(), id.name()));
                     md.md_type = apply_package_constraints_to_module_type(
                         env,
                         &md.md_type,
                         &nested,
-                        nested_parent_path.as_ref(),
+                        package_parent_path,
                         pers_env,
                         ctx,
                     )?;
@@ -3318,121 +3543,7 @@ fn apply_package_constraints_to_module_type<'b>(
         }
     }
 
-    if !constrained_type_map.is_empty() {
-        let mut seen = HashSet::new();
-        for item in &rewritten_sig {
-            match item {
-                SignatureItem::SigValue(_, vd) => {
-                    rewrite_package_constrained_type_refs(
-                        ctx,
-                        vd.val_type,
-                        &constrained_type_map,
-                        &mut seen,
-                    );
-                }
-                SignatureItem::SigType(_, td, _) => {
-                    if let Some(manifest) = td.type_manifest {
-                        rewrite_package_constrained_type_refs(
-                            ctx,
-                            manifest,
-                            &constrained_type_map,
-                            &mut seen,
-                        );
-                    }
-                    match &td.type_kind {
-                        crate::types::TypeKind::TypeVariant(constrs) => {
-                            for cd in constrs {
-                                match &cd.cd_args {
-                                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
-                                        for arg in args {
-                                            rewrite_package_constrained_type_refs(
-                                                ctx,
-                                                *arg,
-                                                &constrained_type_map,
-                                                &mut seen,
-                                            );
-                                        }
-                                    }
-                                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-                                        for lbl in labels {
-                                            rewrite_package_constrained_type_refs(
-                                                ctx,
-                                                lbl.ld_type,
-                                                &constrained_type_map,
-                                                &mut seen,
-                                            );
-                                        }
-                                    }
-                                }
-                                if let Some(res) = cd.cd_res {
-                                    rewrite_package_constrained_type_refs(
-                                        ctx,
-                                        res,
-                                        &constrained_type_map,
-                                        &mut seen,
-                                    );
-                                }
-                            }
-                        }
-                        crate::types::TypeKind::TypeRecord(labels, _) => {
-                            for lbl in labels {
-                                rewrite_package_constrained_type_refs(
-                                    ctx,
-                                    lbl.ld_type,
-                                    &constrained_type_map,
-                                    &mut seen,
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                SignatureItem::SigTypext(_, ext, _) => {
-                    for arg in &ext.ext_type_params {
-                        rewrite_package_constrained_type_refs(
-                            ctx,
-                            *arg,
-                            &constrained_type_map,
-                            &mut seen,
-                        );
-                    }
-                    match &ext.ext_args {
-                        crate::types::decl::ConstructorArguments::CstrTuple(args) => {
-                            for arg in args {
-                                rewrite_package_constrained_type_refs(
-                                    ctx,
-                                    *arg,
-                                    &constrained_type_map,
-                                    &mut seen,
-                                );
-                            }
-                        }
-                        crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-                            for lbl in labels {
-                                rewrite_package_constrained_type_refs(
-                                    ctx,
-                                    lbl.ld_type,
-                                    &constrained_type_map,
-                                    &mut seen,
-                                );
-                            }
-                        }
-                    }
-                    if let Some(ret) = ext.ext_ret_type {
-                        rewrite_package_constrained_type_refs(
-                            ctx,
-                            ret,
-                            &constrained_type_map,
-                            &mut seen,
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    Some(DeclMty::MtySignature(rewritten_sig))
+    Some(crate::types::decl::ModuleType::MtySignature(rewritten_sig))
 }
 
 /// Port of OCaml `Typemod.modtype_of_package` + `package_constraints`.
@@ -5390,7 +5501,7 @@ fn extract_module_type_from_mod_expr(
     extract_module_type_from_mod_expr_with_resolver(mod_expr, env, None, &mut no_ident_resolver)
 }
 
-fn extract_module_type_from_mod_expr_with_ctx<'a>(
+pub(crate) fn extract_module_type_from_mod_expr_with_ctx<'a>(
     mod_expr: &ModuleExpr,
     env: Option<&Env>,
     type_ctx: &'a crate::types::context::TypeContext<'a>,
@@ -5956,6 +6067,7 @@ where
     fn resolve_modtype_to_sig_in_env(
         mty: &crate::types::decl::ModuleType,
         env: &Env,
+        type_ctx: Option<&crate::types::context::TypeContext<'_>>,
     ) -> Option<crate::types::decl::Signature> {
         use crate::types::decl::ModuleType as DeclMty;
         fn anchored(owner_path: &Path, mty: &crate::types::decl::ModuleType) -> crate::types::decl::ModuleType {
@@ -5964,9 +6076,28 @@ where
             mty
         }
 
+        fn substituted_and_anchored(
+            parent_sig: &[crate::types::decl::SignatureItem],
+            parent_path: &Path,
+            owner_path: &Path,
+            mty: &crate::types::decl::ModuleType,
+            ctx: &crate::types::context::TypeContext<'_>,
+        ) -> crate::types::decl::ModuleType {
+            let mut mty = mty.clone();
+            crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+                &mut mty,
+                parent_sig,
+                parent_path,
+                ctx,
+            );
+            anchor_local_module_aliases_to_owner(&mut mty, owner_path);
+            mty
+        }
+
         fn resolve_path(
             path: &Path,
             env: &Env,
+            type_ctx: Option<&crate::types::context::TypeContext<'_>>,
             visiting: &mut HashSet<Path>,
         ) -> Option<crate::types::decl::Signature> {
             use crate::types::decl::SignatureItem as SigItem;
@@ -6009,32 +6140,52 @@ where
                 Path::Pident(id) => {
                     if let Ok(md) = env.lookup_module(&Path::pident(id.clone())) {
                         let anchored_mty = anchored(&Path::pident(id.clone()), &md.md_type);
-                        if let Some(sig) = resolve_mty(&anchored_mty, env, visiting) {
+                        if let Some(sig) = resolve_mty(&anchored_mty, env, type_ctx, visiting) {
                             return Some(sig);
                         }
                     }
                     if let Ok(mtd) = env.lookup_modtype(&Path::pident(id.clone())) {
                         if let Some(mty) = &mtd.mtd_type {
                             let anchored_mty = anchored(&Path::pident(id.clone()), mty);
-                            return resolve_mty(&anchored_mty, env, visiting);
+                            return resolve_mty(&anchored_mty, env, type_ctx, visiting);
                         }
                     }
                     None
                 }
                 Path::Pdot(parent, name, _) => {
-                    let parent_sig = resolve_path(parent, env, visiting)?;
+                    let parent_sig = resolve_path(parent, env, type_ctx, visiting)?;
                     let owner_path = Path::pdot((**parent).clone(), name);
                     parent_sig.iter().find_map(|item| match item {
                         SigItem::SigModule(id, md, _) if id.name() == name.as_str() => {
-                            let anchored_mty = anchored(&owner_path, &md.md_type);
-                            resolve_mty(&anchored_mty, env, visiting)
+                            let child_mty = if let Some(type_ctx) = type_ctx {
+                                substituted_and_anchored(
+                                    &parent_sig,
+                                    parent,
+                                    &owner_path,
+                                    &md.md_type,
+                                    type_ctx,
+                                )
+                            } else {
+                                anchored(&owner_path, &md.md_type)
+                            };
+                            resolve_mty(&child_mty, env, type_ctx, visiting)
                         }
                         SigItem::SigModtype(id, mtd) if id.name() == name.as_str() => mtd
                             .mtd_type
                             .as_ref()
                             .and_then(|mty| {
-                                let anchored_mty = anchored(&owner_path, mty);
-                                resolve_mty(&anchored_mty, env, visiting)
+                                let child_mty = if let Some(type_ctx) = type_ctx {
+                                    substituted_and_anchored(
+                                        &parent_sig,
+                                        parent,
+                                        &owner_path,
+                                        mty,
+                                        type_ctx,
+                                    )
+                                } else {
+                                    anchored(&owner_path, mty)
+                                };
+                                resolve_mty(&child_mty, env, type_ctx, visiting)
                             }),
                         _ => None,
                     })
@@ -6049,30 +6200,50 @@ where
         fn resolve_mty(
             mty: &crate::types::decl::ModuleType,
             env: &Env,
+            type_ctx: Option<&crate::types::context::TypeContext<'_>>,
             visiting: &mut HashSet<Path>,
         ) -> Option<crate::types::decl::Signature> {
             match mty {
                 DeclMty::MtySignature(sig) => Some(sig.clone()),
                 DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => {
-                    resolve_path(path, env, visiting)
+                    resolve_path(path, env, type_ctx, visiting)
                 }
                 _ => None,
             }
         }
 
         let mut visiting = HashSet::new();
-        resolve_mty(mty, env, &mut visiting)
+        resolve_mty(mty, env, type_ctx, &mut visiting)
     }
 
     fn resolve_module_type_path_in_env(
         path: &Path,
         env: &Env,
+        type_ctx: Option<&crate::types::context::TypeContext<'_>>,
     ) -> Option<crate::types::decl::ModuleType> {
         use crate::types::decl::ModuleType as DeclMty;
         use crate::types::decl::SignatureItem as SigItem;
 
         fn anchored(owner_path: &Path, mty: &crate::types::decl::ModuleType) -> crate::types::decl::ModuleType {
             let mut mty = mty.clone();
+            anchor_local_module_aliases_to_owner(&mut mty, owner_path);
+            mty
+        }
+
+        fn substituted_and_anchored(
+            parent_sig: &[crate::types::decl::SignatureItem],
+            parent_path: &Path,
+            owner_path: &Path,
+            mty: &crate::types::decl::ModuleType,
+            ctx: &crate::types::context::TypeContext<'_>,
+        ) -> crate::types::decl::ModuleType {
+            let mut mty = mty.clone();
+            crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+                &mut mty,
+                parent_sig,
+                parent_path,
+                ctx,
+            );
             anchor_local_module_aliases_to_owner(&mut mty, owner_path);
             mty
         }
@@ -6090,16 +6261,34 @@ where
                 None
             }
             Path::Pdot(parent, name, _) => {
-                let parent_mty = resolve_module_type_path_in_env(parent, env)?;
-                let parent_sig = resolve_modtype_to_sig_in_env(&parent_mty, env)?;
+                let parent_mty = resolve_module_type_path_in_env(parent, env, type_ctx)?;
+                let parent_sig = resolve_modtype_to_sig_in_env(&parent_mty, env, type_ctx)?;
                 let owner_path = Path::pdot((**parent).clone(), name);
                 for item in &parent_sig {
                     match item {
                         SigItem::SigModule(id, md, _) if id.name() == name.as_str() => {
+                            if let Some(type_ctx) = type_ctx {
+                                return Some(substituted_and_anchored(
+                                    &parent_sig,
+                                    parent,
+                                    &owner_path,
+                                    &md.md_type,
+                                    type_ctx,
+                                ));
+                            }
                             return Some(anchored(&owner_path, &md.md_type));
                         }
                         SigItem::SigModtype(id, mtd) if id.name() == name.as_str() => {
                             if let Some(mty) = &mtd.mtd_type {
+                                if let Some(type_ctx) = type_ctx {
+                                    return Some(substituted_and_anchored(
+                                        &parent_sig,
+                                        parent,
+                                        &owner_path,
+                                        mty,
+                                        type_ctx,
+                                    ));
+                                }
                                 return Some(anchored(&owner_path, mty));
                             }
                         }
@@ -6154,14 +6343,17 @@ where
 
     match &mod_expr.mod_desc {
         ModuleExprDesc::Tmod_ident(path, lid) => {
+            if let Some(mty) = decl_module_type_from_typed_module_type(&mod_expr.mod_type) {
+                return Some(mty);
+            }
             if let Some(env) = env {
-                if let Some(mty) = resolve_module_type_path_in_env(path, env) {
+                if let Some(mty) = resolve_module_type_path_in_env(path, env, type_ctx) {
                     return Some(mty);
                 }
             }
             if let Some(env) = env {
                 if let Some(sig) =
-                    resolve_modtype_to_sig_in_env(&DeclMty::MtyIdent(path.clone()), env)
+                    resolve_modtype_to_sig_in_env(&DeclMty::MtyIdent(path.clone()), env, type_ctx)
                 {
                     return Some(DeclMty::MtySignature(sig));
                 }
@@ -6241,21 +6433,22 @@ where
                     StructureItemDesc::Tstr_module(mb) => {
                         let inner_mty = preserve_structure_module_alias(&mb.mb_expr)
                             .and_then(|mty| match (&mty, current_env, type_ctx) {
-                                (DeclMty::MtyAlias(_, path), Some(env), Some(type_ctx)) => {
-                                    crate::types::ctype::resolve_module_type_through_env(
-                                        type_ctx,
-                                        env,
-                                        path,
-                                    )
-                                        .or_else(|| resolve_module_type_path_in_env(path, env))
+                                    (DeclMty::MtyAlias(_, path), Some(env), Some(type_ctx)) => {
+                                        crate::types::ctype::resolve_module_type_through_env(
+                                            type_ctx,
+                                            env,
+                                            path,
+                                        )
+                                        .or_else(|| resolve_module_type_path_in_env(path, env, Some(type_ctx)))
                                         .and_then(|resolved_mty| match resolved_mty {
                                             DeclMty::MtySignature(sig) => Some(sig),
-                                            other => resolve_modtype_to_sig_in_env(&other, env),
+                                            other => resolve_modtype_to_sig_in_env(&other, env, Some(type_ctx)),
                                         })
                                         .or_else(|| {
                                             resolve_modtype_to_sig_in_env(
                                                 &DeclMty::MtyIdent(path.clone()),
                                                 env,
+                                                Some(type_ctx),
                                             )
                                         })
                                         .map(|sig| {
@@ -6320,15 +6513,16 @@ where
                                             env,
                                             path,
                                         )
-                                            .or_else(|| resolve_module_type_path_in_env(path, env))
+                                            .or_else(|| resolve_module_type_path_in_env(path, env, Some(type_ctx)))
                                             .and_then(|resolved_mty| match resolved_mty {
                                                 DeclMty::MtySignature(sig) => Some(sig),
-                                                other => resolve_modtype_to_sig_in_env(&other, env),
+                                                other => resolve_modtype_to_sig_in_env(&other, env, Some(type_ctx)),
                                             })
                                             .or_else(|| {
                                                 resolve_modtype_to_sig_in_env(
                                                     &DeclMty::MtyIdent(path.clone()),
                                                     env,
+                                                    Some(type_ctx),
                                                 )
                                             })
                                             .map(|sig| {
@@ -6513,7 +6707,7 @@ where
                                 let inner_sig_opt = match inner_mty {
                                     DeclMty::MtySignature(inner_sig) => Some(inner_sig),
                                     other => current_env
-                                        .and_then(|env| resolve_modtype_to_sig_in_env(&other, env))
+                                        .and_then(|env| resolve_modtype_to_sig_in_env(&other, env, type_ctx))
                                         .or_else(|| match &other {
                                             DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => {
                                                 let name = path.last();
@@ -6527,6 +6721,7 @@ where
                                                                 resolve_modtype_to_sig_in_env(
                                                                     other_mty,
                                                                     env,
+                                                                    type_ctx,
                                                                 )
                                                             }),
                                                         })
@@ -6613,7 +6808,7 @@ where
                                                 return match &md.md_type {
                                                     DeclMty::MtySignature(inner) => Some(inner.clone()),
                                                     other => current_env.and_then(|env| {
-                                                        resolve_modtype_to_sig_in_env(other, env)
+                                                        resolve_modtype_to_sig_in_env(other, env, type_ctx)
                                                     }),
                                                 };
                                             }
@@ -6654,6 +6849,7 @@ where
                                         if let Some(inner_sig) = resolve_modtype_to_sig_in_env(
                                             &DeclMty::MtyIdent(path.clone()),
                                             env,
+                                            type_ctx,
                                         ) {
                                             if debug_extract_include {
                                                 let items = inner_sig
@@ -6763,7 +6959,7 @@ where
             if let Some(functor_mty) = extracted_functor_mty {
                 let resolved_functor_mty = match &functor_mty {
                     DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => env
-                        .and_then(|env| resolve_module_type_path_in_env(path, env))
+                        .and_then(|env| resolve_module_type_path_in_env(path, env, type_ctx))
                         .unwrap_or(functor_mty),
                     _ => functor_mty,
                 };

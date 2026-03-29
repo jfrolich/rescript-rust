@@ -1496,19 +1496,35 @@ fn resolve_module_type_through_env_path<'a>(
                         Some(super::decl::ModuleType::MtySignature(child_sig))
                     }
                     other => {
+                        let mut child_mty = other.clone();
+                        crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+                            &mut child_mty,
+                            &parent_sig,
+                            parent,
+                            ctx,
+                        );
                         if let Some(target_parent_path) = parent_alias_target.as_ref() {
                             let child_target_path = Path::pdot(target_parent_path.clone(), name);
                             Some(strengthen_module_type_for_module_access_path(
                                 ctx,
                                 &child_target_path,
-                                other,
+                                &child_mty,
                             ))
                         } else {
-                            Some(other.clone())
+                            Some(child_mty)
                         }
                     }
                 },
-                SignatureItem::SigModtype(id, mtd) if id.name() == name => mtd.mtd_type.clone(),
+                SignatureItem::SigModtype(id, mtd) if id.name() == name => {
+                    let mut child_mty = mtd.mtd_type.clone()?;
+                    crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+                        &mut child_mty,
+                        &parent_sig,
+                        parent,
+                        ctx,
+                    );
+                    Some(child_mty)
+                }
                 _ => None,
             })
         }
@@ -1566,15 +1582,18 @@ fn strengthen_type_decl_for_module_access_path<'a>(
                 crate::types::TypeKind::TypeRecord(..) | crate::types::TypeKind::TypeVariant(..),
             )
     );
+    let qualified_type_path = Path::pdot(module_access_path.clone(), id.name());
 
     if keep_manifest {
-        return decl.clone();
+        let mut strengthened = decl.clone();
+        strengthened.type_path = Some(qualified_type_path);
+        return strengthened;
     }
 
     let mut strengthened = decl.clone();
-    let manifest_path = Path::pdot(module_access_path.clone(), id.name());
-    let manifest = ctx.new_generic_constr(manifest_path, decl.type_params.clone());
+    let manifest = ctx.new_generic_constr(qualified_type_path.clone(), decl.type_params.clone());
     strengthened.type_manifest = Some(manifest);
+    strengthened.type_path = Some(qualified_type_path);
     if matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract) {
         strengthened.type_private = PrivateFlag::Public;
     }
