@@ -3497,7 +3497,13 @@ impl<'a> RawLambdaConverter<'a> {
                     .unwrap_or(Primitive::PvalFromOption);
                 let payload =
                     RawLambda::prim(from_option, vec![RawLambda::var(scrut_id.clone())], pat_loc);
-                result = self.bind_irrefutable_pattern_raw(arg_pat, payload, result);
+                // For Tpat_any, OCaml's matching.ml still creates a binding
+                if matches!(arg_pat.pat_desc, PatternDesc::Tpat_any) {
+                    let match_id = self.id_gen.create("match");
+                    result = RawLambda::let_(LetKind::Alias, match_id, payload, result);
+                } else {
+                    result = self.bind_irrefutable_pattern_raw(arg_pat, payload, result);
+                }
                 return result;
             }
         }
