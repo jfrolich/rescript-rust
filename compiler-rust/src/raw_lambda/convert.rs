@@ -728,6 +728,52 @@ impl<'a> RawLambdaConverter<'a> {
         InlineAttribute::Default
     }
 
+    /// Build a switch, wrapping the failaction in catch/exit to match OCaml's
+    /// matching.ml behavior where default actions are shared through static catch.
+    fn make_switch_with_catch(
+        &mut self,
+        scrut: RawLambda,
+        const_cases: Vec<(i32, RawLambda)>,
+        block_cases: Vec<(i32, RawLambda)>,
+        failaction: Option<Box<RawLambda>>,
+    ) -> RawLambda {
+        match failaction {
+            Some(default) => {
+                let exit_id = self.next_raise_count();
+                let switch = RawLambda::Lswitch(
+                    Box::new(scrut),
+                    crate::raw_lambda::RawLambdaSwitch {
+                        sw_consts_full: false,
+                        sw_consts: const_cases,
+                        sw_blocks_full: false,
+                        sw_blocks: block_cases,
+                        sw_failaction: Some(Box::new(RawLambda::LstaticRaise(
+                            exit_id,
+                            Vec::new(),
+                        ))),
+                        sw_names: None,
+                    },
+                );
+                RawLambda::LstaticCatch(
+                    Box::new(switch),
+                    (exit_id, Vec::new()),
+                    default,
+                )
+            }
+            None => RawLambda::Lswitch(
+                Box::new(scrut),
+                crate::raw_lambda::RawLambdaSwitch {
+                    sw_consts_full: false,
+                    sw_consts: const_cases,
+                    sw_blocks_full: false,
+                    sw_blocks: block_cases,
+                    sw_failaction: None,
+                    sw_names: None,
+                },
+            ),
+        }
+    }
+
     /// Apply inline attribute to a raw lambda expression, matching OCaml's
     /// Translattribute.add_inline_attribute. Walks through Lprim wrappers
     /// to find the inner Lfunction.
@@ -4183,42 +4229,27 @@ impl<'a> RawLambdaConverter<'a> {
                             )
                         }
                     }
-                    _ => RawLambda::Lswitch(
-                        Box::new(scrut_var.clone()),
-                        crate::raw_lambda::RawLambdaSwitch {
-                            sw_consts_full: false,
-                            sw_consts: const_cases,
-                            sw_blocks_full: false,
-                            sw_blocks: block_cases,
-                            sw_failaction: failaction,
-                            sw_names: None,
-                        },
+                    _ => self.make_switch_with_catch(
+                        scrut_var.clone(),
+                        const_cases,
+                        block_cases,
+                        failaction,
                     ),
                 }
             } else {
-                RawLambda::Lswitch(
-                    Box::new(scrut_var.clone()),
-                    crate::raw_lambda::RawLambdaSwitch {
-                        sw_consts_full: false,
-                        sw_consts: const_cases,
-                        sw_blocks_full: false,
-                        sw_blocks: block_cases,
-                        sw_failaction: failaction,
-                        sw_names: None,
-                    },
+                self.make_switch_with_catch(
+                    scrut_var.clone(),
+                    const_cases,
+                    block_cases,
+                    failaction,
                 )
             }
         } else {
-            RawLambda::Lswitch(
-                Box::new(scrut_var.clone()),
-                crate::raw_lambda::RawLambdaSwitch {
-                    sw_consts_full: false,
-                    sw_consts: const_cases,
-                    sw_blocks_full: false,
-                    sw_blocks: block_cases,
-                    sw_failaction: failaction,
-                    sw_names: None,
-                },
+            self.make_switch_with_catch(
+                scrut_var.clone(),
+                const_cases,
+                block_cases,
+                failaction,
             )
         };
 
