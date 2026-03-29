@@ -3555,6 +3555,149 @@ impl<'a> RawLambdaConverter<'a> {
         )
     }
 
+    /// Check if a single leaf pattern (after peeling aliases and flattening or-patterns)
+    /// is valid for simple constructor matching. Returns false if we should bail out.
+    fn check_simple_constructor_leaf(
+        pat: &Pattern,
+        seen_const_tags: &mut std::collections::BTreeSet<i32>,
+        seen_block_tags: &mut std::collections::BTreeSet<i32>,
+        seen_extensions: &mut std::collections::BTreeSet<String>,
+        repr_cstr: &mut Option<crate::types::ConstructorDescription>,
+        has_non_ctor_constants: &mut bool,
+    ) -> bool {
+        match &pat.pat_desc {
+            PatternDesc::Tpat_construct(_, cstr, args) => {
+                if repr_cstr.is_none() {
+                    *repr_cstr = Some(cstr.clone());
+                }
+                match &cstr.cstr_tag {
+                    ConstructorTag::CstrConstant(tag) => {
+                        args.is_empty() && seen_const_tags.insert(*tag)
+                    }
+                    ConstructorTag::CstrBlock(tag) => {
+                        seen_block_tags.insert(*tag)
+                            && args.iter().all(Self::is_irrefutable_pattern)
+                    }
+                    ConstructorTag::CstrExtension(path) => {
+                        args.iter().all(Self::is_irrefutable_pattern)
+                            && seen_extensions.insert(path.name())
+                    }
+                    ConstructorTag::CstrUnboxed => false,
+                }
+            }
+            PatternDesc::Tpat_constant(TConstant::Int(i)) => {
+                *has_non_ctor_constants = true;
+                seen_const_tags.insert(*i as i32)
+            }
+            PatternDesc::Tpat_constant(TConstant::Char(c)) => {
+                *has_non_ctor_constants = true;
+                seen_const_tags.insert(*c as i32)
+            }
+            _ => false,
+        }
+    }
+
+    /// Recursively check all leaves of an or-pattern for simple constructor matching.
+    fn check_or_pattern_leaves(
+        pat: &Pattern,
+        seen_const_tags: &mut std::collections::BTreeSet<i32>,
+        seen_block_tags: &mut std::collections::BTreeSet<i32>,
+        seen_extensions: &mut std::collections::BTreeSet<String>,
+        repr_cstr: &mut Option<crate::types::ConstructorDescription>,
+        has_non_ctor_constants: &mut bool,
+    ) -> bool {
+        let (inner, _) = peel_aliases(pat);
+        match &inner.pat_desc {
+            PatternDesc::Tpat_or(left, right, _) => {
+                Self::check_or_pattern_leaves(
+                    left,
+                    seen_const_tags,
+                    seen_block_tags,
+                    seen_extensions,
+                    repr_cstr,
+                    has_non_ctor_constants,
+                ) && Self::check_or_pattern_leaves(
+                    right,
+                    seen_const_tags,
+                    seen_block_tags,
+                    seen_extensions,
+                    repr_cstr,
+                    has_non_ctor_constants,
+                )
+            }
+            _ => Self::check_simple_constructor_leaf(
+                inner,
+                seen_const_tags,
+                seen_block_tags,
+                seen_extensions,
+                repr_cstr,
+                has_non_ctor_constants,
+            ),
+        }
+    }
+
+    /// Recursively collect leaf patterns from or-patterns, adding each to const/block cases.
+    fn collect_or_pattern_cases(
+        &mut self,
+        pat: &Pattern,
+        scrut_id: &Ident,
+        action: &RawLambda,
+        const_cases: &mut Vec<(i32, RawLambda)>,
+        block_cases: &mut Vec<(i32, RawLambda)>,
+    ) {
+        let (inner, aliases) = peel_aliases(pat);
+        match &inner.pat_desc {
+            PatternDesc::Tpat_or(left, right, _) => {
+                self.collect_or_pattern_cases(left, scrut_id, action, const_cases, block_cases);
+                self.collect_or_pattern_cases(right, scrut_id, action, const_cases, block_cases);
+            }
+            PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_tag {
+                ConstructorTag::CstrConstant(tag) => const_cases.push((
+                    *tag,
+                    wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), action.clone()),
+                )),
+                ConstructorTag::CstrBlock(tag) => {
+                    // Skip field bindings when action is a static raise (or-pattern shared exit)
+                    // since the bound variables won't be used in the exit handler
+                    let is_exit = matches!(action, RawLambda::LstaticRaise(_, _));
+                    let act = if is_exit {
+                        action.clone()
+                    } else {
+                        self.bind_constructor_args_irrefutably_raw(
+                            scrut_id,
+                            inner,
+                            cstr,
+                            args,
+                            action.clone(),
+                        )
+                    };
+                    block_cases.push((
+                        *tag,
+                        wrap_aliases_raw(
+                            &aliases,
+                            RawLambda::var(scrut_id.clone()),
+                            act,
+                        ),
+                    ));
+                }
+                _ => {}
+            },
+            PatternDesc::Tpat_constant(TConstant::Int(i)) => {
+                const_cases.push((
+                    *i as i32,
+                    wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), action.clone()),
+                ));
+            }
+            PatternDesc::Tpat_constant(TConstant::Char(c)) => {
+                const_cases.push((
+                    *c as i32,
+                    wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), action.clone()),
+                ));
+            }
+            _ => {}
+        }
+    }
+
     fn compile_simple_constructor_match_raw_from_scrut(
         &mut self,
         loc: Location,
@@ -3574,50 +3717,54 @@ impl<'a> RawLambdaConverter<'a> {
         let mut default_case = None;
         let mut repr_cstr = None::<crate::types::ConstructorDescription>;
         let mut has_non_ctor_constants = false;
+        // Track which cases use or-patterns (need shared body via catch/exit)
+        let mut or_case_indices = std::collections::BTreeSet::new();
 
-        for case in cases {
+        for (case_idx, case) in cases.iter().enumerate() {
             if case.c_guard.is_some() {
                 return None;
             }
 
             let (pat, _) = peel_aliases(&case.c_lhs);
             match &pat.pat_desc {
-                PatternDesc::Tpat_construct(_, cstr, args) => {
-                    if repr_cstr.is_none() {
-                        repr_cstr = Some(cstr.clone());
-                    }
-                    match &cstr.cstr_tag {
-                        ConstructorTag::CstrConstant(tag) => {
-                            if !args.is_empty() || !seen_const_tags.insert(*tag) {
-                                return None;
-                            }
-                        }
-                        ConstructorTag::CstrBlock(tag) => {
-                            if !seen_block_tags.insert(*tag)
-                                || !args.iter().all(Self::is_irrefutable_pattern)
-                            {
-                                return None;
-                            }
-                        }
-                        ConstructorTag::CstrExtension(path) => {
-                            if !args.iter().all(Self::is_irrefutable_pattern)
-                                || !seen_extensions.insert(path.name())
-                            {
-                                return None;
-                            }
-                        }
-                        ConstructorTag::CstrUnboxed => return None,
-                    }
-                }
-                PatternDesc::Tpat_constant(TConstant::Int(i)) => {
-                    has_non_ctor_constants = true;
-                    if !seen_const_tags.insert(*i as i32) {
+                PatternDesc::Tpat_or(_, _, _) => {
+                    // Flatten or-pattern and validate each leaf
+                    if !Self::check_or_pattern_leaves(
+                        &case.c_lhs,
+                        &mut seen_const_tags,
+                        &mut seen_block_tags,
+                        &mut seen_extensions,
+                        &mut repr_cstr,
+                        &mut has_non_ctor_constants,
+                    ) {
                         return None;
                     }
+                    or_case_indices.insert(case_idx);
                 }
-                PatternDesc::Tpat_constant(TConstant::Char(c)) => {
-                    has_non_ctor_constants = true;
-                    if !seen_const_tags.insert(*c as i32) {
+                PatternDesc::Tpat_construct(_, cstr, args) => {
+                    if !Self::check_simple_constructor_leaf(
+                        pat,
+                        &mut seen_const_tags,
+                        &mut seen_block_tags,
+                        &mut seen_extensions,
+                        &mut repr_cstr,
+                        &mut has_non_ctor_constants,
+                    ) {
+                        return None;
+                    }
+                    // Ensure repr_cstr is set (check_simple_constructor_leaf does this)
+                    let _ = (cstr, args);
+                }
+                PatternDesc::Tpat_constant(TConstant::Int(_))
+                | PatternDesc::Tpat_constant(TConstant::Char(_)) => {
+                    if !Self::check_simple_constructor_leaf(
+                        pat,
+                        &mut seen_const_tags,
+                        &mut seen_block_tags,
+                        &mut seen_extensions,
+                        &mut repr_cstr,
+                        &mut has_non_ctor_constants,
+                    ) {
                         return None;
                     }
                 }
@@ -3730,44 +3877,74 @@ impl<'a> RawLambdaConverter<'a> {
 
         let mut const_cases = Vec::new();
         let mut block_cases = Vec::new();
-        for case in cases {
+        // Shared bodies from or-patterns: (exit_id, body)
+        let mut shared_bodies: Vec<(i32, RawLambda)> = Vec::new();
+
+        for (case_idx, case) in cases.iter().enumerate() {
             let body = self.convert_expr_raw(&case.c_rhs);
-            let (pat, aliases) = peel_aliases(&case.c_lhs);
-            match &pat.pat_desc {
-                PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_tag {
-                    ConstructorTag::CstrConstant(tag) => const_cases.push((
-                        *tag,
-                        wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), body),
-                    )),
-                    ConstructorTag::CstrBlock(tag) => block_cases.push((
-                        *tag,
-                        wrap_aliases_raw(
-                            &aliases,
-                            RawLambda::var(scrut_id.clone()),
-                            self.bind_constructor_args_irrefutably_raw(
-                                &scrut_id,
-                                pat,
-                                cstr,
-                                args,
+
+            if or_case_indices.contains(&case_idx) {
+                // Or-pattern: share body via catch/exit
+                let exit_id = self.next_raise_count();
+                shared_bodies.push((exit_id, body));
+                let action = RawLambda::LstaticRaise(exit_id, Vec::new());
+                self.collect_or_pattern_cases(
+                    &case.c_lhs,
+                    &scrut_id,
+                    &action,
+                    &mut const_cases,
+                    &mut block_cases,
+                );
+            } else {
+                let (pat, aliases) = peel_aliases(&case.c_lhs);
+                match &pat.pat_desc {
+                    PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_tag {
+                        ConstructorTag::CstrConstant(tag) => const_cases.push((
+                            *tag,
+                            wrap_aliases_raw(
+                                &aliases,
+                                RawLambda::var(scrut_id.clone()),
                                 body,
                             ),
-                        ),
-                    )),
-                    ConstructorTag::CstrUnboxed | ConstructorTag::CstrExtension(_) => {}
-                },
-                PatternDesc::Tpat_constant(TConstant::Int(i)) => {
-                    const_cases.push((
-                        *i as i32,
-                        wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), body),
-                    ));
+                        )),
+                        ConstructorTag::CstrBlock(tag) => block_cases.push((
+                            *tag,
+                            wrap_aliases_raw(
+                                &aliases,
+                                RawLambda::var(scrut_id.clone()),
+                                self.bind_constructor_args_irrefutably_raw(
+                                    &scrut_id,
+                                    pat,
+                                    cstr,
+                                    args,
+                                    body,
+                                ),
+                            ),
+                        )),
+                        ConstructorTag::CstrUnboxed | ConstructorTag::CstrExtension(_) => {}
+                    },
+                    PatternDesc::Tpat_constant(TConstant::Int(i)) => {
+                        const_cases.push((
+                            *i as i32,
+                            wrap_aliases_raw(
+                                &aliases,
+                                RawLambda::var(scrut_id.clone()),
+                                body,
+                            ),
+                        ));
+                    }
+                    PatternDesc::Tpat_constant(TConstant::Char(c)) => {
+                        const_cases.push((
+                            *c as i32,
+                            wrap_aliases_raw(
+                                &aliases,
+                                RawLambda::var(scrut_id.clone()),
+                                body,
+                            ),
+                        ));
+                    }
+                    _ => {}
                 }
-                PatternDesc::Tpat_constant(TConstant::Char(c)) => {
-                    const_cases.push((
-                        *c as i32,
-                        wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), body),
-                    ));
-                }
-                _ => {}
             }
         }
 
@@ -3816,22 +3993,38 @@ impl<'a> RawLambdaConverter<'a> {
                     vec![offset_arg],
                     loc,
                 );
-                let switch = RawLambda::Lswitch(
-                    Box::new(scrut_var.clone()),
-                    crate::raw_lambda::RawLambdaSwitch {
-                        sw_consts_full: false,
-                        sw_consts: sorted_consts,
-                        sw_blocks_full: false,
-                        sw_blocks: Vec::new(),
-                        sw_failaction: None,
-                        sw_names: None,
-                    },
-                );
+
+                // If all cases map to the same static raise, use it directly
+                // instead of generating a switch (matches OCaml's share_actions)
+                let all_same_exit = sorted_consts.iter().all(|(_, act)| {
+                    matches!(act, RawLambda::LstaticRaise(id, args) if args.is_empty()
+                        && *id == match &sorted_consts[0].1 {
+                            RawLambda::LstaticRaise(id0, _) => *id0,
+                            _ => return false,
+                        })
+                });
+
+                let in_range_action = if all_same_exit {
+                    sorted_consts[0].1.clone()
+                } else {
+                    RawLambda::Lswitch(
+                        Box::new(scrut_var.clone()),
+                        crate::raw_lambda::RawLambdaSwitch {
+                            sw_consts_full: false,
+                            sw_consts: sorted_consts,
+                            sw_blocks_full: false,
+                            sw_blocks: Vec::new(),
+                            sw_failaction: None,
+                            sw_names: None,
+                        },
+                    )
+                };
+
                 Some(RawLambda::LstaticCatch(
                     Box::new(RawLambda::LifThenElse(
                         Box::new(is_out),
                         Box::new(RawLambda::LstaticRaise(exit_id, Vec::new())),
-                        Box::new(switch),
+                        Box::new(in_range_action),
                     )),
                     (exit_id, Vec::new()),
                     Box::new((**default).clone()),
@@ -3841,7 +4034,7 @@ impl<'a> RawLambdaConverter<'a> {
             None
         };
 
-        let result = if let Some(result) = dense_const_partial {
+        let mut result = if let Some(result) = dense_const_partial {
             result
         } else if !has_non_ctor_constants {
             if let Some(cstr) = repr_cstr.as_ref() {
@@ -3931,6 +4124,15 @@ impl<'a> RawLambdaConverter<'a> {
                 },
             )
         };
+
+        // Wrap in catch handlers for shared or-pattern bodies
+        for (exit_id, handler) in shared_bodies.into_iter().rev() {
+            result = RawLambda::LstaticCatch(
+                Box::new(result),
+                (exit_id, Vec::new()),
+                Box::new(handler),
+            );
+        }
 
         Some(match wrap_let {
             Some((id, value)) => RawLambda::let_(LetKind::Strict, id, value, result),
