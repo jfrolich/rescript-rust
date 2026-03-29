@@ -728,15 +728,148 @@ impl<'a> RawLambdaConverter<'a> {
         InlineAttribute::Default
     }
 
+    /// OCaml's share_actions_sw: deduplicate switch actions by wrapping shared
+    /// actions in catch/exit. Returns the list of catch handlers to wrap around the switch.
+    fn share_actions_sw(
+        &mut self,
+        sw: &mut crate::raw_lambda::RawLambdaSwitch,
+    ) -> Vec<(i32, RawLambda)> {
+        use crate::raw_lambda::print::RawLambdaPrinter;
+
+        // Map from action key (string repr) to (exit_id, original_action)
+        let mut store: Vec<(String, i32, RawLambda)> = Vec::new();
+        let mut handlers: Vec<(i32, RawLambda)> = Vec::new();
+
+        let mut get_or_create = |action: &RawLambda, self_ref: &mut Self| -> Option<RawLambda> {
+            // If already an exit, don't wrap again
+            if matches!(action, RawLambda::LstaticRaise(_, args) if args.is_empty()) {
+                return None;
+            }
+
+            let key = format!("{}", RawLambdaPrinter::new(action));
+
+            // Check if we've seen this action before
+            for (stored_key, exit_id, _) in &store {
+                if *stored_key == key {
+                    // Shared! Return exit to existing handler
+                    return Some(RawLambda::LstaticRaise(*exit_id, Vec::new()));
+                }
+            }
+
+            // First occurrence - store it but don't wrap yet
+            let exit_id = self_ref.next_raise_count();
+            store.push((key, exit_id, action.clone()));
+            None
+        };
+
+        // First pass: identify shared actions
+        let all_actions: Vec<(String, bool)> = sw.sw_consts.iter()
+            .map(|(_, act)| (format!("{}", RawLambdaPrinter::new(act)), true))
+            .chain(sw.sw_blocks.iter()
+                .map(|(_, act)| (format!("{}", RawLambdaPrinter::new(act)), false)))
+            .collect();
+
+        // Count occurrences of each action key
+        let mut key_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (key, _) in &all_actions {
+            *key_counts.entry(key.clone()).or_insert(0) += 1;
+        }
+
+        // Second pass: wrap shared actions in catch/exit
+        let mut exit_map: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+
+        for (tag, action) in sw.sw_consts.iter_mut() {
+            if matches!(action, RawLambda::LstaticRaise(_, args) if args.is_empty()) {
+                continue;
+            }
+            let key = format!("{}", RawLambdaPrinter::new(action));
+            let count = key_counts.get(&key).copied().unwrap_or(0);
+            if count >= 2 {
+                let exit_id = if let Some(&eid) = exit_map.get(&key) {
+                    eid
+                } else {
+                    let eid = self.next_raise_count();
+                    exit_map.insert(key.clone(), eid);
+                    handlers.push((eid, action.clone()));
+                    eid
+                };
+                *action = RawLambda::LstaticRaise(exit_id, Vec::new());
+            }
+        }
+
+        for (tag, action) in sw.sw_blocks.iter_mut() {
+            if matches!(action, RawLambda::LstaticRaise(_, args) if args.is_empty()) {
+                continue;
+            }
+            let key = format!("{}", RawLambdaPrinter::new(action));
+            let count = key_counts.get(&key).copied().unwrap_or(0);
+            if count >= 2 {
+                let exit_id = if let Some(&eid) = exit_map.get(&key) {
+                    eid
+                } else {
+                    let eid = self.next_raise_count();
+                    exit_map.insert(key.clone(), eid);
+                    handlers.push((eid, action.clone()));
+                    eid
+                };
+                *action = RawLambda::LstaticRaise(exit_id, Vec::new());
+            }
+        }
+
+        handlers
+    }
+
+    /// OCaml's reintroduce_fail: when a switch has no failaction (switch*),
+    /// if any static exit appears >= 3 times in the cases, extract it as failaction.
+    fn reintroduce_fail(sw: &mut crate::raw_lambda::RawLambdaSwitch) {
+        if sw.sw_failaction.is_some() {
+            return;
+        }
+
+        fn as_simple_exit(lam: &RawLambda) -> Option<i32> {
+            match lam {
+                RawLambda::LstaticRaise(i, args) if args.is_empty() => Some(*i),
+                RawLambda::Llet(LetKind::Alias, _, _, body) => as_simple_exit(body),
+                _ => None,
+            }
+        }
+
+        let mut counts: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
+        for (_, lam) in sw.sw_consts.iter().chain(sw.sw_blocks.iter()) {
+            if let Some(i) = as_simple_exit(lam) {
+                *counts.entry(i).or_insert(0) += 1;
+            }
+        }
+
+        let mut best_exit = -1i32;
+        let mut best_count = -1i32;
+        for (&exit_id, &count) in &counts {
+            // Tie-break: choose the largest index (matches OCaml)
+            if count > best_count || (count == best_count && exit_id > best_exit) {
+                best_exit = exit_id;
+                best_count = count;
+            }
+        }
+
+        if best_count >= 3 {
+            sw.sw_consts.retain(|(_, lam)| as_simple_exit(lam) != Some(best_exit));
+            sw.sw_blocks.retain(|(_, lam)| as_simple_exit(lam) != Some(best_exit));
+            sw.sw_failaction = Some(Box::new(RawLambda::LstaticRaise(best_exit, Vec::new())));
+        }
+    }
+
     /// Build a switch, wrapping the failaction in catch/exit to match OCaml's
     /// matching.ml behavior where default actions are shared through static catch.
     fn make_switch_with_catch(
         &mut self,
         scrut: RawLambda,
-        const_cases: Vec<(i32, RawLambda)>,
-        block_cases: Vec<(i32, RawLambda)>,
+        mut const_cases: Vec<(i32, RawLambda)>,
+        mut block_cases: Vec<(i32, RawLambda)>,
         failaction: Option<Box<RawLambda>>,
     ) -> RawLambda {
+        // OCaml's matching.ml sorts cases by tag via sort_int_lambda_list/split_cases
+        const_cases.sort_by_key(|(tag, _)| *tag);
+        block_cases.sort_by_key(|(tag, _)| *tag);
         match failaction {
             Some(default) => {
                 let exit_id = self.next_raise_count();
@@ -760,17 +893,29 @@ impl<'a> RawLambdaConverter<'a> {
                     default,
                 )
             }
-            None => RawLambda::Lswitch(
-                Box::new(scrut),
-                crate::raw_lambda::RawLambdaSwitch {
+            None => {
+                let mut sw = crate::raw_lambda::RawLambdaSwitch {
                     sw_consts_full: false,
                     sw_consts: const_cases,
                     sw_blocks_full: false,
                     sw_blocks: block_cases,
                     sw_failaction: None,
                     sw_names: None,
-                },
-            ),
+                };
+                // OCaml: share_actions_sw then reintroduce_fail
+                let share_handlers = self.share_actions_sw(&mut sw);
+                Self::reintroduce_fail(&mut sw);
+                let mut result = RawLambda::Lswitch(Box::new(scrut), sw);
+                // Wrap with catch handlers from share_actions_sw
+                for (exit_id, handler) in share_handlers.into_iter().rev() {
+                    result = RawLambda::LstaticCatch(
+                        Box::new(result),
+                        (exit_id, Vec::new()),
+                        Box::new(handler),
+                    );
+                }
+                result
+            }
         }
     }
 
@@ -4097,14 +4242,64 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
 
+        // OCaml's combine_constructor: when sig_complete (all constructor tags covered),
+        // fail_opt = None (no failaction). The wildcard/default fills missing tags explicitly.
         let failaction = match default_case {
-            Some(DefaultCase::Any(body)) => Some(Box::new(body)),
-            Some(DefaultCase::Bind(id, body)) => Some(Box::new(RawLambda::let_(
-                LetKind::Alias,
-                id,
-                RawLambda::var(scrut_id.clone()),
-                body,
-            ))),
+            Some(default) => {
+                let default_body = match default {
+                    DefaultCase::Any(body) => body,
+                    DefaultCase::Bind(id, body) => RawLambda::let_(
+                        LetKind::Alias,
+                        id,
+                        RawLambda::var(scrut_id.clone()),
+                        body,
+                    ),
+                };
+
+                // OCaml's combine_constructor: when we have a regular constructor type
+                // (not extensions), a default/wildcard pattern makes the signature complete.
+                // Fill missing tags explicitly and drop the failaction.
+                let sig_complete = if let Some(cstr) = &repr_cstr {
+                    cstr.cstr_consts >= 0
+                } else {
+                    false
+                };
+
+                if sig_complete {
+                    // OCaml's mk_failaction_pos: fill missing tags with exit to default,
+                    // wrap default body in catch handler (like mk_failaction_pos does).
+                    let has_missing = if let Some(cstr) = &repr_cstr {
+                        (0..cstr.cstr_consts).any(|t| !seen_const_tags.contains(&t))
+                            || (0..cstr.cstr_nonconsts).any(|t| !seen_block_tags.contains(&t))
+                    } else {
+                        false
+                    };
+
+                    if has_missing {
+                        let default_exit = self.next_raise_count();
+                        let default_raise = RawLambda::LstaticRaise(default_exit, Vec::new());
+                        if let Some(cstr) = &repr_cstr {
+                            for tag in 0..cstr.cstr_consts {
+                                if !seen_const_tags.contains(&tag) {
+                                    const_cases.push((tag, default_raise.clone()));
+                                }
+                            }
+                            for tag in 0..cstr.cstr_nonconsts {
+                                if !seen_block_tags.contains(&tag) {
+                                    block_cases.push((tag, default_raise.clone()));
+                                }
+                            }
+                        }
+                        // Store the catch handler to wrap later
+                        shared_bodies.push((default_exit, default_body));
+                    } else {
+                        // All tags already covered by explicit patterns, default is dead code
+                    }
+                    None
+                } else {
+                    Some(Box::new(default_body))
+                }
+            }
             None => match partial {
                 Partial::Partial => Some(Box::new(RawLambda::from_lowered(self.match_failure(
                     loc.clone(),
@@ -4982,6 +5177,10 @@ impl<'a> RawLambdaConverter<'a> {
                 partial,
             )?))
         };
+
+        // OCaml's matching.ml sorts cases by tag via sort_int_lambda_list/split_cases
+        sw_consts.sort_by_key(|(tag, _)| *tag);
+        sw_blocks.sort_by_key(|(tag, _)| *tag);
 
         Some(RawLambda::Lswitch(
             Box::new(RawLambda::var(ids[idx].clone())),
