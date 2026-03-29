@@ -305,6 +305,10 @@ pub enum Primitive {
     PisUndefined,
     /// Is null or undefined
     PisNullUndefined,
+    /// Null constant (raw lambda only, 0 args)
+    Pnull,
+    /// Undefined constant (raw lambda only, 0 args)
+    Pundefined,
     /// Dynamic import
     Pimport,
     /// Typeof

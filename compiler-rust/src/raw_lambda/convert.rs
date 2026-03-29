@@ -6125,10 +6125,12 @@ impl<'a> RawLambdaConverter<'a> {
             };
         }
         if raw_name == "%null" && prim.prim_arity == 0 {
-            return RawLambda::const_(Constant::JsNull);
+            // OCaml uses Lprim(Pnull, []), not Lconst(JsNull)
+            return RawLambda::prim(Primitive::Pnull, vec![], loc);
         }
         if raw_name == "%undefined" && prim.prim_arity == 0 {
-            return RawLambda::const_(Constant::JsUndefined { is_unit: false });
+            // OCaml uses Lprim(Pundefined, []), not Lconst(JsUndefined)
+            return RawLambda::prim(Primitive::Pundefined, vec![], loc);
         }
         let primitive = if let Some(primitive) = self.specialize_primitive_raw(prim, ty) {
             primitive

@@ -136,7 +136,9 @@ fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
         | Primitive::PjsFnMake(_)
         | Primitive::PjsFnMakeUnit
         | Primitive::PjsObjectCreate(_)
-        | Primitive::Pimport => true,
+        | Primitive::Pimport
+        | Primitive::Pnull
+        | Primitive::Pundefined => true,
 
         // Block operations
         Primitive::Pmakeblock(_, _, _)

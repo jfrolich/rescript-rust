@@ -535,6 +535,8 @@ impl LambdaCompiler {
                 compiled_args,
                 CallInfo::default(),
             ),
+            Pnull => Expression::null(),
+            Pundefined => Expression::undefined(false),
             _ => Expression::undefined(false),
         };
 

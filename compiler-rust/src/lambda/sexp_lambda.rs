@@ -368,6 +368,8 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::PvalFromOptionNotNest => Sexp::atom("Pval_from_option_not_nest"),
         Primitive::PisUndefined => Sexp::atom("Pis_undefined"),
         Primitive::PisNullUndefined => Sexp::atom("Pis_null_undefined"),
+        Primitive::Pnull => Sexp::atom("Pnull"),
+        Primitive::Pundefined => Sexp::atom("Pundefined"),
         Primitive::Pimport => Sexp::atom("Pimport"),
         Primitive::Pmakeblock(tag, info, m) => Sexp::list(vec![
             Sexp::atom("Pmakeblock"),
