@@ -17,8 +17,8 @@ This is parity for the **pre-optimization raw lambda stage** (`-drawlambda`), no
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **171/657**
-- Parity hunks: **1028**
+- Unoptimized lambda parity: **172/657**
+- Parity hunks: **1032**
 
 ## Working Rules
 
@@ -102,6 +102,41 @@ For each iteration:
 - [ ] Commit immediately if the change is verified OCaml-aligned
 
 ## Session Log
+
+### 2026-03-30
+
+Starting parity: **171/657** with **1028** hunks.
+Current parity: **172/657** with **1032** hunks.
+
+**Analysis**: 485 failing files split into:
+- 211 **ident-only** files (333 hunks): Structurally identical, but different ident stamp numbers from type checker
+- 274 **structural** files (694 hunks): Real differences in raw lambda output
+
+**Ident-only files**: Stamp offsets range from -117 to +117, most common -1 (34 files). Stamps come from type checker, not raw lambda. No single fix addresses all.
+
+**Structural patterns** across 274 files:
+- 74 files: missing `match/N =a` bindings for unused constructor fields → **FIXED** (d02e9c688)
+- 56 files: missing catch/exit wrapping for default cases
+- 51 files: `field:tag` access instead of switch dispatch
+- 23 files: different module field indices (e.g. `epsilon_float/10` vs `/92`)
+- 22 files: missing switch construct
+
+**Commits this session**:
+1. `c091b0e53` raw-lambda: port or-pattern support in constructor matching
+   - Flatten Tpat_or into individual cases with shared body via catch/exit
+   - Reduce raw-match fallbacks (fib.res: 1→0, variantsMatching: 8→5)
+2. `83c1720ad` raw-lambda: skip identity functor coercion wrapping (171→172)
+   - Tcoerce_functor(none, none) = identity, don't eta-expand
+3. `7a1477735` raw-lambda: port @inline attribute on functor module bindings
+   - Extract @inline(always/never) from mb_attributes
+4. `d02e9c688` raw-lambda: bind constructor fields for wildcard patterns
+   - Create (let (match/N =a (field:var/K scrut)) body) for Tpat_any args
+
+**Key findings**:
+- Lowered Lambda fallback always produces JS-oriented if-chains, never switch/catch
+- All switch/catch in raw lambda must come from the raw lambda matchers, not fallback
+- Functor wrapper (eta-expansion) was caused by Rust's module typing producing Tcoerce_functor(none,none) instead of OCaml's Tcoerce_none
+- Field index differences (e.g. Pervasives field positions) are module system issues, not raw lambda
 
 ### 2026-03-29
 
