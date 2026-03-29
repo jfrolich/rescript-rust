@@ -4341,7 +4341,12 @@ impl<'a> RawLambdaConverter<'a> {
                             && cstr.cstr_consts == 1
                             && cstr.cstr_nonconsts == 0
                     }
-                    ConstructorTag::CstrBlock(_) | ConstructorTag::CstrExtension(_) => false,
+                    ConstructorTag::CstrBlock(_) => {
+                        cstr.cstr_consts == 0
+                            && cstr.cstr_nonconsts == 1
+                            && args.iter().all(Self::is_irrefutable_pattern)
+                    }
+                    ConstructorTag::CstrExtension(_) => false,
                 }
             }
             PatternDesc::Tpat_variant(_, Some(inner), _) => Self::is_irrefutable_pattern(inner),
@@ -4545,6 +4550,27 @@ impl<'a> RawLambdaConverter<'a> {
                     && cstr.cstr_nonconsts == 0 =>
             {
                 body
+            }
+            PatternDesc::Tpat_construct(_, cstr, args)
+                if matches!(cstr.cstr_tag, ConstructorTag::CstrBlock(_))
+                    && cstr.cstr_consts == 0
+                    && cstr.cstr_nonconsts == 1 =>
+            {
+                // Single-constructor block type: bind fields directly from scrutinee
+                let (scrut_id, wrap_let) = match &scrut {
+                    RawLambda::Lvar(id) => (id.clone(), None),
+                    _ => {
+                        let id = self.id_gen.create("match");
+                        (id.clone(), Some((id, scrut)))
+                    }
+                };
+                let result = self.bind_constructor_args_irrefutably_raw(
+                    &scrut_id, pat, cstr, args, body,
+                );
+                match wrap_let {
+                    Some((id, value)) => RawLambda::let_(LetKind::Alias, id, value, result),
+                    None => result,
+                }
             }
             PatternDesc::Tpat_variant(_, Some(inner), _) => {
                 let payload = RawLambda::prim(
