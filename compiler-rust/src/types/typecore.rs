@@ -17893,6 +17893,50 @@ pub(crate) fn copy_lookup_signature_for_subst(
     copy_lookup_signature(sig_items, ctx, &mut cache)
 }
 
+fn copy_lookup_value_components_signature(
+    sig_items: &[crate::types::decl::SignatureItem],
+    ctx: &TypeContext<'_>,
+) -> crate::types::decl::Signature {
+    sig_items
+        .iter()
+        .map(|item| match item {
+            crate::types::decl::SignatureItem::SigValue(id, desc) => {
+                crate::types::decl::SignatureItem::SigValue(ctx.rename_ident(id), desc.clone())
+            }
+            crate::types::decl::SignatureItem::SigType(id, decl, rec_status) => {
+                crate::types::decl::SignatureItem::SigType(
+                    ctx.rename_ident(id),
+                    decl.clone(),
+                    *rec_status,
+                )
+            }
+            crate::types::decl::SignatureItem::SigTypext(id, ext, ext_status) => {
+                crate::types::decl::SignatureItem::SigTypext(
+                    ctx.rename_ident(id),
+                    ext.clone(),
+                    *ext_status,
+                )
+            }
+            crate::types::decl::SignatureItem::SigModule(id, md, rec_status) => {
+                crate::types::decl::SignatureItem::SigModule(
+                    ctx.rename_ident(id),
+                    md.clone(),
+                    *rec_status,
+                )
+            }
+            crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
+                crate::types::decl::SignatureItem::SigModtype(ctx.rename_ident(id), mtd.clone())
+            }
+            crate::types::decl::SignatureItem::SigClass => {
+                crate::types::decl::SignatureItem::SigClass
+            }
+            crate::types::decl::SignatureItem::SigClassType => {
+                crate::types::decl::SignatureItem::SigClassType
+            }
+        })
+        .collect()
+}
+
 // ============================================================================
 // Environment Extensions for Built-in Types
 // ============================================================================
@@ -18082,6 +18126,21 @@ impl Env {
                 }
 
                 if let Some((mod_path, sig)) = resolved_module {
+                    let value_component_cache_key =
+                        format!("module-values::{}::env{}", prefix_cache_fragment, self.id());
+                    let (mod_path, sig) = if let Some(cached) =
+                        ctx.find_resolved_module_sig(&value_component_cache_key)
+                    {
+                        cached
+                    } else {
+                        let renamed_sig = copy_lookup_value_components_signature(&sig, ctx);
+                        ctx.register_resolved_module_sig(
+                            &value_component_cache_key,
+                            mod_path.clone(),
+                            renamed_sig.clone(),
+                        );
+                        (mod_path, renamed_sig)
+                    };
                     if std::env::var_os("RUST_DEBUG_CSV_LOOKUP").is_some()
                         && prefix_str == "Csv"
                         && value_name == "success"
