@@ -193,6 +193,7 @@ test_single_file() {
     local ocaml_pass=0 rust_pass=0 parity_pass=0
     local ocaml_fail=0 rust_fail=0 parity_fail=0
     local rust_timeout=0 rust_crash=0
+    local parity_hunks=0
 
     local file_temp="$TEMP_DIR/work/$safe_name"
     mkdir -p "$file_temp"
@@ -293,10 +294,13 @@ test_single_file() {
         else
             parity_fail=1
             diff -ua "$file_temp/ocaml.out" "$file_temp/rust.out" > "$diff_cache" 2>&1 || true
+            if [[ -f "$diff_cache" ]]; then
+                parity_hunks=$(grep -c '^@@' "$diff_cache" || true)
+            fi
         fi
     fi
 
-    echo "$file:ocaml_pass=$ocaml_pass:ocaml_fail=$ocaml_fail:rust_pass=$rust_pass:rust_fail=$rust_fail:rust_timeout=$rust_timeout:rust_crash=$rust_crash:parity_pass=$parity_pass:parity_fail=$parity_fail" > "$result_file"
+    echo "$file:ocaml_pass=$ocaml_pass:ocaml_fail=$ocaml_fail:rust_pass=$rust_pass:rust_fail=$rust_fail:rust_timeout=$rust_timeout:rust_crash=$rust_crash:parity_pass=$parity_pass:parity_fail=$parity_fail:parity_hunks=$parity_hunks" > "$result_file"
 
     if [[ "$VERBOSE" == "true" ]]; then
         if [[ "$ocaml_pass" -eq 1 ]]; then
@@ -364,6 +368,7 @@ RUST_TIMEOUTS=0
 RUST_CRASHES=0
 PARITY_PASS=0
 PARITY_FAIL=0
+PARITY_HUNKS=0
 OCAML_FAILURES=""
 RUST_FAILURES=""
 RUST_TIMEOUT_LIST=""
@@ -404,6 +409,11 @@ for result_file in "$RESULTS_DIR"/*.result; do
             PARITY_FAIL=$((PARITY_FAIL + 1))
             PARITY_FAILURES="$PARITY_FAILURES  $file\n"
         fi
+
+        hunk_count=$(echo "$result" | sed -n 's/.*:parity_hunks=\([0-9][0-9]*\)$/\1/p')
+        if [[ -n "$hunk_count" ]]; then
+            PARITY_HUNKS=$((PARITY_HUNKS + hunk_count))
+        fi
     fi
 done
 
@@ -411,6 +421,7 @@ echo -e "OCaml bsc:    ${GREEN}${OCAML_PASS} passed${RESET}, ${RED}${OCAML_FAIL}
 if [[ "$RUST_AVAILABLE" == "true" ]]; then
     echo -e "Rust bsc:     ${GREEN}${RUST_PASS} passed${RESET}, ${RED}${RUST_FAIL} failed${RESET}"
     echo -e "Parity:       ${GREEN}${PARITY_PASS} passed${RESET}, ${RED}${PARITY_FAIL} failed${RESET}"
+    echo -e "Parity hunks: ${YELLOW}${PARITY_HUNKS}${RESET}"
 else
     echo "Rust bsc:     (not available)"
 fi
