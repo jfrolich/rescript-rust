@@ -4915,8 +4915,8 @@ impl<'a> RawLambdaConverter<'a> {
                     result = self.bind_irrefutable_pattern_raw(item, field, result);
                 }
                 match wrap_tmp {
-                    // OCaml: arg_to_var uses Strict for non-variable scrutinee
-                    Some((tmp, scrut)) => RawLambda::let_(LetKind::Strict, tmp, scrut, result),
+                    // OCaml: make_tuple_matching binds tuple element accesses with Alias
+                    Some((tmp, scrut)) => RawLambda::let_(LetKind::Alias, tmp, scrut, result),
                     None => result,
                 }
             }
@@ -4956,8 +4956,10 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 }
                 match wrap_tmp {
-                    // OCaml: arg_to_var uses Strict for non-variable scrutinee
-                    Some((tmp, scrut)) => RawLambda::let_(LetKind::Strict, tmp, scrut, result),
+                    // OCaml: make_record_matching binds field accesses with Alias (immutable)
+                    // or StrictOpt (mutable). When we wrap a sub-record scrutinee that came
+                    // from a field access, use Alias to match OCaml's arg_to_var behavior.
+                    Some((tmp, scrut)) => RawLambda::let_(LetKind::Alias, tmp, scrut, result),
                     None => result,
                 }
             }
