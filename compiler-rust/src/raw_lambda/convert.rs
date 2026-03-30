@@ -4903,9 +4903,23 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> RawLambda {
         match &pat.pat_desc {
             PatternDesc::Tpat_any => body,
-            PatternDesc::Tpat_var(id, _) => RawLambda::let_(LetKind::Alias, id.clone(), scrut, body),
+            PatternDesc::Tpat_var(id, _) => {
+                // OCaml's bind_check: skip binding when scrut is already the same variable
+                if let RawLambda::Lvar(v) = &scrut {
+                    if v.same(id) {
+                        return body;
+                    }
+                }
+                RawLambda::let_(LetKind::Alias, id.clone(), scrut, body)
+            }
             PatternDesc::Tpat_alias(inner, id, _) => {
                 let inner = self.bind_irrefutable_pattern_raw(inner, scrut.clone(), body);
+                // OCaml's bind_check: skip binding when scrut is already the same variable
+                if let RawLambda::Lvar(v) = &scrut {
+                    if v.same(id) {
+                        return inner;
+                    }
+                }
                 RawLambda::let_(LetKind::Alias, id.clone(), scrut, inner)
             }
             PatternDesc::Tpat_tuple(items) => {
