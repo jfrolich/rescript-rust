@@ -26,7 +26,8 @@ fn print_ocaml_string<W: Write>(f: &mut Formatter<W>, s: &str) {
                 let ch = byte as char;
                 f.print(format_args!("{ch}"));
             }
-            _ => f.print(format_args!("\\x{byte:02x}")),
+            // OCaml uses decimal \NNN format for non-ASCII bytes
+            _ => f.print(format_args!("\\{byte:03}")),
         }
     }
     f.string("\"");
