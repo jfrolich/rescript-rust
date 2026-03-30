@@ -17,8 +17,8 @@ This is parity for the **pre-optimization raw lambda stage** (`-drawlambda`), no
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **177/657**
-- Parity hunks: **1036**
+- Unoptimized lambda parity: **179/657**
+- Parity hunks: **1032**
 
 ## Working Rules
 
@@ -108,6 +108,63 @@ For each iteration:
 
 ## Session Log
 
+### 2026-03-30 (session 3)
+
+Starting parity: **177/657** with **1036** hunks.
+Current parity: **179/657** with **1032** hunks.
+
+**Commits this session:**
+1. `269c73cc6` raw-lambda: use Alias let-kind for type-annotated coercion bindings
+   - OCaml's Matching.for_let sends Tpat_alias(Tpat_any, id, _) through compile_matching which produces Alias bindings when RHS is a variable.
+   - For non-variable RHS, arg_to_var + bind_check wraps with Strict.
+   - Fixes =a vs = mismatches in coercion bindings like `let b: t2 = (a :> t2)`.
+2. `97ddb50f6` raw-lambda: fix empty record representation and catch handler ordering
+   - Empty records now produce Pmakeblock(tag=0, []) matching OCaml (was 0a/unit).
+   - Removed .rev() on share_actions_sw handlers to match OCaml's handler composition order.
+   - 177→178 (+1 file: EmptyRecord.res)
+3. `439ba4e34` raw-lambda: apply @inline attribute to let binding values
+   - OCaml's transl_let calls add_inline_attribute on each binding's value.
+4. `5fda9114d` raw-lambda: use field-by-field record update for small non-optional records
+   - OCaml uses Pmakeblock with field reads (not duprecord+setfield) when size<20 and !optional.
+5. `875d2c819` raw-lambda: use OCaml-style byte escaping for non-ASCII string content
+   - OCaml escapes non-ASCII bytes as \xHH. Rust was using Debug formatting.
+6. `93b1ea898` raw-lambda: fix BigInt sign inversion in constant conversion
+   - TConstant::BigInt(bool, String) uses true=positive. Was passing as negative.
+   - 178→179, 1036→1032 hunks
+
+**Key findings:**
+
+**Remaining failure breakdown (478 files, 1032 hunks):**
+- 214+ ident-only (stamp numbers from type checker, not raw lambda)
+- ~187 structural-only (real IR differences)
+- ~46 both ident and structural
+
+**Root cause: Ident stamp divergence blocks 214+ files**
+The Rust type checker allocates ident stamps at different rates than OCaml. Simple files like `let x = 1; let y = 2` match perfectly, but complex files with externals, modules, or coercions diverge by 1-117 stamps. This is NOT a raw lambda issue - it's in the type checker's Ident.create calls. Most files with only ident diffs have exactly 1 hunk.
+
+**Structural patterns in remaining files:**
+- 34 files: field:tag fallback (constructor matching with refutable args → lowered if-chains)
+- 28 files: makeblock/module structure differences (recursive modules, include wrappers)
+- 18 files: catch/exit ordering (exit IDs from different global counter state)
+- 17 files: field:[] tuple fallback (tuple matching with constructor sub-patterns)
+- 11 files: some/option handling (try/catch wrapping for option-returning expressions)
+- 5 files: switch structure (sparse vs dense switch construction)
+- Others: import paths, jsx wrapping, string encoding
+
+**OCaml matching.ml alias binding mechanics (new understanding):**
+- `Matching.for_let` for `Tpat_var(id)` → `Llet(Strict, id, param, body)` directly
+- `Matching.for_let` for `Tpat_alias(Tpat_any, id, _)` → goes through `compile_matching`
+- Inside `compile_matching`, `simplify_cases` creates `bind Alias id arg action`
+- But `compile_match`'s `bind_check str v arg lam` uses original `str=Strict` from args
+- When arg is `Lvar(x)` and `Ident.same v x`: `bind` returns body unchanged (no extra binding)
+- Result: inner alias binding from simplify uses `Alias`, outer scrutinee uses `Strict`
+- Net effect: variable-to-variable coercion bindings get `Alias`, constant bindings get `Strict`
+
+**OCaml record update strategy:**
+- When `size < 20 && !optional`: field-by-field construction (read individual fields from init)
+- When `size >= 20 || optional`: duprecord + setfield
+- OCaml wraps init expression in `let init = expr in makeblock(field:0 init, field:1 init, ...)`
+
 ### 2026-03-30 (session 2)
 
 Starting parity: **176/657** with **1036** hunks.
@@ -115,117 +172,13 @@ Current parity: **177/657** with **1036** hunks.
 
 **Commits this session:**
 1. `dc11732b0` raw-lambda: print PisNullUndefined as isnullable (matching OCaml)
-   - Fixed raw lambda printer to use "isnullable" instead of "[?null?undefined]"
-   - OCaml-aligned change, affects 4 files
-2. `1886b2abe` raw-lambda: compute module coercion for Pmod_constraint
-   - **ROOT CAUSE FIX**: Pmod_constraint always stored Tcoerce_none
-   - Now calls includemod::modtypes to compute actual Tcoerce_structure
-   - Only for Pmty_signature constraints (avoids stack overflow from `module type of`)
-   - Falls back to Tcoerce_none when modtypes errors (variance mismatches etc.)
-   - Fixes module makeblock field filtering (176→177, regression_print passes)
-
-**Key findings:**
-
-**Remaining failure breakdown (480 files, 1036 hunks):**
-- 198 ident-only (stamp numbers from type checker, not raw lambda)
-- 216 structural (real IR differences)
-- 66 files with raw match fallbacks (lowered lambda if-chains)
-
-**Raw match fallback pattern types (139 total):**
-- 53 Tpat_construct with nested refutable args (needs full matching.ml)
-- 18 Tpat_tuple (tuple pattern matching)
-- 16 Tpat_record (record pattern matching)
-- 14 Tpat_variant (polymorphic variant matching)
-- 10 Tpat_or with tuple scrutinee
-- 7 Tpat_construct with apply scrutinee
-- 6 Tpat_constant (bigint only - Int/Char are handled)
-- Others: Tpat_alias, Tpat_array
-
-**Structural patterns in non-fallback files:**
-- 53 catch ordering (switch construction with/without failaction)
-- 44 some/some_not_nested (type_cannot_contain_undefined divergence)
-- 27 include let wrapper ((let (let/N =a 0a) (global M!)))
-- 62 makeblock field differences (partially fixed by coercion change)
-
-**Root cause: Pmod_constraint coercion was always Tcoerce_none**
-Found at typemod.rs:7355 - the type checker hard-coded `Tcoerce_none` for
-ALL Pmod_constraint nodes. OCaml computes the coercion via includemod::modtypes.
-Fixed for Pmty_signature constraints. Remaining cases:
-- `module type of` constraints (would cause stack overflow in modtypes)
-- Pmty_ident constraints (not yet handled)
-- Some variance mismatches in includemod cause errors (fallback to Tcoerce_none)
-
-**Root cause: catch ordering requires failaction-first switch construction**
-OCaml creates incomplete switches (with failaction for wildcards).
-Rust creates complete switches (enumerating all constructors).
-share_actions_sw processes failaction FIRST (via act_store_shared) in OCaml,
-giving it the lowest store index → innermost catch position.
-In Rust, the failaction is only created by reintroduce_fail after sharing,
-so it doesn't get the innermost position.
-Fix: change switch construction to use failaction for wildcards.
+2. `1886b2abe` raw-lambda: compute module coercion for Pmod_constraint (176→177)
 
 ### 2026-03-30
 
 Starting parity: **171/657** with **1028** hunks.
 Current parity: **175/657** with **1037** hunks.
 
-**Analysis**: 485 failing files split into:
-- 211 **ident-only** files (333 hunks): Structurally identical, but different ident stamp numbers from type checker
-- 274 **structural** files (694 hunks): Real differences in raw lambda output
-
-**Ident-only files**: Stamp offsets range from -117 to +117, most common -1 (34 files). Stamps come from type checker, not raw lambda. No single fix addresses all.
-
-**Structural patterns** across 274 files:
-- 74 files: missing `match/N =a` bindings for unused constructor fields → **FIXED** (d02e9c688)
-- 56 files: missing catch/exit wrapping for default cases
-- 51 files: `field:tag` access instead of switch dispatch
-- 23 files: different module field indices (e.g. `epsilon_float/10` vs `/92`)
-- 22 files: missing switch construct
-
-**Commits this session**:
-1. `c091b0e53` raw-lambda: port or-pattern support in constructor matching
-   - Flatten Tpat_or into individual cases with shared body via catch/exit
-   - Reduce raw-match fallbacks (fib.res: 1→0, variantsMatching: 8→5)
-2. `83c1720ad` raw-lambda: skip identity functor coercion wrapping (171→172)
-   - Tcoerce_functor(none, none) = identity, don't eta-expand
-3. `7a1477735` raw-lambda: port @inline attribute on functor module bindings
-   - Extract @inline(always/never) from mb_attributes
-4. `d02e9c688` raw-lambda: bind constructor fields for wildcard patterns
-   - Create (let (match/N =a (field:var/K scrut)) body) for Tpat_any args
-5. `ea3dde17d` raw-lambda: wrap partial switch default in catch/exit (172→173)
-   - OCaml's matching.ml always uses catch/exit for switch defaults
-6. `4b9c3e931` raw-lambda: treat single-constructor block types as irrefutable (173→174)
-   - CstrBlock with 0 consts, 1 nonconst = irrefutable
-7. `be7710a59` raw-lambda: optimize single-case dense switch to direct comparison
-   - Single-constant match uses (!= tag) instead of isout + switch*
-8. `b13b86d98` raw-lambda: bind optional payload fields for wildcard patterns
-
-9. `592d828b9` raw-lambda: port OCaml switch case sorting, share_actions_sw, reintroduce_fail (174→175)
-   - Sort switch cases by tag (matching OCaml's sort_int_lambda_list)
-   - share_actions_sw: deduplicate shared switch actions via catch/exit
-   - reintroduce_fail: extract most common exit (>=3 occurrences) as default
-   - sig_complete: fill missing constructor tags with exit to default handler
-
-**Current breakdown (post-session):**
-- 224 ident-only files (structurally identical, stamp numbers differ)
-- 258 structural files (391 structural hunks)
-
-**Key findings**:
-- Lowered Lambda fallback always produces JS-oriented if-chains, never switch/catch
-- All switch/catch in raw lambda must come from the raw lambda matchers, not fallback
-- Functor wrapper (eta-expansion) was caused by Rust's module typing producing Tcoerce_functor(none,none) instead of OCaml's Tcoerce_none
-- Field index differences (e.g. Pervasives field positions) are module system issues, not raw lambda
-- OCaml's switch cases are sorted by tag via sort_int_lambda_list/split_cases
-- OCaml's share_actions_sw deduplicates shared actions into catch/exit BEFORE reintroduce_fail
-- OCaml's reintroduce_fail extracts the most common exit (>=3 occurrences) as failaction
-- OCaml uses BOTH isout AND >= for bounds checks depending on Switch module's c_test path (Inter vs Sep)
-- 380/482 failing files have exactly 1 hunk (mostly ident-only)
-- 102 files have =a vs = binding differences from module coercion (wrap_id_pos_list uses Alias)
-- Using Alias for all var-to-var bindings REGRESSES (172→175), OCaml only uses Alias in specific coercion paths
-- Remaining structural patterns: field:tag (51 files from lowered fallback), isout/>= (12 files), switch structure (12 files)
-
 ### 2026-03-29
 
 - Baseline recorded at **171/657** parity with **1028** hunks.
-- Confirmed that raw parity work must target the real OCaml raw stage, not printer normalization.
-- Confirmed current highest-value next task is the grouped constructor/or/alias path from `compiler/ml/matching.ml`.
