@@ -5463,7 +5463,20 @@ impl<'a> RawLambdaConverter<'a> {
                 for binding in bindings.iter().rev() {
                     let value = self.convert_expr_raw(&binding.vb_expr);
                     if let Some(id) = simple_let_binding_id(binding) {
-                        acc = RawLambda::let_(LetKind::Strict, id, value, acc);
+                        // OCaml's Matching.for_let uses Strict for Tpat_var(id).
+                        // For Tpat_alias(Tpat_any, id, _), compile_matching produces
+                        // Alias when the RHS is a variable, Strict otherwise (because
+                        // arg_to_var + bind_check wrap non-var args in Strict let).
+                        let kind = match &binding.vb_pat.pat_desc {
+                            PatternDesc::Tpat_alias(inner, _, _)
+                                if matches!(inner.pat_desc, PatternDesc::Tpat_any)
+                                    && matches!(value, RawLambda::Lvar(_)) =>
+                            {
+                                LetKind::Alias
+                            }
+                            _ => LetKind::Strict,
+                        };
+                        acc = RawLambda::let_(kind, id, value, acc);
                     } else if Self::is_irrefutable_pattern(&binding.vb_pat) {
                         acc = self.raw_simple_for_let(&binding.vb_pat, value, acc);
                     }
