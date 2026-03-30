@@ -1140,6 +1140,24 @@ impl<'a> TypeContext<'a> {
         if self.renamed_module_sigs.borrow().contains_key(module_name) {
             return; // Already renamed
         }
+        self.rename_one_module_sig(module_name);
+    }
+
+    /// Trigger renaming for ALL registered module signatures.
+    /// In OCaml, accessing one module (e.g. Console) via components_of_module_maker
+    /// cascades into scrape_alias → find_module for dependent modules (e.g. Pervasives),
+    /// forcing ALL their ps_sig lazies. We match this by renaming all registered
+    /// modules when any one is first accessed.
+    pub fn trigger_all_module_sig_renames(&self) {
+        let names: Vec<String> = self.raw_module_sigs.borrow().keys().cloned().collect();
+        for name in &names {
+            if !self.renamed_module_sigs.borrow().contains_key(name.as_str()) {
+                self.rename_one_module_sig(name);
+            }
+        }
+    }
+
+    fn rename_one_module_sig(&self, module_name: &str) {
         let raw_sig = {
             let raw = self.raw_module_sigs.borrow();
             raw.get(module_name).cloned()
