@@ -4899,8 +4899,10 @@ impl<'a> RawLambdaConverter<'a> {
         // Categorize sub-patterns
         let mut string_cases: Vec<(String, RawLambda)> = Vec::new();
         let mut int_cases: Vec<(i32, RawLambda)> = Vec::new();
+        let mut ctor_cases: Vec<(Vec<&Pattern>, RawLambda)> = Vec::new();
         let mut default_body: Option<RawLambda> = None;
         let mut has_complex = false;
+        let mut ctor_info: Option<&crate::types::ConstructorDescription> = None;
 
         for (pats, body) in sub_cases {
             let (pat, _aliases) = peel_aliases(pats[0]);
@@ -4914,9 +4916,15 @@ impl<'a> RawLambdaConverter<'a> {
                 PatternDesc::Tpat_constant(TConstant::Char(c)) => {
                     int_cases.push((*c as i32, body.clone()));
                 }
+                PatternDesc::Tpat_construct(_, cstr, args) => {
+                    // Constructor sub-pattern: collect for nested switch
+                    if ctor_info.is_none() {
+                        ctor_info = Some(cstr);
+                    }
+                    ctor_cases.push((args.iter().collect(), body.clone()));
+                }
                 PatternDesc::Tpat_var(id, _) => {
                     if id == field_id {
-                        // Same ident as field var - no additional binding needed
                         default_body = Some(body.clone());
                     } else {
                         default_body = Some(RawLambda::let_(
@@ -4970,8 +4978,82 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         // Int constant tests with catch/exit (OCaml's != comparison pattern)
-        if !int_cases.is_empty() && !has_complex && string_cases.is_empty() {
+        if !int_cases.is_empty() && !has_complex && string_cases.is_empty() && ctor_cases.is_empty() {
             return self.compile_int_test_chain(field_id, &int_cases, default_body, loc);
+        }
+
+        // Constructor sub-patterns: generate nested switch on the field var
+        if !ctor_cases.is_empty() && !has_complex && string_cases.is_empty() && int_cases.is_empty() {
+            // Re-scan the original sub_cases to build a nested constructor switch
+            // using the inner constructor tags
+            let mut inner_const_cases: Vec<(i32, RawLambda)> = Vec::new();
+            let mut inner_block_groups: std::collections::BTreeMap<
+                i32,
+                Vec<(Vec<&Pattern>, RawLambda)>,
+            > = std::collections::BTreeMap::new();
+            let mut inner_repr_cstr: Option<&crate::types::ConstructorDescription> = None;
+
+            for (pats, body) in sub_cases {
+                let (pat, _) = peel_aliases(pats[0]);
+                if let PatternDesc::Tpat_construct(_, cstr, args) = &pat.pat_desc {
+                    if inner_repr_cstr.is_none() {
+                        inner_repr_cstr = Some(cstr);
+                    }
+                    match &cstr.cstr_tag {
+                        ConstructorTag::CstrConstant(tag) => {
+                            inner_const_cases.push((*tag, body.clone()));
+                        }
+                        ConstructorTag::CstrBlock(tag) => {
+                            if args.iter().all(Self::is_irrefutable_pattern) {
+                                let inner_body =
+                                    self.bind_constructor_args_irrefutably_raw(
+                                        field_id, pat, cstr, args, body.clone(),
+                                    );
+                                inner_block_groups
+                                    .entry(*tag)
+                                    .or_default()
+                                    .push((args.iter().collect(), inner_body));
+                            } else {
+                                // Recursively handle inner refutable sub-patterns
+                                inner_block_groups
+                                    .entry(*tag)
+                                    .or_default()
+                                    .push((args.iter().collect(), body.clone()));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Build the inner switch
+            let mut final_block_cases: Vec<(i32, RawLambda)> = Vec::new();
+            for (tag, group) in inner_block_groups {
+                if group.len() == 1 {
+                    final_block_cases.push((tag, group.into_iter().next().unwrap().1));
+                } else {
+                    // Multiple cases for same inner tag: recursive sub-match
+                    if let Some(cstr) = inner_repr_cstr {
+                        let body = self.compile_block_sub_match(
+                            field_id, cstr, group, loc,
+                        );
+                        final_block_cases.push((tag, body));
+                    }
+                }
+            }
+
+            inner_const_cases.sort_by_key(|(t, _)| *t);
+            final_block_cases.sort_by_key(|(t, _)| *t);
+
+            let failaction = default_body.map(Box::new);
+
+            return self.make_switch_with_catch_exit(
+                RawLambda::var(field_id.clone()),
+                inner_const_cases,
+                final_block_cases,
+                failaction,
+                None,
+            );
         }
 
         // Fallback: sequential catch/exit for complex sub-patterns
