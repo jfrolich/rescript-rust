@@ -867,12 +867,23 @@ impl<'a> RawLambdaConverter<'a> {
         mut block_cases: Vec<(i32, RawLambda)>,
         failaction: Option<Box<RawLambda>>,
     ) -> RawLambda {
+        self.make_switch_with_catch_exit(scrut, const_cases, block_cases, failaction, None)
+    }
+
+    fn make_switch_with_catch_exit(
+        &mut self,
+        scrut: RawLambda,
+        mut const_cases: Vec<(i32, RawLambda)>,
+        mut block_cases: Vec<(i32, RawLambda)>,
+        failaction: Option<Box<RawLambda>>,
+        pre_exit: Option<i32>,
+    ) -> RawLambda {
         // OCaml's matching.ml sorts cases by tag via sort_int_lambda_list/split_cases
         const_cases.sort_by_key(|(tag, _)| *tag);
         block_cases.sort_by_key(|(tag, _)| *tag);
         match failaction {
             Some(default) => {
-                let exit_id = self.next_raise_count();
+                let exit_id = pre_exit.unwrap_or_else(|| self.next_raise_count());
                 let switch = RawLambda::Lswitch(
                     Box::new(scrut),
                     crate::raw_lambda::RawLambdaSwitch {
@@ -4014,9 +4025,10 @@ impl<'a> RawLambdaConverter<'a> {
         // Track which cases use or-patterns (need shared body via catch/exit)
         let mut or_case_indices = std::collections::BTreeSet::new();
 
+        let mut has_guards = false;
         for (case_idx, case) in cases.iter().enumerate() {
             if case.c_guard.is_some() {
-                return None;
+                has_guards = true;
             }
 
             let (pat, _) = peel_aliases(&case.c_lhs);
@@ -4174,8 +4186,26 @@ impl<'a> RawLambdaConverter<'a> {
         // Shared bodies from or-patterns: (exit_id, body)
         let mut shared_bodies: Vec<(i32, RawLambda)> = Vec::new();
 
+        // Pre-allocate a fail exit for guard failures when guards are present.
+        // This exit will be the same one used by make_switch_with_catch for the failaction.
+        let guard_fail_exit = if has_guards {
+            Some(self.next_raise_count())
+        } else {
+            None
+        };
+
         for (case_idx, case) in cases.iter().enumerate() {
-            let body = self.convert_expr_raw(&case.c_rhs);
+            let mut body = self.convert_expr_raw(&case.c_rhs);
+
+            // Wrap body with guard check: if guard then body else (exit fail)
+            if let (Some(guard), Some(fail_id)) = (&case.c_guard, guard_fail_exit) {
+                let guard_lam = self.convert_expr_raw(guard);
+                body = RawLambda::LifThenElse(
+                    Box::new(guard_lam),
+                    Box::new(body),
+                    Box::new(RawLambda::LstaticRaise(fail_id, Vec::new())),
+                );
+            }
 
             if or_case_indices.contains(&case_idx) {
                 // Or-pattern: share body via catch/exit
@@ -4201,20 +4231,30 @@ impl<'a> RawLambdaConverter<'a> {
                                 body,
                             ),
                         )),
-                        ConstructorTag::CstrBlock(tag) => block_cases.push((
-                            *tag,
-                            wrap_aliases_raw(
-                                &aliases,
-                                RawLambda::var(scrut_id.clone()),
+                        ConstructorTag::CstrBlock(tag) => {
+                            // Skip field extraction if all args are wildcards and there's a guard
+                            // (OCaml doesn't extract unused fields for guarded cases)
+                            let all_wildcards = args.iter().all(|a| matches!(a.pat_desc, PatternDesc::Tpat_any));
+                            let block_body = if case.c_guard.is_some() && all_wildcards {
+                                body
+                            } else {
                                 self.bind_constructor_args_irrefutably_raw(
                                     &scrut_id,
                                     pat,
                                     cstr,
                                     args,
                                     body,
+                                )
+                            };
+                            block_cases.push((
+                                *tag,
+                                wrap_aliases_raw(
+                                    &aliases,
+                                    RawLambda::var(scrut_id.clone()),
+                                    block_body,
                                 ),
-                            ),
-                        )),
+                            ));
+                        }
                         ConstructorTag::CstrUnboxed | ConstructorTag::CstrExtension(_) => {}
                     },
                     PatternDesc::Tpat_constant(TConstant::Int(i)) => {
@@ -4265,7 +4305,7 @@ impl<'a> RawLambdaConverter<'a> {
                     false
                 };
 
-                if sig_complete {
+                if sig_complete && !has_guards {
                     // OCaml's mk_failaction_pos: fill missing tags with exit to default,
                     // wrap default body in catch handler (like mk_failaction_pos does).
                     let has_missing = if let Some(cstr) = &repr_cstr {
@@ -4450,27 +4490,30 @@ impl<'a> RawLambdaConverter<'a> {
                             )
                         }
                     }
-                    _ => self.make_switch_with_catch(
+                    _ => self.make_switch_with_catch_exit(
                         scrut_var.clone(),
                         const_cases,
                         block_cases,
                         failaction,
+                        guard_fail_exit,
                     ),
                 }
             } else {
-                self.make_switch_with_catch(
+                self.make_switch_with_catch_exit(
                     scrut_var.clone(),
                     const_cases,
                     block_cases,
                     failaction,
+                    guard_fail_exit,
                 )
             }
         } else {
-            self.make_switch_with_catch(
+            self.make_switch_with_catch_exit(
                 scrut_var.clone(),
                 const_cases,
                 block_cases,
                 failaction,
+                guard_fail_exit,
             )
         };
 
