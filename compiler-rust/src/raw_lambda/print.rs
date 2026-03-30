@@ -12,6 +12,26 @@ use crate::lambda::{FieldDbgInfo, FunctionAttribute, InlineAttribute, Primitive,
 use crate::parser::formatter::{BoxKind, Formatter};
 use crate::raw_lambda::{RawApply, RawLFunction, RawLambda, RawLambdaSwitch, RawPrimInfo};
 
+/// Print a string in OCaml style: escape non-ASCII bytes as \xHH.
+fn print_ocaml_string<W: Write>(f: &mut Formatter<W>, s: &str) {
+    f.string("\"");
+    for byte in s.bytes() {
+        match byte {
+            b'"' => f.string("\\\""),
+            b'\\' => f.string("\\\\"),
+            b'\n' => f.string("\\n"),
+            b'\r' => f.string("\\r"),
+            b'\t' => f.string("\\t"),
+            0x20..=0x7e => {
+                let ch = byte as char;
+                f.print(format_args!("{ch}"));
+            }
+            _ => f.print(format_args!("\\x{byte:02x}")),
+        }
+    }
+    f.string("\"");
+}
+
 /// Pretty-printer for raw lambda.
 pub struct RawLambdaPrinter<'a> {
     raw: &'a RawLambda,
@@ -148,10 +168,10 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
                 f.print(format_args!("'\\x{i:02x}'"));
             }
         }
-        Constant::String { s, .. } => f.print(format_args!("{s:?}")),
+        Constant::String { s, .. } => print_ocaml_string(f, s),
         Constant::ImmString(s) => {
             f.string("#");
-            f.print(format_args!("{s:?}"));
+            print_ocaml_string(f, s);
         }
         Constant::Float(s) => f.string(s),
         Constant::BigInt { negative, value } => {
