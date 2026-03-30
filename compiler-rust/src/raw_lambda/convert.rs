@@ -1518,7 +1518,24 @@ impl<'a> RawLambdaConverter<'a> {
             )),
             "%incr" => Some(Primitive::Poffsetref(1)),
             "%decr" => Some(Primitive::Poffsetref(-1)),
-            _ => self.lowered.primitive_from_name(prim_name),
+            _ => {
+                // %fieldN -> Pfield(N, Fld_tuple)
+                if let Some(n_str) = prim_name.strip_prefix("%field") {
+                    if let Ok(n) = n_str.parse::<i32>() {
+                        return Some(Primitive::Pfield(n, FieldDbgInfo::Tuple));
+                    }
+                }
+                // %setfieldN -> Psetfield(N, ...)
+                if let Some(n_str) = prim_name.strip_prefix("%setfield") {
+                    if let Ok(n) = n_str.parse::<i32>() {
+                        return Some(Primitive::Psetfield(
+                            n,
+                            crate::lambda::compat::SetFieldDbgInfo::RecordSet(String::new()),
+                        ));
+                    }
+                }
+                self.lowered.primitive_from_name(prim_name)
+            }
         }
     }
 
