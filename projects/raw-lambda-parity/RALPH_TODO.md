@@ -111,7 +111,7 @@ For each iteration:
 ### 2026-03-30 (session 5)
 
 Starting parity: **182/657** with **1022** hunks.
-Current parity: **184/657** with **1020** hunks.
+Final parity: **184/657** with **1020** hunks.
 
 **Commits this session:**
 1. `a2a89cbdb` raw-lambda: keep trivial let-binding for optional parameter extraction (verified OCaml-aligned, +6 hunks)
