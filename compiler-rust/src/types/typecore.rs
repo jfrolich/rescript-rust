@@ -16187,6 +16187,8 @@ fn type_pack(
         true,
     )
     .map_err(|e| TypeCoreError::Other(format!("pack: {e:?}")))?;
+
+    // Match OCaml type_module_aux Pmod_ident: when the packed module is
     if debug_pack {
         let full_loc = tctx.arena.to_location(loc);
         let mod_kind = match &typed_module.mod_desc {
