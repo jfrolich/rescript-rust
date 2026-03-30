@@ -10236,6 +10236,14 @@ fn type_structure_item<'a>(
                 ),
             };
 
+            // Match OCaml typemod.ml Pstr_module:
+            //   let lv = Ctype.get_current_level () in
+            //   begin_def ();
+            //   Ident.set_current_time lv;
+            // This aligns the stamp counter with the type level.
+            let lv = tctx.type_ctx.current_level();
+            tctx.type_ctx.set_current_time(lv);
+
             // Create module ident BEFORE typing body (matches OCaml typemod.ml:1454)
             // This ensures binding_time < all internal idents, so
             // lower_nongen(binding_time - 1) can reach internal non-generic Tvars.

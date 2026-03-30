@@ -25,11 +25,10 @@ use crate::types::{
     TypeCheckContext, TypeContext, initial_env, transl_signature, type_structure,
 };
 
-// OCaml's Predef sets `Ident.set_current_time 999`. OCaml then creates one
-// additional ident (+/1000) during components_of_module_maker for Pervasives,
-// so user idents start at 1001. Rust doesn't have this step, so we start at
-// 1000 and the first stamp from next_stamp() is 1001.
-const OCAML_NON_PREDEF_STAMP_START: i32 = 1000;
+// OCaml's Predef sets `Ident.set_current_time 999`. OCaml's Parmatch.extra_pat
+// then eagerly creates Ident.create "+" consuming stamp 1000.
+// We match this by starting at 999 and consuming one stamp.
+const OCAML_NON_PREDEF_STAMP_START: i32 = 999;
 
 fn module_name_from_source_filename(path: &str) -> String {
     let basename = std::path::Path::new(path)
@@ -480,6 +479,9 @@ pub fn compile_source_to_js_with_options(
     // Type check
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
+    // at module initialization, consuming stamp 1000 before any compilation.
+    let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     let mut env = initial_env(&type_ctx);
@@ -671,6 +673,9 @@ pub fn typecheck_interface_source(
     // Type check
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
+    // at module initialization, consuming stamp 1000 before any compilation.
+    let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     let mut env = initial_env(&type_ctx);
@@ -1421,6 +1426,9 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
+    // at module initialization, consuming stamp 1000 before any compilation.
+    let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     let mut env = initial_env(&type_ctx);
@@ -1452,6 +1460,9 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
 ) -> Result<()> {
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
+    // at module initialization, consuming stamp 1000 before any compilation.
+    let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     let mut env = initial_env(&type_ctx);
