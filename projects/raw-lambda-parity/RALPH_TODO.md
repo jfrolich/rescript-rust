@@ -17,7 +17,7 @@ This is parity for the **pre-optimization raw lambda stage** (`-drawlambda`), no
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **176/657**
+- Unoptimized lambda parity: **177/657**
 - Parity hunks: **1036**
 
 ## Working Rules
@@ -107,6 +107,62 @@ For each iteration:
 - [ ] Commit immediately if the change is verified OCaml-aligned
 
 ## Session Log
+
+### 2026-03-30 (session 2)
+
+Starting parity: **176/657** with **1036** hunks.
+Current parity: **177/657** with **1036** hunks.
+
+**Commits this session:**
+1. `dc11732b0` raw-lambda: print PisNullUndefined as isnullable (matching OCaml)
+   - Fixed raw lambda printer to use "isnullable" instead of "[?null?undefined]"
+   - OCaml-aligned change, affects 4 files
+2. `1886b2abe` raw-lambda: compute module coercion for Pmod_constraint
+   - **ROOT CAUSE FIX**: Pmod_constraint always stored Tcoerce_none
+   - Now calls includemod::modtypes to compute actual Tcoerce_structure
+   - Only for Pmty_signature constraints (avoids stack overflow from `module type of`)
+   - Falls back to Tcoerce_none when modtypes errors (variance mismatches etc.)
+   - Fixes module makeblock field filtering (176→177, regression_print passes)
+
+**Key findings:**
+
+**Remaining failure breakdown (480 files, 1036 hunks):**
+- 198 ident-only (stamp numbers from type checker, not raw lambda)
+- 216 structural (real IR differences)
+- 66 files with raw match fallbacks (lowered lambda if-chains)
+
+**Raw match fallback pattern types (139 total):**
+- 53 Tpat_construct with nested refutable args (needs full matching.ml)
+- 18 Tpat_tuple (tuple pattern matching)
+- 16 Tpat_record (record pattern matching)
+- 14 Tpat_variant (polymorphic variant matching)
+- 10 Tpat_or with tuple scrutinee
+- 7 Tpat_construct with apply scrutinee
+- 6 Tpat_constant (bigint only - Int/Char are handled)
+- Others: Tpat_alias, Tpat_array
+
+**Structural patterns in non-fallback files:**
+- 53 catch ordering (switch construction with/without failaction)
+- 44 some/some_not_nested (type_cannot_contain_undefined divergence)
+- 27 include let wrapper ((let (let/N =a 0a) (global M!)))
+- 62 makeblock field differences (partially fixed by coercion change)
+
+**Root cause: Pmod_constraint coercion was always Tcoerce_none**
+Found at typemod.rs:7355 - the type checker hard-coded `Tcoerce_none` for
+ALL Pmod_constraint nodes. OCaml computes the coercion via includemod::modtypes.
+Fixed for Pmty_signature constraints. Remaining cases:
+- `module type of` constraints (would cause stack overflow in modtypes)
+- Pmty_ident constraints (not yet handled)
+- Some variance mismatches in includemod cause errors (fallback to Tcoerce_none)
+
+**Root cause: catch ordering requires failaction-first switch construction**
+OCaml creates incomplete switches (with failaction for wildcards).
+Rust creates complete switches (enumerating all constructors).
+share_actions_sw processes failaction FIRST (via act_store_shared) in OCaml,
+giving it the lowest store index → innermost catch position.
+In Rust, the failaction is only created by reintroduce_fail after sharing,
+so it doesn't get the innermost position.
+Fix: change switch construction to use failaction for wildcards.
 
 ### 2026-03-30
 
