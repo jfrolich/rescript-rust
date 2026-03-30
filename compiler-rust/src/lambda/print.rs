@@ -628,6 +628,7 @@ fn format_raw_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::PvalFromOption => write!(f, "#val_from_option"),
         Primitive::PvalFromOptionNotNest => write!(f, "#val_from_option_not_nest"),
         Primitive::PisPolyVarBlock => write!(f, "#is_poly_var_block"),
+        Primitive::PisNullUndefined => write!(f, "isnullable"),
         Primitive::PrawJsCode(info) => {
             if info.is_stmt {
                 write!(f, "#raw_stmt")
