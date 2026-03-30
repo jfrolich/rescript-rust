@@ -60,6 +60,9 @@ pub struct PersistentEnv {
     open_modules: Vec<String>,
     /// Default JSX version from CLI flags, if any.
     jsx_version: Option<i32>,
+    /// Cache of renamed signatures (matching OCaml's lazy Subst.signature).
+    /// Each module's signature is renamed once and cached here.
+    renamed_sig_cache: HashMap<String, Signature>,
 }
 
 impl PersistentEnv {
@@ -71,6 +74,7 @@ impl PersistentEnv {
             alias_prefix_rewrites: HashMap::new(),
             open_modules: Vec::new(),
             jsx_version: None,
+            renamed_sig_cache: HashMap::new(),
         }
     }
 
@@ -409,7 +413,21 @@ impl PersistentEnv {
 
     /// Open a module's signature into the environment.
     /// This adds all the module's exported bindings to the environment.
+    /// Get the renamed signature for a module, cached.
+    /// Matches OCaml's `ps_sig = lazy (Subst.signature Subst.identity sign)`.
+    pub fn get_renamed_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<Signature> {
+        if let Some(cached) = self.renamed_sig_cache.get(name) {
+            return Some(cached.clone());
+        }
+        let ps = self.find_pers_struct(name, ctx)?;
+        let renamed = rename_bound_idents_in_sig(&ps.ps_sig, ctx);
+        self.renamed_sig_cache.insert(name.to_string(), renamed.clone());
+        Some(renamed)
+    }
+
     pub fn open_module<'a>(&mut self, name: &str, env: &mut Env, ctx: &'a TypeContext<'a>) -> bool {
+        // Don't rename at open time — OCaml's ps_sig is only forced later
+        // when find_module is called from normalize_path during type expansion.
         let ps = match self.find_pers_struct(name, ctx) {
             Some(ps) => ps,
             None => return false,
@@ -419,7 +437,8 @@ impl PersistentEnv {
         true
     }
 
-    /// Get a module's declaration (for path resolution).
+    /// Get a module's declaration using the raw (un-renamed) sig.
+    /// Used during initial env setup where OCaml doesn't force ps_sig.
     pub fn get_module_declaration<'a>(
         &mut self,
         name: &str,

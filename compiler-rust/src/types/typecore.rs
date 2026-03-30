@@ -18046,49 +18046,11 @@ pub(crate) fn copy_lookup_signature_for_subst(
 
 fn copy_lookup_value_components_signature(
     sig_items: &[crate::types::decl::SignatureItem],
-    ctx: &TypeContext<'_>,
+    _ctx: &TypeContext<'_>,
 ) -> crate::types::decl::Signature {
-    // Rename bound idents, matching OCaml's Subst.signature called via
-    // Lazy.force ps.ps_sig in find_module when a persistent module is
-    // first accessed for value lookup.
-    sig_items
-        .iter()
-        .map(|item| match item {
-            crate::types::decl::SignatureItem::SigValue(id, desc) => {
-                crate::types::decl::SignatureItem::SigValue(ctx.rename_ident(id), desc.clone())
-            }
-            crate::types::decl::SignatureItem::SigType(id, decl, rec_status) => {
-                crate::types::decl::SignatureItem::SigType(
-                    ctx.rename_ident(id),
-                    decl.clone(),
-                    *rec_status,
-                )
-            }
-            crate::types::decl::SignatureItem::SigTypext(id, ext, ext_status) => {
-                crate::types::decl::SignatureItem::SigTypext(
-                    ctx.rename_ident(id),
-                    ext.clone(),
-                    *ext_status,
-                )
-            }
-            crate::types::decl::SignatureItem::SigModule(id, md, rec_status) => {
-                crate::types::decl::SignatureItem::SigModule(
-                    ctx.rename_ident(id),
-                    md.clone(),
-                    *rec_status,
-                )
-            }
-            crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
-                crate::types::decl::SignatureItem::SigModtype(ctx.rename_ident(id), mtd.clone())
-            }
-            crate::types::decl::SignatureItem::SigClass => {
-                crate::types::decl::SignatureItem::SigClass
-            }
-            crate::types::decl::SignatureItem::SigClassType => {
-                crate::types::decl::SignatureItem::SigClassType
-            }
-        })
-        .collect()
+    // Idents are already renamed at module load/open time via
+    // PersistentEnv::get_renamed_sig (matching OCaml's lazy ps_sig).
+    sig_items.to_vec()
 }
 
 // ============================================================================
@@ -19152,9 +19114,9 @@ impl Env {
                 }
                 // Then try persistent environment (external modules)
                 if let Some(pers) = pers_env.as_mut() {
-                    if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
+                    if let Some(renamed_sig) = pers.get_renamed_sig(mod_name, ctx) {
                         let module_path = Path::pident(Ident::create_persistent(mod_name));
-                        let sig = copy_lookup_signature_for_subst(&ps.ps_sig, ctx);
+                        let sig = copy_lookup_signature_for_subst(&renamed_sig, ctx);
                         if let Some(qualified_alias_path) =
                             pers.qualified_alias_path_for_flattened_head(mod_name)
                         {

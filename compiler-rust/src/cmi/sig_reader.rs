@@ -1018,10 +1018,14 @@ fn read_ident(value: &OcamlValue) -> Ident {
         } else {
             id
         }
-    } else if stamp < 1000 && is_predef_type_name(name) {
-        // Predef type: OCaml uses small stamps, Rust uses persistent idents.
-        // Normalize to persistent so CMI types match initial_env types.
-        Ident::create_persistent(name)
+    } else if stamp < 1000 {
+        if let Some(predef_id) = crate::types::predef::find_predef_ident(name) {
+            // Predef type: use matching predef ident with correct stamp.
+            predef_id
+        } else {
+            // Non-predef with small stamp: preserve original.
+            Ident::new(name, stamp, crate::ident::IdentFlags::from_bits_truncate(flags))
+        }
     } else {
         Ident::new(name, stamp, crate::ident::IdentFlags::from_bits_truncate(flags))
     }
