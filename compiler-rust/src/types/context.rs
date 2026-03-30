@@ -153,6 +153,16 @@ pub struct TypeContext<'a> {
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
 
+    /// Cache of renamed module signatures.
+    /// Matches OCaml's lazy ps_sig = Subst.signature Subst.identity sign.
+    /// Populated by PersistentEnv::get_renamed_sig, consumed by normalize_path.
+    pub(crate) renamed_module_sigs: RefCell<std::collections::HashMap<String, super::decl::Signature>>,
+
+    /// Raw (un-renamed) module signatures for persistent modules.
+    /// Used by trigger_module_sig_rename to lazily rename on first access
+    /// from normalize_path, matching OCaml's lazy ps_sig forcing.
+    raw_module_sigs: RefCell<std::collections::HashMap<String, super::decl::Signature>>,
+
     /// String table for CMI-decoded Longident components.
     /// CMI decoding happens without a ParseArena, so we allocate synthetic
     /// StrIdx values here and resolve them later when needed.
@@ -226,6 +236,8 @@ impl<'a> TypeContext<'a> {
             resolved_pdot_type_cache: RefCell::new(std::collections::HashMap::new()),
             resolved_module_sig_cache: RefCell::new(std::collections::HashMap::new()),
             load_paths: RefCell::new(Vec::new()),
+            renamed_module_sigs: RefCell::new(std::collections::HashMap::new()),
+            raw_module_sigs: RefCell::new(std::collections::HashMap::new()),
             cmi_longident_names: RefCell::new(std::collections::HashMap::new()),
             next_cmi_longident_idx: Cell::new(0xF000_0000),
             predef_int: Cell::new(None),
@@ -1113,6 +1125,50 @@ impl<'a> TypeContext<'a> {
     /// Matches OCaml's `Ident.set_current_time`.
     pub fn set_current_time(&self, t: i32) {
         self.id_gen.set_current_stamp(t);
+    }
+
+    /// Register a raw module signature for lazy renaming.
+    /// Called during load_pervasives to store sigs for normalize_path.
+    pub fn register_raw_module_sig(&self, name: &str, sig: super::decl::Signature) {
+        self.raw_module_sigs.borrow_mut().insert(name.to_string(), sig);
+    }
+
+    /// Trigger module signature renaming for a persistent module.
+    /// Matches OCaml's find_module → Lazy.force ps.ps_sig which renames
+    /// bound idents the first time a module is accessed during normalize_path.
+    pub fn trigger_module_sig_rename(&self, module_name: &str) {
+        if self.renamed_module_sigs.borrow().contains_key(module_name) {
+            return; // Already renamed
+        }
+        let raw_sig = {
+            let raw = self.raw_module_sigs.borrow();
+            raw.get(module_name).cloned()
+        };
+        if let Some(sig) = raw_sig {
+            let renamed: super::decl::Signature = sig
+                .iter()
+                .map(|item| match item {
+                    super::decl::SignatureItem::SigValue(id, desc) => {
+                        super::decl::SignatureItem::SigValue(self.rename_ident(id), desc.clone())
+                    }
+                    super::decl::SignatureItem::SigType(id, decl, rec_status) => {
+                        super::decl::SignatureItem::SigType(self.rename_ident(id), decl.clone(), *rec_status)
+                    }
+                    super::decl::SignatureItem::SigTypext(id, ext, ext_status) => {
+                        super::decl::SignatureItem::SigTypext(self.rename_ident(id), ext.clone(), *ext_status)
+                    }
+                    super::decl::SignatureItem::SigModule(id, md, rec_status) => {
+                        super::decl::SignatureItem::SigModule(self.rename_ident(id), md.clone(), *rec_status)
+                    }
+                    super::decl::SignatureItem::SigModtype(id, mtd) => {
+                        super::decl::SignatureItem::SigModtype(self.rename_ident(id), mtd.clone())
+                    }
+                    super::decl::SignatureItem::SigClass => super::decl::SignatureItem::SigClass,
+                    super::decl::SignatureItem::SigClassType => super::decl::SignatureItem::SigClassType,
+                })
+                .collect();
+            self.renamed_module_sigs.borrow_mut().insert(module_name.to_string(), renamed);
+        }
     }
 
     /// Create a new identifier using the typing context's shared stamp source.

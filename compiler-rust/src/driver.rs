@@ -768,8 +768,11 @@ pub(crate) fn load_pervasives<'a>(
 
     // Try to load and open Pervasives (matches OCaml: open_implicit_module "Pervasives")
     if pers_env.open_module("Pervasives", env, ctx) {
-        // Also add Pervasives as a module in the environment
+        // Add module to env and register raw sig for lazy renaming
         if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
+            if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+                ctx.register_raw_module_sig("Pervasives", sig.clone());
+            }
             env.add_module(Ident::create_persistent("Pervasives"), md);
         }
     }
@@ -777,6 +780,9 @@ pub(crate) fn load_pervasives<'a>(
     // Try to load and open Stdlib (matches OCaml: open_implicit_module "Stdlib")
     if pers_env.open_module("Stdlib", env, ctx) {
         if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
+            if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+                ctx.register_raw_module_sig("Stdlib", sig.clone());
+            }
             env.add_module(Ident::create_persistent("Stdlib"), md);
         }
     }

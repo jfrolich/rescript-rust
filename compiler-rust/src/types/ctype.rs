@@ -1938,6 +1938,15 @@ fn normalize_path_full_inner<'a>(
         _ => path.clone(),
     };
 
+    // Match OCaml's normalize_path which calls find_module for the path.
+    // For persistent idents, OCaml's find_module forces ps_sig (renaming
+    // bound idents). Trigger the same stamp consumption here.
+    if let Path::Pident(id) = &path {
+        if id.is_persistent() {
+            ctx.trigger_module_sig_rename(id.name());
+        }
+    }
+
     // Then check if the path itself is a module alias.
     // First try the simple env lookup (handles Pident and some Pdot paths).
     if let Ok(md) = env.lookup_module(&path) {

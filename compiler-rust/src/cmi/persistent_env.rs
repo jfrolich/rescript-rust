@@ -182,6 +182,9 @@ impl PersistentEnv {
         );
         register_sig_types_recursive(&signature, &effective_module_path, ctx, &self.load_path);
 
+        // Register raw sig on TypeContext for lazy renaming from normalize_path
+        ctx.register_raw_module_sig(&ps_name, signature.clone());
+
         PersStruct {
             ps_name,
             ps_sig: signature,
@@ -415,6 +418,7 @@ impl PersistentEnv {
     /// This adds all the module's exported bindings to the environment.
     /// Get the renamed signature for a module, cached.
     /// Matches OCaml's `ps_sig = lazy (Subst.signature Subst.identity sign)`.
+    /// Also registers in TypeContext so normalize_path can check if rename happened.
     pub fn get_renamed_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<Signature> {
         if let Some(cached) = self.renamed_sig_cache.get(name) {
             return Some(cached.clone());
@@ -422,6 +426,8 @@ impl PersistentEnv {
         let ps = self.find_pers_struct(name, ctx)?;
         let renamed = rename_bound_idents_in_sig(&ps.ps_sig, ctx);
         self.renamed_sig_cache.insert(name.to_string(), renamed.clone());
+        // Also register in TypeContext for normalize_path access
+        ctx.renamed_module_sigs.borrow_mut().insert(name.to_string(), renamed.clone());
         Some(renamed)
     }
 
