@@ -744,7 +744,8 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     /// OCaml's share_actions_sw: deduplicate switch actions by wrapping shared
-    /// actions in catch/exit. Returns the list of catch handlers to wrap around the switch.
+    /// actions in catch/exit. Only actions that appear >= 2 times are wrapped.
+    /// Singleton actions are kept inline. Returns the list of catch handlers.
     fn share_actions_sw(
         &mut self,
         sw: &mut crate::raw_lambda::RawLambdaSwitch,
@@ -755,45 +756,22 @@ impl<'a> RawLambdaConverter<'a> {
         let mut store: Vec<(String, i32, RawLambda)> = Vec::new();
         let mut handlers: Vec<(i32, RawLambda)> = Vec::new();
 
-        let mut get_or_create = |action: &RawLambda, self_ref: &mut Self| -> Option<RawLambda> {
-            // If already an exit, don't wrap again
-            if matches!(action, RawLambda::LstaticRaise(_, args) if args.is_empty()) {
-                return None;
+        // First pass: count occurrences of each action key
+        let mut key_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (_, act) in sw.sw_consts.iter().chain(sw.sw_blocks.iter()) {
+            if matches!(act, RawLambda::LstaticRaise(_, args) if args.is_empty()) {
+                continue;
             }
-
-            let key = format!("{}", RawLambdaPrinter::new(action));
-
-            // Check if we've seen this action before
-            for (stored_key, exit_id, _) in &store {
-                if *stored_key == key {
-                    // Shared! Return exit to existing handler
-                    return Some(RawLambda::LstaticRaise(*exit_id, Vec::new()));
-                }
-            }
-
-            // First occurrence - store it but don't wrap yet
-            let exit_id = self_ref.next_raise_count();
-            store.push((key, exit_id, action.clone()));
-            None
-        };
-
-        // First pass: identify shared actions
-        let all_actions: Vec<(String, bool)> = sw.sw_consts.iter()
-            .map(|(_, act)| (format!("{}", RawLambdaPrinter::new(act)), true))
-            .chain(sw.sw_blocks.iter()
-                .map(|(_, act)| (format!("{}", RawLambdaPrinter::new(act)), false)))
-            .collect();
-
-        // Count occurrences of each action key
-        let mut key_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for (key, _) in &all_actions {
-            *key_counts.entry(key.clone()).or_insert(0) += 1;
+            let key = format!("{}", RawLambdaPrinter::new(act));
+            *key_counts.entry(key).or_insert(0) += 1;
         }
 
         // Second pass: wrap shared actions in catch/exit
-        let mut exit_map: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+        let mut exit_map: std::collections::HashMap<String, i32> =
+            std::collections::HashMap::new();
 
-        for (tag, action) in sw.sw_consts.iter_mut() {
+        for (_tag, action) in sw.sw_consts.iter_mut() {
             if matches!(action, RawLambda::LstaticRaise(_, args) if args.is_empty()) {
                 continue;
             }
@@ -812,7 +790,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
 
-        for (tag, action) in sw.sw_blocks.iter_mut() {
+        for (_tag, action) in sw.sw_blocks.iter_mut() {
             if matches!(action, RawLambda::LstaticRaise(_, args) if args.is_empty()) {
                 continue;
             }
