@@ -17,8 +17,8 @@ This is parity for the **pre-optimization raw lambda stage** (`-drawlambda`), no
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **179/657**
-- Parity hunks: **1032**
+- Unoptimized lambda parity: **180/657**
+- Parity hunks: **1024**
 
 ## Working Rules
 
@@ -107,6 +107,37 @@ For each iteration:
 - [ ] Commit immediately if the change is verified OCaml-aligned
 
 ## Session Log
+
+### 2026-03-30 (session 4)
+
+Starting parity: **179/657** with **1032** hunks.
+Current parity: **180/657** with **1024** hunks.
+
+**Commits this session:**
+1. `3bc508afc` raw-lambda: port Tcoerce_primitive for external function wrappers
+   - OCaml's includemod produces Tcoerce_primitive when a module's Val_prim is coerced to Val_reg (e.g., in include with constraint).
+   - Updated PrimitiveCoercion to carry full PrimitiveDescription, type, loc, id.
+   - Added transl_primitive_raw to generate wrapper functions matching OCaml.
+   - Fixed make_module_block_raw to handle Tcoerce_primitive entries directly.
+   - 9 files moved from structural to ident-only diffs.
+2. `9b751d2e6` raw-lambda: map %fieldN/%setfieldN primitives to Pfield/Psetfield
+   - OCaml's specialize_primitive maps %field0, %field1, etc. to Pfield(n, Fld_tuple).
+   - 179→180, 1032→1030 hunks
+3. `32d30bb9d` raw-lambda: eliminate trivial *sth* binding in optional parameter matching
+   - OCaml's matching compiler optimizes `Some x -> x` to just `val_from_option(arg)`.
+   - Targeted fix only for optional constructor patterns (not general let elimination).
+   - 180/657, 1030→1024 hunks
+
+**Remaining failure breakdown (477 files, 1024 hunks):**
+- 267 ident-only (stamp numbers from type checker, not raw lambda)
+- 210 structural diffs
+
+**Top structural clusters:**
+- 81 files: Extra `match/N` bindings for unused record fields (OCaml binds all fields, Rust skips unused)
+- 50 files: field:tag fallback (constructor matching with refutable args → lowered if-chains)
+- 37 files: letrec/init_mod (recursive module handling missing in Rust raw lambda)
+- 9 files: Remaining external wrapper pattern (complex include paths)
+- 7 files: *sth* wrapping (remaining cases not covered by targeted fix)
 
 ### 2026-03-30 (session 3)
 
