@@ -4069,8 +4069,8 @@ impl<'a> RawLambdaConverter<'a> {
                         args.is_empty() && seen_const_tags.insert(*tag)
                     }
                     ConstructorTag::CstrBlock(tag) => {
-                        seen_block_tags.insert(*tag)
-                            && args.iter().all(Self::is_irrefutable_pattern)
+                        seen_block_tags.insert(*tag);
+                        true
                     }
                     ConstructorTag::CstrExtension(path) => {
                         args.iter().all(Self::is_irrefutable_pattern)
@@ -4119,14 +4119,25 @@ impl<'a> RawLambdaConverter<'a> {
                     has_non_ctor_constants,
                 )
             }
-            _ => Self::check_simple_constructor_leaf(
-                inner,
-                seen_const_tags,
-                seen_block_tags,
-                seen_extensions,
-                repr_cstr,
-                has_non_ctor_constants,
-            ),
+            _ => {
+                // For or-pattern leaves, block constructor args must still be irrefutable
+                // (collect_or_pattern_cases doesn't handle refutable sub-patterns)
+                if let PatternDesc::Tpat_construct(_, cstr, args) = &inner.pat_desc {
+                    if let ConstructorTag::CstrBlock(_) = &cstr.cstr_tag {
+                        if !args.iter().all(Self::is_irrefutable_pattern) {
+                            return false;
+                        }
+                    }
+                }
+                Self::check_simple_constructor_leaf(
+                    inner,
+                    seen_const_tags,
+                    seen_block_tags,
+                    seen_extensions,
+                    repr_cstr,
+                    has_non_ctor_constants,
+                )
+            }
         }
     }
 
@@ -4375,6 +4386,38 @@ impl<'a> RawLambdaConverter<'a> {
         // Shared bodies from or-patterns: (exit_id, body)
         let mut shared_bodies: Vec<(i32, RawLambda)> = Vec::new();
 
+        // Pre-scan: determine which block tags need sub-pattern grouping.
+        // A tag needs grouping if it appears multiple times OR has refutable sub-patterns.
+        let mut block_tag_counts: std::collections::BTreeMap<i32, usize> =
+            std::collections::BTreeMap::new();
+        let mut block_tags_needing_grouping: std::collections::BTreeSet<i32> =
+            std::collections::BTreeSet::new();
+        for case in cases.iter() {
+            if case.c_guard.is_some() {
+                // Skip guard cases in pre-scan (they don't affect tag grouping)
+            }
+            let (pat, _) = peel_aliases(&case.c_lhs);
+            if let PatternDesc::Tpat_construct(_, cstr, args) = &pat.pat_desc {
+                if let ConstructorTag::CstrBlock(tag) = &cstr.cstr_tag {
+                    let count = block_tag_counts.entry(*tag).or_insert(0);
+                    *count += 1;
+                    if *count > 1 || !args.iter().all(Self::is_irrefutable_pattern) {
+                        block_tags_needing_grouping.insert(*tag);
+                    }
+                }
+            }
+        }
+
+        // Block sub-cases grouped by tag for sub-pattern matching
+        // Each entry: (sub_patterns, body_with_aliases)
+        let mut block_sub_groups: std::collections::BTreeMap<i32, Vec<(Vec<&Pattern>, RawLambda)>> =
+            std::collections::BTreeMap::new();
+        // Track constructor info per block tag
+        let mut block_tag_info: std::collections::BTreeMap<
+            i32,
+            (&crate::types::ConstructorDescription, &Pattern),
+        > = std::collections::BTreeMap::new();
+
         // Pre-allocate a fail exit for guard failures when guards are present.
         // This exit will be the same one used by make_switch_with_catch for the failaction.
         let guard_fail_exit = if has_guards {
@@ -4421,28 +4464,42 @@ impl<'a> RawLambdaConverter<'a> {
                             ),
                         )),
                         ConstructorTag::CstrBlock(tag) => {
-                            // Skip field extraction if all args are wildcards and there's a guard
-                            // (OCaml doesn't extract unused fields for guarded cases)
-                            let all_wildcards = args.iter().all(|a| matches!(a.pat_desc, PatternDesc::Tpat_any));
-                            let block_body = if case.c_guard.is_some() && all_wildcards {
-                                body
-                            } else {
-                                self.bind_constructor_args_irrefutably_raw(
-                                    &scrut_id,
-                                    pat,
-                                    cstr,
-                                    args,
-                                    body,
-                                )
-                            };
-                            block_cases.push((
-                                *tag,
-                                wrap_aliases_raw(
+                            if block_tags_needing_grouping.contains(tag) {
+                                // Tag needs sub-pattern grouping: collect for later
+                                block_tag_info
+                                    .entry(*tag)
+                                    .or_insert((cstr, pat));
+                                let body_with_aliases = wrap_aliases_raw(
                                     &aliases,
                                     RawLambda::var(scrut_id.clone()),
-                                    block_body,
-                                ),
-                            ));
+                                    body,
+                                );
+                                block_sub_groups
+                                    .entry(*tag)
+                                    .or_default()
+                                    .push((args.iter().collect(), body_with_aliases));
+                            } else {
+                                // Single case with irrefutable args: existing behavior
+                                let all_wildcards = args
+                                    .iter()
+                                    .all(|a| matches!(a.pat_desc, PatternDesc::Tpat_any));
+                                let block_body =
+                                    if case.c_guard.is_some() && all_wildcards {
+                                        body
+                                    } else {
+                                        self.bind_constructor_args_irrefutably_raw(
+                                            &scrut_id, pat, cstr, args, body,
+                                        )
+                                    };
+                                block_cases.push((
+                                    *tag,
+                                    wrap_aliases_raw(
+                                        &aliases,
+                                        RawLambda::var(scrut_id.clone()),
+                                        block_body,
+                                    ),
+                                ));
+                            }
                         }
                         ConstructorTag::CstrUnboxed | ConstructorTag::CstrExtension(_) => {}
                     },
@@ -4469,6 +4526,16 @@ impl<'a> RawLambdaConverter<'a> {
                     _ => {}
                 }
             }
+        }
+
+        // Process block sub-groups: compile sub-matches for grouped block cases
+        for (tag, sub_cases) in block_sub_groups {
+            let (cstr, pat) = block_tag_info[&tag];
+            let pat_loc = self.loc(pat.pat_loc);
+            let block_body = self.compile_block_sub_match(
+                &scrut_id, cstr, sub_cases, pat_loc,
+            );
+            block_cases.push((tag, block_body));
         }
 
         // OCaml's combine_constructor: when sig_complete (all constructor tags covered),
@@ -4679,6 +4746,8 @@ impl<'a> RawLambdaConverter<'a> {
                             )
                         }
                     }
+                    // Single-constructor block type: no switch needed
+                    (0, _, [], [(_, act)], None) => act.clone(),
                     _ => self.make_switch_with_catch_exit(
                         scrut_var.clone(),
                         const_cases,
@@ -4774,6 +4843,547 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         Lambda::let_(LetKind::Alias, tmp, Lambda::var(scrut_id.clone()), result)
+    }
+
+    /// Compile a nested sub-match for block constructor cases that share the same tag
+    /// but have different (potentially refutable) sub-patterns.
+    ///
+    /// This implements OCaml's matching.ml behavior for constructor sub-matrix compilation:
+    /// extract fields, then recursively match on the extracted field values.
+    fn compile_block_sub_match(
+        &mut self,
+        scrut_id: &Ident,
+        cstr: &crate::types::ConstructorDescription,
+        sub_cases: Vec<(Vec<&Pattern>, RawLambda)>,
+        loc: Location,
+    ) -> RawLambda {
+        let arity = cstr.cstr_arity as usize;
+
+        // Handle optional shape (Some(...) with refutable inner pattern)
+        if constructor_has_optional_shape(cstr) && arity == 1 {
+            return self.compile_optional_block_sub_match(scrut_id, cstr, sub_cases, loc);
+        }
+
+        // Determine field variable names using OCaml's name_pattern convention:
+        // use the first variable name found across all cases for each field position
+        let field_ids: Vec<Ident> = (0..arity)
+            .map(|i| {
+                sub_cases
+                    .iter()
+                    .find_map(|(pats, _)| {
+                        pats.get(i).and_then(|p| {
+                            let (inner, _) = peel_aliases(p);
+                            match &inner.pat_desc {
+                                PatternDesc::Tpat_var(id, _) => Some(id.clone()),
+                                _ => None,
+                            }
+                        })
+                    })
+                    .unwrap_or_else(|| self.id_gen.create("match"))
+            })
+            .collect();
+
+        let field_info = if cstr.cstr_name == "::" {
+            FieldDbgInfo::Cons
+        } else {
+            FieldDbgInfo::Variant
+        };
+
+        // For arity 1: try to build a specialized sub-match (string switch, etc.)
+        if arity == 1 {
+            let field_id = &field_ids[0];
+            let field_read = RawLambda::prim(
+                Primitive::Pfield(0, field_info),
+                vec![RawLambda::var(scrut_id.clone())],
+                loc,
+            );
+
+            let inner = self.compile_single_field_sub_match(
+                field_id, &sub_cases, loc,
+            );
+
+            return RawLambda::let_(LetKind::Alias, field_id.clone(), field_read, inner);
+        }
+
+        // For multi-field: use sequential catch/exit approach
+        // Each row (case) is tried in order; if its sub-pattern test fails, exit to the next row.
+        self.compile_multi_field_sub_match(scrut_id, cstr, &field_ids, &field_info, sub_cases, loc)
+    }
+
+    /// Compile a sub-match for a single-field constructor.
+    /// Analyzes sub-pattern types and generates the appropriate match structure.
+    fn compile_single_field_sub_match(
+        &mut self,
+        field_id: &Ident,
+        sub_cases: &[(Vec<&Pattern>, RawLambda)],
+        loc: Location,
+    ) -> RawLambda {
+        // Categorize sub-patterns
+        let mut string_cases: Vec<(String, RawLambda)> = Vec::new();
+        let mut int_cases: Vec<(i32, RawLambda)> = Vec::new();
+        let mut default_body: Option<RawLambda> = None;
+        let mut has_complex = false;
+
+        for (pats, body) in sub_cases {
+            let (pat, _aliases) = peel_aliases(pats[0]);
+            match &pat.pat_desc {
+                PatternDesc::Tpat_constant(TConstant::String(s, _)) => {
+                    string_cases.push((s.clone(), body.clone()));
+                }
+                PatternDesc::Tpat_constant(TConstant::Int(i)) => {
+                    int_cases.push((*i as i32, body.clone()));
+                }
+                PatternDesc::Tpat_constant(TConstant::Char(c)) => {
+                    int_cases.push((*c as i32, body.clone()));
+                }
+                PatternDesc::Tpat_var(id, _) => {
+                    if id == field_id {
+                        // Same ident as field var - no additional binding needed
+                        default_body = Some(body.clone());
+                    } else {
+                        default_body = Some(RawLambda::let_(
+                            LetKind::Alias,
+                            id.clone(),
+                            RawLambda::var(field_id.clone()),
+                            body.clone(),
+                        ));
+                    }
+                }
+                PatternDesc::Tpat_any => {
+                    default_body = Some(body.clone());
+                }
+                PatternDesc::Tpat_alias(inner, id, _) if matches!(inner.pat_desc, PatternDesc::Tpat_any) => {
+                    default_body = Some(RawLambda::let_(
+                        LetKind::Alias,
+                        id.clone(),
+                        RawLambda::var(field_id.clone()),
+                        body.clone(),
+                    ));
+                }
+                _ => {
+                    has_complex = true;
+                }
+            }
+        }
+
+        // String switch
+        if !string_cases.is_empty() && !has_complex && int_cases.is_empty() {
+            string_cases.sort_by(|(a, _), (b, _)| a.cmp(b));
+            if let Some(default) = default_body {
+                let fail_exit = self.next_raise_count();
+                let sw = RawLambda::LstringSwitch(
+                    Box::new(RawLambda::var(field_id.clone())),
+                    string_cases,
+                    Some(Box::new(RawLambda::LstaticRaise(fail_exit, Vec::new()))),
+                );
+                return RawLambda::LstaticCatch(
+                    Box::new(sw),
+                    (fail_exit, Vec::new()),
+                    Box::new(default),
+                );
+            } else {
+                // No default - string switch without catch
+                return RawLambda::LstringSwitch(
+                    Box::new(RawLambda::var(field_id.clone())),
+                    string_cases,
+                    None,
+                );
+            }
+        }
+
+        // Int constant tests with catch/exit (OCaml's != comparison pattern)
+        if !int_cases.is_empty() && !has_complex && string_cases.is_empty() {
+            return self.compile_int_test_chain(field_id, &int_cases, default_body, loc);
+        }
+
+        // Fallback: sequential catch/exit for complex sub-patterns
+        self.compile_sequential_single_field(field_id, sub_cases, loc)
+    }
+
+    /// Compile int constant test chain matching OCaml's != comparison pattern:
+    /// (catch (if (!= x val0) (exit N) body0) with (N) ...)
+    fn compile_int_test_chain(
+        &mut self,
+        field_id: &Ident,
+        int_cases: &[(i32, RawLambda)],
+        default_body: Option<RawLambda>,
+        loc: Location,
+    ) -> RawLambda {
+        let fail_exit = self.next_raise_count();
+        let fail_raise = RawLambda::LstaticRaise(fail_exit, Vec::new());
+
+        // Build nested if-chain: if (!= x val0) (exit N) body0
+        // For the last case with no default, don't add exit check
+        let mut inner = fail_raise;
+        for (val, body) in int_cases.iter().rev() {
+            let cond = RawLambda::prim(
+                Primitive::Pjscomp(Comparison::Neq),
+                vec![
+                    RawLambda::var(field_id.clone()),
+                    RawLambda::const_(Constant::int(*val)),
+                ],
+                loc,
+            );
+            inner = RawLambda::LifThenElse(
+                Box::new(cond),
+                Box::new(inner.clone()),
+                Box::new(body.clone()),
+            );
+        }
+
+        if let Some(default) = default_body {
+            RawLambda::LstaticCatch(
+                Box::new(inner),
+                (fail_exit, Vec::new()),
+                Box::new(default),
+            )
+        } else {
+            inner
+        }
+    }
+
+    /// Fallback: sequential single-field sub-match with catch/exit chains
+    fn compile_sequential_single_field(
+        &mut self,
+        field_id: &Ident,
+        sub_cases: &[(Vec<&Pattern>, RawLambda)],
+        loc: Location,
+    ) -> RawLambda {
+        // Process cases in reverse, building catch/exit chains
+        let mut result: Option<RawLambda> = None;
+
+        for (pats, body) in sub_cases.iter().rev() {
+            let (pat, _) = peel_aliases(pats[0]);
+            match result {
+                None => {
+                    // Last case: bind the pattern and run
+                    result = Some(self.bind_sub_pattern_raw(field_id, pat, body.clone()));
+                }
+                Some(rest) => {
+                    let exit_id = self.next_raise_count();
+                    let test = self.test_sub_pattern_raw(
+                        field_id, pat, body.clone(), exit_id, loc,
+                    );
+                    result = Some(RawLambda::LstaticCatch(
+                        Box::new(test),
+                        (exit_id, Vec::new()),
+                        Box::new(rest),
+                    ));
+                }
+            }
+        }
+
+        result.unwrap_or(RawLambda::unit())
+    }
+
+    /// Bind a sub-pattern variable to the field value (for the last/default case)
+    fn bind_sub_pattern_raw(
+        &self,
+        field_id: &Ident,
+        pat: &Pattern,
+        body: RawLambda,
+    ) -> RawLambda {
+        match &pat.pat_desc {
+            PatternDesc::Tpat_var(id, _) => {
+                if id == field_id {
+                    body
+                } else {
+                    RawLambda::let_(
+                        LetKind::Alias,
+                        id.clone(),
+                        RawLambda::var(field_id.clone()),
+                        body,
+                    )
+                }
+            }
+            PatternDesc::Tpat_any => body,
+            PatternDesc::Tpat_alias(inner, id, _) => {
+                let inner_body = self.bind_sub_pattern_raw(field_id, inner, body);
+                RawLambda::let_(
+                    LetKind::Alias,
+                    id.clone(),
+                    RawLambda::var(field_id.clone()),
+                    inner_body,
+                )
+            }
+            _ => body, // Constants/constructors in last position are unusual
+        }
+    }
+
+    /// Test a sub-pattern against the field value, with exit on failure
+    fn test_sub_pattern_raw(
+        &mut self,
+        field_id: &Ident,
+        pat: &Pattern,
+        body: RawLambda,
+        fail_exit: i32,
+        loc: Location,
+    ) -> RawLambda {
+        let fail_raise = RawLambda::LstaticRaise(fail_exit, Vec::new());
+        match &pat.pat_desc {
+            PatternDesc::Tpat_constant(TConstant::Int(i)) => {
+                let cond = RawLambda::prim(
+                    Primitive::Pjscomp(Comparison::Neq),
+                    vec![
+                        RawLambda::var(field_id.clone()),
+                        RawLambda::const_(Constant::int(*i as i32)),
+                    ],
+                    loc,
+                );
+                RawLambda::LifThenElse(
+                    Box::new(cond),
+                    Box::new(fail_raise),
+                    Box::new(body),
+                )
+            }
+            PatternDesc::Tpat_constant(TConstant::String(s, _)) => {
+                let cond = RawLambda::prim(
+                    Primitive::Pjscomp(Comparison::Neq),
+                    vec![
+                        RawLambda::var(field_id.clone()),
+                        RawLambda::const_(Constant::string(s.clone())),
+                    ],
+                    loc,
+                );
+                RawLambda::LifThenElse(
+                    Box::new(cond),
+                    Box::new(fail_raise),
+                    Box::new(body),
+                )
+            }
+            PatternDesc::Tpat_var(id, _) => {
+                if id == field_id {
+                    body
+                } else {
+                    RawLambda::let_(
+                        LetKind::Alias,
+                        id.clone(),
+                        RawLambda::var(field_id.clone()),
+                        body,
+                    )
+                }
+            }
+            PatternDesc::Tpat_any => body,
+            _ => {
+                // For other patterns, fall through (exit to next case)
+                fail_raise
+            }
+        }
+    }
+
+    /// Compile sub-match for optional-shape constructors (Some(...) with refutable inner)
+    fn compile_optional_block_sub_match(
+        &mut self,
+        scrut_id: &Ident,
+        cstr: &crate::types::ConstructorDescription,
+        sub_cases: Vec<(Vec<&Pattern>, RawLambda)>,
+        loc: Location,
+    ) -> RawLambda {
+        // Extract the option payload using val_from_option
+        let field_id = sub_cases
+            .iter()
+            .find_map(|(pats, _)| {
+                pats.first().and_then(|p| {
+                    let (inner, _) = peel_aliases(p);
+                    match &inner.pat_desc {
+                        PatternDesc::Tpat_var(id, _) => Some(id.clone()),
+                        _ => None,
+                    }
+                })
+            })
+            .unwrap_or_else(|| self.id_gen.create("match"));
+
+        let from_option = sub_cases
+            .first()
+            .and_then(|(pats, _)| pats.first())
+            .and_then(|p| {
+                self.type_ctx
+                    .get_typed_env(p.pat_env)
+                    .map(|env| {
+                        if type_cannot_contain_undefined(
+                            self.type_ctx,
+                            env.as_ref(),
+                            p.pat_type,
+                        ) {
+                            Primitive::PvalFromOptionNotNest
+                        } else {
+                            Primitive::PvalFromOption
+                        }
+                    })
+            })
+            .unwrap_or(Primitive::PvalFromOption);
+
+        let payload = RawLambda::prim(
+            from_option,
+            vec![RawLambda::var(scrut_id.clone())],
+            loc,
+        );
+
+        let inner = self.compile_single_field_sub_match(&field_id, &sub_cases, loc);
+
+        RawLambda::let_(LetKind::Alias, field_id, payload, inner)
+    }
+
+    /// Compile multi-field sub-match using sequential catch/exit approach.
+    /// Matches OCaml's column-by-column pattern testing with lazy field extraction.
+    fn compile_multi_field_sub_match(
+        &mut self,
+        scrut_id: &Ident,
+        _cstr: &crate::types::ConstructorDescription,
+        field_ids: &[Ident],
+        field_info: &FieldDbgInfo,
+        sub_cases: Vec<(Vec<&Pattern>, RawLambda)>,
+        loc: Location,
+    ) -> RawLambda {
+        if sub_cases.is_empty() {
+            return RawLambda::unit();
+        }
+        if sub_cases.len() == 1 {
+            // Single case: bind all fields
+            let (pats, body) = &sub_cases[0];
+            return self.bind_multi_field_patterns(
+                scrut_id, field_ids, field_info, pats, body.clone(), loc,
+            );
+        }
+
+        // Multiple cases: try each row with catch/exit
+        let mut result: Option<RawLambda> = None;
+
+        for (pats, body) in sub_cases.iter().rev() {
+            match result {
+                None => {
+                    // Last case: bind all fields and run
+                    result = Some(self.bind_multi_field_patterns(
+                        scrut_id,
+                        field_ids,
+                        field_info,
+                        pats,
+                        body.clone(),
+                        loc,
+                    ));
+                }
+                Some(rest) => {
+                    let exit_id = self.next_raise_count();
+                    // Test this row's patterns with exit on failure
+                    let test = self.test_multi_field_row(
+                        scrut_id,
+                        field_ids,
+                        field_info,
+                        pats,
+                        body.clone(),
+                        exit_id,
+                        loc,
+                    );
+                    result = Some(RawLambda::LstaticCatch(
+                        Box::new(test),
+                        (exit_id, Vec::new()),
+                        Box::new(rest),
+                    ));
+                }
+            }
+        }
+
+        result.unwrap_or(RawLambda::unit())
+    }
+
+    /// Bind all fields from a multi-field constructor pattern (for the default/last case)
+    fn bind_multi_field_patterns(
+        &mut self,
+        scrut_id: &Ident,
+        field_ids: &[Ident],
+        field_info: &FieldDbgInfo,
+        pats: &[&Pattern],
+        body: RawLambda,
+        loc: Location,
+    ) -> RawLambda {
+        let mut result = body;
+        // Bind fields in reverse order for correct scoping
+        for (i, (pat, field_id)) in pats.iter().zip(field_ids.iter()).enumerate().rev() {
+            let (inner, _) = peel_aliases(pat);
+            let field_read = RawLambda::prim(
+                Primitive::Pfield(i as i32, field_info.clone()),
+                vec![RawLambda::var(scrut_id.clone())],
+                loc,
+            );
+            match &inner.pat_desc {
+                PatternDesc::Tpat_var(id, _) => {
+                    result = RawLambda::let_(LetKind::Alias, id.clone(), field_read, result);
+                }
+                PatternDesc::Tpat_any => {
+                    // OCaml's make_constr_matching still creates a binding for wildcards
+                    let match_id = self.id_gen.create("match");
+                    result = RawLambda::let_(LetKind::Alias, match_id, field_read, result);
+                }
+                _ => {
+                    // For constants etc. in last row, bind with field_id name
+                    result = RawLambda::let_(LetKind::Alias, field_id.clone(), field_read, result);
+                }
+            }
+        }
+        result
+    }
+
+    /// Test a row of multi-field patterns, with lazy field extraction.
+    /// Matches OCaml's approach of extracting and testing fields sequentially.
+    fn test_multi_field_row(
+        &mut self,
+        scrut_id: &Ident,
+        field_ids: &[Ident],
+        field_info: &FieldDbgInfo,
+        pats: &[&Pattern],
+        body: RawLambda,
+        fail_exit: i32,
+        loc: Location,
+    ) -> RawLambda {
+        let fail_raise = RawLambda::LstaticRaise(fail_exit, Vec::new());
+        let mut result = body;
+
+        // Process fields in reverse order, building up the test chain
+        for (i, (pat, field_id)) in pats.iter().zip(field_ids.iter()).enumerate().rev() {
+            let (inner, _) = peel_aliases(pat);
+            let field_read = RawLambda::prim(
+                Primitive::Pfield(i as i32, field_info.clone()),
+                vec![RawLambda::var(scrut_id.clone())],
+                loc,
+            );
+
+            match &inner.pat_desc {
+                PatternDesc::Tpat_constant(TConstant::Int(val)) => {
+                    let cond = RawLambda::prim(
+                        Primitive::Pjscomp(Comparison::Neq),
+                        vec![
+                            RawLambda::var(field_id.clone()),
+                            RawLambda::const_(Constant::int(*val as i32)),
+                        ],
+                        loc,
+                    );
+                    result = RawLambda::let_(
+                        LetKind::Alias,
+                        field_id.clone(),
+                        field_read,
+                        RawLambda::LifThenElse(
+                            Box::new(cond),
+                            Box::new(fail_raise.clone()),
+                            Box::new(result),
+                        ),
+                    );
+                }
+                PatternDesc::Tpat_var(id, _) => {
+                    // Variable: just bind, no test needed
+                    result = RawLambda::let_(LetKind::Alias, id.clone(), field_read, result);
+                }
+                PatternDesc::Tpat_any => {
+                    // Wildcard: no binding or test needed in test path
+                    // (OCaml skips unused field reads in test rows)
+                }
+                _ => {
+                    // Unknown pattern in test row - exit (can't match)
+                    result = fail_raise.clone();
+                }
+            }
+        }
+
+        result
     }
 
     fn is_irrefutable_pattern(pat: &Pattern) -> bool {
