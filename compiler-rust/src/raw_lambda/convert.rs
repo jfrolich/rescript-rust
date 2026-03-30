@@ -1035,6 +1035,19 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    /// Like is_function_type but only matches when the argument has no label (Nolabel).
+    /// Matches OCaml's check: Tarrow ({lbl = Nolabel; typ}, ...)
+    fn is_nolabel_function_type(&self, ty: TypeExprRef) -> Option<(TypeExprRef, TypeExprRef)> {
+        match self.type_desc(ty) {
+            TypeDesc::Tarrow { arg, ret, .. }
+                if matches!(arg.lbl, crate::types::asttypes::ArgLabel::Nolabel) =>
+            {
+                Some((arg.typ, ret))
+            }
+            _ => None,
+        }
+    }
+
     fn get_function_arity_from_type(
         &self,
         env: &crate::types::env::Env,
@@ -5528,7 +5541,7 @@ impl<'a> RawLambdaConverter<'a> {
 
         match self.arena.get_arity(arity) {
             Some(n) => {
-                let prim = if let Some((lhs, _)) = self.is_function_type(function_type) {
+                let prim = if let Some((lhs, _)) = self.is_nolabel_function_type(function_type) {
                     if self.is_base_type(lhs, "unit") {
                         Primitive::PjsFnMakeUnit
                     } else {
