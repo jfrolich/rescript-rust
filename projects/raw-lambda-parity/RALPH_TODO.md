@@ -17,8 +17,8 @@ This is parity for the **pre-optimization raw lambda stage** (`-drawlambda`), no
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **175/657**
-- Parity hunks: **1038**
+- Unoptimized lambda parity: **176/657**
+- Parity hunks: **1036**
 
 ## Working Rules
 
@@ -41,6 +41,8 @@ This is parity for the **pre-optimization raw lambda stage** (`-drawlambda`), no
 - [x] Ported OCaml switch compilation patterns:
   - `592d828b9` `raw-lambda: port OCaml switch case sorting, share_actions_sw, reintroduce_fail` (174→175)
   - `d8212d83c` `raw-lambda: use Pnull/Pundefined primitives for %null/%undefined`
+  - `106c24295` `raw-lambda: support guards in constructor pattern matching` (175→176)
+  - `6f29ca4e9` `raw-lambda: only use PjsFnMakeUnit for Nolabel unit args`
 
 ## Highest-Impact Open Tasks
 
