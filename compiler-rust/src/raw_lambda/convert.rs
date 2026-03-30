@@ -3115,8 +3115,8 @@ impl<'a> RawLambdaConverter<'a> {
                 }),
             },
             TConstant::Float(f) => Constant::Float(f.clone()),
-            TConstant::BigInt(neg, v) => Constant::BigInt {
-                negative: *neg,
+            TConstant::BigInt(positive, v) => Constant::BigInt {
+                negative: !*positive,
                 value: v.clone(),
             },
         }
