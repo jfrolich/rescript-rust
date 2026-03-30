@@ -1859,19 +1859,26 @@ impl<'a> RawLambdaConverter<'a> {
                     name,
                     num_nonconsts,
                     ..
-                } => self.raw_block_or_prim(
-                    tag,
-                    TagInfo::RecordInlined {
+                } => {
+                    let tag_info = TagInfo::RecordInlined {
                         name,
                         num_nonconst: num_nonconsts,
                         tag,
                         fields: fields_info,
                         mutable_flag,
                         attrs: vec![],
-                    },
-                    elems,
-                    loc,
-                ),
+                    };
+                    // OCaml: if mut = Mutable then raise Not_constant
+                    if matches!(mutable_flag, ParserMutableFlag::Mutable) {
+                        RawLambda::prim(
+                            Primitive::Pmakeblock(tag, tag_info, Mutable::Mutable),
+                            elems,
+                            loc,
+                        )
+                    } else {
+                        self.raw_block_or_prim(tag, tag_info, elems, loc)
+                    }
+                }
                 RecordRepresentation::RecordExtension => {
                     let path = match self.type_desc(first_lbl.lbl_res) {
                         TypeDesc::Tconstr { path, .. } => path,
