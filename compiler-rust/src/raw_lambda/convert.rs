@@ -917,8 +917,11 @@ impl<'a> RawLambdaConverter<'a> {
                 let share_handlers = self.share_actions_sw(&mut sw);
                 Self::reintroduce_fail(&mut sw);
                 let mut result = RawLambda::Lswitch(Box::new(scrut), sw);
-                // Wrap with catch handlers from share_actions_sw
-                for (exit_id, handler) in share_handlers.into_iter().rev() {
+                // Wrap with catch handlers from share_actions_sw.
+                // OCaml's handle_shared composes handlers as h(ohs(x)),
+                // so the first shared action is innermost. We iterate forward
+                // to match: first handler becomes innermost catch.
+                for (exit_id, handler) in share_handlers.into_iter() {
                     result = RawLambda::LstaticCatch(
                         Box::new(result),
                         (exit_id, Vec::new()),
@@ -1693,7 +1696,16 @@ impl<'a> RawLambdaConverter<'a> {
         base: Option<&Expression>,
     ) -> RawLambda {
         let Some((_, first_lbl, _, _)) = fields.first() else {
-            return RawLambda::unit();
+            // Empty record: OCaml creates Pmakeblock(tag=0, []) which prints as [0]
+            return self.raw_block_or_prim(
+                0,
+                TagInfo::Record {
+                    fields: Vec::new(),
+                    mutable_flag: ParserMutableFlag::Immutable,
+                },
+                Vec::new(),
+                loc,
+            );
         };
 
         let repres = first_lbl.lbl_repres.clone();
