@@ -4787,7 +4787,7 @@ impl<'a> RawLambdaConverter<'a> {
                 Lambda::let_(LetKind::Alias, tmp, scrut, result)
             }
             PatternDesc::Tpat_record(fields, _) => {
-                let tmp = self.id_gen.create("record");
+                let tmp = self.id_gen.create("match");
                 let mut result = body;
                 for (lid, lbl, inner_pat, _) in fields.iter().rev() {
                     let field = Lambda::prim(
@@ -4868,7 +4868,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let (tmp, wrap_tmp) = match scrut.clone() {
                     RawLambda::Lvar(id) => (id, None),
                     _ => {
-                        let tmp = self.id_gen.create("tuple");
+                        let tmp = self.id_gen.create("match");
                         (tmp.clone(), Some((tmp, scrut)))
                     }
                 };
@@ -4891,7 +4891,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let (tmp, wrap_tmp) = match scrut.clone() {
                     RawLambda::Lvar(id) => (id, None),
                     _ => {
-                        let tmp = self.id_gen.create("record");
+                        let tmp = self.id_gen.create("match");
                         (tmp.clone(), Some((tmp, scrut)))
                     }
                 };
