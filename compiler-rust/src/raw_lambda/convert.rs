@@ -3835,6 +3835,18 @@ impl<'a> RawLambdaConverter<'a> {
                     let match_id = self.id_gen.create("match");
                     result = RawLambda::let_(LetKind::Alias, match_id, payload, result);
                 } else {
+                    // OCaml's matching eliminates trivial `let x = val_from_option(arg) in x`
+                    // when the body is just the bound variable (e.g., function optional params
+                    // where `match opt with Some sth -> sth | None -> default`).
+                    // But keeps the binding when the body is complex (e.g., record optional
+                    // fields where the body is the entire function body).
+                    if let PatternDesc::Tpat_var(id, _) = &arg_pat.pat_desc {
+                        if let RawLambda::Lvar(body_id) = &result {
+                            if body_id == id {
+                                return payload;
+                            }
+                        }
+                    }
                     result = self.bind_irrefutable_pattern_raw(arg_pat, payload, result);
                 }
                 return result;
