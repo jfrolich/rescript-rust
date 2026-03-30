@@ -3770,6 +3770,15 @@ impl<'a> RawLambdaConverter<'a> {
                     let match_id = self.id_gen.create("match");
                     result = RawLambda::let_(LetKind::Alias, match_id, payload, result);
                 } else {
+                    // OCaml matching optimizes `Some x -> x` to just `val_from_option(arg)`
+                    // by recognizing that the body is the bound variable.
+                    if let PatternDesc::Tpat_var(id, _) = &arg_pat.pat_desc {
+                        if let RawLambda::Lvar(body_id) = &result {
+                            if body_id == id {
+                                return payload;
+                            }
+                        }
+                    }
                     result = self.bind_irrefutable_pattern_raw(arg_pat, payload, result);
                 }
                 return result;
