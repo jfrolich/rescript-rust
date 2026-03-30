@@ -12,22 +12,24 @@ use crate::lambda::{FieldDbgInfo, FunctionAttribute, InlineAttribute, Primitive,
 use crate::parser::formatter::{BoxKind, Formatter};
 use crate::raw_lambda::{RawApply, RawLFunction, RawLambda, RawLambdaSwitch, RawPrimInfo};
 
-/// Print a string in OCaml style: escape non-ASCII bytes as \xHH.
+/// Print a string in OCaml style: escape non-ASCII bytes as \NNN (decimal).
+/// Strings are stored as Latin-1 (each char codepoint = original byte value),
+/// so we iterate chars and use the codepoint as the byte value.
 fn print_ocaml_string<W: Write>(f: &mut Formatter<W>, s: &str) {
     f.string("\"");
-    for byte in s.bytes() {
+    for ch in s.chars() {
+        let byte = ch as u32;
         match byte {
-            b'"' => f.string("\\\""),
-            b'\\' => f.string("\\\\"),
-            b'\n' => f.string("\\n"),
-            b'\r' => f.string("\\r"),
-            b'\t' => f.string("\\t"),
-            0x20..=0x7e => {
-                let ch = byte as char;
-                f.print(format_args!("{ch}"));
-            }
-            // OCaml uses decimal \NNN format for non-ASCII bytes
-            _ => f.print(format_args!("\\{byte:03}")),
+            0x22 /* " */ => f.string("\\\""),
+            0x5C /* \ */ => f.string("\\\\"),
+            0x0A /* \n */ => f.string("\\n"),
+            0x0D /* \r */ => f.string("\\r"),
+            0x09 /* \t */ => f.string("\\t"),
+            0x20..=0x7e => f.print(format_args!("{ch}")),
+            // OCaml uses decimal \NNN for non-printable/non-ASCII bytes
+            _ if byte <= 0xFF => f.print(format_args!("\\{byte:03}")),
+            // Shouldn't happen for Latin-1 strings, but handle gracefully
+            _ => f.print(format_args!("\\x{byte:04x}")),
         }
     }
     f.string("\"");
@@ -344,7 +346,9 @@ fn print_string_switch_cases_with_exn<W: Write>(
             f.space();
         }
         f.open_box(BoxKind::HV, 1);
-        f.print(format_args!("case {:?}:", s));
+        f.string("case ");
+        print_ocaml_string(f, s);
+        f.string(":");
         f.space();
         lam(f, l, reraise_exn);
         f.close_box();
