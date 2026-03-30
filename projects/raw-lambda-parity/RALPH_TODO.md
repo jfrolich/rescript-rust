@@ -132,9 +132,16 @@ Current parity: **185/657** with **1033** hunks.
 - ~8 files: init_mod/update_mod for recursive modules
 - Various: catch handler ordering, record field bindings, exit ID numbering
 
+**Commits this session:**
+1. `ef840315b` raw-lambda: port grouped constructor sub-pattern matching (184→185, 1020→1033)
+2. `cfa6678a1` raw-lambda: clean up share_actions_sw implementation
+
 **Failed approaches this session:**
-- **Blanket isout→>= replacement**: 185→184 (-1 file, +3 hunks). OCaml uses BOTH `isout` and `>=` depending on `switch.ml` cost heuristics (`Sep` vs `Inter` in `Switcher.zyva`). A blanket replacement is wrong.
-- **2-case != chain optimization**: Neutral file count, +5 hunks. OCaml's exact != chain structure depends on `call_switcher` tree decomposition.
+- **Blanket isout→>= replacement**: 185→184. OCaml uses BOTH `isout` and `>=` depending on `switch.ml` cost heuristics. Cannot fix without porting switch.ml.
+- **2-case != chain optimization**: Neutral file count, +5 hunks.
+- **All-action share_actions_sw wrapping**: 185→178. OCaml only wraps SHARED (duplicate) actions, not singletons. The StoreExp.mk_store `Single`/`Shared` distinction confirmed this.
+- **Handler ordering reversal**: Neutral. share_actions_sw handlers only matter in the `None` failaction path (exhaustive matches), which is rare.
+- **shared_bodies forward wrapping**: 185→184. Reverse order is correct for shared_bodies.
 
 **Key insight: Stamp divergence dominates**
 233 of 472 failing files have EXACTLY 1 hunk that's purely ident stamp differences. These are NOT raw lambda issues — they're from the type checker allocating ident stamps at different rates. Fixing these requires type checker work, not raw lambda work. The remaining ~239 files have structural differences.
