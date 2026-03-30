@@ -19654,8 +19654,8 @@ impl Env {
                     // substitution/copying, and OCaml still resolves those through
                     // the persistent environment.
                     if let Some(pers) = pers_env.as_mut() {
-                        if let Some(renamed_sig) = pers.get_renamed_sig(mod_name, ctx) {
-                            let result = Some((renamed_sig, Some(mod_name.to_string())));
+                        if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
+                            let result = Some((ps.ps_sig.clone(), Some(mod_name.to_string())));
                             visiting.remove(path);
                             return result;
                         }
@@ -22736,9 +22736,9 @@ fn resolve_module_signature_for_path<'a>(
                 return Some((access_path, sig));
             }
             if let Some(pers) = pers_env.as_mut() {
-                if let Some(renamed_sig) = pers.get_renamed_sig(id.name(), ctx) {
+                if let Some(ps) = pers.find_pers_struct(id.name(), ctx) {
                     let access_path = Path::pident(Ident::create_persistent(id.name()));
-                    let sig = copy_lookup_signature_for_subst(&renamed_sig, ctx);
+                    let sig = copy_lookup_signature_for_subst(&ps.ps_sig, ctx);
                     if let Some(qualified_alias_path) =
                         pers.qualified_alias_path_for_flattened_head(id.name())
                     {
