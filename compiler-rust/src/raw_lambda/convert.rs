@@ -1522,6 +1522,51 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    /// Port of OCaml's Translcore.transl_primitive.
+    /// Creates a lambda wrapper for a primitive operation, used when a primitive
+    /// value needs to be coerced to a regular value (e.g., in module inclusion).
+    fn transl_primitive_raw(
+        &mut self,
+        prim: &crate::types::PrimitiveDescription,
+        ty: TypeExprRef,
+        loc: Location,
+    ) -> RawLambda {
+        let resolved = self.specialize_primitive_raw(prim, ty).unwrap_or_else(|| {
+            Primitive::PjsCall {
+                prim_name: Self::raw_primitive_name(&prim.prim_name).to_string(),
+                arg_types: vec![ExternalArgSpec { label: None }; prim.prim_arity.max(0) as usize],
+                ffi: ExternalFfiSpec { module_name: None },
+                dynamic_import: false,
+                transformed_jsx: false,
+            }
+        });
+
+        let prim_arity = prim.prim_arity;
+
+        // OCaml: if p.prim_from_constructor || prim_arity = 0 then Lprim (prim, [], loc)
+        if prim_arity == 0 {
+            return RawLambda::prim(resolved, vec![], loc);
+        }
+
+        // Create parameter idents matching OCaml's naming
+        let params: Vec<Ident> = if prim_arity == 1 {
+            vec![self.id_gen.create("prim")]
+        } else {
+            (0..prim_arity)
+                .map(|i| self.id_gen.create(&format!("prim{}", i)))
+                .collect()
+        };
+
+        let args: Vec<RawLambda> = params.iter().map(|id| RawLambda::var(id.clone())).collect();
+
+        RawLambda::function_(
+            prim_arity,
+            params,
+            RawLambda::prim(resolved, args, loc.clone()),
+            FunctionAttribute::default(),
+        )
+    }
+
     fn specialize_primitive_raw(
         &self,
         prim: &crate::types::PrimitiveDescription,
@@ -2269,7 +2314,9 @@ impl<'a> RawLambdaConverter<'a> {
                 );
                 self.apply_coercion_result_raw(loc, strict, arg, param, carg, cc_res)
             }
-            ModuleCoercion::Tcoerce_primitive(_) => arg,
+            ModuleCoercion::Tcoerce_primitive(pc) => {
+                self.transl_primitive_raw(&pc.pc_desc, pc.pc_type, pc.pc_loc)
+            }
             ModuleCoercion::Tcoerce_alias(_, path, inner) => self.name_lambda_raw(strict, arg, |this, _| {
                 this.apply_coercion_raw(
                     loc.clone(),
@@ -2305,35 +2352,40 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleCoercion::Tcoerce_structure(positions, id_pos_list, runtime_fields) => {
                 debug_assert_eq!(positions.len(), runtime_fields.len());
                 let field_ids = fields.iter().cloned().collect::<HashSet<_>>();
-                let block_fields = positions
-                    .iter()
-                    .zip(runtime_fields.iter())
-                    .filter_map(|((pos, field_cc), _name)| {
-                        fields.get(*pos).cloned().map(|id| {
-                            self.apply_coercion_raw(
-                                loc.clone(),
-                                LetKind::Alias,
-                                field_cc,
-                                RawLambda::var(id),
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>();
+                // OCaml matching: Tcoerce_primitive entries generate wrapper functions
+                // directly (not via field lookup), while other coercions use get_field(pos).
+                let mut block_fields = Vec::new();
+                let mut export_ids = Vec::new();
+                for ((pos, field_cc), _name) in positions.iter().zip(runtime_fields.iter()) {
+                    match field_cc {
+                        ModuleCoercion::Tcoerce_primitive(pc) => {
+                            // OCaml: transl_primitive p.pc_loc p.pc_desc p.pc_env p.pc_type
+                            if is_top_level {
+                                export_ids.push(pc.pc_id.clone());
+                            }
+                            block_fields.push(
+                                self.transl_primitive_raw(&pc.pc_desc, pc.pc_type, pc.pc_loc.clone()),
+                            );
+                        }
+                        _ => {
+                            if let Some(id) = fields.get(*pos).cloned() {
+                                if is_top_level {
+                                    export_ids.push(id.clone());
+                                }
+                                block_fields.push(self.apply_coercion_raw(
+                                    loc.clone(),
+                                    LetKind::Strict,
+                                    field_cc,
+                                    RawLambda::var(id),
+                                ));
+                            }
+                        }
+                    }
+                }
                 let tag = if is_top_level {
-                    let ids = positions
-                        .iter()
-                        .filter_map(|(pos, _)| fields.get(*pos).cloned())
-                        .collect::<Vec<_>>();
-                    TagInfo::ModuleExport(ids)
+                    TagInfo::ModuleExport(export_ids)
                 } else {
-                    TagInfo::Module(
-                        positions
-                            .iter()
-                            .filter_map(|(pos, _)| {
-                                fields.get(*pos).map(|id| id.name().to_string())
-                            })
-                            .collect(),
-                    )
+                    TagInfo::Module(runtime_fields.clone())
                 };
                 let lam = RawLambda::prim(
                     Primitive::Pmakeblock(0, tag, Mutable::Immutable),

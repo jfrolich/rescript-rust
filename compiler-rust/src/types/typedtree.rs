@@ -635,14 +635,14 @@ pub enum ModuleCoercion {
 /// Primitive coercion.
 #[derive(Debug, Clone)]
 pub struct PrimitiveCoercion {
-    /// Primitive name.
-    pub pc_name: String,
-    /// External name (for FFI).
-    pub pc_ext_name: String,
-    /// Native name.
-    pub pc_native_name: String,
-    /// Allocation info.
-    pub pc_alloc: i32,
+    /// Primitive description.
+    pub pc_desc: crate::types::PrimitiveDescription,
+    /// Type of the primitive (from the signature).
+    pub pc_type: crate::types::TypeExprRef,
+    /// Location of the primitive declaration.
+    pub pc_loc: crate::location::Location,
+    /// Identifier for the primitive.
+    pub pc_id: crate::ident::Ident,
 }
 
 /// A structure (module definition body).
