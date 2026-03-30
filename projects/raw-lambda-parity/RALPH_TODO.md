@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
-**Last Updated:** 2026-03-29
-**Status:** 3 completed, 5 open
+**Last Updated:** 2026-03-30
+**Status:** 4 completed, 5 open
 
 ## Goal
 
@@ -17,7 +17,7 @@ This is parity for the **pre-optimization raw lambda stage** (`-drawlambda`), no
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **174/657**
+- Unoptimized lambda parity: **175/657**
 - Parity hunks: **1038**
 
 ## Working Rules
@@ -38,6 +38,9 @@ This is parity for the **pre-optimization raw lambda stage** (`-drawlambda`), no
   - `8e2e77d4c` `raw-lambda: preserve irrefutable var aliases`
 - [x] Ported raw array translation:
   - `9daa6db0b` `raw-lambda: port raw array translation`
+- [x] Ported OCaml switch compilation patterns:
+  - `592d828b9` `raw-lambda: port OCaml switch case sorting, share_actions_sw, reintroduce_fail` (174→175)
+  - `d8212d83c` `raw-lambda: use Pnull/Pundefined primitives for %null/%undefined`
 
 ## Highest-Impact Open Tasks
 
