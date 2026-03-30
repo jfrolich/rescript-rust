@@ -17,8 +17,8 @@ This is parity for the **pre-optimization raw lambda stage** (`-drawlambda`), no
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **180/657**
-- Parity hunks: **1024**
+- Unoptimized lambda parity: **182/657**
+- Parity hunks: **1022**
 
 ## Working Rules
 
@@ -121,10 +121,11 @@ Current parity: **180/657** with **1024** hunks.
 5. `0a42c515f` raw-lambda: use 'match' naming for destructuring temp variables (1 file structural→ident-only)
 6. `fbdcd2499` raw-lambda: use Strict let-kind for record/tuple scrutinee bindings
 7. `44dce4a39` raw-lambda: use StrictOpt let-kind for mutable record field bindings (1 file structural→ident-only)
+8. `15f9b301a` raw-lambda: prevent constant folding for mutable records (180→182, 1024→1022)
 
-**Remaining failure breakdown (477 files, 1024 hunks):**
-- 273 ident-only (stamp numbers from type checker, not raw lambda)
-- 204 structural diffs
+**Remaining failure breakdown (475 files, 1022 hunks):**
+- ~273 ident-only (stamp numbers from type checker, not raw lambda)
+- ~202 structural diffs
 
 **Top structural clusters (updated):**
 - ~80 files: Extra `match/N` bindings for unused record fields (OCaml binds all fields, Rust skips unused). Requires porting OCaml's `make_record_matching` which iterates all labels via `lbl_all`.
