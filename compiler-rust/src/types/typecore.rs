@@ -15991,6 +15991,65 @@ fn build_signature_from_structure(
 }
 
 /// Type check pack expression (first-class module).
+/// Recursively wrap Tmod_ident for alias modules in Tmod_constraint implicit.
+/// Handles both direct Tmod_ident and Tmod_constraint(Tmod_ident, explicit).
+fn wrap_alias_ident_in_constraint(
+    mut module: crate::types::typedtree::ModuleExpr,
+    env: &Env,
+) -> crate::types::typedtree::ModuleExpr {
+    use crate::types::typedtree::{ModuleExprDesc, ModuleTypeConstraint, ModuleCoercion};
+
+    match &module.mod_desc {
+        ModuleExprDesc::Tmod_ident(path, _) => {
+            // Check if this module is an alias
+            let is_alias = match path {
+                Path::Pident(id) => env.find_module(id.name())
+                    .ok()
+                    .is_some_and(|md| matches!(md.md_type, crate::types::decl::ModuleType::MtyAlias(_, _))),
+                Path::Pdot(..) => true, // Pdot submodules are typically aliases
+                _ => false,
+            };
+            if is_alias {
+                let inner_mty = module.mod_type.clone();
+                let inner_loc = module.mod_loc;
+                let inner_attrs = module.mod_attributes.clone();
+                crate::types::typedtree::ModuleExpr {
+                    mod_desc: ModuleExprDesc::Tmod_constraint(
+                        Box::new(module),
+                        crate::types::typedtree::ModuleType::placeholder(),
+                        ModuleTypeConstraint::Tmodtype_implicit,
+                        ModuleCoercion::Tcoerce_none,
+                    ),
+                    mod_loc: inner_loc,
+                    mod_type: inner_mty,
+                    mod_env: crate::types::typedtree::EnvRef(0),
+                    mod_attributes: inner_attrs,
+                }
+            } else {
+                module
+            }
+        }
+        ModuleExprDesc::Tmod_constraint(..) => {
+            // Recurse: deconstruct, wrap inner, reconstruct
+            let crate::types::typedtree::ModuleExpr {
+                mod_desc, mod_loc, mod_type, mod_env, mod_attributes
+            } = module;
+            if let ModuleExprDesc::Tmod_constraint(inner, mty, constraint, coercion) = mod_desc {
+                let wrapped_inner = wrap_alias_ident_in_constraint(*inner, env);
+                crate::types::typedtree::ModuleExpr {
+                    mod_desc: ModuleExprDesc::Tmod_constraint(
+                        Box::new(wrapped_inner), mty, constraint, coercion,
+                    ),
+                    mod_loc, mod_type, mod_env, mod_attributes,
+                }
+            } else {
+                unreachable!()
+            }
+        }
+        _ => module,
+    }
+}
+
 fn type_pack(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -16188,7 +16247,13 @@ fn type_pack(
     )
     .map_err(|e| TypeCoreError::Other(format!("pack: {e:?}")))?;
 
-    // Match OCaml type_module_aux Pmod_ident: when the packed module is
+    // Match OCaml type_module_aux: wrap Tmod_ident for alias modules in
+    // Tmod_constraint implicit. This happens when alias=false in OCaml
+    // (type_package calls type_module with alias=false). We use alias=true
+    // to avoid breaking pack type checking, then add the wrapping post-hoc.
+    // Handles both top-level Tmod_ident and nested Tmod_constraint(Tmod_ident).
+    let typed_module = wrap_alias_ident_in_constraint(typed_module, env);
+
     if debug_pack {
         let full_loc = tctx.arena.to_location(loc);
         let mod_kind = match &typed_module.mod_desc {
