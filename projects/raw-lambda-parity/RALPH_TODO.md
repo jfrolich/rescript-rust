@@ -17,8 +17,8 @@ This is parity for the **pre-optimization raw lambda stage** (`-drawlambda`), no
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **182/657**
-- Parity hunks: **1022**
+- Unoptimized lambda parity: **184/657**
+- Parity hunks: **1020**
 
 ## Working Rules
 
@@ -107,6 +107,34 @@ For each iteration:
 - [ ] Commit immediately if the change is verified OCaml-aligned
 
 ## Session Log
+
+### 2026-03-30 (session 5)
+
+Starting parity: **182/657** with **1022** hunks.
+Current parity: **184/657** with **1020** hunks.
+
+**Commits this session:**
+1. `a2a89cbdb` raw-lambda: keep trivial let-binding for optional parameter extraction (verified OCaml-aligned, +6 hunks)
+2. `bcebe10ae` raw-lambda: use @as attribute for record field debug names (fix parser_attr_to_decl_attr)
+3. `e9c0f5cc0` raw-lambda: use Alias let-kind for record/tuple pattern temporaries
+4. `c0bc36857` raw-lambda: restore trivial optional binding simplification (-6 hunks, back to baseline)
+5. `bd83e85ae` raw-lambda: skip self-binding when scrut is same variable (bind_check) (182→183, 1022→1021)
+6. `ede0d40dc` raw-lambda: use OCaml-style decimal escapes for non-ASCII bytes
+7. `9b171b20d` raw-lambda: fix Latin-1 string printing to match OCaml byte escaping (183→184, 1021→1020)
+
+**Key findings:**
+- 270 ident-only files (stamp divergence from type checker, not raw lambda)
+- 205 structural diffs remaining
+- @as attribute payload was being lost (parser_attr_to_decl_attr stored Structure([]) instead of Str("name"))
+- Latin-1 string handling: source read as Latin-1 (byte→char), so printer must iterate chars and use codepoints as byte values
+- OCaml's bind_check skips `let x = x` self-bindings; ported to Rust
+
+**Remaining structural clusters (updated):**
+- ~69 files: field:tag fallback (constructor matching → lowered if-chains)
+- ~47 files: Extra match/N bindings for unused record fields
+- ~14 files: letrec/init_mod/update_mod
+- ~13 files: String encoding (double-encoding of non-ASCII in source strings)
+- ~8 files: Optional parameter handling differences
 
 ### 2026-03-30 (session 4)
 
