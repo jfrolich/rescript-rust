@@ -18032,6 +18032,9 @@ fn copy_lookup_value_components_signature(
     sig_items: &[crate::types::decl::SignatureItem],
     ctx: &TypeContext<'_>,
 ) -> crate::types::decl::Signature {
+    // Rename bound idents, matching OCaml's Subst.signature called via
+    // Lazy.force ps.ps_sig in find_module when a persistent module is
+    // first accessed for value lookup.
     sig_items
         .iter()
         .map(|item| match item {
@@ -18261,8 +18264,11 @@ impl Env {
                 }
 
                 if let Some((mod_path, sig)) = resolved_module {
+                    // Cache key without env ID: for persistent modules, the
+                    // signature rename should happen once (matching OCaml's lazy
+                    // Subst.signature which is forced once per ps_sig).
                     let value_component_cache_key =
-                        format!("module-values::{}::env{}", prefix_cache_fragment, self.id());
+                        format!("module-values::{}", prefix_cache_fragment);
                     let (mod_path, sig) = if let Some(cached) =
                         ctx.find_resolved_module_sig(&value_component_cache_key)
                     {

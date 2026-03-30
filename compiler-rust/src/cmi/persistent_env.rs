@@ -438,6 +438,37 @@ impl PersistentEnv {
 /// Recursively register all type declarations from a signature
 /// into the type context's global store for alias expansion.
 ///
+/// Rename all bound idents in a signature, matching OCaml's
+/// `Subst.signature Subst.identity` which calls `rename_bound_idents`.
+/// This gives each signature item a fresh stamp even with identity substitution.
+fn rename_bound_idents_in_sig<'a>(
+    sig_items: &Signature,
+    ctx: &'a TypeContext<'a>,
+) -> Signature {
+    sig_items
+        .iter()
+        .map(|item| match item {
+            SignatureItem::SigValue(id, desc) => {
+                SignatureItem::SigValue(ctx.rename_ident(id), desc.clone())
+            }
+            SignatureItem::SigType(id, decl, rec_status) => {
+                SignatureItem::SigType(ctx.rename_ident(id), decl.clone(), *rec_status)
+            }
+            SignatureItem::SigTypext(id, ext, ext_status) => {
+                SignatureItem::SigTypext(ctx.rename_ident(id), ext.clone(), *ext_status)
+            }
+            SignatureItem::SigModule(id, md, rec_status) => {
+                SignatureItem::SigModule(ctx.rename_ident(id), md.clone(), *rec_status)
+            }
+            SignatureItem::SigModtype(id, mtd) => {
+                SignatureItem::SigModtype(ctx.rename_ident(id), mtd.clone())
+            }
+            SignatureItem::SigClass => SignatureItem::SigClass,
+            SignatureItem::SigClassType => SignatureItem::SigClassType,
+        })
+        .collect()
+}
+
 /// `module_path` is the path to the module containing this signature
 /// (e.g., `Pident(Js)` or `Pdot(Pident(Js), "Promise")`).
 /// `load_path` is used to resolve module aliases by loading CMI files.

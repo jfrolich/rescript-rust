@@ -25,9 +25,10 @@ use crate::types::{
     TypeCheckContext, TypeContext, initial_env, transl_signature, type_structure,
 };
 
-// OCaml's Predef sets `Ident.set_current_time 999`, but one additional ident
-// is created before user code (during Pervasives loading), so user idents start at 1001.
-// Rust's next_stamp() does fetch_add(1)+1, so with current_stamp=1000 the first stamp is 1001.
+// OCaml's Predef sets `Ident.set_current_time 999`. OCaml then creates one
+// additional ident (+/1000) during components_of_module_maker for Pervasives,
+// so user idents start at 1001. Rust doesn't have this step, so we start at
+// 1000 and the first stamp from next_stamp() is 1001.
 const OCAML_NON_PREDEF_STAMP_START: i32 = 1000;
 
 fn module_name_from_source_filename(path: &str) -> String {
