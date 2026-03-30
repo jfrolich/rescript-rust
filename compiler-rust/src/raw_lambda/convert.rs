@@ -4883,7 +4883,8 @@ impl<'a> RawLambdaConverter<'a> {
                     result = self.bind_irrefutable_pattern_raw(item, field, result);
                 }
                 match wrap_tmp {
-                    Some((tmp, scrut)) => RawLambda::let_(LetKind::Alias, tmp, scrut, result),
+                    // OCaml: arg_to_var uses Strict for non-variable scrutinee
+                    Some((tmp, scrut)) => RawLambda::let_(LetKind::Strict, tmp, scrut, result),
                     None => result,
                 }
             }
@@ -4913,7 +4914,8 @@ impl<'a> RawLambdaConverter<'a> {
                     result = self.bind_irrefutable_pattern_raw(inner_pat, field, result);
                 }
                 match wrap_tmp {
-                    Some((tmp, scrut)) => RawLambda::let_(LetKind::Alias, tmp, scrut, result),
+                    // OCaml: arg_to_var uses Strict for non-variable scrutinee
+                    Some((tmp, scrut)) => RawLambda::let_(LetKind::Strict, tmp, scrut, result),
                     None => result,
                 }
             }
