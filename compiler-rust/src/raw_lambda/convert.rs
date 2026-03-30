@@ -686,6 +686,73 @@ impl<'a> RawLambdaConverter<'a> {
             .unwrap_or_else(|| default.to_string())
     }
 
+    /// Look up all label declarations for a record type.
+    /// OCaml's make_record_matching uses lbl_all to iterate over ALL fields.
+    /// Since Rust's lbl_all is a placeholder, we resolve via the type context cache.
+    fn resolve_all_record_labels(
+        &self,
+        record_ty: TypeExprRef,
+    ) -> Option<Vec<(String, i32, TypeMutableFlag, RecordRepresentation, Vec<crate::types::decl::Attribute>)>> {
+        let ty = self.type_ctx.repr(record_ty);
+        let desc = self.type_ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tconstr { path, .. } => {
+                // Try the record labels cache (populated during type checking)
+                // Use Debug format of path for unique key (includes stamps)
+                let cache_key = format!("{:?}", path);
+                if let Some(labels) = self.type_ctx.get_record_labels(&cache_key) {
+                    return Some(labels);
+                }
+                // Try env lookup
+                if let Ok(decl) = self.env.lookup_type(path) {
+                    if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
+                        return Some(labels.iter().enumerate().map(|(pos, ld)| {
+                            let name = ld.ld_attributes.iter()
+                                .find(|a| a.attr_name.txt == "as")
+                                .and_then(|a| match &a.attr_payload {
+                                    crate::types::decl::AttributePayload::Str(s) => Some(s.clone()),
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| ld.ld_id.name().to_string());
+                            (name, pos as i32, ld.ld_mutable.clone(), repr.clone(), ld.ld_attributes.clone())
+                        }).collect());
+                    }
+                }
+                // Try type_ctx stores
+                if let Some(decl) = self.type_ctx.find_type_decl_by_path(&path.name()) {
+                    if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
+                        return Some(labels.iter().enumerate().map(|(pos, ld)| {
+                            let name = ld.ld_attributes.iter()
+                                .find(|a| a.attr_name.txt == "as")
+                                .and_then(|a| match &a.attr_payload {
+                                    crate::types::decl::AttributePayload::Str(s) => Some(s.clone()),
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| ld.ld_id.name().to_string());
+                            (name, pos as i32, ld.ld_mutable.clone(), repr.clone(), ld.ld_attributes.clone())
+                        }).collect());
+                    }
+                }
+                if let Some(decl) = self.type_ctx.find_type_decl(&path.last()) {
+                    if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
+                        return Some(labels.iter().enumerate().map(|(pos, ld)| {
+                            let name = ld.ld_attributes.iter()
+                                .find(|a| a.attr_name.txt == "as")
+                                .and_then(|a| match &a.attr_payload {
+                                    crate::types::decl::AttributePayload::Str(s) => Some(s.clone()),
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| ld.ld_id.name().to_string());
+                            (name, pos as i32, ld.ld_mutable.clone(), repr.clone(), ld.ld_attributes.clone())
+                        }).collect());
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn global_path(&self) -> Option<crate::types::Path> {
         if self.unit_name.is_empty() {
             None
@@ -5620,32 +5687,120 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 };
                 let mut result = body;
+
+                // OCaml's make_record_matching binds ALL fields (from lbl_all),
+                // not just the ones mentioned in the pattern.
+                // Build a map of pattern-mentioned positions.
+                let mut mentioned: HashMap<i32, (&crate::types::typedtree::Loc<LidentIdx>, &LabelDescription, &Pattern)> = HashMap::new();
                 for (lid, lbl, inner_pat, _) in fields.iter() {
-                    let field = match &lbl.lbl_repres {
-                        RecordRepresentation::RecordUnboxed(_) => RawLambda::var(tmp.clone()),
-                        _ => {
-                            let Some((pos, info)) = raw_record_field_access(lbl) else {
-                                continue;
-                            };
-                            RawLambda::prim(
-                                Primitive::Pfield(pos, info),
-                                vec![RawLambda::var(tmp.clone())],
-                                self.loc(lid.loc),
-                            )
+                    mentioned.insert(lbl.lbl_pos, (lid, lbl, inner_pat));
+                }
+
+                // Try to resolve all labels for this record type
+                let first_lbl = fields.first().map(|(_, lbl, _, _)| lbl);
+                let all_labels = first_lbl.and_then(|lbl| self.resolve_all_record_labels(lbl.lbl_res));
+                let pat_loc_idx = pat.pat_loc;
+
+                if let Some(all_labels) = all_labels {
+                    // Bind ALL fields in position order (OCaml: make_args iterates 0..N)
+                    // Since let bindings wrap inside-out, iterating forward produces
+                    // innermost=first, matching OCaml's output order.
+                    for (name, pos, mutflag, repr, attrs) in all_labels.iter() {
+                        if matches!(repr, RecordRepresentation::RecordUnboxed(_)) {
+                            // Unboxed records: the field IS the scrutinee
+                            if let Some((_, _, inner_pat)) = mentioned.get(pos) {
+                                let field = RawLambda::var(tmp.clone());
+                                if let PatternDesc::Tpat_var(id, _) = &inner_pat.pat_desc {
+                                    result = RawLambda::let_(LetKind::Alias, id.clone(), field, result);
+                                } else {
+                                    result = self.bind_irrefutable_pattern_raw(inner_pat, field, result);
+                                }
+                            }
+                            continue;
                         }
-                    };
-                    // OCaml: matching uses StrictOpt for mutable fields, Alias for immutable
-                    let field_let_kind = if matches!(lbl.lbl_mut, TypeMutableFlag::Mutable) {
-                        LetKind::StrictOpt
-                    } else {
-                        LetKind::Alias
-                    };
-                    if let PatternDesc::Tpat_var(id, _) = &inner_pat.pat_desc {
-                        result = RawLambda::let_(field_let_kind, id.clone(), field, result);
-                    } else {
-                        result = self.bind_irrefutable_pattern_raw(inner_pat, field, result);
+
+                        let field_pos = match repr {
+                            RecordRepresentation::RecordExtension => pos + 1,
+                            _ => *pos,
+                        };
+                        let info = match repr {
+                            RecordRepresentation::RecordRegular => FieldDbgInfo::Record {
+                                name: name.clone(),
+                                mutable_flag: if matches!(mutflag, TypeMutableFlag::Mutable) {
+                                    crate::parser::ast::MutableFlag::Mutable
+                                } else {
+                                    crate::parser::ast::MutableFlag::Immutable
+                                },
+                            },
+                            RecordRepresentation::RecordFloatUnused => continue,
+                            RecordRepresentation::RecordInlined { .. } => FieldDbgInfo::RecordInline {
+                                name: name.clone(),
+                            },
+                            RecordRepresentation::RecordExtension => FieldDbgInfo::RecordExtension {
+                                name: name.clone(),
+                            },
+                            RecordRepresentation::RecordUnboxed(_) => unreachable!(),
+                        };
+                        let field_let_kind = if matches!(mutflag, TypeMutableFlag::Mutable) {
+                            LetKind::StrictOpt
+                        } else {
+                            LetKind::Alias
+                        };
+
+                        let loc = if let Some((lid, _, _)) = mentioned.get(pos) {
+                            self.loc(lid.loc)
+                        } else {
+                            self.loc(pat_loc_idx)
+                        };
+
+                        let field = RawLambda::prim(
+                            Primitive::Pfield(field_pos, info),
+                            vec![RawLambda::var(tmp.clone())],
+                            loc,
+                        );
+
+                        if let Some((_, _, inner_pat)) = mentioned.get(pos) {
+                            // Mentioned in pattern: bind using the pattern's variable
+                            if let PatternDesc::Tpat_var(id, _) = &inner_pat.pat_desc {
+                                result = RawLambda::let_(field_let_kind, id.clone(), field, result);
+                            } else {
+                                result = self.bind_irrefutable_pattern_raw(inner_pat, field, result);
+                            }
+                        } else {
+                            // Not mentioned: bind to a fresh match/N variable (OCaml's omega pattern)
+                            let fresh = self.id_gen.create("match");
+                            result = RawLambda::let_(field_let_kind, fresh, field, result);
+                        }
+                    }
+                } else {
+                    // Fallback: bind only mentioned fields (can't resolve all labels)
+                    for (lid, lbl, inner_pat, _) in fields.iter() {
+                        let field = match &lbl.lbl_repres {
+                            RecordRepresentation::RecordUnboxed(_) => RawLambda::var(tmp.clone()),
+                            _ => {
+                                let Some((pos, info)) = raw_record_field_access(lbl) else {
+                                    continue;
+                                };
+                                RawLambda::prim(
+                                    Primitive::Pfield(pos, info),
+                                    vec![RawLambda::var(tmp.clone())],
+                                    self.loc(lid.loc),
+                                )
+                            }
+                        };
+                        let field_let_kind = if matches!(lbl.lbl_mut, TypeMutableFlag::Mutable) {
+                            LetKind::StrictOpt
+                        } else {
+                            LetKind::Alias
+                        };
+                        if let PatternDesc::Tpat_var(id, _) = &inner_pat.pat_desc {
+                            result = RawLambda::let_(field_let_kind, id.clone(), field, result);
+                        } else {
+                            result = self.bind_irrefutable_pattern_raw(inner_pat, field, result);
+                        }
                     }
                 }
+
                 match wrap_tmp {
                     // OCaml: make_record_matching binds field accesses with Alias (immutable)
                     // or StrictOpt (mutable). When we wrap a sub-record scrutinee that came

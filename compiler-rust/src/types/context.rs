@@ -182,6 +182,12 @@ pub struct TypeContext<'a> {
     /// can use the original's dedup key.
     arity_aliases: RefCell<std::collections::HashMap<TypeExprRef, TypeExprRef>>,
 
+    /// Record type labels cache.
+    /// Maps type path (with stamp for uniqueness) → Vec<(field_name, position, mutable, repr, attributes)>.
+    /// Populated during type checking when record patterns are processed.
+    /// Used by raw lambda conversion to bind ALL record fields (matching OCaml's make_record_matching).
+    record_labels_cache: RefCell<std::collections::HashMap<String, Vec<(String, i32, super::asttypes::MutableFlag, super::decl::RecordRepresentation, Vec<super::decl::Attribute>)>>>,
+
     /// Stored typedtree environment snapshots, keyed by EnvRef.
     typed_envs: RefCell<Vec<Arc<Env>>>,
 
@@ -233,6 +239,7 @@ impl<'a> TypeContext<'a> {
             predef_option_inner: Cell::new(None),
             predef_option_type: Cell::new(None),
             arity_aliases: RefCell::new(std::collections::HashMap::new()),
+            record_labels_cache: RefCell::new(std::collections::HashMap::new()),
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(std::collections::HashMap::new()),
         }
@@ -614,6 +621,24 @@ impl<'a> TypeContext<'a> {
     /// Get the arity alias for a TypeExprRef, if any.
     pub fn get_arity_alias(&self, te: TypeExprRef) -> Option<TypeExprRef> {
         self.arity_aliases.borrow().get(&te).copied()
+    }
+
+    /// Cache record label info for a type path.
+    /// Called during type checking when record patterns are processed.
+    pub fn register_record_labels(
+        &self,
+        type_path_name: &str,
+        labels: Vec<(String, i32, super::asttypes::MutableFlag, super::decl::RecordRepresentation, Vec<super::decl::Attribute>)>,
+    ) {
+        self.record_labels_cache.borrow_mut().insert(type_path_name.to_string(), labels);
+    }
+
+    /// Look up cached record labels for a type path.
+    pub fn get_record_labels(
+        &self,
+        type_path_name: &str,
+    ) -> Option<Vec<(String, i32, super::asttypes::MutableFlag, super::decl::RecordRepresentation, Vec<super::decl::Attribute>)>> {
+        self.record_labels_cache.borrow().get(type_path_name).cloned()
     }
 
     // ========================================================================

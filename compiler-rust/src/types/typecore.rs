@@ -13692,7 +13692,7 @@ fn get_record_labels<'a>(
     if let Some((path, _actual_args, type_decl)) =
         extract_concrete_record_type_info(ty, env, pers_env, ctx)
     {
-        if let crate::types::TypeKind::TypeRecord(ref labels, _) = type_decl.type_kind {
+        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = type_decl.type_kind {
             if std::env::var_os("RUST_DEBUG_RECORD_LABELS").is_some()
                 && path.last() == "options"
             {
@@ -13729,6 +13729,21 @@ fn get_record_labels<'a>(
                     }
                 }
             }
+            // Cache record labels for raw lambda all-field binding.
+            // Use a unique cache key that includes path stamps to avoid collisions
+            // between different record types with the same name.
+            let cache_key = format!("{:?}", path);
+            let cache_entries: Vec<_> = labels.iter().enumerate().map(|(pos, ld)| {
+                let name = ld.ld_attributes.iter()
+                    .find(|a| a.attr_name.txt == "as")
+                    .and_then(|a| match &a.attr_payload {
+                        crate::types::decl::AttributePayload::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| ld.ld_id.name().to_string());
+                (name, pos as i32, ld.ld_mutable.clone(), repr.clone(), ld.ld_attributes.clone())
+            }).collect();
+            ctx.register_record_labels(&cache_key, cache_entries);
             return Some(labels.clone());
         }
     }
@@ -15987,6 +16002,87 @@ fn type_pack(
     _context: Option<TypeClashContext>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
+    fn debug_type_summary(ctx: &TypeContext<'_>, ty: TypeExprRef, depth: usize) -> String {
+        use crate::types::type_expr::TypeDesc;
+
+        if depth > 8 {
+            return "...".to_string();
+        }
+
+        let ty = ctx.repr(ty);
+        match &*ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, args, .. } => {
+                if args.is_empty() {
+                    path.name()
+                } else {
+                    format!(
+                        "{}<{}>",
+                        path.name(),
+                        args.iter()
+                            .map(|arg| debug_type_summary(ctx, *arg, depth + 1))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            }
+            TypeDesc::Tarrow { arg, ret, .. } => format!(
+                "({} -> {})",
+                debug_type_summary(ctx, arg.typ, depth + 1),
+                debug_type_summary(ctx, *ret, depth + 1)
+            ),
+            TypeDesc::Ttuple(items) => format!(
+                "({})",
+                items.iter()
+                    .map(|item| debug_type_summary(ctx, *item, depth + 1))
+                    .collect::<Vec<_>>()
+                    .join(" * ")
+            ),
+            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+                debug_type_summary(ctx, *target, depth + 1)
+            }
+            TypeDesc::Tpoly { body, .. } => {
+                format!("poly {}", debug_type_summary(ctx, *body, depth + 1))
+            }
+            TypeDesc::Tvar(name) => format!("var({})", name.as_deref().unwrap_or("_")),
+            TypeDesc::Tunivar(name) => format!("univar({})", name.as_deref().unwrap_or("_")),
+            TypeDesc::Tpackage { path, .. } => format!("package {}", path.name()),
+            TypeDesc::Tvariant(_) => "variant".to_string(),
+            TypeDesc::Tobject { .. } => "object".to_string(),
+            TypeDesc::Tfield { .. } => "field".to_string(),
+            TypeDesc::Tnil => "nil".to_string(),
+        }
+    }
+
+    fn debug_module_type_summary(ctx: &TypeContext<'_>, mty: &crate::types::decl::ModuleType) -> String {
+        use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
+
+        match mty {
+            DeclMty::MtyIdent(path) => format!("ident {}", path.name()),
+            DeclMty::MtyAlias(_, path) => format!("alias {}", path.name()),
+            DeclMty::MtyFunctor { .. } => "functor".to_string(),
+            DeclMty::MtySignature(sig) => {
+                let parts = sig
+                    .iter()
+                    .filter_map(|item| match item {
+                        SignatureItem::SigValue(id, vd) => {
+                            Some(format!("val {}: {}", id.name(), debug_type_summary(ctx, vd.val_type, 0)))
+                        }
+                        SignatureItem::SigType(id, td, _) => Some(format!(
+                            "type {}{}",
+                            id.name(),
+                            td.type_manifest
+                                .map(|ty| format!(" = {}", debug_type_summary(ctx, ty, 0)))
+                                .unwrap_or_default()
+                        )),
+                        SignatureItem::SigModule(id, _, _) => Some(format!("module {}", id.name())),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                format!("sig [{}]", parts.join("; "))
+            }
+        }
+    }
+
     // Match OCaml typecore/typemod type_package flow:
     // - the expected type must be a package
     // - type the packed module expression
@@ -16085,8 +16181,14 @@ fn type_pack(
         }
     };
 
-    let typed_module = crate::types::typemod::type_module_expr(tctx, env, tctx.arena, module_expr)
-        .map_err(|e| TypeCoreError::Other(format!("pack: {e:?}")))?;
+    let typed_module = crate::types::typemod::type_module_expr_with_alias_mode(
+        tctx,
+        env,
+        tctx.arena,
+        module_expr,
+        true,
+    )
+    .map_err(|e| TypeCoreError::Other(format!("pack: {e:?}")))?;
     if debug_pack {
         let full_loc = tctx.arena.to_location(loc);
         let mod_kind = match &typed_module.mod_desc {
@@ -16198,20 +16300,55 @@ fn type_pack(
         expected_pack_args.clone()
     };
     let typed_module_loc = typed_module.mod_loc;
-    let package_mty = crate::types::typedtree::ModuleType {
-        mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_ident(
-            pack_path.clone(),
-            tctx.arena.placeholder_located(loc),
-        ),
-        mty_loc: loc,
-        mty_attributes: Attributes::new(),
-    };
+    let decl_package_mty = crate::types::typemod::modtype_of_package(
+        env,
+        &pack_path,
+        &pack_lids,
+        &pack_args,
+        tctx.arena,
+        &mut tctx.persistent_env,
+        ctx,
+    )
+    .unwrap_or(crate::types::decl::ModuleType::MtyIdent(pack_path.clone()));
+    let package_mty = typed_module_type_for_unpack(tctx.arena, loc, &decl_package_mty);
+    let arg_mty = crate::types::typemod::decl_module_type_from_typed(&typed_module.mod_type)
+    .or_else(|| {
+        crate::types::typemod::extract_module_type_from_mod_expr_with_ctx(
+            &typed_module,
+            Some(env),
+            ctx,
+        )
+    })
+    .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+    if debug_pack {
+        eprintln!("[type-pack] arg_mty={}", debug_module_type_summary(ctx, &arg_mty));
+        match &arg_mty {
+            crate::types::decl::ModuleType::MtyIdent(path)
+            | crate::types::decl::ModuleType::MtyAlias(_, path) => {
+                if let Some(expanded) =
+                    crate::types::ctype::resolve_module_type_through_env(ctx, env, path)
+                {
+                    eprintln!(
+                        "[type-pack] arg_mty_expanded={}",
+                        debug_module_type_summary(ctx, &expanded)
+                    );
+                }
+            }
+            _ => {}
+        }
+        eprintln!(
+            "[type-pack] package_mty={}",
+            debug_module_type_summary(ctx, &decl_package_mty)
+        );
+    }
+    let coercion = crate::types::includemod::modtypes(ctx, env, &arg_mty, &decl_package_mty)
+        .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
     let wrapped_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
             Box::new(typed_module),
             package_mty.clone(),
             crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
-            crate::types::typedtree::ModuleCoercion::Tcoerce_none,
+            coercion,
         ),
         mod_loc: typed_module_loc,
         mod_type: package_mty,
