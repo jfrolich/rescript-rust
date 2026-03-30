@@ -7345,14 +7345,41 @@ fn type_module_expr_with_alias<'a>(
             let mod_expr_inner = arena.get_mod_expr(*mod_expr_inner_idx);
             let typed_mod = type_module_expr_with_alias(tctx, env, arena, mod_expr_inner, alias)?;
             let typed_mty = transl_modtype(tctx, env, arena, arena.get_mod_type(*mod_type_idx))?;
+            // Compute the actual coercion via wrap_constraint (which calls
+            // includemod::modtypes). Only safe for explicit signature
+            // constraints (Pmty_signature), not `module type of` which can
+            // cause infinite recursion in module type expansion.
+            let parsed_mty = arena.get_mod_type(*mod_type_idx);
+            let is_simple_sig = matches!(
+                &*parsed_mty.pmty_desc,
+                crate::parser::ast::ModuleTypeDesc::Pmty_signature(_)
+            );
+            let coercion = if is_simple_sig {
+                match wrap_constraint(
+                    tctx,
+                    env,
+                    typed_mod.clone(),
+                    typed_mty.clone(),
+                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(
+                        typed_mty.clone(),
+                    )),
+                    loc,
+                    mod_expr.pmod_attributes.clone(),
+                ) {
+                    Ok(result) => return Ok(result),
+                    Err(_) => ModuleCoercion::Tcoerce_none,
+                }
+            } else {
+                ModuleCoercion::Tcoerce_none
+            };
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_constraint(
                     Box::new(typed_mod),
                     typed_mty.clone(),
-                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(
-                        typed_mty,
-                    )),
-                    ModuleCoercion::Tcoerce_none,
+                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(
+                        Box::new(typed_mty),
+                    ),
+                    coercion,
                 ),
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),

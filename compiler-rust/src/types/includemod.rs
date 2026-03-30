@@ -208,6 +208,9 @@ fn modtypes_inner<'a>(
         (ModuleType::MtyAlias(pres_impl, impl_path), mty_sig) => {
             let impl_path = normalized_alias_path(env, impl_path);
             let expanded = expand_module_type_in_env(type_ctx, env, &impl_path)
+                .map(|mty| {
+                    ctype::strengthen_module_type_for_inclusion_path(type_ctx, &impl_path, &mty)
+                })
                 .unwrap_or_else(|| ModuleType::MtyAlias(pres_impl.clone(), impl_path.clone()));
             let coercion = modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)?;
             match pres_impl {
@@ -547,7 +550,10 @@ fn signature_item<'a>(
                     if impl_id.name() == id.name() {
                         // Check that the type declarations are compatible
                         type_declarations(type_ctx, env, id.clone(), impl_type_decl, type_decl)?;
-                        let subst_path = Path::pident(impl_id.clone());
+                        let subst_path = impl_type_decl
+                            .type_path
+                            .clone()
+                            .unwrap_or_else(|| Path::pident(impl_id.clone()));
                         type_subst.insert(id.name().to_string(), subst_path);
                         return Ok((pos, ModuleCoercion::Tcoerce_none));
                     }
@@ -779,13 +785,19 @@ fn value_descriptions<'a>(
     let sig_ty = ctype::instance(type_ctx, expected_ty);
 
     if std::env::var_os("RUST_DEBUG_INCLUDE_VALUE_TYPES").is_some()
-        && matches!(id.name(), "t_encode" | "t_decode")
+        && matches!(id.name(), "t_encode" | "t_decode" | "hash" | "eq" | "cmp" | "compare")
     {
+        let subst = type_subst
+            .iter()
+            .map(|(name, path)| format!("{name}->{path}", path = path.name()))
+            .collect::<Vec<_>>()
+            .join(", ");
         eprintln!(
-            "[include-value] {} impl={} expected={}",
+            "[include-value] {} impl={} expected={} subst=[{}]",
             id.name(),
             type_summary(type_ctx, impl_ty, 0),
-            type_summary(type_ctx, sig_ty, 0)
+            type_summary(type_ctx, sig_ty, 0),
+            subst
         );
     }
 
