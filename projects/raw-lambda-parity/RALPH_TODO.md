@@ -135,6 +135,8 @@ Current parity: **185/657** with **1033** hunks.
 **Commits this session:**
 1. `ef840315b` raw-lambda: port grouped constructor sub-pattern matching (184→185, 1020→1033)
 2. `cfa6678a1` raw-lambda: clean up share_actions_sw implementation
+3. `f9a64a62d` raw-lambda: add nested constructor sub-pattern matching in switch arms
+4. `e2a7f324b` raw-lambda: allow or-patterns with refutable block args in constructor matching
 
 **Failed approaches this session:**
 - **Blanket isout→>= replacement**: 185→184. OCaml uses BOTH `isout` and `>=` depending on `switch.ml` cost heuristics. Cannot fix without porting switch.ml.
