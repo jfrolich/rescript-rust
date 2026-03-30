@@ -8765,17 +8765,6 @@ fn type_match_cases_batch_non_gadt<'a>(
     let propagate = ctx.get_level(ctx.repr(generic_scrutinee_ty)) == crate::types::GENERIC_LEVEL
         || !single_var_case;
 
-    // Match OCaml type_cases has_gadts: when cases aren't a single var,
-    // init_env bumps the stamp counter to align with type levels.
-    // OCaml's init_env: begin_def(); Ident.set_current_time(get_current_level());
-    // We only need the stamp alignment here, not the begin_def (which
-    // would change level nesting). The begin_def in init_env is for GADT
-    // existentials which we don't fully support yet.
-    let has_gadts = !single_var_case;
-    if has_gadts {
-        ctx.set_current_time(ctx.current_level() + 1);
-    }
-
     let mut scope_open = false;
     let batch_result = (|| -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
         if propagate {
@@ -11626,11 +11615,6 @@ fn type_function(
     // or ty_arg is generic. Simple variable patterns skip begin_def/generalize,
     // preserving non-generic identity for body lookups via Pexp_ident.
     let is_simple_param = is_simple_variable_pattern(tctx.arena, param);
-    // Match OCaml type_cases has_gadts: non-variable patterns trigger
-    // init_env which bumps stamp counter to align with type levels.
-    if !is_simple_param {
-        ctx.set_current_time(ctx.current_level() + 1);
-    }
     // For optional params with defaults, the pattern sees the inner type
     let pattern_ty = if default.is_some() && arg_label.is_optional() {
         inner_ty
