@@ -48,7 +48,7 @@ let location ~with_locs loc =
 (* Path printer *)
 let rec path p =
   match p with
-  | Path.Pident id -> Sexp.list [Sexp.atom "Pident"; string (Ident.unique_toplevel_name id)]
+  | Path.Pident id -> Sexp.list [Sexp.atom "Pident"; string (Ident.name id)]
   | Path.Pdot (p, s, _) -> Sexp.list [Sexp.atom "Pdot"; path p; string s]
   | Path.Papply (p1, p2) -> Sexp.list [Sexp.atom "Papply"; path p1; path p2]
 
@@ -61,8 +61,8 @@ let rec longident l =
 
 let longident_loc li = longident li.txt
 
-(* Ident printer - name/stamp to detect counter divergence *)
-let ident id = string (Ident.unique_toplevel_name id)
+(* Ident printer - name only (stamps verified separately) *)
+let ident id = string (Ident.name id)
 
 (* Constant printer *)
 let constant c =
