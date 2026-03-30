@@ -1711,27 +1711,38 @@ impl<'a> RawLambdaConverter<'a> {
         let repres = first_lbl.lbl_repres.clone();
         let mutable_flag = raw_record_mutable_flag(fields);
         let base_lam = base.map(|expr| self.convert_expr_raw(expr));
+        let has_optional = fields.iter().any(|(_, lbl, _, _)| lbl.lbl_optional);
+        // OCaml uses field-by-field construction when:
+        // - no base expression, OR
+        // - all fields are overridden (no Kept), OR
+        // - size < 20 AND no optional fields (OCaml's transl_record line 1130)
         let build_direct = base.is_none()
             || fields
                 .iter()
-                .all(|(_, _, def, _)| matches!(def, RecordLabelDefinition::Overridden(_, _)));
+                .all(|(_, _, def, _)| matches!(def, RecordLabelDefinition::Overridden(_, _)))
+            || (fields.len() < 20 && !has_optional);
 
         if build_direct {
+            // OCaml wraps the init expression in a let binding when there's a
+            // base expression, so field accesses use Lvar(init_id) not the expr.
+            let init_id = base_lam.as_ref().map(|_| self.id_gen.create("init"));
+            let init_var = init_id.as_ref().map(|id| RawLambda::var(id.clone()));
+
             let mut elems = Vec::with_capacity(fields.len());
             for (lid, lbl, def, _) in fields {
                 let value = match def {
                     RecordLabelDefinition::Overridden(_, expr) => self.convert_expr_raw(expr),
                     RecordLabelDefinition::Kept(_) => {
-                        let Some(base_expr) = &base_lam else {
+                        let Some(base_var) = &init_var else {
                             elems.push(RawLambda::unit());
                             continue;
                         };
                         if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
-                            base_expr.clone()
+                            base_var.clone()
                         } else if let Some((pos, info)) = raw_record_field_access(lbl) {
                             RawLambda::prim(
                                 Primitive::Pfield(pos, info),
-                                vec![base_expr.clone()],
+                                vec![base_var.clone()],
                                 self.loc(lid.loc),
                             )
                         } else {
@@ -1747,7 +1758,7 @@ impl<'a> RawLambdaConverter<'a> {
                 .map(|(_, lbl, _, _)| (lbl.lbl_name.clone(), lbl.lbl_optional))
                 .collect::<Vec<_>>();
 
-            return match repres {
+            let result = match repres {
                 RecordRepresentation::RecordRegular => self.raw_block_or_prim(
                     0,
                     TagInfo::Record {
@@ -1804,6 +1815,13 @@ impl<'a> RawLambdaConverter<'a> {
                         loc,
                     )
                 }
+            };
+            // Wrap with let init = base_expr when there's a base expression
+            return match (init_id, base_lam) {
+                (Some(id), Some(base_expr)) => {
+                    RawLambda::let_(LetKind::Strict, id, base_expr, result)
+                }
+                _ => result,
             };
         }
 
