@@ -338,22 +338,36 @@ fn to_parser_mutable(flag: TypeMutableFlag) -> ParserMutableFlag {
     }
 }
 
+/// OCaml's Lambda.find_name: check for @as attribute to get the JS runtime name.
+/// Falls back to the label's declared name.
+fn label_runtime_name(lbl: &LabelDescription) -> String {
+    for attr in &lbl.lbl_attributes {
+        if attr.attr_name.txt == "as" {
+            if let crate::types::decl::AttributePayload::Str(name) = &attr.attr_payload {
+                return name.clone();
+            }
+        }
+    }
+    lbl.lbl_name.clone()
+}
+
 fn raw_record_field_access(lbl: &LabelDescription) -> Option<(i32, FieldDbgInfo)> {
+    let name = label_runtime_name(lbl);
     let info = match &lbl.lbl_repres {
         RecordRepresentation::RecordRegular => FieldDbgInfo::Record {
-            name: lbl.lbl_name.clone(),
+            name,
             mutable_flag: to_parser_mutable(lbl.lbl_mut),
         },
         RecordRepresentation::RecordFloatUnused => return None,
         RecordRepresentation::RecordUnboxed(_) => FieldDbgInfo::Record {
-            name: lbl.lbl_name.clone(),
+            name,
             mutable_flag: to_parser_mutable(lbl.lbl_mut),
         },
         RecordRepresentation::RecordInlined { .. } => FieldDbgInfo::RecordInline {
-            name: lbl.lbl_name.clone(),
+            name,
         },
         RecordRepresentation::RecordExtension => FieldDbgInfo::RecordExtension {
-            name: lbl.lbl_name.clone(),
+            name,
         },
     };
     let pos = match lbl.lbl_repres {
@@ -364,16 +378,17 @@ fn raw_record_field_access(lbl: &LabelDescription) -> Option<(i32, FieldDbgInfo)
 }
 
 fn raw_record_setfield_access(lbl: &LabelDescription) -> Option<(i32, SetFieldDbgInfo)> {
+    let name = label_runtime_name(lbl);
     let info = match &lbl.lbl_repres {
-        RecordRepresentation::RecordRegular => SetFieldDbgInfo::RecordSet(lbl.lbl_name.clone()),
+        RecordRepresentation::RecordRegular => SetFieldDbgInfo::RecordSet(name),
         RecordRepresentation::RecordFloatUnused | RecordRepresentation::RecordUnboxed(_) => {
             return None;
         }
         RecordRepresentation::RecordInlined { .. } => {
-            SetFieldDbgInfo::RecordInlineSet(lbl.lbl_name.clone())
+            SetFieldDbgInfo::RecordInlineSet(name)
         }
         RecordRepresentation::RecordExtension => {
-            SetFieldDbgInfo::RecordExtensionSet(lbl.lbl_name.clone())
+            SetFieldDbgInfo::RecordExtensionSet(name)
         }
     };
     let pos = match lbl.lbl_repres {
@@ -1817,7 +1832,7 @@ impl<'a> RawLambdaConverter<'a> {
 
             let fields_info = fields
                 .iter()
-                .map(|(_, lbl, _, _)| (lbl.lbl_name.clone(), lbl.lbl_optional))
+                .map(|(_, lbl, _, _)| (label_runtime_name(lbl), lbl.lbl_optional))
                 .collect::<Vec<_>>();
 
             let result = match repres {
@@ -1893,7 +1908,7 @@ impl<'a> RawLambdaConverter<'a> {
                             TagInfo::RecordExt {
                                 fields: fields
                                     .iter()
-                                    .map(|(_, lbl, _, _)| lbl.lbl_name.clone())
+                                    .map(|(_, lbl, _, _)| label_runtime_name(lbl))
                                     .collect(),
                                 mutable_flag,
                             },
@@ -3109,7 +3124,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let primitive = Primitive::Pfield(
                     lbl.lbl_pos,
                     FieldDbgInfo::Record {
-                        name: lbl.lbl_name.clone(),
+                        name: label_runtime_name(lbl),
                         mutable_flag: to_parser_mutable(lbl.lbl_mut),
                     },
                 );
@@ -3120,7 +3135,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let val_lam = self.convert_expr(value);
                 let primitive = Primitive::Psetfield(
                     lbl.lbl_pos,
-                    crate::lambda::compat::SetFieldDbgInfo::RecordSet(lbl.lbl_name.clone()),
+                    crate::lambda::compat::SetFieldDbgInfo::RecordSet(label_runtime_name(lbl)),
                 );
                 Lambda::prim(primitive, vec![rec_lam, val_lam], self.loc(expr.exp_loc))
             }
@@ -4811,7 +4826,7 @@ impl<'a> RawLambdaConverter<'a> {
                         Primitive::Pfield(
                             lbl.lbl_pos,
                             FieldDbgInfo::Record {
-                                name: lbl.lbl_name.clone(),
+                                name: label_runtime_name(lbl),
                                 mutable_flag: to_parser_mutable(lbl.lbl_mut),
                             },
                         ),
@@ -5537,7 +5552,7 @@ impl<'a> RawLambdaConverter<'a> {
                             Primitive::Pfield(
                                 field_pos,
                                 FieldDbgInfo::Record {
-                                    name: lbl.lbl_name.clone(),
+                                    name: label_runtime_name(lbl),
                                     mutable_flag: to_parser_mutable(lbl.lbl_mut),
                                 },
                             ),
@@ -5559,7 +5574,7 @@ impl<'a> RawLambdaConverter<'a> {
 
         let fields_info = fields
             .iter()
-            .map(|(_, lbl, _, _)| (lbl.lbl_name.clone(), lbl.lbl_optional))
+            .map(|(_, lbl, _, _)| (label_runtime_name(lbl), lbl.lbl_optional))
             .collect();
 
         let tag_info = TagInfo::Record {

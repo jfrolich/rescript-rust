@@ -98,7 +98,29 @@ fn parser_attr_to_decl_attr(
 ) -> crate::types::decl::Attribute {
     let (name, payload) = attr;
     let attr_payload = match payload {
-        ParsedPayload::PStr(_) => crate::types::decl::AttributePayload::Structure(vec![]),
+        ParsedPayload::PStr(items) => {
+            // OCaml's Lambda.find_name: extract string from @as("name") payloads.
+            // PStr with a single Pstr_eval(Pexp_constant(String(value, _)), _) → Str(value)
+            if let [item] = items.as_slice() {
+                if let crate::parser::ast::StructureItemDesc::Pstr_eval(eval_box) = item.pstr_desc.as_ref() {
+                    let (expr_idx, _attrs) = eval_box.as_ref();
+                    let expr = arena.get_expr(*expr_idx);
+                    if let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = expr.pexp_desc.as_ref() {
+                        if let crate::parser::ast::Constant::String(value, _) = c.as_ref() {
+                            crate::types::decl::AttributePayload::Str(value.to_string())
+                        } else {
+                            crate::types::decl::AttributePayload::Structure(vec![])
+                        }
+                    } else {
+                        crate::types::decl::AttributePayload::Structure(vec![])
+                    }
+                } else {
+                    crate::types::decl::AttributePayload::Structure(vec![])
+                }
+            } else {
+                crate::types::decl::AttributePayload::Structure(vec![])
+            }
+        }
         ParsedPayload::PSig(_) => crate::types::decl::AttributePayload::Structure(vec![]),
         ParsedPayload::PTyp(_) => crate::types::decl::AttributePayload::Ident("<core_type>".into()),
         ParsedPayload::PPat(_) => crate::types::decl::AttributePayload::Ident("<pattern>".into()),
