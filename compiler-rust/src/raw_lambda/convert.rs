@@ -4098,15 +4098,10 @@ impl<'a> RawLambdaConverter<'a> {
                 )
             }
             _ => {
-                // For or-pattern leaves, block constructor args must still be irrefutable
-                // (collect_or_pattern_cases doesn't handle refutable sub-patterns)
-                if let PatternDesc::Tpat_construct(_, cstr, args) = &inner.pat_desc {
-                    if let ConstructorTag::CstrBlock(_) = &cstr.cstr_tag {
-                        if !args.iter().all(Self::is_irrefutable_pattern) {
-                            return false;
-                        }
-                    }
-                }
+                // For or-pattern block leaves, allow refutable sub-patterns.
+                // collect_or_pattern_cases skips field binding for LstaticRaise actions,
+                // so the sub-pattern info is lost but the tag dispatch still works.
+                // The sub-pattern matching happens through the block_sub_groups mechanism.
                 Self::check_simple_constructor_leaf(
                     inner,
                     seen_const_tags,
