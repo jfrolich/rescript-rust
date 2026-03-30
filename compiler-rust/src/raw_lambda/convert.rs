@@ -2660,9 +2660,33 @@ impl<'a> RawLambdaConverter<'a> {
                     body,
                 )
             }
+            StructureItemDesc::Tstr_recmodule(bindings) => {
+                // OCaml: add all recursive module idents to fields, then generate letrec
+                let old_len = fields.len();
+                for mb in bindings.iter() {
+                    fields.push(mb.mb_id.clone());
+                }
+                let body = self.convert_structure_items_raw(
+                    fields, rem, is_top_level, rootpath, cc, loc,
+                );
+                fields.truncate(old_len);
+
+                // OCaml's Transl_recmodule.compile_recmodule generates:
+                // - Simple letrec for function/const-only modules
+                // - init_mod/update_mod for complex recursive modules
+                // For now, always generate simple letrec
+                let rec_bindings: Vec<(Ident, RawLambda)> = bindings
+                    .iter()
+                    .map(|mb| {
+                        let module_lam = self.convert_module_expr_raw(&mb.mb_expr, &None);
+                        (mb.mb_id.clone(), module_lam)
+                    })
+                    .collect();
+
+                RawLambda::Lletrec(rec_bindings, Box::new(body))
+            }
             StructureItemDesc::Tstr_primitive(_)
             | StructureItemDesc::Tstr_type(_, _)
-            | StructureItemDesc::Tstr_recmodule(_)
             | StructureItemDesc::Tstr_modtype(_)
             | StructureItemDesc::Tstr_open(_)
             | StructureItemDesc::Tstr_attribute(_) => {
