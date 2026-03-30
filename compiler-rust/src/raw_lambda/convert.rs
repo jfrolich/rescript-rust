@@ -5473,7 +5473,11 @@ impl<'a> RawLambdaConverter<'a> {
 
                 let mut acc = body;
                 for binding in bindings.iter().rev() {
-                    let value = self.convert_expr_raw(&binding.vb_expr);
+                    let mut value = self.convert_expr_raw(&binding.vb_expr);
+                    // OCaml's transl_let applies inline attributes from vb_attributes
+                    let inline_attr =
+                        Self::get_inline_attribute_from(&binding.vb_attributes, self.arena);
+                    value = Self::apply_inline_attribute_raw(value, inline_attr);
                     if let Some(id) = simple_let_binding_id(binding) {
                         // OCaml's Matching.for_let uses Strict for Tpat_var(id).
                         // For Tpat_alias(Tpat_any, id, _), compile_matching produces
@@ -5500,9 +5504,13 @@ impl<'a> RawLambdaConverter<'a> {
                     let lam_bindings = bindings
                         .iter()
                         .map(|binding| {
+                            let mut value = self.convert_expr_raw(&binding.vb_expr);
+                            let inline_attr =
+                                Self::get_inline_attribute_from(&binding.vb_attributes, self.arena);
+                            value = Self::apply_inline_attribute_raw(value, inline_attr);
                             (
                                 simple_let_binding_id(binding).expect("checked above"),
-                                self.convert_expr_raw(&binding.vb_expr),
+                                value,
                             )
                         })
                         .collect();
