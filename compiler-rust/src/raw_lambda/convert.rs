@@ -1821,15 +1821,34 @@ impl<'a> RawLambdaConverter<'a> {
                 .collect::<Vec<_>>();
 
             let result = match repres {
-                RecordRepresentation::RecordRegular => self.raw_block_or_prim(
-                    0,
-                    TagInfo::Record {
-                        fields: fields_info,
-                        mutable_flag,
-                    },
-                    elems,
-                    loc,
-                ),
+                RecordRepresentation::RecordRegular => {
+                    // OCaml: if mut = Mutable then raise Not_constant
+                    // Mutable records never become constant blocks
+                    if matches!(mutable_flag, ParserMutableFlag::Mutable) {
+                        RawLambda::prim(
+                            Primitive::Pmakeblock(
+                                0,
+                                TagInfo::Record {
+                                    fields: fields_info,
+                                    mutable_flag,
+                                },
+                                Mutable::Mutable,
+                            ),
+                            elems,
+                            loc,
+                        )
+                    } else {
+                        self.raw_block_or_prim(
+                            0,
+                            TagInfo::Record {
+                                fields: fields_info,
+                                mutable_flag,
+                            },
+                            elems,
+                            loc,
+                        )
+                    }
+                }
                 RecordRepresentation::RecordFloatUnused => RawLambda::unit(),
                 RecordRepresentation::RecordUnboxed(_) => match elems.as_slice() {
                     [value] => value.clone(),
