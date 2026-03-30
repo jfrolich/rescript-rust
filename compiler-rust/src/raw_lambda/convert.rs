@@ -4911,7 +4911,17 @@ impl<'a> RawLambdaConverter<'a> {
                             )
                         }
                     };
-                    result = self.bind_irrefutable_pattern_raw(inner_pat, field, result);
+                    // OCaml: matching uses StrictOpt for mutable fields, Alias for immutable
+                    let field_let_kind = if matches!(lbl.lbl_mut, TypeMutableFlag::Mutable) {
+                        LetKind::StrictOpt
+                    } else {
+                        LetKind::Alias
+                    };
+                    if let PatternDesc::Tpat_var(id, _) = &inner_pat.pat_desc {
+                        result = RawLambda::let_(field_let_kind, id.clone(), field, result);
+                    } else {
+                        result = self.bind_irrefutable_pattern_raw(inner_pat, field, result);
+                    }
                 }
                 match wrap_tmp {
                     // OCaml: arg_to_var uses Strict for non-variable scrutinee
