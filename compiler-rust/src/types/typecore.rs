@@ -225,13 +225,9 @@ fn has_dict_pattern_attribute(arena: &ParseArena, attrs: &[crate::parser::ast::A
 }
 
 fn is_dict_type_path(path: &Path) -> bool {
-    // Must match the predef dict type exactly (Pident with persistent stamp),
-    // not any user-defined type that happens to be named "dict".
+    // Must match the predef dict type exactly.
     // OCaml uses `Path.same tpath Predef.path_dict` which compares stamps.
-    match path {
-        Path::Pident(id) => id.stamp() == 0 && id.name() == DICT_TYPE_NAME,
-        _ => false,
-    }
+    path.same(&crate::types::predef::path_dict())
 }
 
 fn resolve_package_modtype_path(lid: &Longident, env: &Env, arena: &ParseArena) -> Path {
@@ -1149,7 +1145,9 @@ pub fn transl_type_delayed(
 fn path_from_longident_persistent(lid: &Longident, arena: &ParseArena) -> Path {
     match lid {
         Longident::Lident(name_idx) => {
-            Path::pident(Ident::create_persistent(arena.get_string(*name_idx)))
+            let name = arena.get_string(*name_idx);
+            crate::types::predef::find_predef_path(name)
+                .unwrap_or_else(|| Path::pident(Ident::create_persistent(name)))
         }
         Longident::Ldot(prefix, name_idx) => {
             let prefix_path = path_from_longident_persistent(prefix, arena);
@@ -1189,7 +1187,9 @@ fn resolve_type_constructor_path(
                     (path, Some(decl.clone()))
                 }
                 Err(_) => {
-                    (Path::pident(Ident::create_persistent(name)), None)
+                    let path = crate::types::predef::find_predef_path(name)
+                        .unwrap_or_else(|| Path::pident(Ident::create_persistent(name)));
+                    (path, None)
                 }
             }
         }
@@ -1201,7 +1201,8 @@ fn resolve_type_constructor_path(
             // plain `Lident s` in the initial safe environment.
             if let Longident::Lident(prefix_idx) = prefix.as_ref() {
                 if tctx.arena.get_string(*prefix_idx) == "*predef*" {
-                    let predef_path = Path::pident(Ident::create_persistent(type_name));
+                    let predef_path = crate::types::predef::find_predef_path(type_name)
+                        .unwrap_or_else(|| Path::pident(Ident::create_persistent(type_name)));
                     let predef_decl = env.lookup_type(&predef_path).ok().cloned();
                     return (predef_path, predef_decl);
                 }
@@ -1353,7 +1354,7 @@ fn transl_type_inner(
             // Like OCaml: wrap optional argument types in option
             let arg_ty = if arg.lbl.is_optional() {
                 ctx.new_constr(
-                    crate::types::Path::pident(crate::ident::Ident::create_persistent("option")),
+                    crate::types::predef::path_option(),
                     vec![arg_ty],
                 )
             } else {
@@ -3950,7 +3951,7 @@ fn type_pattern_record(
     // This enables field-label disambiguation through the dict magic field.
     let record_ty = if has_dict_pattern_attr {
         ctx.new_constr(
-            Path::pident(Ident::create_persistent(DICT_TYPE_NAME)),
+            crate::types::predef::path_dict(),
             vec![ctx.new_var(None)],
         )
     } else {
@@ -6324,10 +6325,9 @@ fn translate_unified_ops(
             // OCaml's type_expect calls instance() on the expected type, creating
             // fresh copies each time. We simulate this by creating separate nodes.
             let make_concrete = || {
-                ctx.new_constr(
-                    Path::pident(Ident::create_persistent(concrete_type_name)),
-                    vec![],
-                )
+                let path = crate::types::predef::find_predef_path(concrete_type_name)
+                    .unwrap_or_else(|| Path::pident(Ident::create_persistent(concrete_type_name)));
+                ctx.new_constr(path, vec![])
             };
 
             // Unify LHS with a fresh concrete type
@@ -6395,10 +6395,9 @@ fn translate_unified_ops(
                 "int" // Default fallback
             };
 
-            let concrete_ty = ctx.new_constr(
-                Path::pident(Ident::create_persistent(concrete_type_name)),
-                vec![],
-            );
+            let concrete_path = crate::types::predef::find_predef_path(concrete_type_name)
+                .unwrap_or_else(|| Path::pident(Ident::create_persistent(concrete_type_name)));
+            let concrete_ty = ctx.new_constr(concrete_path.clone(), vec![]);
 
             // Unify arg with concrete type
             if let Err(e) = unify_expression_types(tctx, loc, arg.exp_type, concrete_ty, None) {
@@ -6406,8 +6405,7 @@ fn translate_unified_ops(
             }
 
             // Result type
-            let result_ty = ctx.new_constr(
-                Path::pident(Ident::create_persistent(concrete_type_name)),
+            let result_ty = ctx.new_constr(concrete_path,
                 vec![],
             );
 
@@ -15072,7 +15070,7 @@ fn type_letexception(
         crate::types::generalize(ctx, ret_ty);
     }
 
-    let exn_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
+    let exn_ty = ctx.new_generic_constr(crate::types::predef::path_exn(), vec![]);
     let exn_path = Path::pident(id.clone());
     let cstr_desc = crate::types::decl::ConstructorDescription {
         cstr_name: name_str.clone(),
@@ -15130,7 +15128,7 @@ fn type_letexception(
             loc: ext_constr.pext_name.loc,
         },
         ext_type: crate::types::ExtensionConstructor {
-            ext_type_path: Path::pident(Ident::create_persistent("exn")),
+            ext_type_path: crate::types::predef::path_exn(),
             ext_type_params: vec![],
             ext_args,
             ext_ret_type: ext_ret_ty,
@@ -18119,7 +18117,7 @@ impl Env {
     /// Get the array type.
     pub fn type_array(&self, ctx: &TypeContext<'_>, elem_ty: TypeExprRef) -> TypeExprRef {
         ctx.new_constr(
-            Path::pident(Ident::create_persistent("array")),
+            crate::types::predef::path_array(),
             vec![elem_ty],
         )
     }
@@ -18127,7 +18125,7 @@ impl Env {
     /// Get the option type.
     pub fn type_option(&self, ctx: &TypeContext<'_>, elem_ty: TypeExprRef) -> TypeExprRef {
         ctx.new_constr(
-            Path::pident(Ident::create_persistent("option")),
+            crate::types::predef::path_option(),
             vec![elem_ty],
         )
     }

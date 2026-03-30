@@ -25,7 +25,9 @@ use crate::types::{
     TypeCheckContext, TypeContext, initial_env, transl_signature, type_structure,
 };
 
-// OCaml's Predef initializes non-predef identifiers at 1000.
+// OCaml's Predef sets `Ident.set_current_time 999`, but one additional ident
+// is created before user code (during Pervasives loading), so user idents start at 1001.
+// Rust's next_stamp() does fetch_add(1)+1, so with current_stamp=1000 the first stamp is 1001.
 const OCAML_NON_PREDEF_STAMP_START: i32 = 1000;
 
 fn module_name_from_source_filename(path: &str) -> String {
@@ -475,6 +477,7 @@ pub fn compile_source_to_js_with_options(
         .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
 
     // Type check
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
@@ -665,6 +668,7 @@ pub fn typecheck_interface_source(
     }
 
     // Type check
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
@@ -807,7 +811,8 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         }
 
         // Type check
-        let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+        crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
         let type_ctx = TypeContext::new(&id_gen);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         let mut env = initial_env(&type_ctx);
@@ -849,7 +854,8 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
 
         // Type check
-        let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+        crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
         let type_ctx = TypeContext::new(&id_gen);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         let mut env = initial_env(&type_ctx);
@@ -1412,6 +1418,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     let structure = ppx::rewrite_structure(&structure, &mut arena)
         .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
 
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
@@ -1442,6 +1449,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     options: &CompilerOptions,
     writer: &mut W,
 ) -> Result<()> {
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);

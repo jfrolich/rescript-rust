@@ -152,6 +152,12 @@ impl Ident {
         LOCAL_IDENT_COUNTER.load(Ordering::Relaxed)
     }
 
+    /// Set the local stamp counter (matches OCaml's `Ident.set_current_time`).
+    #[inline]
+    pub fn set_current_time(stamp: i32) {
+        LOCAL_IDENT_COUNTER.store(stamp, Ordering::Relaxed);
+    }
+
     /// Get the name of this identifier.
     #[inline]
     pub fn name(&self) -> &str {

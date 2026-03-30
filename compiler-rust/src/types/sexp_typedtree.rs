@@ -157,7 +157,7 @@ fn location(with_locs: bool, loc: &Location) -> Sexp {
 
 fn sexp_path(p: &Path) -> Sexp {
     match p {
-        Path::Pident(id) => Sexp::list(vec![Sexp::atom("Pident"), string(id.name())]),
+        Path::Pident(id) => Sexp::list(vec![Sexp::atom("Pident"), string(&format!("{}/{}", id.name(), id.stamp()))]),
         Path::Pdot(parent, s, _) => {
             Sexp::list(vec![Sexp::atom("Pdot"), sexp_path(parent), string(s)])
         }
@@ -200,11 +200,11 @@ fn sexp_longident_idx(arena: &ParseArena, ctx: &TypeContext<'_>, idx: crate::par
 }
 
 // ============================================================================
-// Ident Printer - just the name, skip stamp for determinism
+// Ident Printer - name/stamp to detect counter divergence
 // ============================================================================
 
 fn sexp_ident(id: &Ident) -> Sexp {
-    string(id.name())
+    string(&format!("{}/{}", id.name(), id.stamp()))
 }
 
 // ============================================================================

@@ -4855,7 +4855,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                         transl_type(tctx, &sig_env, arena.get_core_type(label.pld_type))?;
                                                     if label.pld_optional {
                                                         let option_path =
-                                                            Path::pident(Ident::create_persistent("option"));
+                                                            crate::types::predef::path_option();
                                                         lbl_type = tctx
                                                             .type_ctx
                                                             .new_constr(option_path, vec![lbl_type]);
@@ -4912,7 +4912,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                             transl_type(tctx, &sig_env, arena.get_core_type(label.pld_type))?;
                                         if label.pld_optional {
                                             let option_path =
-                                                Path::pident(Ident::create_persistent("option"));
+                                                crate::types::predef::path_option();
                                             lbl_type = tctx
                                                 .type_ctx
                                                 .new_constr(option_path, vec![lbl_type]);
@@ -8932,7 +8932,7 @@ fn type_structure_item<'a>(
                                         // OCaml wraps optional label types in option
                                         let (typed_core_type, type_ref) = if lbl.pld_optional {
                                             let option_path =
-                                                Path::pident(Ident::create_persistent("option"));
+                                                crate::types::predef::path_option();
                                             let option_type_ref =
                                                 ctx.new_constr(option_path.clone(), vec![type_ref]);
                                             let option_lid = crate::parse_arena::Located {
@@ -9264,7 +9264,7 @@ fn type_structure_item<'a>(
                                 transl_type(tctx, &temp_env, lbl_type)?;
                             // OCaml wraps optional label types in option (typedecl.ml lines 616-628)
                             let (typed_core_type, type_ref) = if lbl.pld_optional {
-                                let option_path = Path::pident(Ident::create_persistent("option"));
+                                let option_path = crate::types::predef::path_option();
                                 let option_type_ref =
                                     ctx.new_constr(option_path.clone(), vec![type_ref]);
                                 let option_lid = crate::parse_arena::Located {
@@ -10115,7 +10115,7 @@ fn type_structure_item<'a>(
             // Register the exception constructor in the environment
             let exn_ty = tctx
                 .type_ctx
-                .new_generic_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
+                .new_generic_constr(crate::types::predef::path_exn(), vec![]);
             let exn_path = Path::pident(id.clone());
             let cstr_desc = crate::types::decl::ConstructorDescription {
                 cstr_name: name_str.clone(),
@@ -10166,7 +10166,7 @@ fn type_structure_item<'a>(
             new_env.add_constructor(id.clone(), cstr_desc);
 
             let ext_type = crate::types::ExtensionConstructor {
-                ext_type_path: Path::pident(Ident::create_persistent("exn")),
+                ext_type_path: crate::types::predef::path_exn(),
                 ext_type_params: vec![],
                 ext_args,
                 ext_ret_type: None,
@@ -11336,7 +11336,7 @@ fn transl_sig_type_declarations<'a>(
                     let lbl_name = arena.get_string(label.pld_name.txt);
                     let (typed_label_ty, mut lbl_type) = transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
                     if label.pld_optional {
-                        let option_path = Path::pident(Ident::create_persistent("option"));
+                        let option_path = crate::types::predef::path_option();
                         lbl_type = tctx.type_ctx.new_constr(option_path, vec![lbl_type]);
                     }
                     let (poly_typed_core_type, poly_lbl_type) =
@@ -11426,7 +11426,7 @@ fn transl_sig_type_declarations<'a>(
                                     transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
                                 if label.pld_optional {
                                     let option_path =
-                                        Path::pident(Ident::create_persistent("option"));
+                                        crate::types::predef::path_option();
                                     lbl_type = tctx.type_ctx.new_constr(option_path, vec![lbl_type]);
                                 }
                                 let (poly_typed_core_type, poly_lbl_type) =

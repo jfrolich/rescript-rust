@@ -471,15 +471,12 @@ impl<'a> TypeContext<'a> {
     fn get_or_create_predef(
         &self,
         cache: &Cell<Option<TypeExprRef>>,
-        name: &str,
+        path: Path,
     ) -> TypeExprRef {
         if let Some(ty) = cache.get() {
             ty
         } else {
-            let ty = self.new_generic_constr(
-                Path::pident(Ident::create_persistent(name)),
-                vec![],
-            );
+            let ty = self.new_generic_constr(path, vec![]);
             cache.set(Some(ty));
             ty
         }
@@ -487,35 +484,35 @@ impl<'a> TypeContext<'a> {
 
     /// Get the predef int singleton (generic_level).
     pub fn predef_int(&self) -> TypeExprRef {
-        self.get_or_create_predef(&self.predef_int, "int")
+        self.get_or_create_predef(&self.predef_int, super::predef::path_int())
     }
     /// Get the predef char singleton (generic_level).
     pub fn predef_char(&self) -> TypeExprRef {
-        self.get_or_create_predef(&self.predef_char, "char")
+        self.get_or_create_predef(&self.predef_char, super::predef::path_char())
     }
     /// Get the predef string singleton (generic_level).
     pub fn predef_string(&self) -> TypeExprRef {
-        self.get_or_create_predef(&self.predef_string, "string")
+        self.get_or_create_predef(&self.predef_string, super::predef::path_string())
     }
     /// Get the predef float singleton (generic_level).
     pub fn predef_float(&self) -> TypeExprRef {
-        self.get_or_create_predef(&self.predef_float, "float")
+        self.get_or_create_predef(&self.predef_float, super::predef::path_float())
     }
     /// Get the predef bool singleton (generic_level).
     pub fn predef_bool(&self) -> TypeExprRef {
-        self.get_or_create_predef(&self.predef_bool, "bool")
+        self.get_or_create_predef(&self.predef_bool, super::predef::path_bool())
     }
     /// Get the predef unit singleton (generic_level).
     pub fn predef_unit(&self) -> TypeExprRef {
-        self.get_or_create_predef(&self.predef_unit, "unit")
+        self.get_or_create_predef(&self.predef_unit, super::predef::path_unit())
     }
     /// Get the predef exn singleton (generic_level).
     pub fn predef_exn(&self) -> TypeExprRef {
-        self.get_or_create_predef(&self.predef_exn, "exn")
+        self.get_or_create_predef(&self.predef_exn, super::predef::path_exn())
     }
     /// Get the predef bigint singleton (generic_level).
     pub fn predef_bigint(&self) -> TypeExprRef {
-        self.get_or_create_predef(&self.predef_bigint, "bigint")
+        self.get_or_create_predef(&self.predef_bigint, super::predef::path_bigint())
     }
 
     /// Get the cached generic option constructor scheme types.
@@ -526,7 +523,7 @@ impl<'a> TypeContext<'a> {
             _ => {
                 let inner = self.new_generic_var(None);
                 let option_ty = self.new_generic_constr(
-                    Path::pident(Ident::create_persistent("option")),
+                    super::predef::path_option(),
                     vec![inner],
                 );
                 self.predef_option_inner.set(Some(inner));
