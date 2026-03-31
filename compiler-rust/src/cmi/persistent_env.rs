@@ -463,6 +463,22 @@ impl PersistentEnv {
             }
         }
 
+        // Register raw sig so future normalize_path calls can trigger
+        // the rename via find_module_force_sig without needing PersistentEnv.
+        if !ctx.has_raw_module_sig(name) {
+            let ps = self.find_pers_struct(name, ctx)?;
+            ctx.register_raw_module_sig(name, ps.ps_sig.clone());
+        }
+
+        // Also register alias targets' raw sigs
+        for target in &alias_targets {
+            if !ctx.has_raw_module_sig(target.as_str()) {
+                if let Some(target_ps) = self.find_pers_struct(target, ctx) {
+                    ctx.register_raw_module_sig(target, target_ps.ps_sig.clone());
+                }
+            }
+        }
+
         // Now force this module's sig
         let ps = self.find_pers_struct(name, ctx)?;
         Some(ps.force_sig(ctx))

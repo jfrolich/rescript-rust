@@ -1139,6 +1139,11 @@ impl<'a> TypeContext<'a> {
         self.raw_module_sigs.borrow_mut().insert(name.to_string(), sig);
     }
 
+    /// Check if a raw module signature is registered.
+    pub fn has_raw_module_sig(&self, name: &str) -> bool {
+        self.raw_module_sigs.borrow().contains_key(name)
+    }
+
     /// Set the callback for forcing module sig renames.
     /// Called by the driver after creating PersistentEnv.
     pub fn set_find_module_callback(&self, cb: Box<dyn Fn(&str, &TypeContext<'_>)>) {
