@@ -18745,7 +18745,7 @@ impl Env {
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
     ) -> Option<(Path, crate::types::decl::Signature)> {
-        self.resolve_module_lid_impl(lid, arena, pers_env, ctx, true)
+        self.resolve_module_lid_impl(lid, arena, pers_env, ctx, true, true)
     }
 
     /// Resolve a module longident without mutating type paths inside the returned signature.
@@ -18757,7 +18757,7 @@ impl Env {
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
     ) -> Option<(Path, crate::types::decl::Signature)> {
-        self.resolve_module_lid_impl(lid, arena, pers_env, ctx, false)
+        self.resolve_module_lid_impl(lid, arena, pers_env, ctx, false, false)
     }
 
     fn signature_has_package_self_manifests(
@@ -18796,6 +18796,7 @@ impl Env {
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
         apply_subst: bool,
+        trigger_sig_rename: bool,
     ) -> Option<(Path, crate::types::decl::Signature)> {
         match lid {
             Longident::Lident(mod_idx) => {
@@ -18906,10 +18907,13 @@ impl Env {
                         // Match OCaml components_of_module_maker cascade:
                         // When a module is an alias (MtyAlias), OCaml's scrape_alias
                         // calls find_module on the target, which forces ps_sig.
-                        if let crate::types::decl::ModuleType::MtyAlias(_, target) = &md.md_type {
-                            let head_name = target.head().name().to_string();
-                            if let Some(pers) = pers_env.as_mut() {
-                                let _ = pers.get_renamed_sig(&head_name, ctx);
+                        // Only trigger during value lookups (not module opening).
+                        if trigger_sig_rename {
+                            if let crate::types::decl::ModuleType::MtyAlias(_, target) = &md.md_type {
+                                let head_name = target.head().name().to_string();
+                                if let Some(pers) = pers_env.as_mut() {
+                                    let _ = pers.get_renamed_sig(&head_name, ctx);
+                                }
                             }
                         }
 
@@ -19212,7 +19216,7 @@ impl Env {
                 let submod_name = arena.get_string(*submod_idx);
                 // Recursively resolve the prefix to get a signature
                 if let Some((parent_path, parent_sig)) =
-                    self.resolve_module_lid_impl(prefix, arena, pers_env, ctx, apply_subst)
+                    self.resolve_module_lid_impl(prefix, arena, pers_env, ctx, apply_subst, trigger_sig_rename)
                 {
                     if std::env::var_os("RUST_DEBUG_IMPORT_MODULES").is_some()
                         && (parent_path.name().starts_with("N") || parent_path.name().starts_with("M2"))
