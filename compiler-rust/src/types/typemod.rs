@@ -5058,7 +5058,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         let longident = tctx.resolve_lid(od.popen_lid.txt).clone();
                         let open_lid = arena.get_longident(od.popen_lid.txt);
                         if let Some((resolved_path, sig_items)) =
-                            sig_env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
+                            sig_env.resolve_module_lid_no_rename(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
                         {
                             crate::cmi::persistent_env::add_signature_to_env(
                                 &sig_items,
@@ -7808,7 +7808,7 @@ pub fn transl_signature<'a>(
                 // Resolve the module and extend the environment with opened bindings.
                 // This matches OCaml's transl_signature which calls type_open/Env.open_signature.
                 let path = if let Some((resolved_path, sig_items)) =
-                    sig_env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
+                    sig_env.resolve_module_lid_no_rename(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
                 {
                     crate::cmi::persistent_env::add_signature_to_env(
                         &sig_items,
@@ -10737,7 +10737,7 @@ fn type_structure_item<'a>(
             let open_lid = arena.get_longident(open_desc.popen_lid.txt);
             let mut new_env = env.clone();
             let path = if let Some((resolved_path, sig_items)) =
-                env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
+                env.resolve_module_lid_no_rename(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
             {
                 crate::cmi::persistent_env::add_signature_to_env(
                     &sig_items,

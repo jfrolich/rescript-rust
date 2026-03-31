@@ -14538,7 +14538,7 @@ fn type_open(
     // Resolve through Env alias scraping and rewritten signatures so opened
     // bindings preserve OCaml-style module prefixes in types.
     let path = if let Some((resolved_path, sig_items)) =
-        env.resolve_module_lid(open_lid, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+        env.resolve_module_lid_no_rename(open_lid, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
     {
         crate::cmi::persistent_env::add_signature_to_env(
             &sig_items,
@@ -18748,6 +18748,19 @@ impl Env {
         self.resolve_module_lid_impl(lid, arena, pers_env, ctx, true, true)
     }
 
+    /// Resolve module without triggering alias sig renames.
+    /// Used by Pstr_open — matching OCaml's open_signature which uses
+    /// component tables without forcing ps_sig.
+    pub(crate) fn resolve_module_lid_no_rename<'b>(
+        &self,
+        lid: &Longident,
+        arena: &crate::parse_arena::ParseArena,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'b crate::types::context::TypeContext<'b>,
+    ) -> Option<(Path, crate::types::decl::Signature)> {
+        self.resolve_module_lid_impl(lid, arena, pers_env, ctx, true, false)
+    }
+
     /// Resolve a module longident without mutating type paths inside the returned signature.
     /// This matches OCaml's non-destructive behavior needed for pure type-path lookup.
     fn resolve_module_lid_raw<'b>(
@@ -19179,7 +19192,16 @@ impl Env {
                 }
                 // Then try persistent environment (external modules)
                 if let Some(pers) = pers_env.as_mut() {
-                    if let Some(renamed_sig) = pers.get_renamed_sig(mod_name, ctx) {
+                    // Use get_renamed_sig for value lookups (trigger_sig_rename=true),
+                    // find_pers_struct for opens (trigger_sig_rename=false).
+                    // This matches OCaml where open_signature uses component tables
+                    // without forcing ps_sig.
+                    let sig_opt = if trigger_sig_rename {
+                        pers.get_renamed_sig(mod_name, ctx)
+                    } else {
+                        pers.find_pers_struct(mod_name, ctx).map(|ps| ps.ps_sig.clone())
+                    };
+                    if let Some(renamed_sig) = sig_opt {
                         let module_path = Path::pident(Ident::create_persistent(mod_name));
                         let sig = copy_lookup_signature_for_subst(&renamed_sig, ctx);
                         if let Some(qualified_alias_path) =
