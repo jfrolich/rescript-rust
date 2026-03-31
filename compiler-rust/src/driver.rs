@@ -766,32 +766,33 @@ pub(crate) fn load_pervasives<'a>(
 ) {
     use crate::ident::Ident;
 
-    // Try to load and open Pervasives (matches OCaml: open_implicit_module "Pervasives")
+    // Match OCaml: open_implicit_module "Pervasives"
+    // OCaml only opens via component tables — does NOT add to env.modules.
+    // This means find_module(Pident "Pervasives") falls through to
+    // persistent env, which forces ps_sig (rename) at the right time.
     if pers_env.open_module("Pervasives", env, ctx) {
+        // Register raw sig for normalize_path trigger
         if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
             if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
                 ctx.register_raw_module_sig("Pervasives", sig.clone());
             }
-            env.add_module(Ident::create_persistent("Pervasives"), md);
         }
     }
 
-    // Try to load and open Stdlib (matches OCaml: open_implicit_module "Stdlib")
+    // Match OCaml: open_implicit_module "Stdlib"
     if pers_env.open_module("Stdlib", env, ctx) {
         if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
             if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
                 ctx.register_raw_module_sig("Stdlib", sig.clone());
             }
-            env.add_module(Ident::create_persistent("Stdlib"), md);
         }
     }
 
     // Apply explicit `-open` modules in argument order.
     for module_name in open_modules {
         if pers_env.open_module(module_name, env, ctx) {
-            if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
-                env.add_module(Ident::create_persistent(module_name), md);
-            }
+            // Don't add to env.modules — only open via component tables
+            // (matching OCaml's open_implicit_module behavior)
         }
     }
 }
