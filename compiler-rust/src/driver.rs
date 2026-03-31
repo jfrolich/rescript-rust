@@ -768,7 +768,6 @@ pub(crate) fn load_pervasives<'a>(
 
     // Try to load and open Pervasives (matches OCaml: open_implicit_module "Pervasives")
     if pers_env.open_module("Pervasives", env, ctx) {
-        // Add module to env and register raw sig for lazy renaming
         if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
             if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
                 ctx.register_raw_module_sig("Pervasives", sig.clone());
