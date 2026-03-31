@@ -163,6 +163,11 @@ pub struct TypeContext<'a> {
     /// from normalize_path, matching OCaml's lazy ps_sig forcing.
     raw_module_sigs: RefCell<std::collections::HashMap<String, super::decl::Signature>>,
 
+    /// Callback to force module sig rename from normalize_path.
+    /// Set by the driver to call PersistentEnv::force_sig.
+    /// Avoids circular dependency between types and cmi modules.
+    find_module_sig_callback: RefCell<Option<Box<dyn Fn(&str, &TypeContext<'_>)>>>,
+
     /// String table for CMI-decoded Longident components.
     /// CMI decoding happens without a ParseArena, so we allocate synthetic
     /// StrIdx values here and resolve them later when needed.
@@ -238,6 +243,7 @@ impl<'a> TypeContext<'a> {
             load_paths: RefCell::new(Vec::new()),
             renamed_module_sigs: RefCell::new(std::collections::HashMap::new()),
             raw_module_sigs: RefCell::new(std::collections::HashMap::new()),
+            find_module_sig_callback: RefCell::new(None),
             cmi_longident_names: RefCell::new(std::collections::HashMap::new()),
             next_cmi_longident_idx: Cell::new(0xF000_0000),
             predef_int: Cell::new(None),
@@ -1131,6 +1137,27 @@ impl<'a> TypeContext<'a> {
     /// Called during load_pervasives to store sigs for normalize_path.
     pub fn register_raw_module_sig(&self, name: &str, sig: super::decl::Signature) {
         self.raw_module_sigs.borrow_mut().insert(name.to_string(), sig);
+    }
+
+    /// Set the callback for forcing module sig renames.
+    /// Called by the driver after creating PersistentEnv.
+    pub fn set_find_module_callback(&self, cb: Box<dyn Fn(&str, &TypeContext<'_>)>) {
+        *self.find_module_sig_callback.borrow_mut() = Some(cb);
+    }
+
+    /// Force module sig rename via persistent env callback.
+    /// This matches OCaml's find_module → Lazy.force ps.ps_sig.
+    pub fn find_module_force_sig(&self, module_name: &str) {
+        if self.renamed_module_sigs.borrow().contains_key(module_name) {
+            return;
+        }
+        // Try callback first (for persistent modules loaded on-demand)
+        if let Some(cb) = self.find_module_sig_callback.borrow().as_ref() {
+            cb(module_name, self);
+            return;
+        }
+        // Fallback to raw_module_sigs (for Pervasives/Stdlib registered at init)
+        self.rename_one_module_sig(module_name);
     }
 
     /// Trigger module signature renaming for a persistent module.

@@ -1916,9 +1916,11 @@ fn normalize_path_full<'a>(
     // For Pdot, the PREFIX normalization in the recursive call handles prefix modules.
     // Only trigger for the HEAD module of the path (matching OCaml's find_module
     // which is called on the normalized path, not on each prefix separately).
+    // Match OCaml's normalize_path → find_module:
+    // For persistent idents, find_module forces ps_sig rename.
     let head = path.head();
     if head.is_persistent() {
-        ctx.trigger_module_sig_rename(head.name());
+        ctx.find_module_force_sig(head.name());
     }
 
     normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new())
