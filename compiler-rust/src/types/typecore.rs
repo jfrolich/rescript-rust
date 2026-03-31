@@ -8765,6 +8765,13 @@ fn type_match_cases_batch_non_gadt<'a>(
     let propagate = ctx.get_level(ctx.repr(generic_scrutinee_ty)) == crate::types::GENERIC_LEVEL
         || !single_var_case;
 
+    // Match OCaml type_cases init_env: when has_gadts, bump stamp.
+    // With no normalize_path trigger, level ≈ stamp, so level+1 works.
+    let has_gadts = !single_var_case;
+    if has_gadts {
+        ctx.set_current_time(ctx.current_level() + 1);
+    }
+
     let mut scope_open = false;
     let batch_result = (|| -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
         if propagate {
@@ -11669,9 +11676,6 @@ fn type_function(
     }
     if propagate {
         ctx.begin_def();
-        if !is_simple_param {
-            ctx.set_current_time(ctx.current_level());
-        }
     }
     let typed_param_result =
         type_pattern(tctx, env, param, param_pat_ty, PatternMode::Normal, &mut state);

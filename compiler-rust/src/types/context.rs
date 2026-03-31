@@ -1222,6 +1222,13 @@ impl<'a> TypeContext<'a> {
                     super::decl::SignatureItem::SigClassType => super::decl::SignatureItem::SigClassType,
                 })
                 .collect();
+            // Re-synchronize level with stamp after batch rename.
+            // In OCaml, level and stamp share currentstamp, so renames
+            // implicitly advance both. Keep them synchronized.
+            let level_delta = self.current_stamp() - self.current_level();
+            if level_delta > 0 {
+                self.set_current_level(self.current_level() + level_delta);
+            }
             self.renamed_module_sigs.borrow_mut().insert(module_name.to_string(), renamed);
         }
     }

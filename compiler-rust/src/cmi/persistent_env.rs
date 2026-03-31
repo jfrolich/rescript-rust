@@ -53,8 +53,18 @@ impl PersStruct {
         if let Some(cached) = ctx.renamed_module_sigs.borrow().get(&self.ps_name) {
             return cached.clone();
         }
-        // Rename bound idents (matches OCaml's Subst.signature Subst.identity sign)
+        // Rename bound idents (matches OCaml's Subst.signature Subst.identity sign).
+        // After renaming, re-synchronize level with stamp so that subsequent
+        // set_current_time(level) calls work correctly. In OCaml, level and stamp
+        // share the same counter, so renames implicitly advance both. In Rust,
+        // renames only advance stamp, causing level < stamp desynchronization.
         let renamed = rename_bound_idents_in_sig(&self.ps_sig, ctx);
+        // Re-synchronize level with stamp after renames.
+        // Only adjust the level delta, don't reset nongen_level/saved_level.
+        let level_delta = ctx.current_stamp() as i32 - ctx.current_level() as i32;
+        if level_delta > 0 {
+            ctx.set_current_level(ctx.current_level() + level_delta);
+        }
         ctx.renamed_module_sigs.borrow_mut().insert(self.ps_name.clone(), renamed.clone());
         renamed
     }
