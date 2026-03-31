@@ -8765,20 +8765,10 @@ fn type_match_cases_batch_non_gadt<'a>(
     let propagate = ctx.get_level(ctx.repr(generic_scrutinee_ty)) == crate::types::GENERIC_LEVEL
         || !single_var_case;
 
-    // Match OCaml type_cases init_env: when has_gadts, OCaml calls
-    // begin_def() + set_current_time(level). We simulate the stamp bump
-    // WITHOUT the extra begin_def (to avoid level imbalance).
-    let has_gadts = !single_var_case;
-
     let mut scope_open = false;
     let batch_result = (|| -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
         if propagate {
             ctx.begin_def();
-            // After begin_def, level is now stamp+1. If has_gadts,
-            // OCaml's init_env bumps stamp to match level.
-            if has_gadts {
-                ctx.set_current_time(ctx.current_level());
-            }
             scope_open = true;
         }
 
