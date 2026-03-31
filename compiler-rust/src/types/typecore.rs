@@ -18903,14 +18903,9 @@ impl Env {
                         });
                         let skip_self_manifest_subst = apply_subst
                             && Self::signature_has_package_self_manifests(&sig, ctx);
-                        // Extract module alias targets for path-prefix rewriting.
-                        // - Pdot aliases (e.g. Js.Json) can be rewritten directly.
-                        // - Pident aliases (e.g. Types = Mistakes__Types) should only
-                        //   rewrite nested module prefixes (e.g. Mistakes__Types.Id -> Types.Id).
                         // Match OCaml components_of_module_maker cascade:
                         // When a module is an alias (MtyAlias), OCaml's scrape_alias
-                        // calls find_module on the target, which forces ps_sig for the
-                        // target module. Trigger the same rename here.
+                        // calls find_module on the target, which forces ps_sig.
                         if let crate::types::decl::ModuleType::MtyAlias(_, target) = &md.md_type {
                             let head_name = target.head().name().to_string();
                             if let Some(pers) = pers_env.as_mut() {
@@ -18918,6 +18913,10 @@ impl Env {
                             }
                         }
 
+                        // Extract module alias targets for path-prefix rewriting.
+                        // - Pdot aliases (e.g. Js.Json) can be rewritten directly.
+                        // - Pident aliases (e.g. Types = Mistakes__Types) should only
+                        //   rewrite nested module prefixes (e.g. Mistakes__Types.Id -> Types.Id).
                         let (alias_target_pdot, alias_target_pident) = if apply_subst {
                             match &md.md_type {
                                 crate::types::decl::ModuleType::MtyAlias(_, target)
