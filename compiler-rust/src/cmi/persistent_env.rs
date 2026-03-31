@@ -428,7 +428,46 @@ impl PersistentEnv {
         if let Some(cached) = self.renamed_sig_cache.get(name) {
             return Some(cached.clone());
         }
-        // Do the rename
+
+        // Match OCaml components_of_module_maker cascade:
+        // Before renaming this module, process its submodule aliases.
+        // In OCaml, building components calls scrape_alias for each Sig_module
+        // item. If a submodule is Mty_alias(path), scrape_alias calls
+        // find_module(path) which forces ps_sig for the target module.
+        // We replicate this by scanning the raw sig for alias submodules
+        // and triggering their rename first.
+        let ps = self.find_pers_struct(name, ctx)?;
+        let alias_targets: Vec<String> = ps.ps_sig.iter().filter_map(|item| {
+            if let SignatureItem::SigModule(_, md, _) = item {
+                if let ModuleType::MtyAlias(_, path) = &md.md_type {
+                    // Extract the head module name from the alias target
+                    let head = path.head();
+                    if head.is_persistent() || head.stamp() == 0 {
+                        return Some(head.name().to_string());
+                    }
+                }
+            }
+            None
+        }).collect();
+
+        // Trigger rename for all alias targets first (cascade)
+        for target in &alias_targets {
+            if target != name {
+                // Recursive: trigger rename for the dependency
+                // Use trigger_module_sig_rename which checks the TypeContext cache
+                ctx.trigger_module_sig_rename(target);
+                // If not in TypeContext, load and rename from persistent env
+                if !ctx.renamed_module_sigs.borrow().contains_key(target.as_str()) {
+                    if let Some(target_ps) = self.find_pers_struct(target, ctx) {
+                        let target_renamed = rename_bound_idents_in_sig(&target_ps.ps_sig, ctx);
+                        self.renamed_sig_cache.insert(target.clone(), target_renamed.clone());
+                        ctx.renamed_module_sigs.borrow_mut().insert(target.clone(), target_renamed);
+                    }
+                }
+            }
+        }
+
+        // Now rename this module's sig
         let ps = self.find_pers_struct(name, ctx)?;
         let renamed = rename_bound_idents_in_sig(&ps.ps_sig, ctx);
         self.renamed_sig_cache.insert(name.to_string(), renamed.clone());
