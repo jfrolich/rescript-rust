@@ -38,10 +38,26 @@ use super::sig_reader::SigReadContext;
 pub struct PersStruct {
     /// Module name
     pub ps_name: String,
-    /// Loaded signature
+    /// Raw (un-renamed) loaded signature from CMI
     pub ps_sig: Signature,
     /// Source filename
     pub ps_filename: String,
+}
+
+impl PersStruct {
+    /// Force the ps_sig rename (matching OCaml's Lazy.force ps.ps_sig).
+    /// Returns the renamed signature. The rename is cached in TypeContext's
+    /// renamed_module_sigs map. Only consumes stamps on first call.
+    pub fn force_sig<'a>(&self, ctx: &'a TypeContext<'a>) -> Signature {
+        // Check if already forced
+        if let Some(cached) = ctx.renamed_module_sigs.borrow().get(&self.ps_name) {
+            return cached.clone();
+        }
+        // Rename bound idents (matches OCaml's Subst.signature Subst.identity sign)
+        let renamed = rename_bound_idents_in_sig(&self.ps_sig, ctx);
+        ctx.renamed_module_sigs.borrow_mut().insert(self.ps_name.clone(), renamed.clone());
+        renamed
+    }
 }
 
 /// Persistent environment for module loading.
@@ -420,21 +436,36 @@ impl PersistentEnv {
     /// → find_module). We match this by triggering ALL registered module renames
     /// when any module is first accessed.
     pub fn get_renamed_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<Signature> {
-        // Check TypeContext cache first (populated by trigger_module_sig_rename)
-        if let Some(cached) = ctx.renamed_module_sigs.borrow().get(name) {
-            return Some(cached.clone());
-        }
-        // Check local cache
-        if let Some(cached) = self.renamed_sig_cache.get(name) {
-            return Some(cached.clone());
+        // Match OCaml's find_module → Lazy.force ps.ps_sig.
+        // Uses PersStruct::force_sig which caches in TypeContext.
+        let ps = self.find_pers_struct(name, ctx)?;
+
+        // Before forcing this module's sig, scan for Mty_alias submodules
+        // and force their targets first (matching OCaml's cascade through
+        // components_of_module_maker → scrape_alias → find_module).
+        let alias_targets: Vec<String> = ps.ps_sig.iter().filter_map(|item| {
+            if let SignatureItem::SigModule(_, md, _) = item {
+                if let ModuleType::MtyAlias(_, path) = &md.md_type {
+                    let head = path.head();
+                    if head.is_persistent() && head.name() != name {
+                        return Some(head.name().to_string());
+                    }
+                }
+            }
+            None
+        }).collect();
+
+        for target in &alias_targets {
+            if !ctx.renamed_module_sigs.borrow().contains_key(target.as_str()) {
+                if let Some(target_ps) = self.find_pers_struct(target, ctx) {
+                    target_ps.force_sig(ctx);
+                }
+            }
         }
 
-        // Do the rename
+        // Now force this module's sig
         let ps = self.find_pers_struct(name, ctx)?;
-        let renamed = rename_bound_idents_in_sig(&ps.ps_sig, ctx);
-        self.renamed_sig_cache.insert(name.to_string(), renamed.clone());
-        ctx.renamed_module_sigs.borrow_mut().insert(name.to_string(), renamed.clone());
-        Some(renamed)
+        Some(ps.force_sig(ctx))
     }
 
     pub fn open_module<'a>(&mut self, name: &str, env: &mut Env, ctx: &'a TypeContext<'a>) -> bool {
