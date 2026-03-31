@@ -1911,13 +1911,6 @@ fn normalize_path_full<'a>(
     env: &Env,
     path: &Path,
 ) -> Path {
-    // Match OCaml's normalize_path → find_module:
-    // For persistent idents, find_module forces ps_sig rename.
-    let head = path.head();
-    if head.is_persistent() {
-        ctx.find_module_force_sig(head.name());
-    }
-
     normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new())
 }
 
@@ -1945,8 +1938,18 @@ fn normalize_path_full_inner<'a>(
         _ => path.clone(),
     };
 
-    // NOTE: rename trigger for persistent idents moved to normalize_path_full
-    // (top-level only, not during prefix recursion).
+    // Match OCaml normalize_path: calls find_module on the path.
+    // For Pident, OCaml's find_module checks env.modules first, then persistent.
+    // If persistent (not in env), forces ps_sig. Since we don't add
+    // Pervasives/Stdlib to env.modules, this triggers for them.
+    if let Path::Pident(id) = &path {
+        if id.is_persistent() {
+            // Only trigger if NOT in env (matching OCaml's find_module fallback)
+            if env.find_module(id.name()).is_err() {
+                ctx.find_module_force_sig(id.name());
+            }
+        }
+    }
 
     // Then check if the path itself is a module alias.
     // First try the simple env lookup (handles Pident and some Pdot paths).
