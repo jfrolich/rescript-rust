@@ -11669,8 +11669,6 @@ fn type_function(
     }
     if propagate {
         ctx.begin_def();
-        // Match OCaml type_cases init_env: when !is_var (has_gadts),
-        // bump stamp to match level after begin_def.
         if !is_simple_param {
             ctx.set_current_time(ctx.current_level());
         }
