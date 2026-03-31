@@ -168,6 +168,10 @@ pub struct TypeContext<'a> {
     /// Avoids circular dependency between types and cmi modules.
     find_module_sig_callback: RefCell<Option<Box<dyn Fn(&str, &TypeContext<'_>)>>>,
 
+    /// Tracks which modules have had their components "built" (forced).
+    /// Matching OCaml's lazy EnvLazy for component building.
+    pub(crate) component_tracker: super::env_lazy::ModuleComponentTracker,
+
     /// String table for CMI-decoded Longident components.
     /// CMI decoding happens without a ParseArena, so we allocate synthetic
     /// StrIdx values here and resolve them later when needed.
@@ -244,6 +248,7 @@ impl<'a> TypeContext<'a> {
             renamed_module_sigs: RefCell::new(std::collections::HashMap::new()),
             raw_module_sigs: RefCell::new(std::collections::HashMap::new()),
             find_module_sig_callback: RefCell::new(None),
+            component_tracker: super::env_lazy::ModuleComponentTracker::new(),
             cmi_longident_names: RefCell::new(std::collections::HashMap::new()),
             next_cmi_longident_idx: Cell::new(0xF000_0000),
             predef_int: Cell::new(None),
