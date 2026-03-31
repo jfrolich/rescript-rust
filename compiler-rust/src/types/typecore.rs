@@ -18303,6 +18303,27 @@ impl Env {
                     {
                         cached
                     } else {
+                        // Match OCaml's get_components → components_of_module_maker:
+                        // This is the point where OCaml lazily builds module components,
+                        // triggering scrape_alias → find_module → ps_sig rename cascade.
+                        //
+                        // 1. Force ps_sig rename for the target module (if persistent)
+                        // 2. Force ps_sig for alias targets (cascade)
+                        if let Some(pers) = pers_env.as_mut() {
+                            // Check if the resolved module path is persistent
+                            if let Path::Pident(id) = &mod_path {
+                                if id.is_persistent() {
+                                    let _ = pers.get_renamed_sig(id.name(), ctx);
+                                }
+                            }
+                            // Check env for alias cascade
+                            if let Ok(md) = self.find_module(&prefix_str) {
+                                if let crate::types::decl::ModuleType::MtyAlias(_, target) = &md.md_type {
+                                    let _ = pers.get_renamed_sig(target.head().name(), ctx);
+                                }
+                            }
+                        }
+
                         let renamed_sig = copy_lookup_value_components_signature(&sig, ctx);
                         ctx.register_resolved_module_sig(
                             &value_component_cache_key,
@@ -18917,18 +18938,8 @@ impl Env {
                         });
                         let skip_self_manifest_subst = apply_subst
                             && Self::signature_has_package_self_manifests(&sig, ctx);
-                        // Match OCaml components_of_module_maker cascade:
-                        // When a module is an alias (MtyAlias), OCaml's scrape_alias
-                        // calls find_module on the target, which forces ps_sig.
-                        // Only trigger during value lookups (not module opening).
-                        if trigger_sig_rename {
-                            if let crate::types::decl::ModuleType::MtyAlias(_, target) = &md.md_type {
-                                let head_name = target.head().name().to_string();
-                                if let Some(pers) = pers_env.as_mut() {
-                                    let _ = pers.get_renamed_sig(&head_name, ctx);
-                                }
-                            }
-                        }
+                        // Alias cascade deferred to lookup_value_by_lid's
+                        // component building (matching OCaml's lazy cascade).
 
                         // Extract module alias targets for path-prefix rewriting.
                         // - Pdot aliases (e.g. Js.Json) can be rewritten directly.
@@ -19190,17 +19201,12 @@ impl Env {
                         return Some((path, sig));
                     }
                 }
-                // Then try persistent environment (external modules)
+                // Then try persistent environment (external modules).
+                // Use raw sig — the rename (OCaml's Lazy.force ps.ps_sig)
+                // is deferred to lookup_value_by_lid's component building,
+                // matching OCaml's get_components → components_of_module_maker.
                 if let Some(pers) = pers_env.as_mut() {
-                    // Use get_renamed_sig for value lookups (trigger_sig_rename=true),
-                    // find_pers_struct for opens (trigger_sig_rename=false).
-                    // This matches OCaml where open_signature uses component tables
-                    // without forcing ps_sig.
-                    let sig_opt = if trigger_sig_rename {
-                        pers.get_renamed_sig(mod_name, ctx)
-                    } else {
-                        pers.find_pers_struct(mod_name, ctx).map(|ps| ps.ps_sig.clone())
-                    };
+                    let sig_opt = pers.find_pers_struct(mod_name, ctx).map(|ps| ps.ps_sig.clone());
                     if let Some(renamed_sig) = sig_opt {
                         let module_path = Path::pident(Ident::create_persistent(mod_name));
                         let sig = copy_lookup_signature_for_subst(&renamed_sig, ctx);
