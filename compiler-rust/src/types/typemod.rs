@@ -7722,17 +7722,11 @@ pub fn transl_signature<'a>(
             PSigDesc::Psig_type(inner) => {
                 let (ref rec_flag, ref decls) = **inner;
                 let typed_decls = transl_sig_type_declarations(tctx, &sig_env, arena, decls)?;
-                // Add types to sig_env so subsequent items see them.
-                // This ensures locally-defined types shadow opened types
-                // (e.g., type xy in Sprite shadows Actors.xy from open).
-                // Only add non-abstract types (those with manifests or type_kind)
-                // to avoid interfering with functor signature types.
+                // Match OCaml transl_signature/Typedecl.transl_type_decl:
+                // all signature types, including abstract ones, enter the
+                // threaded environment for subsequent signature items.
                 for td in &typed_decls {
-                    if td.typ_type.type_manifest.is_some()
-                        || !matches!(td.typ_type.type_kind, crate::types::TypeKind::TypeAbstract)
-                    {
-                        sig_env.add_type(td.typ_id.clone(), td.typ_type.clone());
-                    }
+                    sig_env.add_type(td.typ_id.clone(), td.typ_type.clone());
                 }
                 TSigDesc::Tsig_type(*rec_flag, typed_decls)
             }
@@ -10893,6 +10887,10 @@ fn type_structure_item<'a>(
             let localized_include_sig = final_include_sig.as_ref().map(|sig_items| {
                 let mut sig =
                     crate::types::typecore::copy_lookup_signature_for_subst(sig_items, tctx.type_ctx);
+                crate::cmi::persistent_env::freshen_signature_bound_idents(
+                    &mut sig,
+                    tctx.type_ctx,
+                );
                 let include_root_path = include_module_root_path(&typed_mod);
                 let include_flat_name = include_module_flat_name(&typed_mod);
                 let local_include_types: HashMap<String, Ident> = sig

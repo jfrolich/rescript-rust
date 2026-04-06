@@ -2633,6 +2633,7 @@ fn type_pattern_inner(
 
             // Save pattern variables before p1
             let vars_before = state.pattern_variables.len();
+            let module_vars_before = state.module_variables.len();
 
             // Type check first branch
             let p1 = tctx.arena.get_pat(*p1_idx);
@@ -2640,9 +2641,11 @@ fn type_pattern_inner(
 
             // Save p1's variables
             let p1_vars: Vec<_> = state.pattern_variables[vars_before..].to_vec();
+            let p1_module_vars: Vec<_> = state.module_variables[module_vars_before..].to_vec();
 
             // Reset for p2
             state.pattern_variables.truncate(vars_before);
+            state.module_variables.truncate(module_vars_before);
 
             // Type check second branch
             let p2 = tctx.arena.get_pat(*p2_idx);
@@ -2651,8 +2654,18 @@ fn type_pattern_inner(
             // Get p2's variables
             let p2_vars: Vec<_> = state.pattern_variables[vars_before..].to_vec();
 
-            // Merge variables (they should match)
-            merge_or_pattern_variables(tctx, env, loc, &p1_vars, &p2_vars)?;
+            // Match OCaml typecore.ml:
+            // - verify both branches bind the same variables,
+            // - alpha-rename branch 2 onto branch 1's ids,
+            // - keep only branch 1's bindings live after typing the or-pattern.
+            let alpha_env = merge_or_pattern_variables(tctx, env, loc, &p1_vars, &p2_vars)?;
+            let typed_p2 = alpha_pattern(&alpha_env, &typed_p2);
+            state.pattern_variables.truncate(vars_before);
+            state.pattern_variables.extend(p1_vars.iter().cloned());
+            state.module_variables.truncate(module_vars_before);
+            state
+                .module_variables
+                .extend(p1_module_vars.iter().cloned());
 
             Ok(Pattern::new(
                 PatternDesc::Tpat_or(Box::new(typed_p1), Box::new(typed_p2), None),
@@ -3564,9 +3577,11 @@ fn merge_or_pattern_variables(
 
         match v1.id.name().cmp(v2.id.name()) {
             std::cmp::Ordering::Equal => {
-                // Same variable - unify types
-                unify_pattern_types(tctx, loc, v1.ty, v2.ty)?;
-                result.push((v1.id.clone(), v2.id.clone()));
+                if !v1.id.same(&v2.id) {
+                    unify_pattern_types(tctx, loc, v1.ty, v2.ty)?;
+                    // Match OCaml alpha_pat: rename branch-2 ids onto branch-1 ids.
+                    result.push((v2.id.clone(), v1.id.clone()));
+                }
                 i += 1;
                 j += 1;
             }
@@ -3589,6 +3604,102 @@ fn merge_or_pattern_variables(
     }
 
     Ok(result)
+}
+
+fn alpha_pattern_id<'a>(alpha_env: &'a [(Ident, Ident)], id: &Ident) -> Option<&'a Ident> {
+    alpha_env
+        .iter()
+        .find_map(|(from, to)| if from.same(id) { Some(to) } else { None })
+}
+
+fn alpha_pattern(alpha_env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_var(id, name) => {
+            let pat_desc = alpha_pattern_id(alpha_env, id)
+                .map(|new_id| PatternDesc::Tpat_var(new_id.clone(), name.clone()))
+                .unwrap_or(PatternDesc::Tpat_any);
+            Pattern {
+                pat_desc,
+                ..pat.clone()
+            }
+        }
+        PatternDesc::Tpat_alias(inner, id, name) => {
+            let new_inner = alpha_pattern(alpha_env, inner);
+            if let Some(new_id) = alpha_pattern_id(alpha_env, id) {
+                Pattern {
+                    pat_desc: PatternDesc::Tpat_alias(
+                        Box::new(new_inner),
+                        new_id.clone(),
+                        name.clone(),
+                    ),
+                    ..pat.clone()
+                }
+            } else {
+                new_inner
+            }
+        }
+        PatternDesc::Tpat_tuple(items) => Pattern {
+            pat_desc: PatternDesc::Tpat_tuple(
+                items
+                    .iter()
+                    .map(|item| alpha_pattern(alpha_env, item))
+                    .collect(),
+            ),
+            ..pat.clone()
+        },
+        PatternDesc::Tpat_construct(lid, cstr, args) => Pattern {
+            pat_desc: PatternDesc::Tpat_construct(
+                lid.clone(),
+                cstr.clone(),
+                args.iter().map(|arg| alpha_pattern(alpha_env, arg)).collect(),
+            ),
+            ..pat.clone()
+        },
+        PatternDesc::Tpat_variant(label, arg, row) => Pattern {
+            pat_desc: PatternDesc::Tpat_variant(
+                label.clone(),
+                arg.as_ref()
+                    .map(|arg| Box::new(alpha_pattern(alpha_env, arg))),
+                *row,
+            ),
+            ..pat.clone()
+        },
+        PatternDesc::Tpat_record(fields, closed) => Pattern {
+            pat_desc: PatternDesc::Tpat_record(
+                fields
+                    .iter()
+                    .map(|(lid, lbl, field_pat, opt)| {
+                        (
+                            lid.clone(),
+                            lbl.clone(),
+                            alpha_pattern(alpha_env, field_pat),
+                            *opt,
+                        )
+                    })
+                    .collect(),
+                *closed,
+            ),
+            ..pat.clone()
+        },
+        PatternDesc::Tpat_array(items) => Pattern {
+            pat_desc: PatternDesc::Tpat_array(
+                items
+                    .iter()
+                    .map(|item| alpha_pattern(alpha_env, item))
+                    .collect(),
+            ),
+            ..pat.clone()
+        },
+        PatternDesc::Tpat_or(left, right, row) => Pattern {
+            pat_desc: PatternDesc::Tpat_or(
+                Box::new(alpha_pattern(alpha_env, left)),
+                Box::new(alpha_pattern(alpha_env, right)),
+                row.clone(),
+            ),
+            ..pat.clone()
+        },
+        _ => pat.clone(),
+    }
 }
 
 // ============================================================================
@@ -14969,8 +15080,9 @@ fn type_letexception(
                                 ctyp_loc: typed_ct.ctyp_loc,
                                 ctyp_attributes: Attributes::new(),
                             };
+                            let label_id = ctx.create_ident(&label_name);
                             typed_labels.push(crate::types::typedtree::LabelDeclaration {
-                                ld_id: Ident::create_local(&label_name),
+                                ld_id: label_id.clone(),
                                 ld_name: crate::parse_arena::Located {
                                     txt: label_name.clone(),
                                     loc: label.pld_name.loc,
@@ -14982,7 +15094,7 @@ fn type_letexception(
                                 ld_attributes: label.pld_attributes.clone(),
                             });
                             decl_labels.push(crate::types::decl::LabelDeclaration {
-                                ld_id: Ident::create_local(&label_name),
+                                ld_id: label_id,
                                 ld_mutable: match label.pld_mutable {
                                     crate::parser::ast::MutableFlag::Immutable => {
                                         crate::types::MutableFlag::Immutable
@@ -23483,6 +23595,60 @@ mod tests {
         // Duplicate should fail
         let id2 = state.enter_variable(&ctx, loc, &name, ty, false, false, &arena);
         assert!(matches!(id2, Err(TypeCoreError::MultiplyBoundVariable(_))));
+    }
+
+    #[test]
+    fn test_type_pattern_or_reuses_left_branch_ident() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = crate::types::initial_env(&ctx);
+        let mut arena = ParseArena::new();
+
+        let loc = LocIdx::none();
+        let x_idx = arena.intern("x");
+        let x_name = Located { txt: x_idx, loc };
+        let left = arena.push_pat(crate::parser::ast::Pattern {
+            ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_var(x_name.clone())),
+            ppat_loc: loc,
+            ppat_attributes: Attributes::new(),
+        });
+        let right = arena.push_pat(crate::parser::ast::Pattern {
+            ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_var(x_name)),
+            ppat_loc: loc,
+            ppat_attributes: Attributes::new(),
+        });
+        let or_pat = crate::parser::ast::Pattern {
+            ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_or(left, right)),
+            ppat_loc: loc,
+            ppat_attributes: Attributes::new(),
+        };
+        let mut tctx = TypeCheckContext::new(&ctx, &arena);
+        let mut state = PatternState::new();
+
+        let typed_pat = type_pattern(
+            &mut tctx,
+            &env,
+            &or_pat,
+            env.type_int(&ctx),
+            PatternMode::Normal,
+            &mut state,
+        )
+        .expect("or-pattern should type-check");
+
+        let crate::types::typedtree::PatternDesc::Tpat_or(left_pat, right_pat, None) = typed_pat.pat_desc
+        else {
+            panic!("expected typed or-pattern");
+        };
+        let crate::types::typedtree::PatternDesc::Tpat_var(left_id, _) = &left_pat.pat_desc else {
+            panic!("expected left branch variable");
+        };
+        let crate::types::typedtree::PatternDesc::Tpat_var(right_id, _) = &right_pat.pat_desc else {
+            panic!("expected right branch variable");
+        };
+
+        assert_eq!(state.pattern_variables.len(), 1);
+        assert!(left_id.same(right_id));
+        assert!(state.pattern_variables[0].id.same(left_id));
     }
 
     #[test]

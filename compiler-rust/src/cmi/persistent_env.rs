@@ -683,6 +683,136 @@ fn build_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> SubstMap
     maps
 }
 
+fn insert_type_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident) {
+    let new_path = Path::pident(new_id.clone());
+    if old_id.stamp() != 0 {
+        maps.type_stamp_map.insert(old_id.stamp(), new_path);
+    } else {
+        maps.type_name_map
+            .insert(old_id.name().to_string(), new_path);
+    }
+}
+
+fn insert_module_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident) {
+    let new_path = Path::pident(new_id.clone());
+    if old_id.stamp() != 0 {
+        maps.module_stamp_map.insert(old_id.stamp(), new_path);
+    } else {
+        maps.module_name_map
+            .insert(old_id.name().to_string(), new_path);
+    }
+}
+
+fn merge_subst_maps(parent: &SubstMaps, child: &SubstMaps) -> SubstMaps {
+    let mut merged = parent.clone();
+    merged.type_stamp_map.extend(child.type_stamp_map.clone());
+    merged.type_name_map.extend(child.type_name_map.clone());
+    merged.module_stamp_map.extend(child.module_stamp_map.clone());
+    merged.module_name_map.extend(child.module_name_map.clone());
+    merged
+}
+
+fn freshen_module_type_bound_idents_with_maps(
+    module_type: &mut ModuleType,
+    maps: &SubstMaps,
+    ctx: &TypeContext<'_>,
+) {
+    match module_type {
+        ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
+            if !maps.is_empty() {
+                *path = substitute_type_path(
+                    path,
+                    &maps.type_stamp_map,
+                    &maps.type_name_map,
+                    &maps.module_stamp_map,
+                    &maps.module_name_map,
+                );
+            }
+        }
+        ModuleType::MtySignature(sig) => {
+            freshen_signature_bound_idents_with_maps(sig, maps, ctx);
+        }
+        ModuleType::MtyFunctor {
+            param,
+            param_type,
+            result,
+        } => {
+            if let Some(param_type) = param_type.as_mut() {
+                freshen_module_type_bound_idents_with_maps(param_type, maps, ctx);
+            }
+            let old_param = param.clone();
+            let new_param = ctx.rename_ident(&old_param);
+            *param = new_param.clone();
+            let mut param_maps = SubstMaps::default();
+            insert_module_subst_path(&mut param_maps, &old_param, &new_param);
+            let result_maps = merge_subst_maps(maps, &param_maps);
+            freshen_module_type_bound_idents_with_maps(result, &result_maps, ctx);
+        }
+    }
+}
+
+fn freshen_signature_bound_idents_with_maps(
+    sig_items: &mut [SignatureItem],
+    maps: &SubstMaps,
+    ctx: &TypeContext<'_>,
+) {
+    if !maps.is_empty() {
+        substitute_type_paths_in_sig_with_maps(sig_items, maps, ctx);
+        substitute_sig_decl_paths_in_place_with_maps(sig_items, maps);
+    }
+
+    let mut local_maps = SubstMaps::default();
+
+    for item in sig_items.iter_mut() {
+        match item {
+            SignatureItem::SigValue(id, _) | SignatureItem::SigTypext(id, _, _) => {
+                *id = ctx.rename_ident(id);
+            }
+            SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
+                let old_id = id.clone();
+                let new_id = ctx.rename_ident(&old_id);
+                insert_type_subst_path(&mut local_maps, &old_id, &new_id);
+                *id = new_id;
+            }
+            SignatureItem::SigModule(id, _, _) => {
+                let old_id = id.clone();
+                let new_id = ctx.rename_ident(&old_id);
+                insert_module_subst_path(&mut local_maps, &old_id, &new_id);
+                *id = new_id;
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        }
+    }
+
+    if !local_maps.is_empty() {
+        substitute_type_paths_in_sig_with_maps(sig_items, &local_maps, ctx);
+        substitute_sig_decl_paths_in_place_with_maps(sig_items, &local_maps);
+    }
+
+    let combined_maps = merge_subst_maps(maps, &local_maps);
+
+    for item in sig_items.iter_mut() {
+        match item {
+            SignatureItem::SigModule(_, md, _) => {
+                freshen_module_type_bound_idents_with_maps(&mut md.md_type, &combined_maps, ctx);
+            }
+            SignatureItem::SigModtype(_, mtd) => {
+                if let Some(module_type) = mtd.mtd_type.as_mut() {
+                    freshen_module_type_bound_idents_with_maps(module_type, &combined_maps, ctx);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(crate) fn freshen_signature_bound_idents(
+    sig_items: &mut [SignatureItem],
+    ctx: &TypeContext<'_>,
+) {
+    freshen_signature_bound_idents_with_maps(sig_items, &SubstMaps::default(), ctx);
+}
+
 fn build_subst_maps_for_module(sig_items: &[SignatureItem], module_path: &Path) -> SubstMaps {
     let mut maps = build_subst_maps(sig_items, module_path);
 

@@ -53,6 +53,7 @@ FILE_ARG=""
 TELLA_MODE=false
 TELLA_JSX_MODE=false
 TELLA_MAX_SOURCE_BYTES=0
+CANONICAL_STAMPS=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -97,6 +98,10 @@ while [[ $# -gt 0 ]]; do
             TELLA_MODE=true
             TELLA_MAX_SOURCE_BYTES="$2"
             shift 2
+            ;;
+        --canonical)
+            CANONICAL_STAMPS=true
+            shift
             ;;
         -h|--help)
             sed -n '10,44p' "$0" | sed 's/^# \{0,1\}//'
@@ -330,7 +335,7 @@ mkdir -p "$RESULTS_DIR"
 mkdir -p "$TEMP_DIR/diffs"
 
 # Export variables for parallel execution
-export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT TELLA_MODE CACHE_DIR
+export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT TELLA_MODE CACHE_DIR CANONICAL_STAMPS
 
 # Function to test a single file - writes results to a file
 test_single_file() {
@@ -417,12 +422,20 @@ test_single_file() {
 
     # Compare if both succeeded
     if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
-        if diff -q "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > /dev/null 2>&1; then
+        local ocaml_cmp="$file_temp/ocaml.sexp"
+        local rust_cmp="$file_temp/rust.sexp"
+        if [[ "$CANONICAL_STAMPS" == "true" ]]; then
+            python3 "$PROJECT_ROOT/scripts/canonicalize_stamps.py" < "$file_temp/ocaml.sexp" > "$file_temp/ocaml.canon.sexp" 2>/dev/null
+            python3 "$PROJECT_ROOT/scripts/canonicalize_stamps.py" < "$file_temp/rust.sexp" > "$file_temp/rust.canon.sexp" 2>/dev/null
+            ocaml_cmp="$file_temp/ocaml.canon.sexp"
+            rust_cmp="$file_temp/rust.canon.sexp"
+        fi
+        if diff -q "$ocaml_cmp" "$rust_cmp" > /dev/null 2>&1; then
             parity_pass=1
         else
             parity_fail=1
             # Save diff for inspection
-            diff -ua "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
+            diff -ua "$ocaml_cmp" "$rust_cmp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
             # Save sexp files to persistent cache
             cp "$file_temp/ocaml.sexp" "$CACHE_DIR/tests/ocaml/$safe_name.sexp" 2>/dev/null || true
             cp "$file_temp/rust.sexp" "$CACHE_DIR/tests/rust/$safe_name.sexp" 2>/dev/null || true
