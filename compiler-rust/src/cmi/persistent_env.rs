@@ -1336,6 +1336,45 @@ pub fn substitute_type_paths_in_sig(
     }
 }
 
+/// Rewrite Tconstr paths in a signature using a direct stamp → path map.
+/// Used to remap CMI idents to implementation idents before moregen linking.
+pub fn substitute_type_paths_in_sig_with_stamp_map(
+    sig_items: &[SignatureItem],
+    stamp_map: &HashMap<i32, Path>,
+    ctx: &TypeContext<'_>,
+) {
+    if stamp_map.is_empty() {
+        return;
+    }
+    let empty: HashMap<String, Path> = HashMap::new();
+    let mut visited = HashSet::new();
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_id, desc) => {
+                substitute_type_expr_path(
+                    desc.val_type, stamp_map, &empty, &HashMap::new(), &HashMap::new(),
+                    ctx, &mut visited,
+                );
+            }
+            SignatureItem::SigType(_id, decl, _) => {
+                for &param in &decl.type_params {
+                    substitute_type_expr_path(
+                        param, stamp_map, &empty, &HashMap::new(), &HashMap::new(),
+                        ctx, &mut visited,
+                    );
+                }
+                if let Some(manifest) = decl.type_manifest {
+                    substitute_type_expr_path(
+                        manifest, stamp_map, &empty, &HashMap::new(), &HashMap::new(),
+                        ctx, &mut visited,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Recursively walk a type expression and substitute Tconstr paths.
 fn substitute_type_expr_path(
     ty_ref: TypeExprRef,

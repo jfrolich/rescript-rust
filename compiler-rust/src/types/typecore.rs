@@ -693,6 +693,10 @@ pub struct TypeCheckContext<'a> {
     /// type_match_cases_batch_non_gadt to create fresh instances per case
     /// body, matching OCaml's behavior where ty_res is generic.
     pub generic_constraint_body_ty: Option<TypeExprRef>,
+    /// Cached semantic module types from Tmod_apply, keyed by parsed module
+    /// expression location.  Ensures that a second lookup for the same functor
+    /// application reuses the types with correct path substitutions.
+    pub module_expr_semantic_types: HashMap<crate::parse_arena::LocIdx, crate::types::decl::ModuleType>,
 }
 
 /// A diagnostic from type checking.
@@ -720,6 +724,7 @@ impl<'a> TypeCheckContext<'a> {
             persistent_env: None,
             force_fresh_local_float: false,
             generic_constraint_body_ty: None,
+            module_expr_semantic_types: HashMap::new(),
         }
     }
 
@@ -14704,7 +14709,10 @@ fn type_newtype(
     let result = (|| -> TypeCoreResult<Expression> {
         let level = ctx.current_level();
         let mut new_env = env.clone();
-        let newtype_id = Ident::create_local(name_str.clone());
+        // Use the shared stamp counter (ctx.create_ident) so the newtype ident
+        // participates in the same stamp sequence as other typed-tree idents.
+        // This matches OCaml where Env.enter_type uses Ident.create.
+        let newtype_id = ctx.create_ident(&name_str);
         new_env.add_type(
             newtype_id.clone(),
             crate::types::decl::TypeDeclaration {
@@ -16735,9 +16743,12 @@ fn type_expect_with_module_unpacks(
 
     let decl_mty = module_type_from_package_binding(tctx, env, unpack.ty);
     let typed_mty = typed_module_type_for_unpack(tctx.arena, unpack.loc_idx, &decl_mty);
+    // Match OCaml Env.enter_module: create one fresh ident used for
+    // both the body environment binding and the Texp_letmodule node.
+    let letmod_id = tctx.type_ctx.create_ident(unpack.id.name());
     let mut body_env = env.clone();
     body_env.add_module(
-        unpack.id.clone(),
+        letmod_id.clone(),
         crate::types::decl::ModuleDeclaration {
             md_type: decl_mty,
             md_attributes: vec![],
@@ -16751,7 +16762,7 @@ fn type_expect_with_module_unpacks(
         tctx.type_ctx,
         env,
         &body_env,
-        &unpack.id,
+        &letmod_id,
         typed_body.exp_type,
         expected_ty,
     );
@@ -16805,7 +16816,7 @@ fn type_expect_with_module_unpacks(
     let wrapped_ty = typed_body.exp_type;
     Ok(Expression::new(
         crate::types::typedtree::ExpressionDesc::Texp_letmodule(
-            tctx.type_ctx.create_ident(unpack.id.name()),
+            letmod_id.clone(),
             unpack.name.clone(),
             Box::new(unpack_module),
             Box::new(typed_body),

@@ -961,6 +961,51 @@ fn apply_moregen_constraints(
         }
     };
 
+    // Rewrite CMI interface type paths to use implementation idents.
+    // OCaml does this in Includemod.signatures → pair_components which builds
+    // a Subst mapping id2→Pident(id1) for each paired Sig_type/Sig_module, then
+    // applies it via Subst.type_expr during type comparisons.
+    // We apply the same remapping up front: for each type in the interface sig,
+    // find the corresponding implementation type by name and remap the CMI
+    // stamp to the implementation's Pident path in all type_exprs.
+    {
+        let impl_sig = &typed_structure.str_type;
+        let mut stamp_remap: std::collections::HashMap<i32, crate::types::Path> =
+            std::collections::HashMap::new();
+        // Match OCaml pair_components: remap Sig_type, Sig_module, Sig_modtype
+        for iface_item in &iface_sig {
+            let (iface_id, find_fn): (&crate::ident::Ident, Box<dyn Fn(&SignatureItem) -> Option<&crate::ident::Ident>>) = match iface_item {
+                SignatureItem::SigType(id, _, _) => (id, Box::new(|i| match i {
+                    SignatureItem::SigType(impl_id, _, _) => Some(impl_id),
+                    _ => None,
+                })),
+                SignatureItem::SigModule(id, _, _) => (id, Box::new(|i| match i {
+                    SignatureItem::SigModule(impl_id, _, _) => Some(impl_id),
+                    _ => None,
+                })),
+                SignatureItem::SigModtype(id, _) => (id, Box::new(|i| match i {
+                    SignatureItem::SigModtype(impl_id, _) => Some(impl_id),
+                    _ => None,
+                })),
+                _ => continue,
+            };
+            if let Some(impl_id) = impl_sig.iter().find_map(|i| {
+                let candidate = find_fn(i)?;
+                (candidate.name() == iface_id.name()).then_some(candidate)
+            }) {
+                if iface_id.stamp() != 0 && impl_id.stamp() != 0 && iface_id.stamp() != impl_id.stamp() {
+                    stamp_remap.insert(iface_id.stamp(), crate::types::Path::pident(impl_id.clone()));
+                }
+            }
+        }
+        if !stamp_remap.is_empty() {
+            // Apply stamp remapping to interface type_exprs
+            crate::cmi::persistent_env::substitute_type_paths_in_sig_with_stamp_map(
+                &iface_sig, &stamp_remap, type_ctx,
+            );
+        }
+    }
+
     // Build a map from value name -> interface type
     let mut iface_val_types: std::collections::HashMap<String, TypeExprRef> =
         std::collections::HashMap::new();

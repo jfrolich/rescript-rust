@@ -2496,8 +2496,14 @@ fn try_expand_head<'a>(
                                 eprintln!("[expand] path={} env.lookup_type manifest hidden", path_name);
                             }
                         }
-                    } else if debug_expand {
-                        eprintln!("[expand] path={} env.lookup_type no-manifest", path_name);
+                    } else {
+                        // Abstract type with no manifest found in env.
+                        // Don't fall through to stamp-based lookup — the env is
+                        // authoritative and this type should NOT be expanded.
+                        forbid_fallback_manifest_expansion = true;
+                        if debug_expand {
+                            eprintln!("[expand] path={} env.lookup_type no-manifest (abstract, blocking stamp-fallback)", path_name);
+                        }
                     }
                 }
             }
@@ -2505,7 +2511,9 @@ fn try_expand_head<'a>(
             // 1a. For local identifiers, try stamp-based declaration lookup.
             // This preserves OCaml-style local identity paths while still
             // allowing expansion when env name lookup is unavailable.
-            if let Path::Pident(id) = &path
+            // Skip if env already found the type as abstract (no manifest).
+            if !forbid_fallback_manifest_expansion
+                && let Path::Pident(id) = &path
                 && !id.is_persistent()
                 && id.stamp() != 0
                 && let Some(stamp_decl) = ctx
