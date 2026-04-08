@@ -699,7 +699,11 @@ impl SwitchCompiler {
             return actions[cases[0].2].clone();
         }
 
-        let (w, _) = self.opt_count(cases);
+        let (w, cost) = self.opt_count(cases);
+        eprintln!("c_test: {} cases, ok_inter={}, decision={:?}, cost={:?}", lcases, self.ok_inter, w, cost);
+        for (i, c) in cases.iter().enumerate() {
+            eprintln!("  case[{}]: ({}, {}, act={})", i, c.0, c.1, c.2);
+        }
         match w {
             TRet::No => actions[cases[0].2].clone(),
             TRet::Inter(i, j) => {
