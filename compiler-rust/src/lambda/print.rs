@@ -53,7 +53,7 @@ pub fn format_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
         Constant::JsTrue => write!(f, "#true"),
         Constant::JsFalse => write!(f, "#false"),
         Constant::JsNull => write!(f, "#null"),
-        Constant::ModuleAlias => write!(f, "#alias"),
+        Constant::ModuleAlias => write!(f, "0a"),
         Constant::JsUndefined { .. } => write!(f, "#undefined"),
         Constant::Int { i, .. } => write!(f, "{i}"),
         Constant::NativeInt { i, .. } => write!(f, "{i}"),
@@ -694,7 +694,7 @@ fn format_raw_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
             }
         }
         Constant::Some(inner) => format_raw_constant(inner, f),
-        Constant::ModuleAlias => write!(f, "#alias"),
+        Constant::ModuleAlias => write!(f, "0a"),
     }
 }
 
