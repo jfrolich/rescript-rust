@@ -1608,7 +1608,6 @@ impl<'a> RawLambdaConverter<'a> {
             "#is_nullable" => Some(Primitive::PisNullUndefined),
             "#null_to_opt" => Some(Primitive::PnullToOpt),
             "#nullable_to_opt" => Some(Primitive::PnullUndefinedToOpt),
-            "#import" => Some(Primitive::Pimport),
             _ => {
                 // %fieldN -> Pfield(N, Fld_tuple)
                 if let Some(n_str) = prim_name.strip_prefix("%field") {
@@ -5148,29 +5147,91 @@ impl<'a> RawLambdaConverter<'a> {
             },
         };
 
-        // For non-constructor constant switches (int/char patterns) with a fail action,
-        // use OCaml's Switch module to generate optimal comparison trees.
-        // Constructor-only switches are handled below with direct Lswitch.
-        let dense_const_partial = if block_cases.is_empty()
-            && !const_cases.is_empty()
-            && has_non_ctor_constants
-        {
-            failaction.as_ref().map(|default| {
-                let fail = Some((**default).clone());
+        let dense_const_partial = if block_cases.is_empty() {
+            failaction.as_ref().and_then(|default| {
                 let mut sorted_consts = const_cases.clone();
                 sorted_consts.sort_by_key(|(tag, _)| *tag);
-                let low = sorted_consts.first().unwrap().0;
-                let high = sorted_consts.last().unwrap().0;
-                let next_raise = &mut || self.next_raise_count();
-                crate::raw_lambda::switch::call_switcher(
-                    fail,
-                    scrut_var.clone(),
-                    low,
-                    high,
-                    &sorted_consts,
-                    None,
-                    next_raise,
-                )
+                let first = sorted_consts.first()?.0;
+                let last = sorted_consts.last()?.0;
+                let is_dense = sorted_consts
+                    .iter()
+                    .enumerate()
+                    .all(|(idx, (tag, _))| *tag == first + idx as i32);
+                if !is_dense {
+                    return None;
+                }
+
+                // Single-case optimization: use direct comparison instead of isout+switch
+                if sorted_consts.len() == 1 {
+                    let (tag, action) = sorted_consts.into_iter().next()?;
+                    let exit_id = self.next_raise_count();
+                    let cond = RawLambda::prim(
+                        Primitive::Pjscomp(Comparison::Neq),
+                        vec![scrut_var.clone(), RawLambda::const_(Constant::int(tag))],
+                        loc,
+                    );
+                    return Some(RawLambda::LstaticCatch(
+                        Box::new(RawLambda::LifThenElse(
+                            Box::new(cond),
+                            Box::new(RawLambda::LstaticRaise(exit_id, Vec::new())),
+                            Box::new(action),
+                        )),
+                        (exit_id, Vec::new()),
+                        Box::new((**default).clone()),
+                    ));
+                }
+
+                let exit_id = self.next_raise_count();
+                let offset_arg = if first == 0 {
+                    scrut_var.clone()
+                } else {
+                    RawLambda::prim(
+                        Primitive::Poffsetint(-first),
+                        vec![scrut_var.clone()],
+                        loc,
+                    )
+                };
+                let is_out = RawLambda::prim(
+                    Primitive::Pisout(last - first),
+                    vec![offset_arg],
+                    loc,
+                );
+
+                // If all cases map to the same static raise, use it directly
+                // instead of generating a switch (matches OCaml's share_actions)
+                let all_same_exit = sorted_consts.iter().all(|(_, act)| {
+                    matches!(act, RawLambda::LstaticRaise(id, args) if args.is_empty()
+                        && *id == match &sorted_consts[0].1 {
+                            RawLambda::LstaticRaise(id0, _) => *id0,
+                            _ => return false,
+                        })
+                });
+
+                let in_range_action = if all_same_exit {
+                    sorted_consts[0].1.clone()
+                } else {
+                    RawLambda::Lswitch(
+                        Box::new(scrut_var.clone()),
+                        crate::raw_lambda::RawLambdaSwitch {
+                            sw_consts_full: false,
+                            sw_consts: sorted_consts,
+                            sw_blocks_full: false,
+                            sw_blocks: Vec::new(),
+                            sw_failaction: None,
+                            sw_names: None,
+                        },
+                    )
+                };
+
+                Some(RawLambda::LstaticCatch(
+                    Box::new(RawLambda::LifThenElse(
+                        Box::new(is_out),
+                        Box::new(RawLambda::LstaticRaise(exit_id, Vec::new())),
+                        Box::new(in_range_action),
+                    )),
+                    (exit_id, Vec::new()),
+                    Box::new((**default).clone()),
+                ))
             })
         } else {
             None
