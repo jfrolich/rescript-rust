@@ -2679,6 +2679,470 @@ impl<'a> RawLambdaConverter<'a> {
         self.convert_module_expr_raw_with_coercion(module_expr, rootpath, &ModuleCoercion::Tcoerce_none)
     }
 
+    // ---- Recursive module compilation (Transl_recmodule) ----
+
+    /// Create the location constant for `#init_mod`.
+    /// Produces `Const_block(Blk_tuple, [filename, line, char])`.
+    fn undefined_location(&self, loc_idx: LocIdx) -> RawLambda {
+        let loc = self.loc(loc_idx);
+        let fname = self.basename_for_loc(loc);
+        RawLambda::Lconst(Constant::Block {
+            tag: 0,
+            tag_info: TagInfo::Tuple,
+            elements: vec![
+                Constant::string(fname),
+                Constant::int(loc.loc_start.line),
+                Constant::int(loc.loc_start.column()),
+            ],
+        })
+    }
+
+    /// Compute the init shape for a recursive module.
+    /// Returns `Some((loc_const, shape_const))` if the module can be initialized,
+    /// `None` if the module has no shape (e.g., functor).
+    ///
+    /// Mirrors OCaml's `Transl_recmodule.init_shape`.
+    fn init_shape(&self, modl: &ModuleExpr) -> Option<(RawLambda, RawLambda)> {
+        let env = self.type_ctx.get_typed_env(modl.mod_env)?;
+        // Get the decl::ModuleType.
+        // First try converting the typedtree mod_type directly.
+        // If that fails (e.g., Tmty_placeholder), try extracting from
+        // Tmod_constraint wrapper or looking up in the env.
+        let decl_mty = self.get_decl_module_type(modl, &env);
+        let decl_mty = decl_mty?;
+        let shape = self.init_shape_mod(&env, &decl_mty)?;
+        Some((self.undefined_location(modl.mod_loc), RawLambda::Lconst(shape)))
+    }
+
+    /// Extract decl::ModuleType from a module expression.
+    /// Tries multiple strategies:
+    /// 1. Convert typedtree mod_type directly (if not placeholder)
+    /// 2. For Tmod_constraint, try constraint type, then recurse into inner
+    /// 3. For Tmod_structure, build from the structure's str_type
+    /// 4. For Tmod_ident, it's a module alias
+    fn get_decl_module_type(
+        &self,
+        modl: &ModuleExpr,
+        env: &crate::types::env::Env,
+    ) -> Option<crate::types::decl::ModuleType> {
+        // Strategy 1: direct conversion from typedtree mod_type
+        if let Some(mty) = crate::types::typemod::decl_module_type_from_typed(&modl.mod_type) {
+            // If we got MtyIdent, try to resolve it to concrete type
+            if let crate::types::decl::ModuleType::MtyIdent(ref path) = mty {
+                if let Some(resolved) = self.scrape_modtype(env, &mty) {
+                    return Some(resolved);
+                }
+            }
+            return Some(mty);
+        }
+
+        // Strategy 2: based on mod_desc
+        match &modl.mod_desc {
+            ModuleExprDesc::Tmod_constraint(inner, constraint_mty, _, _) => {
+                // Try the constraint's module type first
+                if let Some(mty) = crate::types::typemod::decl_module_type_from_typed(constraint_mty) {
+                    // If it's concrete (not MtyIdent), use it directly
+                    if !matches!(&mty, crate::types::decl::ModuleType::MtyIdent(_)) {
+                        return Some(mty);
+                    }
+                    // If it's MtyIdent, try to resolve it
+                    if let Some(resolved) = self.scrape_modtype(env, &mty) {
+                        return Some(resolved);
+                    }
+                    // Fall through to try the inner module
+                }
+                // Recurse into the inner module expr - this gets the actual structure type
+                return self.get_decl_module_type(inner, env);
+            }
+            ModuleExprDesc::Tmod_structure(structure) => {
+                // Build MtySignature from the structure's str_type (which is decl::Signature)
+                return Some(crate::types::decl::ModuleType::MtySignature(
+                    structure.str_type.clone(),
+                ));
+            }
+            ModuleExprDesc::Tmod_ident(_, _) => {
+                // Module alias - treated as alias
+                return None; // OCaml returns MtyAlias but we don't have the path info
+            }
+            _ => {}
+        }
+
+        None
+    }
+
+    /// Compute the shape constant for a module type.
+    /// Returns `None` if the module type can't be initialized (functor, unknown ident).
+    fn init_shape_mod(
+        &self,
+        env: &crate::types::env::Env,
+        mty: &crate::types::decl::ModuleType,
+    ) -> Option<Constant> {
+        use crate::types::decl::ModuleType;
+
+        // Scrape: resolve Mty_ident to its expansion
+        let scraped = self.scrape_modtype(env, mty);
+        let mty_ref = scraped.as_ref().unwrap_or(mty);
+
+        match mty_ref {
+            ModuleType::MtyIdent(_) => None, // couldn't scrape further
+            ModuleType::MtyAlias(_, _) => {
+                // Module alias: constant value
+                Some(Constant::Block {
+                    tag: 1, // value tag
+                    tag_info: TagInfo::Constructor {
+                        name: "value".to_string(),
+                        num_nonconst: 2,
+                        tag: 1,
+                        attrs: vec![],
+                    },
+                    elements: vec![Constant::ModuleAlias],
+                })
+            }
+            ModuleType::MtySignature(sg) => {
+                let struct_shape = self.init_shape_struct(env, sg)?;
+                Some(Constant::Block {
+                    tag: 0, // Module tag
+                    tag_info: TagInfo::Constructor {
+                        name: "Module".to_string(),
+                        num_nonconst: 2,
+                        tag: 0,
+                        attrs: vec![],
+                    },
+                    elements: vec![Constant::Block {
+                        tag: 0,
+                        tag_info: TagInfo::Tuple,
+                        elements: struct_shape,
+                    }],
+                })
+            }
+            ModuleType::MtyFunctor { .. } => None, // can't init functors
+        }
+    }
+
+    /// Compute shape constants for each item in a signature.
+    /// Returns `None` if any value item can't be shaped (non-function value).
+    fn init_shape_struct(
+        &self,
+        env: &crate::types::env::Env,
+        sg: &[crate::types::decl::SignatureItem],
+    ) -> Option<Vec<Constant>> {
+        use crate::types::decl::{SignatureItem as DeclSigItem, ValueKind as DeclValueKind};
+
+        let mut result = Vec::new();
+        let mut env = env.clone_preserve_id();
+
+        for item in sg {
+            match item {
+                DeclSigItem::SigValue(id, vd) => {
+                    match &vd.val_kind {
+                        DeclValueKind::ValPrim(_) => {
+                            // Primitive values don't need shapes, skip
+                            continue;
+                        }
+                        DeclValueKind::ValReg => {
+                            // Regular value: check if it's a function type
+                            let expanded =
+                                crate::types::ctype::expand_head(self.type_ctx, &env, vd.val_type);
+                            let is_function = matches!(&*self.type_ctx.get_desc(expanded), TypeDesc::Tarrow { .. });
+                            if !is_function {
+                                return None; // non-function value, can't init
+                            }
+                            // Function shape: Const_pointer(0, Pt_constructor{name="Function"...})
+                            // We use ModuleAlias since it also prints as "0a"
+                            let init_v = Constant::ModuleAlias;
+                            // add_name: wrap with (shape, name) tuple
+                            result.push(Constant::Block {
+                                tag: 0,
+                                tag_info: TagInfo::Tuple,
+                                elements: vec![init_v, Constant::string(id.name())],
+                            });
+                        }
+                    }
+                }
+                DeclSigItem::SigType(id, tdecl, _) => {
+                    env.add_type(id.clone(), tdecl.clone());
+                }
+                DeclSigItem::SigTypext(_, _, _) => {
+                    return None; // type extensions can't be initialized
+                }
+                DeclSigItem::SigModule(id, md, _) => {
+                    let sub_shape = self.init_shape_mod(&env, &md.md_type)?;
+                    // add_name: wrap with (shape, name) tuple
+                    result.push(Constant::Block {
+                        tag: 0,
+                        tag_info: TagInfo::Tuple,
+                        elements: vec![sub_shape, Constant::string(id.name())],
+                    });
+                    env.add_module(id.clone(), md.clone());
+                }
+                DeclSigItem::SigModtype(id, minfo) => {
+                    env.add_modtype(id.clone(), minfo.clone());
+                }
+                DeclSigItem::SigClass => {
+                    // ReScript doesn't have classes, but just in case
+                    return None;
+                }
+                DeclSigItem::SigClassType => {
+                    // Skip class types
+                    continue;
+                }
+            }
+        }
+        Some(result)
+    }
+
+    /// Simple Mtype.scrape: resolve Mty_ident to concrete module type.
+    fn scrape_modtype(
+        &self,
+        env: &crate::types::env::Env,
+        mty: &crate::types::decl::ModuleType,
+    ) -> Option<crate::types::decl::ModuleType> {
+        use crate::types::decl::ModuleType;
+        match mty {
+            ModuleType::MtyIdent(path) => {
+                // Look up the modtype declaration and try to expand
+                if let Ok(mtd) = env.lookup_modtype(path) {
+                    if let Some(ref expanded) = mtd.mtd_type {
+                        // Recursively scrape the expansion
+                        let result = self.scrape_modtype(env, expanded);
+                        Some(result.unwrap_or_else(|| expanded.clone()))
+                    } else {
+                        None // abstract module type, can't scrape
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None, // already concrete
+        }
+    }
+
+    /// Check if a raw lambda is a block of only functions and constants.
+    /// Used to decide if we can use simple `letrec` for recursive modules.
+    ///
+    /// Mirrors OCaml's `Transl_recmodule.is_function_or_const_block`.
+    fn is_function_or_const_block(lam: &RawLambda, acc: &HashSet<Ident>) -> bool {
+        match lam {
+            RawLambda::Lprim(info) if matches!(info.primitive, Primitive::Pmakeblock(_, _, _)) => {
+                info.args.iter().all(|arg| match arg {
+                    RawLambda::Lvar(id) => acc.contains(id),
+                    RawLambda::Lfunction(_) | RawLambda::Lconst(_) => true,
+                    _ => false,
+                })
+            }
+            RawLambda::Llet(_, id, value, cont) => {
+                if matches!(value.as_ref(), RawLambda::Lfunction(_)) {
+                    let mut new_acc = acc.clone();
+                    new_acc.insert(id.clone());
+                    Self::is_function_or_const_block(cont, &new_acc)
+                } else if matches!(value.as_ref(), RawLambda::Lconst(_)) {
+                    Self::is_function_or_const_block(cont, acc)
+                } else if let RawLambda::Lvar(id2) = value.as_ref() {
+                    if acc.contains(id2) {
+                        let mut new_acc = acc.clone();
+                        new_acc.insert(id.clone());
+                        Self::is_function_or_const_block(cont, &new_acc)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            RawLambda::Lletrec(bindings, cont) => {
+                let mut new_acc = acc.clone();
+                for (id, rhs) in bindings {
+                    if !matches!(rhs, RawLambda::Lfunction(_)) {
+                        return false;
+                    }
+                    new_acc.insert(id.clone());
+                }
+                Self::is_function_or_const_block(cont, &new_acc)
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if all bindings are either strict (no shape) or all-function blocks.
+    fn is_strict_or_all_functions(
+        bindings: &[(Ident, Option<(RawLambda, RawLambda)>, RawLambda)],
+    ) -> bool {
+        bindings.iter().all(|(_, opt, rhs)| match opt {
+            None => true,
+            Some(_) => Self::is_function_or_const_block(rhs, &HashSet::new()),
+        })
+    }
+
+    /// Reorder recursive module bindings to honor dependencies.
+    /// Bindings without shapes (strict) are ordered after their dependencies.
+    /// Bindings with shapes (init_mod) can appear in any order.
+    ///
+    /// Mirrors OCaml's `Transl_recmodule.reorder_rec_bindings`.
+    fn reorder_rec_bindings(
+        bindings: Vec<(Ident, Option<(RawLambda, RawLambda)>, RawLambda)>,
+    ) -> Vec<(Ident, Option<(RawLambda, RawLambda)>, RawLambda)> {
+        let n = bindings.len();
+        if n <= 1 {
+            return bindings;
+        }
+
+        // Compute free variables for each RHS
+        let fvs: Vec<HashSet<Ident>> = bindings
+            .iter()
+            .map(|(_, _, rhs)| raw_free_variables(rhs))
+            .collect();
+        let ids: Vec<&Ident> = bindings.iter().map(|(id, _, _)| id).collect();
+
+        #[derive(Clone, Copy, PartialEq)]
+        enum Status {
+            Undefined,
+            Inprogress,
+            Defined,
+        }
+        let mut status = vec![Status::Undefined; n];
+        let mut result_indices: Vec<usize> = Vec::with_capacity(n);
+
+        fn emit_binding(
+            i: usize,
+            ids: &[&Ident],
+            fvs: &[HashSet<Ident>],
+            inits: &[&Option<(RawLambda, RawLambda)>],
+            status: &mut [Status],
+            result: &mut Vec<usize>,
+        ) {
+            match status[i] {
+                Status::Defined => return,
+                Status::Inprogress => {
+                    // Circular dependency - OCaml raises an error here.
+                    // We'll just proceed (the runtime will catch it).
+                    return;
+                }
+                Status::Undefined => {
+                    if inits[i].is_none() {
+                        // Strict binding: must order after dependencies
+                        status[i] = Status::Inprogress;
+                        for j in 0..ids.len() {
+                            if fvs[i].contains(ids[j]) {
+                                emit_binding(j, ids, fvs, inits, status, result);
+                            }
+                        }
+                    }
+                    result.push(i);
+                    status[i] = Status::Defined;
+                }
+            }
+        }
+
+        let inits: Vec<&Option<(RawLambda, RawLambda)>> =
+            bindings.iter().map(|(_, init, _)| init).collect();
+
+        for i in 0..n {
+            if status[i] == Status::Undefined {
+                emit_binding(i, &ids, &fvs, &inits, &mut status, &mut result_indices);
+            }
+        }
+
+        // Reorder bindings according to result_indices
+        let mut bindings = bindings;
+        let mut reordered = Vec::with_capacity(n);
+        // Use a vec of Options so we can take values out
+        let mut slots: Vec<Option<(Ident, Option<(RawLambda, RawLambda)>, RawLambda)>> =
+            bindings.into_iter().map(Some).collect();
+        for i in result_indices {
+            if let Some(binding) = slots[i].take() {
+                reordered.push(binding);
+            }
+        }
+        reordered
+    }
+
+    /// Generate the init_mod/update_mod code or simple letrec for recursive modules.
+    ///
+    /// Three phases for init_mod/update_mod:
+    /// 1. `let M = #init_mod(loc, shape)` for modules with shapes
+    /// 2. `let M = rhs` for strict modules (no shape)
+    /// 3. `seq #update_mod(shape, M, rhs)` to fill in actual values
+    fn eval_rec_bindings(
+        bindings: Vec<(Ident, Option<(RawLambda, RawLambda)>, RawLambda)>,
+        cont: RawLambda,
+    ) -> RawLambda {
+        if Self::is_strict_or_all_functions(&bindings) {
+            // Simple letrec: all modules are just function/const blocks
+            let rec_bindings: Vec<(Ident, RawLambda)> = bindings
+                .into_iter()
+                .map(|(id, _, rhs)| (id, rhs))
+                .collect();
+            return RawLambda::Lletrec(rec_bindings, Box::new(cont));
+        }
+
+        // Phase 3: patch_forwards - update_mod for each shaped binding
+        let mut result = cont;
+        for (id, init, rhs) in bindings.iter().rev() {
+            if let Some((_loc, shape)) = init {
+                result = RawLambda::seq(
+                    RawLambda::prim(
+                        Primitive::PupdateMod,
+                        vec![shape.clone(), RawLambda::Lvar(id.clone()), rhs.clone()],
+                        Location::none(),
+                    ),
+                    result,
+                );
+            }
+        }
+
+        // Phase 2: bind_strict - let bindings for modules without shapes
+        for (id, init, rhs) in bindings.iter().rev() {
+            if init.is_none() {
+                result = RawLambda::let_(
+                    LetKind::Strict,
+                    id.clone(),
+                    rhs.clone(),
+                    result,
+                );
+            }
+        }
+
+        // Phase 1: bind_inits - init_mod for modules with shapes
+        for (id, init, _rhs) in bindings.iter().rev() {
+            if let Some((loc, shape)) = init {
+                result = RawLambda::let_(
+                    LetKind::Strict,
+                    id.clone(),
+                    RawLambda::prim(
+                        Primitive::PinitMod,
+                        vec![loc.clone(), shape.clone()],
+                        Location::none(),
+                    ),
+                    result,
+                );
+            }
+        }
+
+        result
+    }
+
+    /// Compile recursive module bindings.
+    /// Mirrors OCaml's `Transl_recmodule.compile_recmodule`.
+    fn compile_recmodule(
+        &mut self,
+        bindings: &[crate::types::typedtree::ModuleBinding],
+        cont: RawLambda,
+    ) -> RawLambda {
+        // Collect (id, init_shape, rhs) for each binding
+        let collected: Vec<(Ident, Option<(RawLambda, RawLambda)>, RawLambda)> = bindings
+            .iter()
+            .map(|mb| {
+                let id = mb.mb_id.clone();
+                let shape = self.init_shape(&mb.mb_expr);
+                let rhs = self.convert_module_expr_raw(&mb.mb_expr, &None);
+                (id, shape, rhs)
+            })
+            .collect();
+
+        let reordered = Self::reorder_rec_bindings(collected);
+        Self::eval_rec_bindings(reordered, cont)
+    }
+
     fn convert_structure_items_raw(
         &mut self,
         fields: &mut Vec<Ident>,
@@ -2786,19 +3250,7 @@ impl<'a> RawLambdaConverter<'a> {
                 );
                 fields.truncate(old_len);
 
-                // OCaml's Transl_recmodule.compile_recmodule generates:
-                // - Simple letrec for function/const-only modules
-                // - init_mod/update_mod for complex recursive modules
-                // For now, always generate simple letrec
-                let rec_bindings: Vec<(Ident, RawLambda)> = bindings
-                    .iter()
-                    .map(|mb| {
-                        let module_lam = self.convert_module_expr_raw(&mb.mb_expr, &None);
-                        (mb.mb_id.clone(), module_lam)
-                    })
-                    .collect();
-
-                RawLambda::Lletrec(rec_bindings, Box::new(body))
+                self.compile_recmodule(bindings, body)
             }
             StructureItemDesc::Tstr_primitive(_)
             | StructureItemDesc::Tstr_type(_, _)
