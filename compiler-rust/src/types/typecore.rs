@@ -16116,32 +16116,81 @@ fn build_signature_from_structure(
 fn wrap_alias_ident_in_constraint(
     mut module: crate::types::typedtree::ModuleExpr,
     env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext<'_>,
 ) -> crate::types::typedtree::ModuleExpr {
     use crate::types::typedtree::{ModuleExprDesc, ModuleTypeConstraint, ModuleCoercion};
 
     match &module.mod_desc {
         ModuleExprDesc::Tmod_ident(path, _) => {
-            // Match OCaml scrape_alias: wrap for aliases whose target is NOT
-            // a functor application (Papply). OCaml's lazy component forcing
-            // resolves Papply alias targets to concrete signatures before this
-            // check. For Pdot paths, check via env.lookup_module; fallback to
-            // wrapping for unresolvable CMI modules.
-            let is_alias_check = |md: &crate::types::decl::ModuleDeclaration| -> bool {
-                match &md.md_type {
-                    crate::types::decl::ModuleType::MtyAlias(_, target) =>
-                        !matches!(target, Path::Papply(_, _)),
+            // Match OCaml scrape_alias (env.ml:1435): resolve alias chains
+            // until reaching a non-alias module type. If the chain resolves
+            // to MtySignature/MtyFunctor, the alias was a functor result and
+            // should NOT be wrapped. If it stays MtyAlias (unresolvable
+            // target), it's a true alias and should be wrapped.
+            let is_alias = {
+                let md_type = match path {
+                    Path::Pident(id) => env.find_module(id.name())
+                        .ok()
+                        .map(|md| md.md_type.clone()),
+                    Path::Pdot(parent, name, _) => env.lookup_module(path)
+                        .ok()
+                        .map(|md| md.md_type.clone())
+                        .or_else(|| {
+                            // Fallback: resolve through persistent env for
+                            // modules like SectionID.Comparable where the parent
+                            // is a persistent alias.
+                            let pe = pers_env.as_mut()?;
+                            let parent_name = parent.head_name();
+                            let ps = pe.find_pers_struct(&parent_name, ctx)?;
+                            // Find submodule in parent's signature
+                            ps.ps_sig.iter().find_map(|item| match item {
+                                crate::types::decl::SignatureItem::SigModule(id, md, _)
+                                    if id.name() == name.as_str() =>
+                                {
+                                    Some(md.md_type.clone())
+                                }
+                                _ => None,
+                            })
+                        }),
+                    _ => None,
+                };
+                match md_type {
+                    // Pdot lookup failed even with persistent env → assume alias
+                    None if matches!(path, Path::Pdot(..)) => true,
+                    Some(crate::types::decl::ModuleType::MtyAlias(_, ref target)) => {
+                        // Scrape: follow the alias chain with cycle detection.
+                        let mut current = target.clone();
+                        let mut visited = std::collections::HashSet::new();
+                        let mut is_still_alias = true;
+                        for _ in 0..10 {
+                            if !visited.insert(current.name()) {
+                                break;
+                            }
+                            // Try env only — don't resolve through persistent env.
+                            // OCaml's find_module for persistent modules returns
+                            // the raw declaration from the CMI which is typically
+                            // still MtyAlias. We match that by not eagerly loading
+                            // persistent modules to signatures.
+                            let target_mty = env.lookup_module(&current)
+                                .ok()
+                                .map(|md| md.md_type.clone());
+                            match target_mty.as_ref() {
+                                Some(crate::types::decl::ModuleType::MtyAlias(_, next)) => {
+                                    current = next.clone();
+                                }
+                                Some(crate::types::decl::ModuleType::MtySignature(_))
+                                | Some(crate::types::decl::ModuleType::MtyFunctor { .. }) => {
+                                    is_still_alias = false;
+                                    break;
+                                }
+                                _ => break,
+                            }
+                        }
+                        is_still_alias
+                    }
                     _ => false,
                 }
-            };
-            let is_alias = match path {
-                Path::Pident(id) => env.find_module(id.name())
-                    .ok()
-                    .is_some_and(is_alias_check),
-                Path::Pdot(..) => env.lookup_module(path)
-                    .ok()
-                    .map(is_alias_check)
-                    .unwrap_or(true),
-                _ => false,
             };
             if is_alias {
                 let inner_mty = module.mod_type.clone();
@@ -16169,7 +16218,7 @@ fn wrap_alias_ident_in_constraint(
                 mod_desc, mod_loc, mod_type, mod_env, mod_attributes
             } = module;
             if let ModuleExprDesc::Tmod_constraint(inner, mty, constraint, coercion) = mod_desc {
-                let wrapped_inner = wrap_alias_ident_in_constraint(*inner, env);
+                let wrapped_inner = wrap_alias_ident_in_constraint(*inner, env, pers_env, ctx);
                 crate::types::typedtree::ModuleExpr {
                     mod_desc: ModuleExprDesc::Tmod_constraint(
                         Box::new(wrapped_inner), mty, constraint, coercion,
@@ -16386,7 +16435,7 @@ fn type_pack(
     // (type_package calls type_module with alias=false). We use alias=true
     // to avoid breaking pack type checking, then add the wrapping post-hoc.
     // Handles both top-level Tmod_ident and nested Tmod_constraint(Tmod_ident).
-    let typed_module = wrap_alias_ident_in_constraint(typed_module, env);
+    let typed_module = wrap_alias_ident_in_constraint(typed_module, env, &mut tctx.persistent_env, tctx.type_ctx);
 
     if debug_pack {
         let full_loc = tctx.arena.to_location(loc);

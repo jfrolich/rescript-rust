@@ -19,9 +19,12 @@ import sys
 import re
 
 def canonicalize(text):
-    # Match word/stamp where stamp is >= 1000 (3+ digits starting with 1-9, or 4+ digits)
-    # This avoids matching field positions like field:foo/0 or tags like A/3
-    pattern = re.compile(r'(\b[a-zA-Z_*][a-zA-Z0-9_*\']*)/(\d{4,}|[1-9]\d{2,})')
+    # Match name/stamp where stamp is a 4+ digit number (>= 1000).
+    # Identifiers can contain letters, digits, underscores, *, and ' (e.g., *opt*/1234).
+    # We use a lookbehind for a non-/ character (or start) to avoid matching inside paths,
+    # and match the identifier name before the /stamp.
+    # Stamps < 1000 are field positions, tag numbers, or predef stamps — left unchanged.
+    pattern = re.compile(r'([a-zA-Z_*][a-zA-Z0-9_*\']*)/(\d{4,})')
 
     # Per-name: maps (name, old_stamp) -> canonical_stamp
     stamp_map = {}
@@ -31,8 +34,6 @@ def canonicalize(text):
     def replace(m):
         name = m.group(1)
         old_stamp = int(m.group(2))
-        if old_stamp < 1000:
-            return m.group(0)  # not a generated stamp, leave as-is
         key = (name, old_stamp)
         if key not in stamp_map:
             counter = next_per_name.get(name, 1)
