@@ -10,6 +10,7 @@
 pub mod convert;
 pub mod lower;
 pub mod print;
+pub mod switch;
 pub(crate) mod typeopt;
 
 use crate::ident::Ident;
