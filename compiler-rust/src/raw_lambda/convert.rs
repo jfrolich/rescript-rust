@@ -5833,9 +5833,6 @@ impl<'a> RawLambdaConverter<'a> {
                 }
 
                 match wrap_tmp {
-                    // OCaml: make_record_matching binds field accesses with Alias (immutable)
-                    // or StrictOpt (mutable). When we wrap a sub-record scrutinee that came
-                    // from a field access, use Alias to match OCaml's arg_to_var behavior.
                     Some((tmp, scrut)) => RawLambda::let_(LetKind::Alias, tmp, scrut, result),
                     None => result,
                 }
