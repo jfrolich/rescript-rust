@@ -4143,7 +4143,27 @@ impl<'a> RawLambdaConverter<'a> {
 
         let body = self.convert_expr_raw(&cases[0].c_rhs);
         let scrut_lam = self.convert_expr_raw(scrut);
-        Some(self.bind_irrefutable_pattern_raw(&cases[0].c_lhs, scrut_lam, body))
+
+        // OCaml's compile_matching uses args=[(arg, Strict)], which means
+        // when arg_to_var creates a temp for a non-variable scrutinee, it
+        // gets a Strict binding. Match this for non-trivial patterns.
+        match (&cases[0].c_lhs.pat_desc, &scrut_lam) {
+            (PatternDesc::Tpat_var(_, _), _) | (_, RawLambda::Lvar(_)) => {
+                // Simple var pattern or variable scrutinee — no wrapping needed
+                Some(self.bind_irrefutable_pattern_raw(&cases[0].c_lhs, scrut_lam, body))
+            }
+            _ => {
+                // Non-variable scrutinee with complex pattern (record, tuple, etc.)
+                // OCaml's compile_matching binds with Strict via arg_to_var
+                let match_id = self.id_gen.create("match");
+                let bound = self.bind_irrefutable_pattern_raw(
+                    &cases[0].c_lhs,
+                    RawLambda::Lvar(match_id.clone()),
+                    body,
+                );
+                Some(RawLambda::let_(LetKind::Strict, match_id, scrut_lam, bound))
+            }
+        }
     }
 
     fn compile_simple_trywith_raw(
