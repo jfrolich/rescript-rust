@@ -18281,6 +18281,18 @@ pub(crate) fn copy_lookup_signature_for_subst(
     copy_lookup_signature(sig_items, ctx, &mut cache)
 }
 
+/// Deep-copy a module type, creating new type expression nodes.
+/// Used to avoid in-place modification of shared type expressions
+/// when applying path substitutions (matching OCaml's lazy deep-copy
+/// behavior in `components_of_module_maker` + `Subst.type_declaration`).
+pub(crate) fn copy_lookup_module_type_for_subst(
+    module_type: &crate::types::decl::ModuleType,
+    ctx: &TypeContext<'_>,
+) -> crate::types::decl::ModuleType {
+    let mut cache = HashMap::new();
+    copy_lookup_module_type(module_type, ctx, &mut cache)
+}
+
 fn copy_lookup_value_components_signature(
     sig_items: &[crate::types::decl::SignatureItem],
     _ctx: &TypeContext<'_>,

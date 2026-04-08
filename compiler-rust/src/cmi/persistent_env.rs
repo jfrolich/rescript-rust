@@ -1136,6 +1136,11 @@ pub fn substitute_type_paths_in_child_module_type(
     parent_module_path: &Path,
     ctx: &TypeContext<'_>,
 ) {
+    // Deep-copy the module type first to avoid modifying shared type expressions
+    // in-place. OCaml's lazy `components_of_module_maker` + `Subst.type_declaration`
+    // naturally deep-copies; we must do it explicitly.
+    *child_mty =
+        crate::types::typecore::copy_lookup_module_type_for_subst(child_mty, ctx);
     match child_mty {
         ModuleType::MtySignature(sig) => {
             substitute_type_paths_in_child_sig(sig, parent_sig, parent_module_path, ctx);

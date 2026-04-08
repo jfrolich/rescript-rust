@@ -1474,8 +1474,16 @@ fn resolve_module_type_through_env_path<'a>(
                         // child module signatures may reference parent-defined types/modules
                         // using bare names (e.g. `subtype` inside `Stream.Writable`).
                         // Rewrite those references through the parent module access path.
+                        //
+                        // IMPORTANT: deep-copy the signature before applying parent
+                        // substitutions to avoid modifying the original type expressions
+                        // in-place (which would corrupt the typed tree).  OCaml's lazy
+                        // `components_of_module_maker` naturally deep-copies via
+                        // `Subst.type_declaration`; we emulate that with copy_lookup.
+                        let copied_sig =
+                            super::typecore::copy_lookup_signature_for_subst(sig, ctx);
                         crate::cmi::persistent_env::substitute_type_paths_in_child_sig(
-                            sig,
+                            &copied_sig,
                             &parent_sig,
                             parent,
                             ctx,
@@ -1487,11 +1495,11 @@ fn resolve_module_type_through_env_path<'a>(
                             strengthen_signature_for_module_access_path(
                                 ctx,
                                 &child_target_path,
-                                sig,
+                                &copied_sig,
                                 0,
                             )
                         } else {
-                            sig.clone()
+                            copied_sig
                         };
                         Some(super::decl::ModuleType::MtySignature(child_sig))
                     }
