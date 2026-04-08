@@ -1608,6 +1608,7 @@ impl<'a> RawLambdaConverter<'a> {
             "#is_nullable" => Some(Primitive::PisNullUndefined),
             "#null_to_opt" => Some(Primitive::PnullToOpt),
             "#nullable_to_opt" => Some(Primitive::PnullUndefinedToOpt),
+            "#import" => Some(Primitive::Pimport),
             _ => {
                 // %fieldN -> Pfield(N, Fld_tuple)
                 if let Some(n_str) = prim_name.strip_prefix("%field") {
