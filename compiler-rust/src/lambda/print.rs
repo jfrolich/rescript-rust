@@ -232,7 +232,7 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Pnotbigint => write!(f, "~~"),
         Primitive::Plslbigint => write!(f, "lsl"),
         Primitive::Pasrbigint => write!(f, "asr"),
-        Primitive::Pbigintcomp(cmp) => write!(f, "{}", format_comparison(*cmp)),
+        Primitive::Pbigintcomp(cmp) => write!(f, "{},", format_comparison(*cmp)),
         Primitive::Pbigintorder => write!(f, "compare"),
         Primitive::Pbigintmin => write!(f, "min"),
         Primitive::Pbigintmax => write!(f, "max"),
