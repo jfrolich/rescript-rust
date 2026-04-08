@@ -1749,10 +1749,10 @@ impl<'a> RawLambdaConverter<'a> {
                 if constructor_has_optional_shape(cstr) =>
             {
                 match args {
-                    [arg] => {
-                        let env_opt = self.type_ctx.get_typed_env(arg.exp_env);
-                        let can_use_not_nested = env_opt
-                            .as_ref()
+                    [arg]
+                        if self
+                            .type_ctx
+                            .get_typed_env(arg.exp_env)
                             .map(|env| {
                                 type_cannot_contain_undefined(
                                     self.type_ctx,
@@ -1760,19 +1760,9 @@ impl<'a> RawLambdaConverter<'a> {
                                     arg.exp_type,
                                 )
                             })
-                            .unwrap_or_else(|| {
-                                // Fallback: use self.env when typed env not stored
-                                type_cannot_contain_undefined(
-                                    self.type_ctx,
-                                    self.env,
-                                    arg.exp_type,
-                                )
-                            });
-                        if can_use_not_nested {
-                            TagInfo::SomeNotNested
-                        } else {
-                            TagInfo::Some
-                        }
+                            .unwrap_or(false) =>
+                    {
+                        TagInfo::SomeNotNested
                     }
                     _ => TagInfo::Some,
                 }
