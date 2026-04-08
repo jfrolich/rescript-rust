@@ -135,25 +135,19 @@ fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
     let Path::Pident(id) = path else {
         return BuiltinPathTest::NotApplicable;
     };
-    if !id.is_persistent() {
+    // OCaml checks by stamp range (predef stamps), but predef idents are NOT persistent
+    // (they're created with Ident.create, not Ident.create_persistent).
+    // Check by name for predef types — they are always top-level Pident.
+    // Only match non-module paths (predef types have low stamps or stamp 0).
+    if id.stamp() < 0 {
         return BuiltinPathTest::NotApplicable;
     }
     match id.name() {
         "option" | "unit" => BuiltinPathTest::ForSureNo,
-        "int"
-        | "char"
-        | "float"
-        | "bool"
-        | "exn"
-        | "array"
-        | "list"
-        | "result"
-        | "dict"
-        | "bigint"
-        | "string"
-        | "extension_constructor"
-        | "unknown"
-        | "promise" => BuiltinPathTest::ForSureYes,
+        "int" | "char" | "float" | "bool" | "exn" | "array" | "list" | "result" | "dict"
+        | "bigint" | "string" | "extension_constructor" | "unknown" | "promise" => {
+            BuiltinPathTest::ForSureYes
+        }
         _ => BuiltinPathTest::NotApplicable,
     }
 }
