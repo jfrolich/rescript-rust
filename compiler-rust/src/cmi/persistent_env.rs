@@ -2666,15 +2666,23 @@ pub fn add_signature_to_env(
             .collect()
     }
 
-    for (pos, item) in sig_items.iter().enumerate() {
-        let slot_path = |name: &str| {
-            Path::Pdot(Box::new(module_path.clone()), name.to_string(), pos as i32)
+    // OCaml's components_of_module_maker uses a selective position counter:
+    // only value-bearing items (non-primitive values, modules, extension constructors)
+    // get runtime field positions. Types and module types are skipped.
+    let mut pos: i32 = 0;
+    for item in sig_items.iter() {
+        let slot_path = |name: &str, p: i32| {
+            Path::Pdot(Box::new(module_path.clone()), name.to_string(), p)
         };
         match item {
             SignatureItem::SigValue(id, desc) => {
                 // Add value binding with qualified path
                 let mut desc = desc.clone();
-                desc.val_path = Some(slot_path(id.name()));
+                desc.val_path = Some(slot_path(id.name(), pos));
+                // OCaml: only increment pos for non-primitive values
+                if !matches!(desc.val_kind, crate::types::decl::ValueKind::ValPrim(_)) {
+                    pos += 1;
+                }
                 if std::env::var_os("RUST_DEBUG_OPEN_SIG_VALUES").is_some()
                     && (id.name() == "someElement"
                         || id.name() == "element"
@@ -2923,7 +2931,8 @@ pub fn add_signature_to_env(
                 // Set the qualified path so that when this module is accessed
                 // via Lident (e.g. "Console" from opened Stdlib), we produce
                 // the correct Pdot path (e.g. Pdot(Pident("Stdlib"), "Console"))
-                let access_path = slot_path(id.name());
+                let access_path = slot_path(id.name(), pos);
+                pos += 1;
                 md.md_path = Some(access_path.clone());
                 // Rewrite module-type paths against the opened signature.
                 // Some CMI signatures use hidden self-alias heads (e.g. `ArrayExt!`)
@@ -2983,6 +2992,7 @@ pub fn add_signature_to_env(
                 }
             }
             SignatureItem::SigTypext(id, ext, _status) => {
+                pos += 1; // Extension constructors occupy runtime slots
                 let ext_type_path = substitute_sig_path(&ext.ext_type_path, sig_items, module_path);
                 // Add extension constructor
                 let cstr_desc = ConstructorDescription {
