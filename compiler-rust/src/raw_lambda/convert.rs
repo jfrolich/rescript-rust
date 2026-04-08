@@ -1601,6 +1601,13 @@ impl<'a> RawLambdaConverter<'a> {
             "%lebigint" => Some(Primitive::Pbigintcomp(crate::lambda::Comparison::Le)),
             "%gtbigint" => Some(Primitive::Pbigintcomp(crate::lambda::Comparison::Gt)),
             "%gebigint" => Some(Primitive::Pbigintcomp(crate::lambda::Comparison::Ge)),
+            // #-prefixed primitives (from OCaml's translcore.ml prim_table)
+            "#null" => Some(Primitive::Pnull),
+            "#undefined" => Some(Primitive::Pundefined),
+            "#typeof" => Some(Primitive::Ptypeof),
+            "#is_nullable" => Some(Primitive::PisNullUndefined),
+            "#null_to_opt" => Some(Primitive::PnullToOpt),
+            "#nullable_to_opt" => Some(Primitive::PnullUndefinedToOpt),
             _ => {
                 // %fieldN -> Pfield(N, Fld_tuple)
                 if let Some(n_str) = prim_name.strip_prefix("%field") {
