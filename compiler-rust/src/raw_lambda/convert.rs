@@ -3411,29 +3411,36 @@ impl<'a> RawLambdaConverter<'a> {
                 *partial,
                 *transformed_jsx,
             ),
-            ExpressionDesc::Texp_match(scrut, cases, exn_cases, partial) if exn_cases.is_empty() => self
-                .compile_irrefutable_match_raw(scrut, cases)
-                .or_else(|| {
-                    self.compile_simple_string_match(self.loc(expr.exp_loc), scrut, cases, *partial)
-                })
-                .or_else(|| {
-                    self.compile_simple_variant_match_raw(self.loc(expr.exp_loc), scrut, cases, *partial)
-                })
-                .or_else(|| {
-                    self.compile_simple_tuple_match_raw(self.loc(expr.exp_loc), scrut, cases, *partial)
-                })
-                .or_else(|| {
-                    self.compile_simple_constructor_match_raw(
-                        self.loc(expr.exp_loc),
-                        scrut,
-                        cases,
-                        *partial,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    trace_raw_match_fallback(&self.loc(expr.exp_loc), scrut, cases);
-                    RawLambda::from_lowered(self.lowered.convert_expr(expr))
-                }),
+            ExpressionDesc::Texp_match(scrut, cases, exn_cases, partial) if exn_cases.is_empty() => {
+                // OCaml's compile_matching pre-allocates an exit ID for the
+                // default failure handler when the match is Partial. This
+                // consumes one raise count before the match body uses any.
+                if *partial == Partial::Partial {
+                    let _default_raise = self.next_raise_count();
+                }
+                self.compile_irrefutable_match_raw(scrut, cases)
+                    .or_else(|| {
+                        self.compile_simple_string_match(self.loc(expr.exp_loc), scrut, cases, *partial)
+                    })
+                    .or_else(|| {
+                        self.compile_simple_variant_match_raw(self.loc(expr.exp_loc), scrut, cases, *partial)
+                    })
+                    .or_else(|| {
+                        self.compile_simple_tuple_match_raw(self.loc(expr.exp_loc), scrut, cases, *partial)
+                    })
+                    .or_else(|| {
+                        self.compile_simple_constructor_match_raw(
+                            self.loc(expr.exp_loc),
+                            scrut,
+                            cases,
+                            *partial,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        trace_raw_match_fallback(&self.loc(expr.exp_loc), scrut, cases);
+                        RawLambda::from_lowered(self.lowered.convert_expr(expr))
+                    })
+            }
             ExpressionDesc::Texp_try(body, cases) => self
                 .compile_simple_trywith_raw(self.loc(expr.exp_loc), body, cases)
                 .unwrap_or_else(|| RawLambda::from_lowered(self.lowered.convert_expr(expr))),
