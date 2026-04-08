@@ -16121,12 +16121,26 @@ fn wrap_alias_ident_in_constraint(
 
     match &module.mod_desc {
         ModuleExprDesc::Tmod_ident(path, _) => {
-            // Check if this module is an alias
+            // Match OCaml scrape_alias: wrap for aliases whose target is NOT
+            // a functor application (Papply). OCaml's lazy component forcing
+            // resolves Papply alias targets to concrete signatures before this
+            // check. For Pdot paths, check via env.lookup_module; fallback to
+            // wrapping for unresolvable CMI modules.
+            let is_alias_check = |md: &crate::types::decl::ModuleDeclaration| -> bool {
+                match &md.md_type {
+                    crate::types::decl::ModuleType::MtyAlias(_, target) =>
+                        !matches!(target, Path::Papply(_, _)),
+                    _ => false,
+                }
+            };
             let is_alias = match path {
                 Path::Pident(id) => env.find_module(id.name())
                     .ok()
-                    .is_some_and(|md| matches!(md.md_type, crate::types::decl::ModuleType::MtyAlias(_, _))),
-                Path::Pdot(..) => true, // Pdot submodules are typically aliases
+                    .is_some_and(is_alias_check),
+                Path::Pdot(..) => env.lookup_module(path)
+                    .ok()
+                    .map(is_alias_check)
+                    .unwrap_or(true),
                 _ => false,
             };
             if is_alias {

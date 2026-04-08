@@ -299,9 +299,9 @@ test_single_file() {
             if [[ -f "$diff_cache" ]]; then
                 parity_hunks=$(grep -c '^@@' "$diff_cache" || true)
             fi
-            # Stamp-normalized comparison: replace /NNN+ stamps with /0
-            sed 's|/[0-9][0-9][0-9][0-9]*|/0|g' "$file_temp/ocaml.out" > "$file_temp/ocaml.norm"
-            sed 's|/[0-9][0-9][0-9][0-9]*|/0|g' "$file_temp/rust.out" > "$file_temp/rust.norm"
+            # Stamp-canonicalized comparison: renumber stamps sequentially per-name
+            python3 "$PROJECT_ROOT/scripts/canonicalize_lambda_stamps.py" < "$file_temp/ocaml.out" > "$file_temp/ocaml.norm"
+            python3 "$PROJECT_ROOT/scripts/canonicalize_lambda_stamps.py" < "$file_temp/rust.out" > "$file_temp/rust.norm"
             if diff -q "$file_temp/ocaml.norm" "$file_temp/rust.norm" > /dev/null 2>&1; then
                 norm_parity_pass=1
             else
