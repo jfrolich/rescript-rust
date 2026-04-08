@@ -7289,6 +7289,7 @@ fn type_module_expr_with_alias<'a>(
                 }
             };
 
+            let path_clone = path.clone();
             let ident_mod = ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_ident(path, lid.clone()),
                 mod_loc: loc,
@@ -7303,12 +7304,36 @@ fn type_module_expr_with_alias<'a>(
                     Some(crate::types::decl::ModuleType::MtyAlias(_, _))
                 )
             {
+                // OCaml (typemod.ml line 1245-1252): when the module type is an alias
+                // and we're not in alias mode, wrap with Tcoerce_alias(p1, Tcoerce_none)
+                // where p1 is the alias target path. The inner Tmod_ident should have
+                // mod_type = Mty_alias(Mta_absent, path).
+                let alias_target = match &mod_type {
+                    Some(crate::types::decl::ModuleType::MtyAlias(_, p1)) => p1.clone(),
+                    _ => path_clone.clone(),
+                };
+
+                // Fix inner mod_type to Tmty_alias (OCaml line 1234)
+                let mut inner = ident_mod;
+                inner.mod_type = ModuleType {
+                    mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_alias(
+                        path_clone.clone(),
+                        lid.clone(),
+                    ),
+                    mty_loc: loc,
+                    mty_attributes: mod_expr.pmod_attributes.clone(),
+                };
+
                 Ok(ModuleExpr {
                     mod_desc: ModuleExprDesc::Tmod_constraint(
-                        Box::new(ident_mod),
+                        Box::new(inner),
                         ModuleType::placeholder(),
                         crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
-                        ModuleCoercion::Tcoerce_none,
+                        ModuleCoercion::Tcoerce_alias(
+                            EnvRef(0),
+                            alias_target,
+                            Box::new(ModuleCoercion::Tcoerce_none),
+                        ),
                     ),
                     mod_loc: loc,
                     mod_type: ModuleType::placeholder(),
