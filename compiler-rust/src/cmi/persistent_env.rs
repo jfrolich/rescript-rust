@@ -1381,6 +1381,27 @@ pub fn substitute_type_paths_in_sig_with_stamp_map(
 }
 
 /// Recursively walk a type expression and substitute Tconstr paths.
+/// Public wrapper for substitute_type_expr_path.
+pub fn substitute_type_expr_path_pub(
+    ty_ref: TypeExprRef,
+    type_stamp_map: &HashMap<i32, Path>,
+    type_name_map: &HashMap<String, Path>,
+    module_stamp_map: &HashMap<i32, Path>,
+    module_name_map: &HashMap<String, Path>,
+    ctx: &TypeContext<'_>,
+    visited: &mut HashSet<usize>,
+) {
+    substitute_type_expr_path(
+        ty_ref,
+        type_stamp_map,
+        type_name_map,
+        module_stamp_map,
+        module_name_map,
+        ctx,
+        visited,
+    );
+}
+
 fn substitute_type_expr_path(
     ty_ref: TypeExprRef,
     type_stamp_map: &HashMap<i32, Path>,

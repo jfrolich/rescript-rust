@@ -16833,6 +16833,13 @@ fn type_expect_with_module_unpacks(
     // Match OCaml Env.enter_module: create one fresh ident used for
     // both the body environment binding and the Texp_letmodule node.
     let letmod_id = tctx.type_ctx.create_ident(unpack.id.name());
+    // Note: OCaml applies prefix_idents/Subst.signature here via lazy
+    // components_of_module_maker, rewriting Pident paths to Pdot(Reducer, ...).
+    // This affects which path form becomes the representative after unification.
+    // Implementing this in Rust causes widespread crashes (426/657 files) because
+    // the Pdot paths can't always be expanded back through the env.
+    // The remaining cosmetic difference (Pident vs Pdot for first-class module
+    // type paths) is accepted as a known limitation.
     let mut body_env = env.clone();
     body_env.add_module(
         letmod_id.clone(),
