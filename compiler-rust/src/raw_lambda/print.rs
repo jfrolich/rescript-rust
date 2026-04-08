@@ -546,7 +546,9 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             f.open_box(BoxKind::Box, 2);
             f.string("(seq");
             f.space();
-            sequence(f, first, reraise_exn);
+            // OCaml's printlambda uses `lam` for the first element (preserving
+            // nested seq structure) and `sequence` for the second (flattening).
+            lam(f, first, reraise_exn);
             f.space();
             sequence(f, second, reraise_exn);
             f.string(")");
