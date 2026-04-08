@@ -5702,8 +5702,10 @@ impl<'a> RawLambdaConverter<'a> {
                     result = self.bind_irrefutable_pattern_raw(item, field, result);
                 }
                 match wrap_tmp {
-                    // OCaml: make_tuple_matching binds tuple element accesses with Alias
-                    Some((tmp, scrut)) => RawLambda::let_(LetKind::Alias, tmp, scrut, result),
+                    // OCaml's compile_matching passes args with Strict kind;
+                    // arg_to_var creates the temp, bind_check preserves Strict
+                    // for non-variable scrutinees.
+                    Some((tmp, scrut)) => RawLambda::let_(LetKind::Strict, tmp, scrut, result),
                     None => result,
                 }
             }
