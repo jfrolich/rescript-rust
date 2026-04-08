@@ -240,14 +240,38 @@ fn resolve_package_modtype_path(lid: &Longident, env: &Env, arena: &ParseArena) 
                 Path::pident(Ident::create_persistent(name_str))
             }
         }
-        Longident::Ldot(prefix, name) => Path::pdot(
-            crate::types::typemod::path_from_longident(prefix, |idx| arena.get_string(idx)),
-            arena.get_string(*name),
-        ),
+        Longident::Ldot(prefix, name) => {
+            // Resolve the prefix through the env to get the correct ident
+            // (persistent for CMI modules), matching OCaml's behavior.
+            let prefix_path = resolve_package_module_prefix(prefix, env, arena);
+            Path::pdot(prefix_path, arena.get_string(*name))
+        }
         Longident::Lapply(functor, arg) => Path::papply(
             crate::types::typemod::path_from_longident(functor, |idx| arena.get_string(idx)),
             crate::types::typemod::path_from_longident(arg, |idx| arena.get_string(idx)),
         ),
+    }
+}
+
+/// Resolve a module prefix longident through the environment, so that
+/// persistent modules use their persistent ident (stamp 0) instead of
+/// creating fresh local idents.
+fn resolve_package_module_prefix(lid: &Longident, env: &Env, arena: &ParseArena) -> Path {
+    match lid {
+        Longident::Lident(name) => {
+            let name_str = arena.get_string(*name);
+            // Try to find the module in the env to get the correct ident
+            if let Ok(md) = env.find_module_with_id(name_str) {
+                Path::pident(md.0.clone())
+            } else {
+                Path::pident(Ident::create_persistent(name_str))
+            }
+        }
+        Longident::Ldot(prefix, name) => {
+            let prefix_path = resolve_package_module_prefix(prefix, env, arena);
+            Path::pdot(prefix_path, arena.get_string(*name))
+        }
+        _ => crate::types::typemod::path_from_longident(lid, |idx| arena.get_string(idx)),
     }
 }
 
