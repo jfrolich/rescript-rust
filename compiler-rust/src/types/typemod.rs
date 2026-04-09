@@ -5636,11 +5636,25 @@ pub(crate) fn decl_module_type_from_typed(
             for item in &sig.sig_items {
                 match &item.sig_desc {
                     TypedSignatureItemDesc::Tsig_value(vd) => {
+                        let val_kind = if vd.val_prim.is_empty() {
+                            ValueKind::ValReg
+                        } else {
+                            // @inline and external values have non-empty val_prim;
+                            // mark them as ValPrim so they don't get runtime slots
+                            // (matching OCaml's transl_value_decl behavior).
+                            ValueKind::ValPrim(crate::types::PrimitiveDescription {
+                                prim_name: vd.val_prim.first().cloned().unwrap_or_default(),
+                                prim_arity: 0,
+                                prim_native_name: vd.val_prim.get(1).cloned().unwrap_or_default(),
+                                prim_native_float: false,
+                                prim_from_constructor: false,
+                            })
+                        };
                         out.push(SigItem::SigValue(
                             vd.val_id.clone(),
                             ValueDescription {
                                 val_type: vd.val_desc.ctyp_type,
-                                val_kind: ValueKind::ValReg,
+                                val_kind,
                                 val_loc: crate::location::Location::none(),
                                 val_attributes: vec![],
                                 val_path: None,
