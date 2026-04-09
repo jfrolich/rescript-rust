@@ -1379,6 +1379,52 @@ impl<'a> RawLambdaConverter<'a> {
             || self.is_base_type(ty, "char")
             || self.is_base_type(ty, "bool")
             || self.is_base_type(ty, "unit")
+            || self.is_immediate_poly_variant(ty)
+    }
+
+    /// Check if a type is "immediate" (not a pointer), matching OCaml's
+    /// maybe_pointer_type. Checks type_immediate on type declarations,
+    /// all-constant variant types, and closed poly variant rows without payloads.
+    fn is_immediate_poly_variant(&self, ty: TypeExprRef) -> bool {
+        use crate::types::type_expr::TypeDesc;
+        use crate::types::btype;
+        let ty = self.type_ctx.repr(ty);
+        match &*self.type_ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, .. } => {
+                if let Some(decl) = crate::raw_lambda::typeopt::find_type_decl_pub(
+                    self.type_ctx, self.env, path,
+                ) {
+                    if decl.type_immediate {
+                        return true;
+                    }
+                    // Variant types with all constant constructors are immediate
+                    if let crate::types::decl::TypeKind::TypeVariant(cdecls) = &decl.type_kind {
+                        return cdecls.iter().all(|cd| {
+                            matches!(&cd.cd_args, crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty())
+                        });
+                    }
+                    // For abstract types with a manifest, check the manifest
+                    if let Some(manifest) = decl.type_manifest {
+                        return self.is_immediate_poly_variant(manifest);
+                    }
+                }
+                false
+            }
+            TypeDesc::Tvariant(row) => {
+                let row = btype::row_repr(self.type_ctx, row);
+                if !row.row_closed {
+                    return false;
+                }
+                !row.row_fields.iter().any(|(_, f)| {
+                    matches!(
+                        btype::row_field_repr(self.type_ctx, f),
+                        crate::types::type_expr::RowField::Rpresent(Some(_))
+                            | crate::types::type_expr::RowField::Reither { constant: false, .. }
+                    )
+                })
+            }
+            _ => false,
+        }
     }
 
     fn basename_for_loc(&self, loc: Location) -> String {

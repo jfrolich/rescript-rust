@@ -225,6 +225,10 @@ fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
     }
 }
 
+pub(crate) fn find_type_decl_pub(ctx: &TypeContext<'_>, env: &Env, path: &Path) -> Option<TypeDeclaration> {
+    find_type_decl(ctx, env, path)
+}
+
 fn find_type_decl(ctx: &TypeContext<'_>, env: &Env, path: &Path) -> Option<TypeDeclaration> {
     match path {
         Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => {
