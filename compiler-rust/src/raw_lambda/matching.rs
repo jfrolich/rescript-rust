@@ -5727,34 +5727,71 @@ fn complete_pats_constrs(
                 Vec::new()
             };
 
-            // Filter to unseen constructors, preserving const before nonconst order
-            let mut const_others = Vec::new();
-            let mut nonconst_others = Vec::new();
-            for cnstr in &all_constrs {
-                let is_unseen = match &cnstr.cstr_tag {
-                    ConstructorTag::CstrConstant(i) => {
-                        (*i as usize) < seen_const.len() && !seen_const[*i as usize]
-                    }
-                    ConstructorTag::CstrBlock(i) => {
-                        (*i as usize) < seen_nonconst.len() && !seen_nonconst[*i as usize]
-                    }
-                    _ => false,
-                };
-                if is_unseen {
-                    if cnstr.cstr_arity == 0 {
-                        const_others.push(cnstr);
-                    } else {
-                        nonconst_others.push(cnstr);
+            if !all_constrs.is_empty() {
+                // Filter to unseen constructors, preserving const before nonconst order
+                let mut const_others = Vec::new();
+                let mut nonconst_others = Vec::new();
+                for cnstr in &all_constrs {
+                    let is_unseen = match &cnstr.cstr_tag {
+                        ConstructorTag::CstrConstant(i) => {
+                            (*i as usize) < seen_const.len() && !seen_const[*i as usize]
+                        }
+                        ConstructorTag::CstrBlock(i) => {
+                            (*i as usize) < seen_nonconst.len() && !seen_nonconst[*i as usize]
+                        }
+                        _ => false,
+                    };
+                    if is_unseen {
+                        if cnstr.cstr_arity == 0 {
+                            const_others.push(cnstr);
+                        } else {
+                            nonconst_others.push(cnstr);
+                        }
                     }
                 }
-            }
 
-            // Build patterns: pat_of_constr for each unseen constructor
-            let mut result = Vec::new();
-            for cnstr in const_others.iter().chain(nonconst_others.iter()) {
-                result.push(pat_of_constr(p, cnstr));
+                // Build patterns: pat_of_constr for each unseen constructor
+                let mut result = Vec::new();
+                for cnstr in const_others.iter().chain(nonconst_others.iter()) {
+                    result.push(pat_of_constr(p, cnstr));
+                }
+                result
+            } else {
+                // Type lookup failed — synthesize unseen constructors from the
+                // cstr_consts/cstr_nonconsts counts and the seen tags.
+                // This handles external module types (e.g., list from stdlib).
+                let mut result = Vec::new();
+                for i in 0..cstr.cstr_consts {
+                    if (i as usize) < seen_const.len() && !seen_const[i as usize] {
+                        let synth_cstr = ConstructorDescription {
+                            cstr_name: String::new(),
+                            cstr_tag: ConstructorTag::CstrConstant(i),
+                            cstr_arity: 0,
+                            cstr_consts: cstr.cstr_consts,
+                            cstr_nonconsts: cstr.cstr_nonconsts,
+                            ..cstr.clone()
+                        };
+                        result.push(pat_of_constr(p, &synth_cstr));
+                    }
+                }
+                for i in 0..cstr.cstr_nonconsts {
+                    if (i as usize) < seen_nonconst.len() && !seen_nonconst[i as usize] {
+                        // Synthesize a non-constant constructor with arity 1
+                        // (we don't know the real arity, but 1 is sufficient for
+                        // the pattern to be recognized as non-constant)
+                        let synth_cstr = ConstructorDescription {
+                            cstr_name: String::new(),
+                            cstr_tag: ConstructorTag::CstrBlock(i),
+                            cstr_arity: 1,
+                            cstr_consts: cstr.cstr_consts,
+                            cstr_nonconsts: cstr.cstr_nonconsts,
+                            ..cstr.clone()
+                        };
+                        result.push(pat_of_constr(p, &synth_cstr));
+                    }
+                }
+                result
             }
-            result
         }
     }
 }
@@ -8138,6 +8175,8 @@ pub fn do_for_multiple_match(
         let (next, nexts) = split_precompile(Some(ctx_ref), &None, &pm1, next_raise_count);
 
         let size = paraml.len();
+
+        // Debug: print what split_precompile produced
         let idl: Vec<Ident> = paraml.iter().map(|_| Ident::create_local("match")).collect();
         let args: Vec<(RawLambda, LetKind)> = idl
             .iter()

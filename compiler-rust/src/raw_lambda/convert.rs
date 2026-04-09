@@ -4426,8 +4426,25 @@ impl<'a> RawLambdaConverter<'a> {
         // Reset raise count — the simple matchers may have consumed one
         // for the partial default, but the full matching compiler manages
         // its own raise counts.
-        let scrut_lam = self.convert_expr_raw(scrut);
         let pat_act_list = self.cases_to_pat_act_list(cases);
+
+        // OCaml optimization: when the scrutinee is a tuple, decompose into
+        // individual arguments and use for_multiple_match, which can flatten
+        // the tuple pattern matching without allocating a tuple.
+        // (See OCaml's translcore.ml lines 1259-1260)
+        if let ExpressionDesc::Texp_tuple(argl) = &scrut.exp_desc {
+            let paraml: Vec<RawLambda> = argl.iter().map(|a| self.convert_expr_raw(a)).collect();
+            return full_matching::for_multiple_match(
+                self.type_ctx,
+                loc,
+                paraml,
+                pat_act_list,
+                partial,
+                &mut self.next_static_raise,
+            );
+        }
+
+        let scrut_lam = self.convert_expr_raw(scrut);
 
         let loc_for_handler = loc.clone();
         let fname = self.basename_for_loc(loc_for_handler.clone());
