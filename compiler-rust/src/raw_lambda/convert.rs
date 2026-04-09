@@ -6756,10 +6756,16 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 }
                 match wrap_tmp {
-                    // OCaml's compile_matching passes args with Strict kind;
-                    // arg_to_var creates the temp, bind_check preserves Strict
-                    // for non-variable scrutinees.
-                    Some((tmp, scrut)) => RawLambda::let_(LetKind::Strict, tmp, scrut, result),
+                    // OCaml's bind_check uses Alias for field accesses (pure expressions),
+                    // Strict for computations.
+                    Some((tmp, scrut)) => {
+                        let kind = if matches!(&scrut, RawLambda::Lprim(info) if matches!(info.primitive, Primitive::Pfield(_, _))) {
+                            LetKind::Alias
+                        } else {
+                            LetKind::Strict
+                        };
+                        RawLambda::let_(kind, tmp, scrut, result)
+                    }
                     None => result,
                 }
             }
