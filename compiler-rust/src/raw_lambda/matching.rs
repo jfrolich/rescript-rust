@@ -7324,7 +7324,7 @@ fn do_compile_matching(
                     let names: Option<SwitchNames> = None;
                     let loc = Location::none();
                     let arg_clone = arg.clone();
-                    let row_desc = extract_row_from_type(ctx_ref, pat.pat_type);
+                    let row_desc = extract_row_from_type_with_env(ctx_ref, pat.pat_type, pat.pat_env);
                     let row_desc2 = row_desc.clone();
                     compile_test_wrapper(
                         ctx_ref,
@@ -7615,6 +7615,28 @@ fn build_label_descriptions(
 
 /// Extract a RowDesc from a type expression (for variant matching).
 /// Follows type links to find the Tvariant row.
+/// Extract variant row with env-based expansion (preferred).
+fn extract_row_from_type_with_env(
+    ctx_ref: &TypeContext<'_>,
+    ty: TypeExprRef,
+    env_ref: crate::types::typedtree::EnvRef,
+) -> RowDesc {
+    use crate::types::type_expr::TypeDesc;
+    use crate::types::btype;
+
+    // First try expanding with the environment
+    if let Some(env) = ctx_ref.get_typed_env(env_ref) {
+        let expanded = crate::types::ctype::expand_head(ctx_ref, env.as_ref(), ty);
+        let desc = ctx_ref.get_desc(expanded);
+        if let TypeDesc::Tvariant(row) = &*desc {
+            return btype::row_repr(ctx_ref, row);
+        }
+    }
+
+    // Fall back to stamp/path-based lookup
+    extract_row_from_type(ctx_ref, ty)
+}
+
 fn extract_row_from_type(ctx_ref: &TypeContext<'_>, ty: TypeExprRef) -> RowDesc {
     use crate::types::type_expr::TypeDesc;
     use crate::types::btype;
