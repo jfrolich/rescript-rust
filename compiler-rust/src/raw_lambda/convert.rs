@@ -5386,6 +5386,22 @@ impl<'a> RawLambdaConverter<'a> {
             },
         };
 
+        // Detect if any case pattern is an int constant (not char/variant).
+        // For int constants, OCaml uses low=min_int creating fail intervals
+        // at both ends, making isout optimal. For char/variant, fail is only
+        // at the top when starting from 0, making >= optimal.
+        let has_int_constants_detected = cases.iter().any(|case| {
+            fn has_int_in_pat(pat: &Pattern) -> bool {
+                match &pat.pat_desc {
+                    PatternDesc::Tpat_constant(TConstant::Int(_)) => true,
+                    PatternDesc::Tpat_or(l, r, _) => has_int_in_pat(l) || has_int_in_pat(r),
+                    PatternDesc::Tpat_alias(inner, _, _) => has_int_in_pat(inner),
+                    _ => false,
+                }
+            }
+            has_int_in_pat(&case.c_lhs)
+        });
+
         let dense_const_partial = if block_cases.is_empty() {
             failaction.as_ref().and_then(|default| {
                 let mut sorted_consts = const_cases.clone();
@@ -5421,20 +5437,32 @@ impl<'a> RawLambdaConverter<'a> {
                 }
 
                 let exit_id = self.next_raise_count();
-                let offset_arg = if first == 0 {
-                    scrut_var.clone()
-                } else {
+                // For char constants and variant constructors starting at 0,
+                // OCaml's Switch module picks Sep optimization: >= (last+1).
+                // For int constants, OCaml uses low=min_int which creates
+                // fail intervals at both ends, making Inter (isout) optimal.
+                let is_out = if first == 0 && !has_int_constants_detected {
                     RawLambda::prim(
-                        Primitive::Poffsetint(-first),
-                        vec![scrut_var.clone()],
+                        Primitive::Pintcomp(Comparison::Ge),
+                        vec![scrut_var.clone(), RawLambda::const_(Constant::int(last + 1))],
+                        loc,
+                    )
+                } else {
+                    let offset_arg = if first == 0 {
+                        scrut_var.clone()
+                    } else {
+                        RawLambda::prim(
+                            Primitive::Poffsetint(-first),
+                            vec![scrut_var.clone()],
+                            loc,
+                        )
+                    };
+                    RawLambda::prim(
+                        Primitive::Pisout(last - first),
+                        vec![offset_arg],
                         loc,
                     )
                 };
-                let is_out = RawLambda::prim(
-                    Primitive::Pisout(last - first),
-                    vec![offset_arg],
-                    loc,
-                );
 
                 // If all cases map to the same static raise, use it directly
                 // instead of generating a switch (matches OCaml's share_actions)
