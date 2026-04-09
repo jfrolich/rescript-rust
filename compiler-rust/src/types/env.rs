@@ -176,17 +176,17 @@ pub enum EnvSummary {
 pub struct BindingTable<T> {
     /// Bindings indexed by name. The bool indicates whether the binding is
     /// local (true = from `add`, false = from `add_opened`).
-    by_name: HashMap<String, Vec<(Ident, T, bool)>>,
+    by_name: im_rc::HashMap<String, Vec<(Ident, T, bool)>>,
     /// Bindings indexed by identifier stamp.
-    by_stamp: HashMap<i32, T>,
+    by_stamp: im_rc::HashMap<i32, T>,
 }
 
 impl<T: Clone> BindingTable<T> {
     /// Create a new empty binding table.
     pub fn new() -> Self {
         BindingTable {
-            by_name: HashMap::new(),
-            by_stamp: HashMap::new(),
+            by_name: im_rc::HashMap::new(),
+            by_stamp: im_rc::HashMap::new(),
         }
     }
 
@@ -198,10 +198,10 @@ impl<T: Clone> BindingTable<T> {
 
         self.by_stamp.insert(stamp, value.clone());
 
-        self.by_name
-            .entry(name)
-            .or_default()
-            .push((id, value, true));
+        match self.by_name.get_mut(&name) {
+            Some(entries) => entries.push((id, value, true)),
+            None => { self.by_name.insert(name, vec![(id, value, true)]); }
+        }
     }
 
     /// Add a binding from an opened module. Goes at the end of the name
@@ -213,10 +213,10 @@ impl<T: Clone> BindingTable<T> {
 
         self.by_stamp.insert(stamp, value.clone());
 
-        self.by_name
-            .entry(name)
-            .or_default()
-            .push((id, value, false));
+        match self.by_name.get_mut(&name) {
+            Some(entries) => entries.push((id, value, false)),
+            None => { self.by_name.insert(name, vec![(id, value, false)]); }
+        }
     }
 
     /// Find a binding by name.

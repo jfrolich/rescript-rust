@@ -32,9 +32,6 @@ use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-static SIMPLE_ABBREVS_DEBUG_EVENTS: AtomicUsize = AtomicUsize::new(0);
 
 /// Snapshot wrapper for a type descriptor.
 ///
@@ -661,34 +658,8 @@ impl<'a> TypeContext<'a> {
     pub fn check_abbrev_env(&self, env: &crate::types::env::Env) {
         let env_id = env.id();
         if env_id != self.previous_env_id.get() {
-            if std::env::var_os("RUST_DEBUG_ABBREV_ENV").is_some() {
-                let simple = self.simple_abbrevs.get();
-                let simple_before = self.get_abbrev_memo(simple);
-                eprintln!(
-                    "[abbrev-env] clear env_change old_env_id={} new_env_id={} simple_before={:?}",
-                    self.previous_env_id.get(),
-                    env_id,
-                    simple_before
-                );
-                if std::env::var_os("RUST_DEBUG_ABBREV_ENV_BT").is_some() {
-                    eprintln!(
-                        "[abbrev-env] clear-bt old_env_id={} new_env_id={}\n{:?}",
-                        self.previous_env_id.get(),
-                        env_id,
-                        std::backtrace::Backtrace::capture()
-                    );
-                }
-            }
             self.clear_abbrev_memos();
             self.previous_env_id.set(env_id);
-            if std::env::var_os("RUST_DEBUG_ABBREV_ENV").is_some() {
-                let simple = self.simple_abbrevs.get();
-                eprintln!(
-                    "[abbrev-env] clear-done env_id={} simple_after={:?}",
-                    env_id,
-                    self.get_abbrev_memo(simple)
-                );
-            }
         }
     }
 
@@ -713,27 +684,6 @@ impl<'a> TypeContext<'a> {
     pub fn clear_simple_abbrevs(&self) {
         let simple = self.simple_abbrevs.get();
         if simple != AbbrevMemoRef::nil() {
-            if std::env::var_os("RUST_DEBUG_SIMPLE_ABBREVS").is_some() {
-                let before = self.get_abbrev_memo(simple);
-                if !matches!(before, AbbrevMemo::Mnil) {
-                    let event = SIMPLE_ABBREVS_DEBUG_EVENTS.fetch_add(1, Ordering::Relaxed);
-                    if event < 200 {
-                        eprintln!(
-                            "[simple-abbrevs] clear event={} memo={:?}",
-                            event, before
-                        );
-                        if std::env::var_os("RUST_DEBUG_SIMPLE_ABBREVS_BT").is_some()
-                            && event < 20
-                        {
-                            eprintln!(
-                                "[simple-abbrevs] clear-bt event={}\n{:?}",
-                                event,
-                                std::backtrace::Backtrace::capture()
-                            );
-                        }
-                    }
-                }
-            }
             self.clear_abbrev_memo(simple);
         }
     }
@@ -929,17 +879,8 @@ impl<'a> TypeContext<'a> {
         if memo == AbbrevMemoRef::nil() {
             return;
         }
-        let debug_simple = std::env::var_os("RUST_DEBUG_SIMPLE_ABBREVS").is_some()
-            && memo == self.simple_abbrevs.get();
-        let path_name = path.name();
-        let path_last = path.last().to_string();
-        let debug_path_name = if debug_simple {
-            Some(path_name.clone())
-        } else {
-            None
-        };
 
-        let wrote = {
+        {
             let mut abbrevs = self.abbrevs.borrow_mut();
             if memo.0 >= abbrevs.len() {
                 return;
@@ -961,49 +902,8 @@ impl<'a> TypeContext<'a> {
                 expansion,
                 next,
             };
-            true
-        };
-        if wrote {
-            if debug_simple {
-                let event = SIMPLE_ABBREVS_DEBUG_EVENTS.fetch_add(1, Ordering::Relaxed);
-                if event < 200 {
-                    eprintln!(
-                        "[simple-abbrevs] memoize event={} path={} private={:?} abbrev={} expansion={}",
-                        event,
-                        debug_path_name.as_deref().unwrap_or("<unknown>"),
-                        private_flag,
-                        abbrev.0,
-                        expansion.0
-                    );
-                    if std::env::var_os("RUST_DEBUG_SIMPLE_ABBREVS_BT").is_some()
-                        && event < 20
-                    {
-                        eprintln!(
-                            "[simple-abbrevs] memoize-bt event={}\n{:?}",
-                            event,
-                            std::backtrace::Backtrace::capture()
-                        );
-                    }
-                }
-            }
-            if let Some(needle) = std::env::var_os("RUST_DEBUG_MEMOIZE_ABBREV_PATH")
-                .and_then(|s| s.into_string().ok())
-                .filter(|s| !s.is_empty())
-            {
-                if path_name == needle || path_last == needle {
-                    eprintln!(
-                        "[memoize-abbrev] path={} private={:?} abbrev={} expansion={} memo={}\n{:?}",
-                        path_name,
-                        private_flag,
-                        abbrev.0,
-                        expansion.0,
-                        memo.0,
-                        std::backtrace::Backtrace::capture()
-                    );
-                }
-            }
-            self.memoized_abbrev_refs.borrow_mut().push(memo);
         }
+        self.memoized_abbrev_refs.borrow_mut().push(memo);
     }
 
     // ========================================================================

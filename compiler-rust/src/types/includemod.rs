@@ -406,32 +406,6 @@ pub fn signatures<'a>(
     sig_impl: &Signature,
     sig_sig: &Signature,
 ) -> IncludeModResult<ModuleCoercion> {
-    if std::env::var_os("RUST_DEBUG_INCLUDE_SIG_ORDER").is_some() {
-        let summarize = |sig: &Signature| {
-            sig.iter()
-                .map(|item| match item {
-                    SignatureItem::SigValue(id, _) => format!("val:{}", id.name()),
-                    SignatureItem::SigType(id, _, _) => format!("type:{}", id.name()),
-                    SignatureItem::SigTypext(id, _, _) => format!("ext:{}", id.name()),
-                    SignatureItem::SigModule(id, _, _) => format!("module:{}", id.name()),
-                    SignatureItem::SigModtype(id, _) => format!("modtype:{}", id.name()),
-                    SignatureItem::SigClass => "class".to_string(),
-                    SignatureItem::SigClassType => "class_type".to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let interesting = |sig: &Signature| {
-            sig.iter().any(|item| {
-                matches!(item, SignatureItem::SigValue(id, _) if matches!(id.name(), "t_encode" | "t_decode"))
-            })
-        };
-        if interesting(sig_impl) || interesting(sig_sig) {
-            eprintln!("[include-sig-order] impl=[{}]", summarize(sig_impl));
-            eprintln!("[include-sig-order] sig=[{}]", summarize(sig_sig));
-        }
-    }
-
     let mut errors = Vec::new();
     let mut coercions = Vec::new();
     let mut include_env = env.clone();
@@ -715,57 +689,6 @@ fn value_descriptions<'a>(
         }
     }
 
-    fn type_summary(type_ctx: &TypeContext<'_>, ty: TypeExprRef, depth: usize) -> String {
-        use crate::types::type_expr::TypeDesc;
-
-        if depth > 8 {
-            return "...".to_string();
-        }
-
-        let ty = type_ctx.repr(ty);
-        match &*type_ctx.get_desc(ty) {
-            TypeDesc::Tconstr { path, args, .. } => {
-                if args.is_empty() {
-                    path.name()
-                } else {
-                    format!(
-                        "{}<{}>",
-                        path.name(),
-                        args.iter()
-                            .map(|arg| type_summary(type_ctx, *arg, depth + 1))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                }
-            }
-            TypeDesc::Tarrow { arg, ret, .. } => format!(
-                "({} -> {})",
-                type_summary(type_ctx, arg.typ, depth + 1),
-                type_summary(type_ctx, *ret, depth + 1)
-            ),
-            TypeDesc::Ttuple(items) => format!(
-                "({})",
-                items.iter()
-                    .map(|item| type_summary(type_ctx, *item, depth + 1))
-                    .collect::<Vec<_>>()
-                    .join(" * ")
-            ),
-            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-                type_summary(type_ctx, *target, depth + 1)
-            }
-            TypeDesc::Tpoly { body, .. } => {
-                format!("poly {}", type_summary(type_ctx, *body, depth + 1))
-            }
-            TypeDesc::Tvar(name) => format!("var({})", name.as_deref().unwrap_or("_")),
-            TypeDesc::Tunivar(name) => format!("univar({})", name.as_deref().unwrap_or("_")),
-            TypeDesc::Tpackage { path, .. } => format!("package {}", path.name()),
-            TypeDesc::Tvariant(_) => "variant".to_string(),
-            TypeDesc::Tobject { .. } => "object".to_string(),
-            TypeDesc::Tfield { .. } => "field".to_string(),
-            TypeDesc::Tnil => "nil".to_string(),
-        }
-    }
-
     // Check that the value types are compatible
     // The implementation type should be more general than (or equal to) the signature type
     let mut unify_state = UnifyState::default();
@@ -783,23 +706,6 @@ fn value_descriptions<'a>(
         ctype::subst_identity_copy(type_ctx, impl_desc.val_type)
     };
     let sig_ty = ctype::instance(type_ctx, expected_ty);
-
-    if std::env::var_os("RUST_DEBUG_INCLUDE_VALUE_TYPES").is_some()
-        && matches!(id.name(), "t_encode" | "t_decode" | "hash" | "eq" | "cmp" | "compare")
-    {
-        let subst = type_subst
-            .iter()
-            .map(|(name, path)| format!("{name}->{path}", path = path.name()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        eprintln!(
-            "[include-value] {} impl={} expected={} subst=[{}]",
-            id.name(),
-            type_summary(type_ctx, impl_ty, 0),
-            type_summary(type_ctx, sig_ty, 0),
-            subst
-        );
-    }
 
     // Try to unify (signature type should match implementation type)
     if ctype::unify(type_ctx, &mut unify_state, impl_ty, sig_ty).is_err() {
