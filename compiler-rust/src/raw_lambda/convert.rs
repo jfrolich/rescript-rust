@@ -1388,7 +1388,9 @@ impl<'a> RawLambdaConverter<'a> {
     fn is_immediate_poly_variant(&self, ty: TypeExprRef) -> bool {
         use crate::types::type_expr::TypeDesc;
         use crate::types::btype;
-        let ty = self.type_ctx.repr(ty);
+        // Try expand_head first to resolve type aliases
+        let expanded = crate::types::ctype::expand_head(self.type_ctx, self.env, ty);
+        let ty = self.type_ctx.repr(expanded);
         match &*self.type_ctx.get_desc(ty) {
             TypeDesc::Tconstr { path, .. } => {
                 if let Some(decl) = crate::raw_lambda::typeopt::find_type_decl_pub(
