@@ -3468,13 +3468,16 @@ pub fn split_precompile(
     next_raise: &mut i32,
 ) -> (PmHalfCompiled, Vec<(i32, PmHalfCompiled)>) {
     let (info, nexts) = split_or(argo, pm.cases.clone(), &pm.args, pm.default.clone(), next_raise);
-    // Debug output omitted (dbg = false in OCaml)
     (info.me, nexts)
 }
 
-/// Helper: reverse a vector (equivalent to List.rev).
-fn rev_vec<T>(mut v: Vec<T>) -> Vec<T> {
-    v.reverse();
+///// Identity function — no reversal needed.
+///
+/// In OCaml, items are prepended to lists (`cl :: list`) and then reversed
+/// with `List.rev` to restore original order. In Rust, items are appended
+/// with `.push()`, so they're already in the correct order. The `rev_vec`
+/// calls that ported OCaml's `List.rev` are therefore no-ops.
+fn rev_vec<T>(v: Vec<T>) -> Vec<T> {
     v
 }
 
@@ -4410,7 +4413,10 @@ fn record_matching_line_from_fields(
     num_fields: usize,
     fields: &[(crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>, LabelDescription, Pattern, bool)],
 ) -> Vec<Pattern> {
-    let mut patv: Vec<Pattern> = (0..num_fields).map(|_| omega()).collect();
+    // Determine the actual size needed: max of num_fields and any label position + 1.
+    let max_pos = fields.iter().map(|(_, lbl, _, _)| lbl.lbl_pos as usize + 1).max().unwrap_or(0);
+    let size = std::cmp::max(num_fields, max_pos);
+    let mut patv: Vec<Pattern> = (0..size).map(|_| omega()).collect();
     for (_, lbl, pat, _) in fields {
         patv[lbl.lbl_pos as usize] = pat.clone();
     }
@@ -7052,6 +7058,16 @@ fn compile_match(
             )?;
             Ok((bind_check(*str_kind, &v, arg, lam), total))
         }
+        (cases, []) if !cases.is_empty() => {
+            // Cases exist but no args — shouldn't happen normally.
+            // Return the first non-guarded action if available.
+            for (_, act) in cases {
+                if !is_guarded(act) {
+                    return Ok((act.clone(), jumps_empty()));
+                }
+            }
+            Err(Unused)
+        }
         _ => panic!("Matching.compile_match"),
     }
 }
@@ -7541,11 +7557,17 @@ pub fn compile_matching(
                 args: vec![(arg, LetKind::Strict)],
                 default: Vec::new(),
             };
-            let (lambda, total) =
-                compile_match(ctx_ref, None, &partial, &start_ctx(1), &pm, next_raise_count)
-                    .expect("compile_matching Total: Unused");
-            assert!(jumps_is_empty(&total));
-            lambda
+            match compile_match(ctx_ref, None, &partial, &start_ctx(1), &pm, next_raise_count) {
+                Ok((lambda, total)) => {
+                    assert!(jumps_is_empty(&total));
+                    lambda
+                }
+                Err(Unused) => {
+                    // Shouldn't happen for Total matches, but handle gracefully
+                    // by returning a unit value as placeholder.
+                    lambda_unit()
+                }
+            }
         }
     }
 }

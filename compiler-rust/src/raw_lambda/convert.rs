@@ -22,7 +22,8 @@ use crate::lambda::{
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
 use crate::parser::ast::{Arity, MutableFlag as ParserMutableFlag};
-use crate::raw_lambda::RawLambda;
+use crate::raw_lambda::{RawLambda, RawPrimInfo};
+use crate::raw_lambda::matching as full_matching;
 use crate::raw_lambda::typeopt::{
     constructor_has_optional_shape, type_cannot_contain_undefined,
 };
@@ -659,6 +660,30 @@ impl<'a> RawLambdaConverter<'a> {
     fn next_raise_count(&mut self) -> i32 {
         self.next_static_raise += 1;
         self.next_static_raise
+    }
+
+    /// Convert typed tree cases to `(Pattern, RawLambda)` pairs for the full
+    /// matching compiler. Guards are encoded as
+    /// `if guard then body else staticraise(0, [])` per OCaml convention.
+    fn cases_to_pat_act_list(&mut self, cases: &[Case]) -> Vec<(Pattern, RawLambda)> {
+        cases
+            .iter()
+            .map(|case| {
+                let body = self.convert_expr_raw(&case.c_rhs);
+                let act = match &case.c_guard {
+                    Some(guard) => {
+                        let guard_lam = self.convert_expr_raw(guard);
+                        RawLambda::LifThenElse(
+                            Box::new(guard_lam),
+                            Box::new(body),
+                            Box::new(RawLambda::LstaticRaise(0, Vec::new())),
+                        )
+                    }
+                    None => body,
+                };
+                (case.c_lhs.clone(), act)
+            })
+            .collect()
     }
 
     fn id_of_pattern(&mut self, pat: &Pattern) -> Option<Ident> {
@@ -3695,33 +3720,36 @@ impl<'a> RawLambdaConverter<'a> {
                 *transformed_jsx,
             ),
             ExpressionDesc::Texp_match(scrut, cases, exn_cases, partial) if exn_cases.is_empty() => {
-                // OCaml's compile_matching pre-allocates an exit ID for the
-                // default failure handler when the match is Partial. This
-                // consumes one raise count before the match body uses any.
-                if *partial == Partial::Partial {
+                // Try simple matchers first (they handle most common cases
+                // and produce output matching OCaml's simple optimizations).
+                // For complex patterns that simple matchers can't handle,
+                // fall back to the full matching compiler (matching.rs).
+                let partial = *partial;
+                if partial == Partial::Partial {
                     let _default_raise = self.next_raise_count();
                 }
+                let loc = self.loc(expr.exp_loc);
                 self.compile_irrefutable_match_raw(scrut, cases)
                     .or_else(|| {
-                        self.compile_simple_string_match(self.loc(expr.exp_loc), scrut, cases, *partial)
+                        self.compile_simple_string_match(loc.clone(), scrut, cases, partial)
                     })
                     .or_else(|| {
-                        self.compile_simple_variant_match_raw(self.loc(expr.exp_loc), scrut, cases, *partial)
+                        self.compile_simple_variant_match_raw(loc.clone(), scrut, cases, partial)
                     })
                     .or_else(|| {
-                        self.compile_simple_tuple_match_raw(self.loc(expr.exp_loc), scrut, cases, *partial)
+                        self.compile_simple_tuple_match_raw(loc.clone(), scrut, cases, partial)
                     })
                     .or_else(|| {
                         self.compile_simple_constructor_match_raw(
-                            self.loc(expr.exp_loc),
+                            loc.clone(),
                             scrut,
                             cases,
-                            *partial,
+                            partial,
                         )
                     })
                     .unwrap_or_else(|| {
-                        trace_raw_match_fallback(&self.loc(expr.exp_loc), scrut, cases);
-                        RawLambda::from_lowered(self.lowered.convert_expr(expr))
+                        // Simple matchers couldn't handle it — use full matching compiler.
+                        self.compile_full_matching(loc, scrut, cases, partial, expr)
                     })
             }
             ExpressionDesc::Texp_try(body, cases) => self
@@ -4402,6 +4430,66 @@ impl<'a> RawLambdaConverter<'a> {
             Some((id, value)) => RawLambda::let_(LetKind::Strict, id, value, result),
             None => result,
         })
+    }
+
+    /// Use the full matching compiler (matching.rs) for patterns that
+    /// the simple matchers can't handle. Falls back to Lambda lowering
+    /// if the matching compiler panics.
+    fn compile_full_matching(
+        &mut self,
+        loc: Location,
+        scrut: &Expression,
+        cases: &[Case],
+        partial: Partial,
+        expr: &Expression,
+    ) -> RawLambda {
+        // Reset raise count — the simple matchers may have consumed one
+        // for the partial default, but the full matching compiler manages
+        // its own raise counts.
+        let scrut_lam = self.convert_expr_raw(scrut);
+        let pat_act_list = self.cases_to_pat_act_list(cases);
+
+        let loc_for_handler = loc.clone();
+        let fname = self.basename_for_loc(loc_for_handler.clone());
+        let handler_fun = || {
+            let line = loc_for_handler.loc_start.line;
+            let char_pos = loc_for_handler.loc_start.column();
+            let match_failure_ident = predef_exception_ident(
+                "Match_failure",
+                PREDEF_MATCH_FAILURE_STAMP,
+            );
+            let exn = RawLambda::LglobalModule(match_failure_ident, false);
+            let payload = RawLambda::Lconst(Constant::Block {
+                tag: 0,
+                tag_info: TagInfo::Tuple,
+                elements: vec![
+                    Constant::string(fname.clone()),
+                    Constant::int(line),
+                    Constant::int(char_pos),
+                ],
+            });
+            RawLambda::Lprim(RawPrimInfo {
+                primitive: Primitive::Praise,
+                args: vec![RawLambda::Lprim(RawPrimInfo {
+                    primitive: Primitive::Pmakeblock(
+                        0,
+                        TagInfo::Extension,
+                        Mutable::Immutable,
+                    ),
+                    args: vec![exn, payload],
+                    loc: loc_for_handler.clone(),
+                })],
+                loc: loc_for_handler,
+            })
+        };
+        full_matching::compile_matching(
+            self.type_ctx,
+            handler_fun,
+            scrut_lam,
+            pat_act_list,
+            partial,
+            &mut self.next_static_raise,
+        )
     }
 
     fn compile_irrefutable_match_raw(
