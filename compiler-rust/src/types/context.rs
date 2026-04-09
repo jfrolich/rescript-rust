@@ -33,15 +33,54 @@ use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 use std::sync::Arc;
 
-/// Snapshot wrapper for a type descriptor.
+/// Append-only type arena using UnsafeCell for zero-copy access.
 ///
-/// This keeps call sites ergonomic (`*ctx.get_desc(t)`, `&*desc`) while
-/// avoiding long-lived borrows into arena storage.
+/// Safe because:
+/// - `Box<TypeExpr>` gives stable heap addresses
+/// - The Vec only grows (push), never shrinks or reorders
+/// - Individual TypeExpr.desc RefCells are independent
+struct TypeArena {
+    types: std::cell::UnsafeCell<Vec<Box<TypeExpr>>>,
+}
+
+impl TypeArena {
+    fn new() -> Self {
+        TypeArena {
+            types: std::cell::UnsafeCell::new(Vec::new()),
+        }
+    }
+
+    #[inline]
+    fn get(&self, r: TypeExprRef) -> &TypeExpr {
+        unsafe {
+            let types = &*self.types.get();
+            types[r.0].as_ref()
+        }
+    }
+
+    fn push(&self, ty: TypeExpr) -> TypeExprRef {
+        unsafe {
+            let types = &mut *self.types.get();
+            let idx = types.len();
+            types.push(Box::new(ty));
+            TypeExprRef(idx)
+        }
+    }
+
+    fn len(&self) -> usize {
+        unsafe { (*self.types.get()).len() }
+    }
+}
+
+/// Type alias for the desc borrow returned by get_desc().
+pub type TypeDescRef<'a> = std::cell::Ref<'a, TypeDesc>;
+
+/// Cloned snapshot of a type descriptor, for cases where the caller
+/// needs to hold the desc while also mutating the same type node.
 pub struct TypeDescSnapshot(TypeDesc);
 
 impl Deref for TypeDescSnapshot {
     type Target = TypeDesc;
-
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -103,9 +142,8 @@ pub struct TypeContext<'a> {
     /// previously-expanded types and create Tlink sharing.
     current_abbreviations: Cell<AbbrevMemoRef>,
 
-    /// Type expression storage (for indexed access).
-    /// Boxed values keep stable addresses as the vector grows.
-    types: RefCell<Vec<Box<TypeExpr>>>,
+    /// Type expression storage. Uses UnsafeCell-based arena for zero-copy access.
+    types: TypeArena,
 
     /// Abbreviation memo storage
     abbrevs: RefCell<Vec<RefCell<AbbrevMemo>>>,
@@ -216,7 +254,7 @@ impl<'a> TypeContext<'a> {
             generic_dotted_constr_copies: RefCell::new(ahash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
-            types: RefCell::new(Vec::new()),
+            types: TypeArena::new(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
             abbrevs: RefCell::new(vec![
@@ -401,10 +439,7 @@ impl<'a> TypeContext<'a> {
     /// Create a new type expression.
     fn alloc_type(&self, desc: TypeDesc, level: i32) -> TypeExprRef {
         let id = self.id_gen.next_type_id();
-        let mut types = self.types.borrow_mut();
-        let idx = types.len();
-        types.push(Box::new(TypeExpr::new(desc, level, id)));
-        TypeExprRef(idx)
+        self.types.push(TypeExpr::new(desc, level, id))
     }
 
     /// Create a new type at a specific level.
@@ -583,35 +618,35 @@ impl<'a> TypeContext<'a> {
     // Type Access
     // ========================================================================
 
-    /// Access a type expression by reference.
-    fn with_type<R>(&self, r: TypeExprRef, f: impl FnOnce(&TypeExpr) -> R) -> R {
-        let types = self.types.borrow();
-        f(types[r.0].as_ref())
-    }
-
     /// Get the descriptor of a type.
+    /// Returns a cloned snapshot to avoid RefCell borrow conflicts when
+    /// the desc is held across function calls that may modify the same node.
+    #[inline]
     pub fn get_desc(&self, r: TypeExprRef) -> TypeDescSnapshot {
-        self.with_type(r, |ty| TypeDescSnapshot(ty.desc().clone()))
+        TypeDescSnapshot(self.types.get(r).desc().clone())
     }
 
     /// Get the level of a type.
+    #[inline]
     pub fn get_level(&self, r: TypeExprRef) -> i32 {
-        self.with_type(r, |ty| ty.level())
+        self.types.get(r).level()
     }
 
     /// Number of allocated type expressions.
     pub fn type_expr_count(&self) -> usize {
-        self.types.borrow().len()
+        self.types.len()
     }
 
     /// Set the level of a type.
+    #[inline]
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
-        self.with_type(r, |ty| ty.set_level(level));
+        self.types.get(r).set_level(level);
     }
 
     /// Set the descriptor of a type.
+    #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
-        self.with_type(r, |ty| ty.set_desc(desc));
+        self.types.get(r).set_desc(desc);
     }
 
     // ========================================================================
