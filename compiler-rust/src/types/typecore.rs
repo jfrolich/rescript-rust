@@ -16038,8 +16038,21 @@ fn lookup_constructor_in_module<'b>(
             // Resolve the module prefix to get its signature
             let (mod_path, sig) = env.resolve_module_lid(module_lid, arena, pers_env, ctx)?;
             let mut candidates: Vec<(Path, crate::types::decl::ConstructorDescription)> = Vec::new();
+            // Track runtime field positions (matching OCaml's components_of_module_maker)
+            let mut runtime_pos: i32 = 0;
             // Search the signature for type declarations that contain the constructor
             for sig_item in &sig {
+                // Update runtime_pos for position-bearing items
+                match sig_item {
+                    SignatureItem::SigValue(_, desc) => {
+                        if !matches!(desc.val_kind, crate::types::decl::ValueKind::ValPrim(_)) {
+                            runtime_pos += 1;
+                        }
+                    }
+                    SignatureItem::SigModule(_, _, _) => { runtime_pos += 1; }
+                    SignatureItem::SigTypext(_, _, _) => { /* pos incremented below after use */ }
+                    _ => {} // SigType, SigModtype don't increment
+                }
                 if let SignatureItem::SigType(_id, type_decl, _rec) = sig_item {
                     if let crate::types::TypeKind::TypeVariant(ref constrs) = type_decl.type_kind {
                         let num_consts = constrs.iter()
@@ -16166,8 +16179,16 @@ fn lookup_constructor_in_module<'b>(
                 }
                 // Also search SigTypext for exception/extension constructors
                 if let SignatureItem::SigTypext(id, ext, _status) = sig_item {
+                    // Increment runtime_pos for extension constructors
+                    let ext_slot = runtime_pos;
+                    runtime_pos += 1;
                     if id.name() == cstr_name {
-                        let ext_path = Path::pident(Ident::create_persistent(cstr_name));
+                        // Use Pdot path through the module with correct field position.
+                        let ext_path = Path::Pdot(
+                            Box::new(mod_path.clone()),
+                            cstr_name.to_string(),
+                            ext_slot,
+                        );
                         let (cstr_args, cstr_arity, cstr_inlined) = match &ext.ext_args {
                             crate::types::ConstructorArguments::CstrTuple(args) => {
                                 (args.clone(), args.len() as i32, None)
