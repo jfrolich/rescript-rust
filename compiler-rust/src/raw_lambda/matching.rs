@@ -4828,42 +4828,6 @@ pub fn expand_stringswitch(
 // Generic test trees — Sharing (OCaml matching.ml lines 1609-1659)
 // ============================================================================
 
-/// Add handler if shared.
-/// Returns a vector of handlers and a function that resolves shared actions.
-/// Equivalent to OCaml's `handle_shared`.
-///
-/// In OCaml this returns `(hs_ref, handle_shared_fn)` where `hs_ref` is a
-/// mutable ref to a composed function. In Rust we collect handlers into a Vec
-/// and compose them at the end.
-fn handle_shared(
-    next_raise_count: &mut i32,
-) -> (Vec<(i32, RawLambda)>, Box<dyn FnMut(SharedAction) -> RawLambda + '_>) {
-    // We collect handlers as we process shared actions.
-    // The OCaml code builds a closure chain: hs := fun act -> h(ohs(act))
-    // We'll collect them in a Vec and apply them in reverse order at the end.
-    let mut handlers: Vec<(i32, Box<dyn FnOnce(RawLambda) -> RawLambda>)> = Vec::new();
-
-    // We need the handler function to be callable multiple times, but each call
-    // can add to handlers. Use a separate vec that we'll move out at the end.
-    // Actually, let's use a different approach: return the handlers separately.
-
-    // The handle_shared closure needs to mutably borrow next_raise_count
-    // and also accumulate handlers.
-    let handler_list: Vec<(i32, Box<dyn FnOnce(RawLambda) -> RawLambda>)> = Vec::new();
-
-    // Return the handler list by value, and a closure that processes each action
-    (Vec::new(), Box::new(move |act: SharedAction| {
-        match act {
-            SharedAction::Single(a) => a,
-            SharedAction::Shared(a) => {
-                // This path is handled below in the actual implementation
-                // since we need mutable access to the handler list
-                a
-            }
-        }
-    }))
-}
-
 /// Process shared actions for tree-based matching.
 /// Returns `(wrapper_fn, processed_sw, processed_d)`.
 /// The wrapper_fn wraps the result with catch handlers.
