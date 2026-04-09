@@ -549,8 +549,12 @@ pub fn is_constr_row(ctx: &TypeContext<'_>, t: TypeExprRef, allow_ident: bool) -
 /// This is used for polymorphic variant tag representation.
 pub fn hash_variant(s: &str) -> i32 {
     let mut accu: u32 = 0;
-    for c in s.bytes() {
-        accu = accu.wrapping_mul(223).wrapping_add(c as u32);
+    // Iterate over characters and use their Latin-1 byte values (lower 8 bits).
+    // OCaml strings are byte sequences, and multi-byte UTF-8 chars get stored as
+    // individual Latin-1 codepoints (one char per original byte). Using .chars()
+    // and masking to u8 correctly handles both ASCII and Latin-1-encoded labels.
+    for c in s.chars() {
+        accu = accu.wrapping_mul(223).wrapping_add((c as u32) & 0xFF);
     }
     // Reduce to 31 bits
     accu &= (1 << 31) - 1;

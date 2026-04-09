@@ -1336,9 +1336,24 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn is_base_type(&self, ty: TypeExprRef, name: &str) -> bool {
+        // First try without expansion (common case)
         match self.type_desc(ty) {
-            TypeDesc::Tconstr { path, .. } => path.head_name() == name || path.last() == name,
-            _ => false,
+            TypeDesc::Tconstr { path, .. } if path.head_name() == name || path.last() == name => {
+                return true;
+            }
+            _ => {}
+        }
+        // Expand type aliases (like OCaml's scrape/expand_head_opt)
+        let expanded = crate::types::ctype::expand_head(self.type_ctx, self.env, ty);
+        if expanded != self.type_ctx.repr(ty) {
+            match &*self.type_ctx.get_desc(expanded) {
+                TypeDesc::Tconstr { path, .. } => {
+                    path.head_name() == name || path.last() == name
+                }
+                _ => false,
+            }
+        } else {
+            false
         }
     }
 
