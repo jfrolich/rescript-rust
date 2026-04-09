@@ -6115,7 +6115,11 @@ fn split_cases(
             ConstructorTag::CstrConstant(n) => consts.push((n, act)),
             ConstructorTag::CstrBlock(n) => nonconsts.push((n, act)),
             ConstructorTag::CstrUnboxed => nonconsts.push((0, act)),
-            ConstructorTag::CstrExtension(_) => panic!("split_cases: extension constructor"),
+            ConstructorTag::CstrExtension(_) => {
+                // Extension constructors are handled by get_extension_cases,
+                // not split_cases. If we reach here, skip them.
+                continue;
+            }
         }
     }
     consts.sort_by_key(|(i, _)| *i);
