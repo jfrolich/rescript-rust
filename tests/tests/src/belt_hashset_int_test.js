@@ -6,8 +6,8 @@ let sum2 = h => {
   return v.contents;
 };
 
-describe()(_arg0 => {
-  test()(_arg0 => {
+describe()(param => {
+  test()(param => {
     let u = A.concat(I.randomRange(120, 40), I.randomRange(100, 30));
     let v = N.fromArray(u);
     Test_utils.eq(91, N.size(v), %loc_LOC());
@@ -17,7 +17,7 @@ describe()(_arg0 => {
     Test_utils.eq(x, N.reduce(add, 0, v), %loc_LOC());
     return Test_utils.eq(x, sum2(v), %loc_LOC());
   }, "fromArray");
-  test()(_arg0 => {
+  test()(param => {
     let u = A.concat(I.randomRange(100, 0), I.randomRange(100000, 0));
     let v = N.make(40);
     N.mergeMany(u, v);
@@ -31,7 +31,7 @@ describe()(_arg0 => {
     }
     return Test_utils.eq(98000, N.size(v), %loc_LOC());
   }, "mergeMany");
-  test()(_arg0 => {
+  test()(param => {
     let u0 = N.fromArray(I.randomRange(100000, 0));
     let u1 = N.copy(u0);
     Test_utils.eq(N.toArray(u1), N.toArray(u0), %loc_LOC());
@@ -47,7 +47,7 @@ describe()(_arg0 => {
     SI.stableSortInPlace(v1);
     return Test_utils.eq(v1, v0, %loc_LOC());
   }, "stableSortInPlace");
-  return test()(_arg0 => {
+  return test()(param => {
     let h = N.fromArray(I.randomRange(1000000, 0));
     let histo = N.getBucketHistogram(h);
     return Test_utils.ok(%lessequal()(10, histo.length), %loc_LOC());

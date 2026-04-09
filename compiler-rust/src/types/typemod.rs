@@ -5618,7 +5618,18 @@ pub(crate) fn decl_module_type_from_typed(
     match &mty.mty_desc {
         ModuleTypeDesc::Tmty_ident(path, _) => Some(DeclMty::MtyIdent(path.clone())),
         ModuleTypeDesc::Tmty_alias(path, _) => {
-            Some(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path.clone()))
+            // Use MtaPresent instead of MtaAbsent to prevent includemod::modtypes
+            // from wrapping the coercion in Tcoerce_alias. In OCaml, type_package
+            // calls type_module with alias=false, so the module type is never
+            // Mty_alias when reaching includemod. In Rust, type_pack uses alias=true
+            // which produces Tmty_alias, so we need MtaPresent to avoid spurious
+            // Tcoerce_alias wrapping that causes incorrect lambda generation
+            // (extra 0a wrapper in dynamic imports).
+            //
+            // The Tcoerce_alias for actual module aliases (like `include Belt.List`)
+            // is produced directly in type_module_expr_with_alias (line 7349) and
+            // does NOT go through this function, so this change is safe.
+            Some(DeclMty::MtyAlias(AliasPresence::MtaPresent, path.clone()))
         }
         ModuleTypeDesc::Tmty_signature(sig) => {
             let mut out = Vec::new();

@@ -2880,6 +2880,51 @@ impl<'a> RawLambdaConverter<'a> {
         self.convert_module_expr_raw_with_coercion(module_expr, rootpath, &ModuleCoercion::Tcoerce_none)
     }
 
+    /// Convert a module expression inside a Texp_pack.
+    ///
+    /// In OCaml, type_package calls type_module with alias=false, so the inner
+    /// module expression has mod_type = Mty_signature (not Mty_alias). But in
+    /// Rust, type_pack uses alias=true, producing Tmty_alias which causes the
+    /// lambda conversion to emit Const_ModuleAlias (0a) instead of the actual
+    /// module reference.
+    ///
+    /// This method skips the Tmty_alias short-circuit and directly converts the
+    /// module expression based on its mod_desc, matching OCaml's behavior.
+    fn convert_module_expr_for_pack_raw(
+        &mut self,
+        module_expr: &ModuleExpr,
+    ) -> RawLambda {
+        // Unwrap Tmod_constraint wrappers (from type_pack wrapping)
+        // and apply composed coercions, but skip the Tmty_alias check.
+        self.convert_module_expr_for_pack_inner(module_expr, &ModuleCoercion::Tcoerce_none)
+    }
+
+    fn convert_module_expr_for_pack_inner(
+        &mut self,
+        module_expr: &ModuleExpr,
+        cc: &ModuleCoercion,
+    ) -> RawLambda {
+        match &module_expr.mod_desc {
+            ModuleExprDesc::Tmod_constraint(inner, _, _, inner_cc) => {
+                self.convert_module_expr_for_pack_inner(
+                    inner,
+                    &Self::compose_coercions_raw(cc, inner_cc),
+                )
+            }
+            ModuleExprDesc::Tmod_ident(path, _) => {
+                let loc = self.loc(module_expr.mod_loc);
+                let arg = if let Some(env) = self.env_for_module_expr(module_expr) {
+                    self.translate_module_path_raw_in_env(env.as_ref(), path, loc.clone())
+                } else {
+                    self.translate_module_path_raw(path, loc.clone())
+                };
+                self.apply_coercion_raw(loc, LetKind::Strict, cc, arg)
+            }
+            // For other module expression kinds, fall back to the normal conversion
+            _ => self.convert_module_expr_raw_with_coercion(module_expr, &None, cc),
+        }
+    }
+
     // ---- Recursive module compilation (Transl_recmodule) ----
 
     /// Create the location constant for `#init_mod`.
@@ -3765,7 +3810,7 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_extension_constructor(_, path) => {
                 self.translate_extension_path_raw(path, self.loc(expr.exp_loc))
             }
-            ExpressionDesc::Texp_pack(modl) => self.convert_module_expr_raw(modl, &None),
+            ExpressionDesc::Texp_pack(modl) => self.convert_module_expr_for_pack_raw(modl),
             ExpressionDesc::Texp_assert(inner_expr) => {
                 if matches!(
                     inner_expr.exp_desc,
