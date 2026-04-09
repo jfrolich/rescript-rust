@@ -452,14 +452,50 @@ fn set_args_erase_mutable(q: &Pattern, r: &[Pattern]) -> Vec<Pattern> {
 }
 
 /// Expand record pattern to all fields (filling missing with omega).
-/// Simplified version of OCaml's `all_record_args`.
+/// OCaml's `all_record_args` uses `lbl_all` to get ALL labels, then fills
+/// missing ones with omega. Since Rust's `lbl_all` is a placeholder, we
+/// resolve via the TypeContext when available.
 fn all_record_args(
+    ctx_ref: Option<&TypeContext<'_>>,
+    pat_type: TypeExprRef,
+    pat_env: EnvRef,
     lbls: &[(crate::parse_arena::Located<crate::parse_arena::LidentIdx>, crate::types::LabelDescription, Pattern, bool)],
 ) -> Vec<(crate::parse_arena::Located<crate::parse_arena::LidentIdx>, crate::types::LabelDescription, Pattern, bool)> {
-    // For now, just return the fields as-is. The full OCaml version
-    // expands to all labels using lbl_all, but that requires the label
-    // array store. This is sufficient for the matching algorithm.
-    lbls.to_vec()
+    if lbls.is_empty() {
+        return Vec::new();
+    }
+
+    let first_lbl = &lbls[0].1;
+
+    // Try to resolve all labels from the type
+    let all_labels = ctx_ref.and_then(|ctx| {
+        resolve_labels_from_type(ctx, first_lbl.lbl_res, pat_env)
+            .or_else(|| resolve_labels_from_type(ctx, pat_type, pat_env))
+    });
+
+    match all_labels {
+        Some(all_labels) => {
+            // Build a full array with omega for missing fields
+            let dummy_loc = crate::parse_arena::Located {
+                txt: crate::parse_arena::LidentIdx(0),
+                loc: LocIdx::none(),
+            };
+            let mut result: Vec<_> = all_labels.iter().map(|lbl| {
+                (dummy_loc.clone(), lbl.clone(), omega(), first_lbl.lbl_optional)
+            }).collect();
+            // Fill in the actual patterns from the provided fields
+            for (id, lbl, pat, opt) in lbls {
+                if (lbl.lbl_pos as usize) < result.len() {
+                    result[lbl.lbl_pos as usize] = (id.clone(), lbl.clone(), pat.clone(), *opt);
+                }
+            }
+            result
+        }
+        None => {
+            // Fallback: return fields as-is (old behavior)
+            lbls.to_vec()
+        }
+    }
 }
 
 /// Check if two constructors may be equal (considering extension types).
@@ -939,7 +975,7 @@ pub fn ctx_matcher(
             let p = p.clone();
             Box::new(move |q: &Pattern, rem: &[Pattern]| match &q.pat_desc {
                 PatternDesc::Tpat_record(fields2, _) if !fields2.is_empty() => {
-                    let expanded = all_record_args(fields2);
+                    let expanded = all_record_args(None, q.pat_type, q.pat_env, fields2);
                     let mut result: Vec<Pattern> = expanded
                         .iter()
                         .map(|(_, _, p, _)| p.clone())
@@ -1841,14 +1877,14 @@ enum VarPat {
 /// - Aliases are preserved around or-patterns
 ///
 /// Equivalent to OCaml's `simplify_or`.
-fn simplify_or(p: &Pattern) -> Pattern {
-    fn simpl_rec(p: &Pattern) -> Result<Pattern, VarPat> {
+fn simplify_or(ctx_ref: Option<&TypeContext<'_>>, p: &Pattern) -> Pattern {
+    fn simpl_rec(ctx_ref: Option<&TypeContext<'_>>, p: &Pattern) -> Result<Pattern, VarPat> {
         match &p.pat_desc {
             PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) => {
                 Err(VarPat::Var(p.clone()))
             }
             PatternDesc::Tpat_alias(q, id, s) => {
-                match simpl_rec(q) {
+                match simpl_rec(ctx_ref, q) {
                     Ok(q_simplified) => Ok(Pattern {
                         pat_desc: PatternDesc::Tpat_alias(
                             Box::new(q_simplified),
@@ -1868,8 +1904,8 @@ fn simplify_or(p: &Pattern) -> Pattern {
                 }
             }
             PatternDesc::Tpat_or(p1, p2, o) => {
-                let q1 = simpl_rec(p1)?; // propagates Var if p1 is variable
-                match simpl_rec(p2) {
+                let q1 = simpl_rec(ctx_ref, p1)?; // propagates Var if p1 is variable
+                match simpl_rec(ctx_ref, p2) {
                     Ok(q2) => Ok(Pattern {
                         pat_desc: PatternDesc::Tpat_or(
                             Box::new(q1),
@@ -1889,7 +1925,7 @@ fn simplify_or(p: &Pattern) -> Pattern {
                 }
             }
             PatternDesc::Tpat_record(lbls, closed) => {
-                let all_lbls = all_record_args(lbls);
+                let all_lbls = all_record_args(ctx_ref, p.pat_type, p.pat_env, lbls);
                 Ok(Pattern {
                     pat_desc: PatternDesc::Tpat_record(all_lbls, *closed),
                     ..p.clone()
@@ -1899,7 +1935,7 @@ fn simplify_or(p: &Pattern) -> Pattern {
         }
     }
 
-    match simpl_rec(p) {
+    match simpl_rec(ctx_ref, p) {
         Ok(p) => p,
         Err(VarPat::Var(p)) => p,
     }
@@ -1926,6 +1962,7 @@ fn bind(kind: LetKind, id: &Ident, arg: &RawLambda, action: RawLambda) -> RawLam
 ///
 /// Equivalent to OCaml's `simplify_cases`.
 pub fn simplify_cases(
+    ctx_ref: Option<&TypeContext<'_>>,
     args: &[(RawLambda, LetKind)],
     cls: Vec<(Vec<Pattern>, RawLambda)>,
 ) -> Vec<(Vec<Pattern>, RawLambda)> {
@@ -1934,6 +1971,7 @@ pub fn simplify_cases(
     let (ref arg, _) = args[0];
 
     fn simplify(
+        ctx_ref: Option<&TypeContext<'_>>,
         arg: &RawLambda,
         mut cls: Vec<(Vec<Pattern>, RawLambda)>,
     ) -> Vec<(Vec<Pattern>, RawLambda)> {
@@ -1953,12 +1991,12 @@ pub fn simplify_cases(
                 let mut row = vec![omega()];
                 row.extend(patl.iter().cloned());
                 let mut result = vec![(row, new_action)];
-                result.extend(simplify(arg, cls));
+                result.extend(simplify(ctx_ref, arg, cls));
                 result
             }
             PatternDesc::Tpat_any => {
                 let mut result = vec![(pats, action)];
-                result.extend(simplify(arg, cls));
+                result.extend(simplify(ctx_ref, arg, cls));
                 result
             }
             PatternDesc::Tpat_alias(p, id, _) => {
@@ -1966,17 +2004,17 @@ pub fn simplify_cases(
                 let mut new_pats = vec![(**p).clone()];
                 new_pats.extend(patl.iter().cloned());
                 cls.insert(0, (new_pats, new_action));
-                simplify(arg, cls)
+                simplify(ctx_ref, arg, cls)
             }
             PatternDesc::Tpat_record(lbls, _) if lbls.is_empty() => {
                 let mut row = vec![omega()];
                 row.extend(patl.iter().cloned());
                 let mut result = vec![(row, action)];
-                result.extend(simplify(arg, cls));
+                result.extend(simplify(ctx_ref, arg, cls));
                 result
             }
             PatternDesc::Tpat_record(lbls, closed) => {
-                let all_lbls = all_record_args(lbls);
+                let all_lbls = all_record_args(ctx_ref, pat.pat_type, pat.pat_env, lbls);
                 let full_pat = Pattern {
                     pat_desc: PatternDesc::Tpat_record(all_lbls, *closed),
                     ..pat.clone()
@@ -1984,17 +2022,17 @@ pub fn simplify_cases(
                 let mut row = vec![full_pat];
                 row.extend(patl.iter().cloned());
                 let mut result = vec![(row, action)];
-                result.extend(simplify(arg, cls));
+                result.extend(simplify(ctx_ref, arg, cls));
                 result
             }
             PatternDesc::Tpat_or(..) => {
-                let pat_simple = simplify_or(pat);
+                let pat_simple = simplify_or(ctx_ref, pat);
                 match &pat_simple.pat_desc {
                     PatternDesc::Tpat_or(..) => {
                         let mut row = vec![pat_simple];
                         row.extend(patl.iter().cloned());
                         let mut result = vec![(row, action)];
-                        result.extend(simplify(arg, cls));
+                        result.extend(simplify(ctx_ref, arg, cls));
                         result
                     }
                     _ => {
@@ -2002,19 +2040,19 @@ pub fn simplify_cases(
                         let mut new_pats = vec![pat_simple];
                         new_pats.extend(patl.iter().cloned());
                         cls.insert(0, (new_pats, action));
-                        simplify(arg, cls)
+                        simplify(ctx_ref, arg, cls)
                     }
                 }
             }
             _ => {
                 let mut result = vec![(pats, action)];
-                result.extend(simplify(arg, cls));
+                result.extend(simplify(ctx_ref, arg, cls));
                 result
             }
         }
     }
 
-    simplify(arg, cls)
+    simplify(ctx_ref, arg, cls)
 }
 
 // ============================================================================
@@ -2765,13 +2803,14 @@ fn rebuild_nexts(
 /// Split a matching, directed first by or-patterns, then by tests/variable transitions.
 /// Equivalent to OCaml's `split_or`.
 fn split_or(
+    ctx_ref: Option<&TypeContext<'_>>,
     argo: &Option<Ident>,
     cls: Vec<(Vec<Pattern>, RawLambda)>,
     args: &[(RawLambda, LetKind)],
     def: DefaultEnv,
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
-    let cls = simplify_cases(args, cls);
+    let cls = simplify_cases(ctx_ref, args, cls);
 
     do_split_or(argo, Vec::new(), Vec::new(), Vec::new(), &cls, args, &def, next_raise)
 }
@@ -3277,6 +3316,7 @@ fn precompile_var(
                         );
                         let av = arg_rest[0].0.clone();
                         let (first_info, nexts) = split_or(
+                            None, // TypeContext not available in do_split_or
                             &Some(v.clone()),
                             var_cls,
                             arg_rest,
@@ -3463,11 +3503,12 @@ fn do_cases_or(
 /// Top-level split_precompile.
 /// Equivalent to OCaml's `split_precompile`.
 pub fn split_precompile(
+    ctx_ref: Option<&TypeContext<'_>>,
     argo: &Option<Ident>,
     pm: &PatternMatching,
     next_raise: &mut i32,
 ) -> (PmHalfCompiled, Vec<(i32, PmHalfCompiled)>) {
-    let (info, nexts) = split_or(argo, pm.cases.clone(), &pm.args, pm.default.clone(), next_raise);
+    let (info, nexts) = split_or(ctx_ref, argo, pm.cases.clone(), &pm.args, pm.default.clone(), next_raise);
     (info.me, nexts)
 }
 
@@ -7064,7 +7105,7 @@ fn compile_match(
                 args: new_args,
                 default: m.default.clone(),
             };
-            let (first_match, rem) = split_precompile(&Some(v.clone()), &new_pm, next_raise_count);
+            let (first_match, rem) = split_precompile(Some(ctx_ref), &Some(v.clone()), &new_pm, next_raise_count);
 
             let mut comp_fn = |partial: &Partial, ctx: &[Ctx], arg: &RawLambda, pmh: &PmHalfCompiled| -> Result<(RawLambda, Jumps), Unused> {
                 do_compile_matching(ctx_ref, partial, ctx, arg, pmh, next_raise_count)
@@ -7133,7 +7174,7 @@ fn do_compile_matching(
                     )
                 }
                 PatternDesc::Tpat_record(fields, _) if !fields.is_empty() => {
-                    let all_labels = get_all_labels_from_record_fields(fields);
+                    let all_labels = resolve_all_record_labels(ctx_ref, &pat, fields);
                     let norm_pat = normalize_pat(&pat);
                     compile_no_test(
                         ctx_ref,
@@ -7364,6 +7405,160 @@ fn get_all_labels_from_record_fields(
     let mut labels: Vec<LabelDescription> = fields.iter().map(|(_, lbl, _, _)| lbl.clone()).collect();
     labels.sort_by_key(|l| l.lbl_pos);
     labels
+}
+
+/// Resolve ALL record labels from the record type, not just those mentioned in the pattern.
+/// This is the equivalent of OCaml's `lbl.lbl_all` which points to all labels of the record type.
+/// We look up the type declaration via the TypeContext to get all labels.
+fn resolve_all_record_labels(
+    ctx_ref: &TypeContext<'_>,
+    pat: &Pattern,
+    fields: &[(crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>, LabelDescription, Pattern, bool)],
+) -> Vec<LabelDescription> {
+    if fields.is_empty() {
+        return Vec::new();
+    }
+
+    let first_lbl = &fields[0].1;
+
+    // Try to resolve via the record type (lbl_res)
+    if let Some(all_labels) = resolve_labels_from_type(ctx_ref, first_lbl.lbl_res, pat.pat_env) {
+        return all_labels;
+    }
+
+    // Try via pat_type
+    if let Some(all_labels) = resolve_labels_from_type(ctx_ref, pat.pat_type, pat.pat_env) {
+        return all_labels;
+    }
+
+    // Fallback: return only mentioned fields (old behavior)
+    get_all_labels_from_record_fields(fields)
+}
+
+/// Look up all LabelDescription entries for a record type.
+fn resolve_labels_from_type(
+    ctx_ref: &TypeContext<'_>,
+    record_ty: TypeExprRef,
+    env_ref: EnvRef,
+) -> Option<Vec<LabelDescription>> {
+    use crate::types::type_expr::TypeDesc;
+
+    let ty = ctx_ref.repr(record_ty);
+    let desc = ctx_ref.get_desc(ty);
+    let (path, _args) = match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
+        _ => return None,
+    };
+    drop(desc);
+
+    // Try env lookup first
+    let env = ctx_ref.get_typed_env(env_ref)?;
+    if let Ok(decl) = env.lookup_type(&path) {
+        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
+            return Some(build_label_descriptions(labels, repr, decl.type_private));
+        }
+    }
+
+    // Try type_ctx stores
+    if let Some(decl) = ctx_ref.find_type_decl_by_path(&path.name()) {
+        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
+            return Some(build_label_descriptions(labels, repr, decl.type_private));
+        }
+    }
+    if let Some(decl) = ctx_ref.find_type_decl(&path.last()) {
+        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
+            return Some(build_label_descriptions(labels, repr, decl.type_private));
+        }
+    }
+
+    // Try stamp-based lookup
+    if let crate::types::Path::Pident(ref id) = path {
+        if id.stamp() != 0 {
+            if let Some(decl) = ctx_ref.find_type_decl_by_stamp(id.stamp()) {
+                if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
+                    return Some(build_label_descriptions(labels, repr, decl.type_private));
+                }
+            }
+        }
+    }
+
+    // Handle inline records: path is Pdot(parent_type, constructor_name, _)
+    // Look up the parent type declaration and find the constructor's inline record
+    if let crate::types::Path::Pdot(ref parent_path, ref cstr_name, _) = path {
+        // Try to find the parent type declaration
+        let parent_decl = env.lookup_type(parent_path).ok().cloned()
+            .or_else(|| ctx_ref.find_type_decl_by_path(&parent_path.name()).map(|d| d.clone()))
+            .or_else(|| ctx_ref.find_type_decl(&parent_path.last()).map(|d| d.clone()))
+            .or_else(|| {
+                if let crate::types::Path::Pident(ref id) = **parent_path {
+                    if id.stamp() != 0 {
+                        ctx_ref.find_type_decl_by_stamp(id.stamp()).map(|d| d.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
+        if let Some(parent_decl) = parent_decl {
+            if let crate::types::TypeKind::TypeVariant(ref constrs) = parent_decl.type_kind {
+                for cd in constrs {
+                    if cd.cd_id.name() == cstr_name.as_str() {
+                        if let crate::types::ConstructorArguments::CstrRecord(ref labels) = cd.cd_args {
+                            // Determine the block tag for this constructor
+                            let mut block_tag = 0i32;
+                            let num_nonconsts = constrs.iter().filter(|c| {
+                                !matches!(c.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty())
+                            }).count() as i32;
+                            for c in constrs {
+                                if c.cd_id.name() == cstr_name.as_str() {
+                                    break;
+                                }
+                                let is_constant = matches!(
+                                    c.cd_args,
+                                    crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
+                                );
+                                if !is_constant {
+                                    block_tag += 1;
+                                }
+                            }
+                            let repr = RecordRepresentation::RecordInlined {
+                                tag: block_tag,
+                                name: cstr_name.clone(),
+                                num_nonconsts,
+                                attrs: cd.cd_attributes.clone(),
+                            };
+                            return Some(build_label_descriptions(labels, &repr, parent_decl.type_private));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn build_label_descriptions(
+    labels: &[crate::types::decl::LabelDeclaration],
+    repr: &RecordRepresentation,
+    private: crate::types::asttypes::PrivateFlag,
+) -> Vec<LabelDescription> {
+    labels.iter().enumerate().map(|(pos, ld)| {
+        LabelDescription {
+            lbl_name: ld.ld_id.name().to_string(),
+            lbl_res: TypeExprRef(0), // Not used by matching
+            lbl_arg: ld.ld_type,
+            lbl_mut: ld.ld_mutable,
+            lbl_optional: ld.ld_optional,
+            lbl_pos: pos as i32,
+            lbl_all: crate::types::decl::LabelArrayRef(0),
+            lbl_repres: repr.clone(),
+            lbl_private: private,
+            lbl_loc: ld.ld_loc.clone(),
+            lbl_attributes: ld.ld_attributes.clone(),
+        }
+    }).collect()
 }
 
 /// Extract a RowDesc from a type expression (for variant matching).
@@ -7940,7 +8135,7 @@ pub fn do_for_multiple_match(
 
     // Try flatten optimization first
     let result = (|| -> Result<RawLambda, CannotFlattenExn> {
-        let (next, nexts) = split_precompile(&None, &pm1, next_raise_count);
+        let (next, nexts) = split_precompile(Some(ctx_ref), &None, &pm1, next_raise_count);
 
         let size = paraml.len();
         let idl: Vec<Ident> = paraml.iter().map(|_| Ident::create_local("match")).collect();
