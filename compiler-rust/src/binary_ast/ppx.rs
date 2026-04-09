@@ -60,10 +60,16 @@ fn first_char_special(s: &str) -> bool {
     matches!(s.chars().next(), Some('#' | '?' | '%'))
 }
 
-/// Check if a string starts with the OCaml marshal magic number
+/// Check if a string starts with the OCaml marshal magic number.
+/// The marshal magic bytes are 0x84, 0x95, 0xA6, 0xBE. These are stored as
+/// Latin-1 code points (U+0084, U+0095, U+00A6, U+00BE) in UTF-8 strings,
+/// so we must compare against chars (not raw UTF-8 bytes).
 fn starts_with_marshal_magic(s: &str) -> bool {
-    let bytes: Vec<u8> = s.bytes().collect();
-    bytes.len() >= 4 && bytes[0] == 0x84 && bytes[1] == 0x95 && bytes[2] == 0xA6 && bytes[3] == 0xBE
+    let mut chars = s.chars();
+    matches!(
+        (chars.next(), chars.next(), chars.next(), chars.next()),
+        (Some('\u{84}'), Some('\u{95}'), Some('\u{A6}'), Some('\u{BE}'))
+    )
 }
 
 fn prim_str(arena: &mut ParseArena, s: impl Into<String>) -> StrIdx {

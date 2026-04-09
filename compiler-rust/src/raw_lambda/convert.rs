@@ -2477,11 +2477,29 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> RawLambda {
         match cc {
             ModuleCoercion::Tcoerce_none => {
-                let block_fields = fields.iter().cloned().map(RawLambda::var).collect();
+                // Deduplicate fields by name, keeping only the LAST occurrence.
+                // This matches OCaml's simplify_signature behavior: when a structure
+                // has duplicate value names (e.g., from %%private with shadowing),
+                // OCaml wraps in Tmod_constraint with Tcoerce_structure that selects
+                // only the final binding. Since Rust doesn't compute that coercion,
+                // we achieve the same result by deduplicating here.
+                let deduped_fields = {
+                    let mut seen = HashSet::new();
+                    let mut indices = Vec::new();
+                    // Walk from the end to find which indices to keep
+                    for i in (0..fields.len()).rev() {
+                        if seen.insert(fields[i].name().to_string()) {
+                            indices.push(i);
+                        }
+                    }
+                    indices.reverse();
+                    indices.iter().map(|&i| fields[i].clone()).collect::<Vec<_>>()
+                };
+                let block_fields = deduped_fields.iter().cloned().map(RawLambda::var).collect();
                 let tag = if is_top_level {
-                    TagInfo::ModuleExport(fields.to_vec())
+                    TagInfo::ModuleExport(deduped_fields)
                 } else {
-                    TagInfo::Module(fields.iter().map(|id| id.name().to_string()).collect())
+                    TagInfo::Module(deduped_fields.iter().map(|id| id.name().to_string()).collect())
                 };
                 RawLambda::prim(
                     Primitive::Pmakeblock(0, tag, Mutable::Immutable),
