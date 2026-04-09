@@ -168,7 +168,7 @@ fn is_not_undefined_attr(attr: &Attribute) -> bool {
     attr.attr_name.txt == NOT_UNDEFINED_ATTR
 }
 
-fn has_untagged(attrs: &[Attribute]) -> bool {
+pub(crate) fn has_untagged(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| attr.attr_name.txt == UNTAGGED_ATTR)
 }
 

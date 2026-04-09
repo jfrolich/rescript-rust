@@ -19,8 +19,13 @@ use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch, RawPrimInfo};
 use crate::raw_lambda::print::RawLambdaPrinter;
 use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
 use crate::types::type_expr::TypeExprRef;
-use crate::types::decl::ConstructorTag;
+use crate::types::decl::{ConstructorTag, ConstructorDescription, LabelDescription, RecordRepresentation};
 use crate::types::asttypes::MutableFlag;
+use crate::types::type_expr::{RowDesc, RowField};
+use crate::types::btype;
+use crate::types::context::TypeContext;
+use crate::lambda::{Primitive, FieldDbgInfo};
+use crate::raw_lambda::typeopt::{constructor_has_optional_shape, has_untagged, type_cannot_contain_undefined};
 
 // ============================================================================
 // Omega (wildcard) helpers — ported from parmatch.ml
@@ -3464,4 +3469,1193 @@ pub fn split_precompile(
 fn rev_vec<T>(mut v: Vec<T>) -> Vec<T> {
     v.reverse();
     v
+}
+
+// ============================================================================
+// Layer 5: General divide functions (lines 1094-1131)
+// ============================================================================
+
+/// Add a case to a pattern matching.
+/// Equivalent to OCaml's `add_line`.
+fn add_line(
+    patl_action: (Vec<Pattern>, RawLambda),
+    mut pm: PatternMatching,
+) -> PatternMatching {
+    pm.cases.insert(0, patl_action);
+    pm
+}
+
+/// A cell: a pattern matching with its context list and pattern.
+/// Equivalent to OCaml's `cell`.
+struct Cell {
+    pm: PatternMatching,
+    ctx: Vec<Ctx>,
+    pat: Pattern,
+}
+
+/// Add a case to the appropriate cell in a division, creating a new cell if needed.
+/// Equivalent to OCaml's `add`.
+fn add<K>(
+    make_matching_fun: impl FnOnce(&[(RawLambda, LetKind)]) -> Cell,
+    mut division: Vec<(K, Cell)>,
+    eq_key: impl Fn(&K, &K) -> bool,
+    key: K,
+    patl_action: (Vec<Pattern>, RawLambda),
+    args: &[(RawLambda, LetKind)],
+) -> Vec<(K, Cell)> {
+    // Try to find existing entry with matching key
+    if let Some(pos) = division.iter().position(|(k, _)| eq_key(&key, k)) {
+        division[pos].1.pm.cases.insert(0, patl_action);
+        division
+    } else {
+        let mut cell = make_matching_fun(args);
+        cell.pm.cases = vec![patl_action];
+        division.insert(0, (key, cell));
+        division
+    }
+}
+
+/// Divide a pattern matching by the first pattern column, grouping by key.
+/// Equivalent to OCaml's `divide`.
+fn divide<K>(
+    make: impl Fn(&Pattern, &DefaultEnv, &[Ctx], &[(RawLambda, LetKind)]) -> Cell + Clone,
+    eq_key: impl Fn(&K, &K) -> bool + Clone,
+    get_key: impl Fn(&Pattern) -> K + Clone,
+    get_args: impl Fn(&Pattern, &[Pattern]) -> Vec<Pattern> + Clone,
+    ctx: &[Ctx],
+    pm: &PatternMatching,
+) -> Vec<(K, Cell)> {
+    fn divide_rec<K>(
+        cases: &[(Vec<Pattern>, RawLambda)],
+        make: &dyn Fn(&Pattern, &DefaultEnv, &[Ctx], &[(RawLambda, LetKind)]) -> Cell,
+        eq_key: &dyn Fn(&K, &K) -> bool,
+        get_key: &dyn Fn(&Pattern) -> K,
+        get_args: &dyn Fn(&Pattern, &[Pattern]) -> Vec<Pattern>,
+        default: &DefaultEnv,
+        ctx: &[Ctx],
+        args: &[(RawLambda, LetKind)],
+    ) -> Vec<(K, Cell)> {
+        match cases.split_first() {
+            Some(((patl, action), rem)) => {
+                match patl.split_first() {
+                    Some((p, rest_patl)) => {
+                        let this_match = divide_rec(rem, make, eq_key, get_key, get_args, default, ctx, args);
+                        let key = get_key(p);
+                        let mut new_patl = get_args(p, rest_patl);
+                        // get_args returns args @ rest_patl, which is the new pattern list
+                        add(
+                            |a| make(p, default, ctx, a),
+                            this_match,
+                            |a, b| eq_key(a, b),
+                            key,
+                            (new_patl, action.clone()),
+                            args,
+                        )
+                    }
+                    None => Vec::new(),
+                }
+            }
+            None => Vec::new(),
+        }
+    }
+
+    divide_rec(
+        &pm.cases,
+        &|p, def, ctx, args| make.clone()(p, def, ctx, args),
+        &|a, b| eq_key.clone()(a, b),
+        &|p| get_key.clone()(p),
+        &|p, rest| get_args.clone()(p, rest),
+        &pm.default,
+        ctx,
+        &pm.args,
+    )
+}
+
+/// Divide a pattern matching into a single cell (no grouping by key).
+/// Equivalent to OCaml's `divide_line`.
+fn divide_line(
+    make_ctx: impl Fn(&[Ctx]) -> Vec<Ctx>,
+    make: impl Fn(&DefaultEnv, &[(RawLambda, LetKind)]) -> PatternMatching,
+    get_args: impl Fn(&Pattern, &[Pattern]) -> Vec<Pattern>,
+    pat: Pattern,
+    ctx: &[Ctx],
+    pm: &PatternMatching,
+) -> Cell {
+    fn divide_rec(
+        cases: &[(Vec<Pattern>, RawLambda)],
+        get_args: &dyn Fn(&Pattern, &[Pattern]) -> Vec<Pattern>,
+        make: &dyn Fn(&DefaultEnv, &[(RawLambda, LetKind)]) -> PatternMatching,
+        default: &DefaultEnv,
+        args: &[(RawLambda, LetKind)],
+    ) -> PatternMatching {
+        match cases.split_first() {
+            Some(((patl, action), rem)) => {
+                match patl.split_first() {
+                    Some((p, rest_patl)) => {
+                        let this_match = divide_rec(rem, get_args, make, default, args);
+                        let new_patl = get_args(p, rest_patl);
+                        add_line((new_patl, action.clone()), this_match)
+                    }
+                    None => make(default, args),
+                }
+            }
+            None => make(default, args),
+        }
+    }
+
+    Cell {
+        pm: divide_rec(&pm.cases, &get_args, &make, &pm.default, &pm.args),
+        ctx: make_ctx(ctx),
+        pat,
+    }
+}
+
+// ============================================================================
+// Layer 6: Per-type pattern matchers (lines 1148-1516)
+// ============================================================================
+
+// --- Constants (lines 1148-1177) ---
+
+/// Matcher for constant patterns.
+/// Equivalent to OCaml's `matcher_const`.
+fn matcher_const(
+    cst: &Constant,
+    p: &Pattern,
+    rem: &[Pattern],
+) -> Result<Vec<Pattern>, MatchError> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_or(p1, p2, _) => {
+            match matcher_const(cst, p1, rem) {
+                Ok(r) => Ok(r),
+                Err(MatchError::NoMatch) => matcher_const(cst, p2, rem),
+                Err(e) => Err(e),
+            }
+        }
+        PatternDesc::Tpat_constant(c1)
+            if const_compare(c1, cst) == std::cmp::Ordering::Equal =>
+        {
+            Ok(rem.to_vec())
+        }
+        PatternDesc::Tpat_any => Ok(rem.to_vec()),
+        _ => Err(MatchError::NoMatch),
+    }
+}
+
+/// Get the key (constant) from a constant pattern.
+/// Equivalent to OCaml's `get_key_constant`.
+fn get_key_constant(caller: &str, p: &Pattern) -> Constant {
+    match &p.pat_desc {
+        PatternDesc::Tpat_constant(cst) => cst.clone(),
+        _ => {
+            eprintln!("BAD: {}", caller);
+            // pretty_pat p; -- omitted
+            panic!("get_key_constant: not a constant pattern");
+        }
+    }
+}
+
+/// Get the arguments from a constant pattern (none — just the remainder).
+/// Equivalent to OCaml's `get_args_constant`.
+fn get_args_constant(_p: &Pattern, rem: &[Pattern]) -> Vec<Pattern> {
+    rem.to_vec()
+}
+
+/// Make a constant matching cell.
+/// Equivalent to OCaml's `make_constant_matching`.
+fn make_constant_matching(
+    p: &Pattern,
+    def: &DefaultEnv,
+    ctx: &[Ctx],
+    args: &[(RawLambda, LetKind)],
+) -> Cell {
+    match args.split_first() {
+        None => panic!("Matching.make_constant_matching"),
+        Some((_, argl)) => {
+            let key = get_key_constant("make", p);
+            let def = make_default(
+                &|p2, rem| matcher_const(&key, p2, rem),
+                def,
+            );
+            let ctx = filter_ctx(p, ctx);
+            Cell {
+                pm: PatternMatching {
+                    cases: Vec::new(),
+                    args: argl.to_vec(),
+                    default: def,
+                },
+                ctx,
+                pat: normalize_pat(p),
+            }
+        }
+    }
+}
+
+/// Divide a pattern matching by constant values.
+/// Equivalent to OCaml's `divide_constant`.
+fn divide_constant(ctx: &[Ctx], m: &PatternMatching) -> Vec<(Constant, Cell)> {
+    divide(
+        make_constant_matching,
+        |c, d| const_compare(c, d) == std::cmp::Ordering::Equal,
+        |p| get_key_constant("divide", p),
+        get_args_constant,
+        ctx,
+        m,
+    )
+}
+
+// --- Constructors (lines 1180-1289) ---
+
+/// Make field access arguments for a constructor.
+/// Equivalent to OCaml's `make_field_args`.
+fn make_field_args(
+    fld_info: FieldDbgInfo,
+    loc: Location,
+    binding_kind: LetKind,
+    arg: &RawLambda,
+    first_pos: i32,
+    last_pos: i32,
+    argl: &[(RawLambda, LetKind)],
+) -> Vec<(RawLambda, LetKind)> {
+    let mut result = Vec::new();
+    for pos in first_pos..=last_pos {
+        result.push((
+            RawLambda::Lprim(RawPrimInfo {
+                primitive: Primitive::Pfield(pos, fld_info.clone()),
+                args: vec![arg.clone()],
+                loc: loc.clone(),
+            }),
+            binding_kind,
+        ));
+    }
+    result.extend(argl.iter().cloned());
+    result
+}
+
+/// Get the key (tag) from a constructor pattern.
+/// Equivalent to OCaml's `get_key_constr`.
+fn get_key_constr(p: &Pattern) -> ConstructorTag {
+    match &p.pat_desc {
+        PatternDesc::Tpat_construct(_, cstr, _) => cstr.cstr_tag.clone(),
+        _ => panic!("get_key_constr: not a construct pattern"),
+    }
+}
+
+/// Get the arguments from a constructor pattern.
+/// Equivalent to OCaml's `get_args_constr`.
+fn get_args_constr(p: &Pattern, rem: &[Pattern]) -> Vec<Pattern> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_construct(_, _, args) => {
+            let mut result = args.clone();
+            result.extend(rem.iter().cloned());
+            result
+        }
+        _ => panic!("get_args_constr: not a construct pattern"),
+    }
+}
+
+/// Matcher for constructor patterns.
+/// Equivalent to OCaml's `matcher_constr`.
+///
+/// NB: matcher_constr applies to default matrices.
+/// In that context, matching by constructors of extensible
+/// types degrades to arity checking, due to potential rebinding.
+/// This comparison is performed by Types.may_equal_constr.
+fn matcher_constr(
+    cstr: &ConstructorDescription,
+    p: &Pattern,
+    rem: &[Pattern],
+) -> Result<Vec<Pattern>, MatchError> {
+    match cstr.cstr_arity {
+        0 => matcher_constr_arity0(cstr, p, rem),
+        1 => matcher_constr_arity1(cstr, p, rem),
+        _ => matcher_constr_arityN(cstr, p, rem),
+    }
+}
+
+/// Matcher for 0-arity constructor.
+fn matcher_constr_arity0(
+    cstr: &ConstructorDescription,
+    q: &Pattern,
+    rem: &[Pattern],
+) -> Result<Vec<Pattern>, MatchError> {
+    match &q.pat_desc {
+        PatternDesc::Tpat_or(p1, p2, _) => {
+            match matcher_constr_arity0(cstr, p1, rem) {
+                Ok(r) => Ok(r),
+                Err(MatchError::NoMatch) => matcher_constr_arity0(cstr, p2, rem),
+                Err(e) => Err(e),
+            }
+        }
+        PatternDesc::Tpat_construct(_, cstr2, args)
+            if args.is_empty() && may_equal_constr(cstr, cstr2) =>
+        {
+            Ok(rem.to_vec())
+        }
+        PatternDesc::Tpat_any => Ok(rem.to_vec()),
+        _ => Err(MatchError::NoMatch),
+    }
+}
+
+/// Matcher for 1-arity constructor.
+fn matcher_constr_arity1(
+    cstr: &ConstructorDescription,
+    q: &Pattern,
+    rem: &[Pattern],
+) -> Result<Vec<Pattern>, MatchError> {
+    match &q.pat_desc {
+        PatternDesc::Tpat_or(p1, p2, _) => {
+            let r1 = matcher_constr_arity1(cstr, p1, rem).ok();
+            let r2 = matcher_constr_arity1(cstr, p2, rem).ok();
+            match (r1, r2) {
+                (None, None) => Err(MatchError::NoMatch),
+                (Some(r1), None) => Ok(r1),
+                (None, Some(r2)) => Ok(r2),
+                (Some(r1), Some(r2)) => {
+                    match (r1.first(), r2.first()) {
+                        (Some(a1), Some(a2)) => {
+                            let or_pat = Pattern {
+                                pat_desc: PatternDesc::Tpat_or(
+                                    Box::new(a1.clone()),
+                                    Box::new(a2.clone()),
+                                    None,
+                                ),
+                                pat_loc: LocIdx::none(),
+                                pat_extra: Vec::new(),
+                                pat_type: a1.pat_type,
+                                pat_env: a1.pat_env,
+                                pat_attributes: Attributes::new(),
+                            };
+                            let mut result = vec![or_pat];
+                            result.extend(rem.iter().cloned());
+                            Ok(result)
+                        }
+                        _ => panic!("matcher_constr_arity1: unexpected empty result"),
+                    }
+                }
+            }
+        }
+        PatternDesc::Tpat_construct(_, cstr2, args)
+            if args.len() == 1 && may_equal_constr(cstr, cstr2) =>
+        {
+            let mut result = vec![args[0].clone()];
+            result.extend(rem.iter().cloned());
+            Ok(result)
+        }
+        PatternDesc::Tpat_any => {
+            let mut result = vec![omega()];
+            result.extend(rem.iter().cloned());
+            Ok(result)
+        }
+        _ => Err(MatchError::NoMatch),
+    }
+}
+
+/// Matcher for N-arity constructor (N >= 2).
+fn matcher_constr_arityN(
+    cstr: &ConstructorDescription,
+    q: &Pattern,
+    rem: &[Pattern],
+) -> Result<Vec<Pattern>, MatchError> {
+    match &q.pat_desc {
+        PatternDesc::Tpat_or(_, _, _) => Err(MatchError::OrPat),
+        PatternDesc::Tpat_construct(_, cstr2, args)
+            if may_equal_constr(cstr, cstr2) =>
+        {
+            let mut result = args.clone();
+            result.extend(rem.iter().cloned());
+            Ok(result)
+        }
+        PatternDesc::Tpat_any => {
+            let mut result = omegas(cstr.cstr_arity as usize);
+            result.extend(rem.iter().cloned());
+            Ok(result)
+        }
+        _ => Err(MatchError::NoMatch),
+    }
+}
+
+/// Helper: get runtime name from label attributes (OCaml's Lambda.find_name).
+fn label_runtime_name_matching(lbl: &LabelDescription) -> String {
+    for attr in &lbl.lbl_attributes {
+        if attr.attr_name.txt == "as" {
+            if let crate::types::decl::AttributePayload::Str(name) = &attr.attr_payload {
+                return name.clone();
+            }
+        }
+    }
+    lbl.lbl_name.clone()
+}
+
+/// Create field debug info for a record label (equivalent to OCaml's Lambda.fld_record).
+fn fld_record(lbl: &LabelDescription) -> FieldDbgInfo {
+    FieldDbgInfo::Record {
+        name: label_runtime_name_matching(lbl),
+        mutable_flag: match lbl.lbl_mut {
+            MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
+            MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
+        },
+    }
+}
+
+/// Create field debug info for an inlined record label (equivalent to OCaml's Lambda.fld_record_inline).
+fn fld_record_inline(lbl: &LabelDescription) -> FieldDbgInfo {
+    FieldDbgInfo::RecordInline {
+        name: label_runtime_name_matching(lbl),
+    }
+}
+
+/// Create field debug info for a record extension label (equivalent to OCaml's Lambda.fld_record_extension).
+fn fld_record_extension(lbl: &LabelDescription) -> FieldDbgInfo {
+    FieldDbgInfo::RecordExtension {
+        name: label_runtime_name_matching(lbl),
+    }
+}
+
+/// Make a constructor matching cell.
+/// Equivalent to OCaml's `make_constr_matching`.
+fn make_constr_matching(
+    ctx_ref: &TypeContext<'_>,
+    p: &Pattern,
+    def: &DefaultEnv,
+    ctx: &[Ctx],
+    args: &[(RawLambda, LetKind)],
+) -> Cell {
+    match args.split_first() {
+        None => panic!("Matching.make_constr_matching"),
+        Some(((arg, _mut), argl)) => {
+            let cstr = pat_as_constr(p);
+            let untagged = has_untagged(&cstr.cstr_attributes);
+            let newargs = if cstr.cstr_inlined.is_some()
+                || (untagged && !cstr.cstr_args.is_empty())
+            {
+                let mut result = vec![(arg.clone(), LetKind::Alias)];
+                result.extend(argl.iter().cloned());
+                result
+            } else {
+                match &cstr.cstr_tag {
+                    ConstructorTag::CstrBlock(_)
+                        if constructor_has_optional_shape(cstr) =>
+                    {
+                        let from_option = match &p.pat_desc {
+                            PatternDesc::Tpat_construct(_, _, args_inner)
+                                if args_inner.len() == 1 =>
+                            {
+                                let pat = &args_inner[0];
+                                let env_opt =
+                                    ctx_ref.get_typed_env(pat.pat_env);
+                                let can_skip = env_opt
+                                    .map(|env| {
+                                        type_cannot_contain_undefined(
+                                            ctx_ref,
+                                            env.as_ref(),
+                                            pat.pat_type,
+                                        )
+                                    })
+                                    .unwrap_or(false);
+                                if can_skip {
+                                    Primitive::PvalFromOptionNotNest
+                                } else {
+                                    Primitive::PvalFromOption
+                                }
+                            }
+                            _ => Primitive::PvalFromOption,
+                        };
+                        let mut result = vec![(
+                            RawLambda::Lprim(RawPrimInfo {
+                                primitive: from_option,
+                                args: vec![arg.clone()],
+                                loc: Location::none(),
+                            }),
+                            LetKind::Alias,
+                        )];
+                        result.extend(argl.iter().cloned());
+                        result
+                    }
+                    ConstructorTag::CstrConstant(_) | ConstructorTag::CstrBlock(_) => {
+                        let fld_info = if cstr.cstr_name == "::" {
+                            FieldDbgInfo::Cons
+                        } else {
+                            FieldDbgInfo::Variant
+                        };
+                        make_field_args(
+                            fld_info,
+                            Location::none(),
+                            LetKind::Alias,
+                            arg,
+                            0,
+                            cstr.cstr_arity - 1,
+                            argl,
+                        )
+                    }
+                    ConstructorTag::CstrUnboxed => {
+                        let mut result = vec![(arg.clone(), LetKind::Alias)];
+                        result.extend(argl.iter().cloned());
+                        result
+                    }
+                    ConstructorTag::CstrExtension(_) => {
+                        make_field_args(
+                            FieldDbgInfo::Extension,
+                            Location::none(),
+                            LetKind::Alias,
+                            arg,
+                            1,
+                            cstr.cstr_arity,
+                            argl,
+                        )
+                    }
+                }
+            };
+            let cstr_clone = cstr.clone();
+            Cell {
+                pm: PatternMatching {
+                    cases: Vec::new(),
+                    args: newargs,
+                    default: make_default(
+                        &|p2, rem| matcher_constr(&cstr_clone, p2, rem),
+                        def,
+                    ),
+                },
+                ctx: filter_ctx(p, ctx),
+                pat: normalize_pat(p),
+            }
+        }
+    }
+}
+
+/// Divide a pattern matching by constructor.
+/// Equivalent to OCaml's `divide_constructor`.
+fn divide_constructor(
+    ctx_ref: &TypeContext<'_>,
+    ctx: &[Ctx],
+    pm: &PatternMatching,
+) -> Vec<(ConstructorTag, Cell)> {
+    divide(
+        |p, def, ctx_inner, args| make_constr_matching(ctx_ref, p, def, ctx_inner, args),
+        |a, b| equal_tag(a, b),
+        get_key_constr,
+        get_args_constr,
+        ctx,
+        pm,
+    )
+}
+
+// --- Variants (lines 1293-1362) ---
+
+/// Matcher for constant variant patterns.
+/// Equivalent to OCaml's `matcher_variant_const`.
+fn matcher_variant_const(
+    lab: &str,
+    p: &Pattern,
+    rem: &[Pattern],
+) -> Result<Vec<Pattern>, MatchError> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_or(p1, p2, _) => {
+            match matcher_variant_const(lab, p1, rem) {
+                Ok(r) => Ok(r),
+                Err(MatchError::NoMatch) => matcher_variant_const(lab, p2, rem),
+                Err(e) => Err(e),
+            }
+        }
+        PatternDesc::Tpat_variant(lab1, _, _) if lab1 == lab => Ok(rem.to_vec()),
+        PatternDesc::Tpat_any => Ok(rem.to_vec()),
+        _ => Err(MatchError::NoMatch),
+    }
+}
+
+/// Make a variant matching cell for constant variants.
+/// Equivalent to OCaml's `make_variant_matching_constant`.
+fn make_variant_matching_constant(
+    p: &Pattern,
+    lab: &str,
+    def: &DefaultEnv,
+    ctx: &[Ctx],
+    args: &[(RawLambda, LetKind)],
+) -> Cell {
+    match args.split_first() {
+        None => panic!("Matching.make_variant_matching_constant"),
+        Some((_, argl)) => {
+            let lab_owned = lab.to_string();
+            let def = make_default(
+                &|p2, rem| matcher_variant_const(&lab_owned, p2, rem),
+                def,
+            );
+            let ctx = filter_ctx(p, ctx);
+            Cell {
+                pm: PatternMatching {
+                    cases: Vec::new(),
+                    args: argl.to_vec(),
+                    default: def,
+                },
+                ctx,
+                pat: normalize_pat(p),
+            }
+        }
+    }
+}
+
+/// Matcher for non-constant variant patterns.
+/// Equivalent to OCaml's `matcher_variant_nonconst`.
+fn matcher_variant_nonconst(
+    lab: &str,
+    p: &Pattern,
+    rem: &[Pattern],
+) -> Result<Vec<Pattern>, MatchError> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_or(_, _, _) => Err(MatchError::OrPat),
+        PatternDesc::Tpat_variant(lab1, Some(arg), _) if lab1 == lab => {
+            let mut result = vec![(**arg).clone()];
+            result.extend(rem.iter().cloned());
+            Ok(result)
+        }
+        PatternDesc::Tpat_any => {
+            let mut result = vec![omega()];
+            result.extend(rem.iter().cloned());
+            Ok(result)
+        }
+        _ => Err(MatchError::NoMatch),
+    }
+}
+
+/// Make a variant matching cell for non-constant variants.
+/// Equivalent to OCaml's `make_variant_matching_nonconst`.
+fn make_variant_matching_nonconst(
+    p: &Pattern,
+    lab: &str,
+    def: &DefaultEnv,
+    ctx: &[Ctx],
+    args: &[(RawLambda, LetKind)],
+) -> Cell {
+    match args.split_first() {
+        None => panic!("Matching.make_variant_matching_nonconst"),
+        Some(((arg, _mut), argl)) => {
+            let lab_owned = lab.to_string();
+            let def = make_default(
+                &|p2, rem| matcher_variant_nonconst(&lab_owned, p2, rem),
+                def,
+            );
+            let ctx = filter_ctx(p, ctx);
+            let mut new_args = vec![(
+                RawLambda::Lprim(RawPrimInfo {
+                    primitive: Primitive::Pfield(1, FieldDbgInfo::PolyVarContent),
+                    args: vec![arg.clone()],
+                    loc: Location::none(),
+                }),
+                LetKind::Alias,
+            )];
+            new_args.extend(argl.iter().cloned());
+            Cell {
+                pm: PatternMatching {
+                    cases: Vec::new(),
+                    args: new_args,
+                    default: def,
+                },
+                ctx,
+                pat: normalize_pat(p),
+            }
+        }
+    }
+}
+
+/// Divide a pattern matching by variant tag.
+/// Equivalent to OCaml's `divide_variant`.
+fn divide_variant(
+    ctx_ref: &TypeContext<'_>,
+    row: &RowDesc,
+    ctx: &[Ctx],
+    pm: &PatternMatching,
+) -> Vec<((String, ConstructorTag), Cell)> {
+    let row = btype::row_repr(ctx_ref, row);
+
+    fn divide_rec(
+        ctx_ref: &TypeContext<'_>,
+        row: &RowDesc,
+        cases: &[(Vec<Pattern>, RawLambda)],
+        def: &DefaultEnv,
+        ctx: &[Ctx],
+        al: &[(RawLambda, LetKind)],
+    ) -> Vec<((String, ConstructorTag), Cell)> {
+        match cases.split_first() {
+            Some(((patl, action), rem)) => {
+                match patl.split_first() {
+                    Some((p, rest_patl)) => {
+                        match &p.pat_desc {
+                            PatternDesc::Tpat_variant(lab, pato, _) => {
+                                let variants = divide_rec(ctx_ref, row, rem, def, ctx, al);
+
+                                // Check if this label is absent in the row
+                                let is_absent = match row.row_fields.iter().find(|(l, _)| l == lab)
+                                {
+                                    Some((_, field)) => {
+                                        matches!(
+                                            btype::row_field_repr(ctx_ref, field),
+                                            RowField::Rabsent
+                                        )
+                                    }
+                                    None => true,
+                                };
+
+                                if is_absent {
+                                    return variants;
+                                }
+
+                                let tag = btype::hash_variant(lab);
+                                let eq_key = |a: &(String, ConstructorTag),
+                                              b: &(String, ConstructorTag)|
+                                 -> bool {
+                                    a.0 == b.0 && equal_tag(&a.1, &b.1)
+                                };
+
+                                match pato {
+                                    None => {
+                                        let key =
+                                            (lab.clone(), ConstructorTag::CstrConstant(tag));
+                                        add(
+                                            |a| {
+                                                make_variant_matching_constant(
+                                                    p, lab, def, ctx, a,
+                                                )
+                                            },
+                                            variants,
+                                            eq_key,
+                                            key,
+                                            (rest_patl.to_vec(), action.clone()),
+                                            al,
+                                        )
+                                    }
+                                    Some(pat_inner) => {
+                                        let key =
+                                            (lab.clone(), ConstructorTag::CstrBlock(tag));
+                                        let mut new_patl =
+                                            vec![(**pat_inner).clone()];
+                                        new_patl.extend(rest_patl.iter().cloned());
+                                        add(
+                                            |a| {
+                                                make_variant_matching_nonconst(
+                                                    p, lab, def, ctx, a,
+                                                )
+                                            },
+                                            variants,
+                                            eq_key,
+                                            key,
+                                            (new_patl, action.clone()),
+                                            al,
+                                        )
+                                    }
+                                }
+                            }
+                            _ => Vec::new(),
+                        }
+                    }
+                    None => Vec::new(),
+                }
+            }
+            None => Vec::new(),
+        }
+    }
+
+    divide_rec(ctx_ref, &row, &pm.cases, &pm.default, ctx, &pm.args)
+}
+
+// --- Variables (lines 1370-1378) ---
+
+/// Get the arguments from a variable pattern (none — just the remainder).
+/// Equivalent to OCaml's `get_args_var`.
+fn get_args_var(_p: &Pattern, rem: &[Pattern]) -> Vec<Pattern> {
+    rem.to_vec()
+}
+
+/// Matcher version of get_args_var for make_default.
+fn matcher_get_args_var(
+    _p: &Pattern,
+    rem: &[Pattern],
+) -> Result<Vec<Pattern>, MatchError> {
+    Ok(rem.to_vec())
+}
+
+/// Make a variable matching.
+/// Equivalent to OCaml's `make_var_matching`.
+fn make_var_matching(def: &DefaultEnv, args: &[(RawLambda, LetKind)]) -> PatternMatching {
+    match args.split_first() {
+        None => panic!("Matching.make_var_matching"),
+        Some((_, argl)) => PatternMatching {
+            cases: Vec::new(),
+            args: argl.to_vec(),
+            default: make_default(&matcher_get_args_var, def),
+        },
+    }
+}
+
+/// Divide a pattern matching by variable.
+/// Equivalent to OCaml's `divide_var`.
+fn divide_var(ctx: &[Ctx], pm: &PatternMatching) -> Cell {
+    divide_line(ctx_lshift, make_var_matching, get_args_var, omega(), ctx, pm)
+}
+
+// --- Tuples (lines 1382-1413) ---
+
+/// Get the arguments from a tuple pattern.
+/// Equivalent to OCaml's `get_args_tuple`.
+fn get_args_tuple(arity: usize, p: &Pattern, rem: &[Pattern]) -> Vec<Pattern> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_any => {
+            let mut result = omegas(arity);
+            result.extend(rem.iter().cloned());
+            result
+        }
+        PatternDesc::Tpat_tuple(args) => {
+            let mut result = args.clone();
+            result.extend(rem.iter().cloned());
+            result
+        }
+        _ => panic!("get_args_tuple: not a tuple or any pattern"),
+    }
+}
+
+/// Matcher for tuple patterns.
+/// Equivalent to OCaml's `matcher_tuple`.
+fn matcher_tuple(
+    arity: usize,
+    p: &Pattern,
+    rem: &[Pattern],
+) -> Result<Vec<Pattern>, MatchError> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_or(_, _, _) => Err(MatchError::OrPat),
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) => {
+            let mut result = omegas(arity);
+            result.extend(rem.iter().cloned());
+            Ok(result)
+        }
+        PatternDesc::Tpat_tuple(args) if args.len() == arity => {
+            let mut result = args.clone();
+            result.extend(rem.iter().cloned());
+            Ok(result)
+        }
+        _ => Err(MatchError::NoMatch),
+    }
+}
+
+/// Make a tuple matching.
+/// Equivalent to OCaml's `make_tuple_matching`.
+fn make_tuple_matching(
+    loc: Location,
+    arity: usize,
+    def: &DefaultEnv,
+    args: &[(RawLambda, LetKind)],
+) -> PatternMatching {
+    match args.split_first() {
+        None => panic!("Matching.make_tuple_matching"),
+        Some(((arg, _mut), argl)) => {
+            let mut new_args = Vec::new();
+            for pos in 0..arity {
+                new_args.push((
+                    RawLambda::Lprim(RawPrimInfo {
+                        primitive: Primitive::Pfield(pos as i32, FieldDbgInfo::Tuple),
+                        args: vec![arg.clone()],
+                        loc: loc.clone(),
+                    }),
+                    LetKind::Alias,
+                ));
+            }
+            new_args.extend(argl.iter().cloned());
+            PatternMatching {
+                cases: Vec::new(),
+                args: new_args,
+                default: make_default(
+                    &|p2, rem| matcher_tuple(arity, p2, rem),
+                    def,
+                ),
+            }
+        }
+    }
+}
+
+/// Divide a pattern matching by tuple.
+/// Equivalent to OCaml's `divide_tuple`.
+fn divide_tuple(arity: usize, p: &Pattern, ctx: &[Ctx], pm: &PatternMatching) -> Cell {
+    divide_line(
+        |c| filter_ctx(p, c),
+        |def, args| make_tuple_matching(Location::none(), arity, def, args),
+        |pat, rem| get_args_tuple(arity, pat, rem),
+        p.clone(),
+        ctx,
+        pm,
+    )
+}
+
+// --- Records (lines 1417-1476) ---
+
+/// Build a list of patterns for record matching, filling in omegas for missing fields.
+/// Equivalent to OCaml's `record_matching_line`.
+fn record_matching_line(
+    num_fields: usize,
+    lbl_pat_list: &[(impl std::any::Any, LabelDescription, Pattern, bool)],
+) -> Vec<Pattern> {
+    let mut patv: Vec<Pattern> = (0..num_fields).map(|_| omega()).collect();
+    for (_, lbl, pat, _) in lbl_pat_list {
+        patv[lbl.lbl_pos as usize] = pat.clone();
+    }
+    patv
+}
+
+/// Build a record matching line from a Tpat_record pattern's fields.
+/// This version takes the typed record fields directly.
+fn record_matching_line_from_fields(
+    num_fields: usize,
+    fields: &[(crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>, LabelDescription, Pattern, bool)],
+) -> Vec<Pattern> {
+    let mut patv: Vec<Pattern> = (0..num_fields).map(|_| omega()).collect();
+    for (_, lbl, pat, _) in fields {
+        patv[lbl.lbl_pos as usize] = pat.clone();
+    }
+    patv
+}
+
+/// Get the arguments from a record pattern.
+/// Equivalent to OCaml's `get_args_record`.
+fn get_args_record(num_fields: usize, p: &Pattern, rem: &[Pattern]) -> Vec<Pattern> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_any => {
+            let mut result = record_matching_line_from_fields(num_fields, &[]);
+            result.extend(rem.iter().cloned());
+            result
+        }
+        PatternDesc::Tpat_record(lbl_pat_list, _) => {
+            let mut result = record_matching_line_from_fields(num_fields, lbl_pat_list);
+            result.extend(rem.iter().cloned());
+            result
+        }
+        _ => panic!("get_args_record: not a record or any pattern"),
+    }
+}
+
+/// Matcher for record patterns.
+/// Equivalent to OCaml's `matcher_record`.
+fn matcher_record(
+    num_fields: usize,
+    p: &Pattern,
+    rem: &[Pattern],
+) -> Result<Vec<Pattern>, MatchError> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_or(_, _, _) => Err(MatchError::OrPat),
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) => {
+            let mut result = record_matching_line_from_fields(num_fields, &[]);
+            result.extend(rem.iter().cloned());
+            Ok(result)
+        }
+        PatternDesc::Tpat_record(fields, _) if fields.is_empty() && num_fields == 0 => {
+            Ok(rem.to_vec())
+        }
+        PatternDesc::Tpat_record(lbl_pat_list, _) => {
+            // Check that the first label's lbl_all length matches num_fields.
+            // In OCaml: Array.length lbl.lbl_all = num_fields
+            // In Rust, lbl_all is a LabelArrayRef placeholder. We check using
+            // the all_labels array passed to divide_record instead.
+            // For the matcher, we trust the caller's num_fields is correct.
+            if !lbl_pat_list.is_empty() {
+                let mut result = record_matching_line_from_fields(num_fields, lbl_pat_list);
+                result.extend(rem.iter().cloned());
+                Ok(result)
+            } else {
+                Err(MatchError::NoMatch)
+            }
+        }
+        _ => Err(MatchError::NoMatch),
+    }
+}
+
+/// Make a record matching.
+/// Equivalent to OCaml's `make_record_matching`.
+fn make_record_matching(
+    loc: Location,
+    all_labels: &[LabelDescription],
+    def: &DefaultEnv,
+    args: &[(RawLambda, LetKind)],
+) -> PatternMatching {
+    match args.split_first() {
+        None => panic!("Matching.make_record_matching"),
+        Some(((arg, _mut), argl)) => {
+            let mut new_args = Vec::new();
+            for lbl in all_labels.iter() {
+                let access = match &lbl.lbl_repres {
+                    RecordRepresentation::RecordFloatUnused => {
+                        panic!("Record_float_unused")
+                    }
+                    RecordRepresentation::RecordRegular => {
+                        RawLambda::Lprim(RawPrimInfo {
+                            primitive: Primitive::Pfield(
+                                lbl.lbl_pos,
+                                fld_record(lbl),
+                            ),
+                            args: vec![arg.clone()],
+                            loc: loc.clone(),
+                        })
+                    }
+                    RecordRepresentation::RecordInlined { .. } => {
+                        RawLambda::Lprim(RawPrimInfo {
+                            primitive: Primitive::Pfield(
+                                lbl.lbl_pos,
+                                fld_record_inline(lbl),
+                            ),
+                            args: vec![arg.clone()],
+                            loc: loc.clone(),
+                        })
+                    }
+                    RecordRepresentation::RecordUnboxed(_) => arg.clone(),
+                    RecordRepresentation::RecordExtension => {
+                        RawLambda::Lprim(RawPrimInfo {
+                            primitive: Primitive::Pfield(
+                                lbl.lbl_pos + 1,
+                                fld_record_extension(lbl),
+                            ),
+                            args: vec![arg.clone()],
+                            loc: loc.clone(),
+                        })
+                    }
+                };
+                let str_kind = match lbl.lbl_mut {
+                    MutableFlag::Immutable => LetKind::Alias,
+                    MutableFlag::Mutable => LetKind::StrictOpt,
+                };
+                new_args.push((access, str_kind));
+            }
+            new_args.extend(argl.iter().cloned());
+            let nfields = all_labels.len();
+            let def = make_default(
+                &|p2, rem| matcher_record(nfields, p2, rem),
+                def,
+            );
+            PatternMatching {
+                cases: Vec::new(),
+                args: new_args,
+                default: def,
+            }
+        }
+    }
+}
+
+/// Divide a pattern matching by record fields.
+/// Equivalent to OCaml's `divide_record`.
+fn divide_record(
+    all_labels: &[LabelDescription],
+    p: &Pattern,
+    ctx: &[Ctx],
+    pm: &PatternMatching,
+) -> Cell {
+    let num_fields = all_labels.len();
+    divide_line(
+        |c| filter_ctx(p, c),
+        |def, args| make_record_matching(Location::none(), all_labels, def, args),
+        |pat, rem| get_args_record(num_fields, pat, rem),
+        p.clone(),
+        ctx,
+        pm,
+    )
+}
+
+// --- Arrays (lines 1480-1516) ---
+
+/// Get the key (length) from an array pattern.
+/// Equivalent to OCaml's `get_key_array`.
+fn get_key_array(p: &Pattern) -> usize {
+    match &p.pat_desc {
+        PatternDesc::Tpat_array(patl) => patl.len(),
+        _ => panic!("get_key_array: not an array pattern"),
+    }
+}
+
+/// Get the arguments from an array pattern.
+/// Equivalent to OCaml's `get_args_array`.
+fn get_args_array(p: &Pattern, rem: &[Pattern]) -> Vec<Pattern> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_array(patl) => {
+            let mut result = patl.clone();
+            result.extend(rem.iter().cloned());
+            result
+        }
+        _ => panic!("get_args_array: not an array pattern"),
+    }
+}
+
+/// Matcher for array patterns.
+/// Equivalent to OCaml's `matcher_array`.
+fn matcher_array(
+    len: usize,
+    p: &Pattern,
+    rem: &[Pattern],
+) -> Result<Vec<Pattern>, MatchError> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_or(_, _, _) => Err(MatchError::OrPat),
+        PatternDesc::Tpat_array(args) if args.len() == len => {
+            let mut result = args.clone();
+            result.extend(rem.iter().cloned());
+            Ok(result)
+        }
+        PatternDesc::Tpat_any => {
+            let mut result = omegas(len);
+            result.extend(rem.iter().cloned());
+            Ok(result)
+        }
+        _ => Err(MatchError::NoMatch),
+    }
+}
+
+/// Make an array matching cell.
+/// Equivalent to OCaml's `make_array_matching`.
+fn make_array_matching(
+    p: &Pattern,
+    def: &DefaultEnv,
+    ctx: &[Ctx],
+    args: &[(RawLambda, LetKind)],
+) -> Cell {
+    match args.split_first() {
+        None => panic!("Matching.make_array_matching"),
+        Some(((arg, _mut), argl)) => {
+            let len = get_key_array(p);
+            let mut new_args = Vec::new();
+            for pos in 0..len {
+                new_args.push((
+                    RawLambda::Lprim(RawPrimInfo {
+                        primitive: Primitive::Parrayrefu,
+                        args: vec![
+                            arg.clone(),
+                            RawLambda::Lconst(crate::lambda::Constant::Int {
+                                i: pos as i32,
+                                comment: None,
+                            }),
+                        ],
+                        loc: Location::none(),
+                    }),
+                    LetKind::StrictOpt,
+                ));
+            }
+            new_args.extend(argl.iter().cloned());
+            let def = make_default(
+                &|p2, rem| matcher_array(len, p2, rem),
+                def,
+            );
+            let ctx = filter_ctx(p, ctx);
+            Cell {
+                pm: PatternMatching {
+                    cases: Vec::new(),
+                    args: new_args,
+                    default: def,
+                },
+                ctx,
+                pat: normalize_pat(p),
+            }
+        }
+    }
+}
+
+/// Divide a pattern matching by array length.
+/// Equivalent to OCaml's `divide_array`.
+fn divide_array(ctx: &[Ctx], pm: &PatternMatching) -> Vec<(usize, Cell)> {
+    divide(
+        make_array_matching,
+        |a, b| a == b,
+        get_key_array,
+        get_args_array,
+        ctx,
+        pm,
+    )
 }
