@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use crate::ident::{Ident, IdentFlags};
@@ -2078,4 +2079,347 @@ pub fn default_compat(p: &Pattern, def: &DefaultEnv) -> DefaultEnv {
                 result
             }
         })
+}
+
+// ============================================================================
+// Layer 3: Default environments and or-patterns
+// Ported from OCaml's matching.ml lines 612-657
+// ============================================================================
+
+/// Type alias for the set of identifiers (equivalent to OCaml's IdentSet).
+type IdentSet = BTreeSet<Ident>;
+
+/// Recursively extract all variables bound in a pattern.
+/// Equivalent to OCaml's `extract_vars`.
+pub fn extract_vars(r: IdentSet, p: &Pattern) -> IdentSet {
+    match &p.pat_desc {
+        PatternDesc::Tpat_var(id, _) => {
+            let mut r = r;
+            r.insert(id.clone());
+            r
+        }
+        PatternDesc::Tpat_alias(p, id, _) => {
+            let mut r = r;
+            r.insert(id.clone());
+            extract_vars(r, p)
+        }
+        PatternDesc::Tpat_tuple(pats) => {
+            pats.iter().fold(r, |r, p| extract_vars(r, p))
+        }
+        PatternDesc::Tpat_record(lpats, _) => {
+            lpats.iter().fold(r, |r, (_, _, p, _)| extract_vars(r, p))
+        }
+        PatternDesc::Tpat_construct(_, _, pats) => {
+            pats.iter().fold(r, |r, p| extract_vars(r, p))
+        }
+        PatternDesc::Tpat_array(pats) => {
+            pats.iter().fold(r, |r, p| extract_vars(r, p))
+        }
+        PatternDesc::Tpat_variant(_, Some(p), _) => extract_vars(r, p),
+        PatternDesc::Tpat_or(p, _, _) => extract_vars(r, p),
+        PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_any
+        | PatternDesc::Tpat_variant(_, None, _) => r,
+    }
+}
+
+/// Error raised when an or-pattern cannot be flattened because
+/// an aliased variable needs a binding but no argument is available.
+/// Equivalent to OCaml's `Cannot_flatten` exception.
+#[derive(Debug)]
+pub struct CannotFlatten;
+
+/// Create an alpha-renaming environment mapping each id in `ids` to either
+/// the match argument (if id is in aliases) or a fresh ident with the same name.
+/// Raises `CannotFlatten` if an alias id has no argument.
+/// Equivalent to OCaml's `mk_alpha_env`.
+pub fn mk_alpha_env(
+    arg: &Option<Ident>,
+    aliases: &[Ident],
+    ids: &IdentSet,
+) -> Result<Vec<(Ident, Ident)>, CannotFlatten> {
+    ids.iter()
+        .map(|id| {
+            let new_id = if aliases.contains(id) {
+                match arg {
+                    Some(v) => v.clone(),
+                    None => return Err(CannotFlatten),
+                }
+            } else {
+                Ident::create_local(id.name())
+            };
+            Ok((id.clone(), new_id))
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Alpha-renaming for patterns (local copy, mirrors Typedtree.alpha_pat)
+// ---------------------------------------------------------------------------
+
+/// Look up an identifier in the alpha-renaming environment.
+fn alpha_pat_id<'a>(env: &'a [(Ident, Ident)], id: &Ident) -> Option<&'a Ident> {
+    env.iter()
+        .find_map(|(from, to)| if from.same(id) { Some(to) } else { None })
+}
+
+/// Apply an alpha-renaming environment to a pattern.
+/// Equivalent to OCaml's `Typedtree.alpha_pat`.
+fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_var(id, name) => {
+            let pat_desc = alpha_pat_id(env, id)
+                .map(|new_id| PatternDesc::Tpat_var(new_id.clone(), name.clone()))
+                .unwrap_or(PatternDesc::Tpat_any);
+            Pattern {
+                pat_desc,
+                ..pat.clone()
+            }
+        }
+        PatternDesc::Tpat_alias(inner, id, name) => {
+            let new_inner = alpha_pat(env, inner);
+            if let Some(new_id) = alpha_pat_id(env, id) {
+                Pattern {
+                    pat_desc: PatternDesc::Tpat_alias(
+                        Box::new(new_inner),
+                        new_id.clone(),
+                        name.clone(),
+                    ),
+                    ..pat.clone()
+                }
+            } else {
+                new_inner
+            }
+        }
+        PatternDesc::Tpat_tuple(items) => Pattern {
+            pat_desc: PatternDesc::Tpat_tuple(
+                items.iter().map(|item| alpha_pat(env, item)).collect(),
+            ),
+            ..pat.clone()
+        },
+        PatternDesc::Tpat_construct(lid, cstr, args) => Pattern {
+            pat_desc: PatternDesc::Tpat_construct(
+                lid.clone(),
+                cstr.clone(),
+                args.iter().map(|arg| alpha_pat(env, arg)).collect(),
+            ),
+            ..pat.clone()
+        },
+        PatternDesc::Tpat_variant(label, arg, row) => Pattern {
+            pat_desc: PatternDesc::Tpat_variant(
+                label.clone(),
+                arg.as_ref().map(|arg| Box::new(alpha_pat(env, arg))),
+                *row,
+            ),
+            ..pat.clone()
+        },
+        PatternDesc::Tpat_record(fields, closed) => Pattern {
+            pat_desc: PatternDesc::Tpat_record(
+                fields
+                    .iter()
+                    .map(|(lid, lbl, field_pat, opt)| {
+                        (lid.clone(), lbl.clone(), alpha_pat(env, field_pat), *opt)
+                    })
+                    .collect(),
+                *closed,
+            ),
+            ..pat.clone()
+        },
+        PatternDesc::Tpat_array(items) => Pattern {
+            pat_desc: PatternDesc::Tpat_array(
+                items.iter().map(|item| alpha_pat(env, item)).collect(),
+            ),
+            ..pat.clone()
+        },
+        PatternDesc::Tpat_or(left, right, row) => Pattern {
+            pat_desc: PatternDesc::Tpat_or(
+                Box::new(alpha_pat(env, left)),
+                Box::new(alpha_pat(env, right)),
+                row.clone(),
+            ),
+            ..pat.clone()
+        },
+        _ => pat.clone(),
+    }
+}
+
+/// Expand an or-pattern into separate cases with alpha-renamed variables.
+///
+/// `arg`: optional binding for alias variables
+/// `patl`: surrounding pattern context
+/// `mk_action`: closure that builds an action given a list of fresh idents
+/// `rem`: accumulator of already-expanded cases
+/// `vars`: set of variables that need alpha-renaming
+/// `aliases`: accumulated alias identifiers from Tpat_alias wrappers
+/// `pat`: the pattern being exploded
+///
+/// Equivalent to OCaml's `explode_or_pat`.
+pub fn explode_or_pat<F>(
+    arg: &Option<Ident>,
+    patl: &[Pattern],
+    mk_action: &F,
+    rem: Vec<(Vec<Pattern>, RawLambda)>,
+    vars: &IdentSet,
+    aliases: &[Ident],
+    pat: &Pattern,
+) -> Result<Vec<(Vec<Pattern>, RawLambda)>, CannotFlatten>
+where
+    F: Fn(&[Ident]) -> RawLambda,
+{
+    match &pat.pat_desc {
+        PatternDesc::Tpat_or(p1, p2, _) => {
+            let rem = explode_or_pat(arg, patl, mk_action, rem, vars, aliases, p2)?;
+            explode_or_pat(arg, patl, mk_action, rem, vars, aliases, p1)
+        }
+        PatternDesc::Tpat_alias(p, id, _) => {
+            let mut new_aliases = vec![id.clone()];
+            new_aliases.extend_from_slice(aliases);
+            explode_or_pat(arg, patl, mk_action, rem, vars, &new_aliases, p)
+        }
+        PatternDesc::Tpat_var(x, _) => {
+            let mut x_aliases = vec![x.clone()];
+            x_aliases.extend_from_slice(aliases);
+            let env = mk_alpha_env(arg, &x_aliases, vars)?;
+            let new_ids: Vec<Ident> = env.iter().map(|(_, id)| id.clone()).collect();
+            let mut row = vec![omega()];
+            row.extend_from_slice(patl);
+            let mut result = vec![(row, mk_action(&new_ids))];
+            result.extend(rem);
+            Ok(result)
+        }
+        _ => {
+            let env = mk_alpha_env(arg, aliases, vars)?;
+            let new_ids: Vec<Ident> = env.iter().map(|(_, id)| id.clone()).collect();
+            let mut row = vec![alpha_pat(&env, pat)];
+            row.extend_from_slice(patl);
+            let mut result = vec![(row, mk_action(&new_ids))];
+            result.extend(rem);
+            Ok(result)
+        }
+    }
+}
+
+/// Compute the free variables of a pattern matching's actions.
+/// Equivalent to OCaml's `pm_free_variables`.
+pub fn pm_free_variables(pm: &PatternMatching) -> IdentSet {
+    // OCaml uses IdentSet.union (free_variables act) r folded right over cases.
+    // We use raw_free_variables (HashSet-based) and convert to BTreeSet.
+    pm.cases.iter().rev().fold(BTreeSet::new(), |mut r, (_, act)| {
+        let fv = raw_lambda_free_variables(act);
+        r.extend(fv);
+        r
+    })
+}
+
+/// Compute free variables of a RawLambda expression.
+/// Local helper equivalent to Lambda.free_variables, matching
+/// the raw_free_variables in convert.rs.
+fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
+    fn collect(lam: &RawLambda, fv: &mut IdentSet) {
+        match lam {
+            RawLambda::Lvar(id) => {
+                fv.insert(id.clone());
+            }
+            RawLambda::LglobalModule(_, _) | RawLambda::Lconst(_) => {}
+            RawLambda::Lapply(apply) => {
+                collect(&apply.ap_func, fv);
+                for arg in &apply.ap_args {
+                    collect(arg, fv);
+                }
+            }
+            RawLambda::Lfunction(func) => {
+                collect(&func.body, fv);
+                for param in &func.params {
+                    fv.remove(param);
+                }
+            }
+            RawLambda::Llet(_, id, arg, body) => {
+                collect(arg, fv);
+                collect(body, fv);
+                fv.remove(id);
+            }
+            RawLambda::Lletrec(bindings, body) => {
+                collect(body, fv);
+                for (_, expr) in bindings {
+                    collect(expr, fv);
+                }
+                for (id, _) in bindings {
+                    fv.remove(id);
+                }
+            }
+            RawLambda::Lprim(info) => {
+                for arg in &info.args {
+                    collect(arg, fv);
+                }
+            }
+            RawLambda::Lswitch(arg, sw) => {
+                collect(arg, fv);
+                for (_, lam) in &sw.sw_consts {
+                    collect(lam, fv);
+                }
+                for (_, lam) in &sw.sw_blocks {
+                    collect(lam, fv);
+                }
+                if let Some(fail) = &sw.sw_failaction {
+                    collect(fail, fv);
+                }
+            }
+            RawLambda::LstringSwitch(arg, cases, default) => {
+                collect(arg, fv);
+                for (_, lam) in cases {
+                    collect(lam, fv);
+                }
+                if let Some(default) = default {
+                    collect(default, fv);
+                }
+            }
+            RawLambda::LstaticRaise(_, args) => {
+                for arg in args {
+                    collect(arg, fv);
+                }
+            }
+            RawLambda::LstaticCatch(body, (_, vars), handler) => {
+                collect(body, fv);
+                collect(handler, fv);
+                for var in vars {
+                    fv.remove(var);
+                }
+            }
+            RawLambda::LtryWith(body, exn, handler) => {
+                collect(body, fv);
+                collect(handler, fv);
+                fv.remove(exn);
+            }
+            RawLambda::LifThenElse(cond, then_br, else_br) => {
+                collect(cond, fv);
+                collect(then_br, fv);
+                collect(else_br, fv);
+            }
+            RawLambda::Lsequence(first, second) => {
+                collect(first, fv);
+                collect(second, fv);
+            }
+            RawLambda::Lwhile(cond, body) => {
+                collect(cond, fv);
+                collect(body, fv);
+            }
+            RawLambda::Lfor(id, lo, hi, _, body) => {
+                collect(lo, fv);
+                collect(hi, fv);
+                collect(body, fv);
+                fv.remove(id);
+            }
+            RawLambda::Lassign(id, expr) => {
+                fv.insert(id.clone());
+                collect(expr, fv);
+            }
+            RawLambda::Lsend(_, obj, _) => {
+                collect(obj, fv);
+            }
+        }
+    }
+
+    let mut fv = BTreeSet::new();
+    collect(lam, &mut fv);
+    fv
 }
