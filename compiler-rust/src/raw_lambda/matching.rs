@@ -6,11 +6,16 @@
 
 #![allow(dead_code)]
 
-use crate::ident::Ident;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+
+use crate::ident::{Ident, IdentFlags};
 use crate::lambda::LetKind;
+use crate::location::Location;
 use crate::parse_arena::LocIdx;
 use crate::parser::ast::Attributes;
-use crate::raw_lambda::RawLambda;
+use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch, RawPrimInfo};
+use crate::raw_lambda::print::RawLambdaPrinter;
 use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
 use crate::types::type_expr::TypeExprRef;
 use crate::types::decl::ConstructorTag;
@@ -1308,4 +1313,769 @@ pub struct PmHalfCompiledInfo {
     pub matrix: Matrix,
     /// The top-level default environment.
     pub top_default: DefaultEnv,
+}
+
+// ============================================================================
+// Layer 2: Catch/exit and action sharing
+// ============================================================================
+// Ported from OCaml's matching.ml lines 442-587.
+
+// ============================================================================
+// Lambda.make_key — normalize a RawLambda for structural comparison
+// ============================================================================
+
+/// Maximum size for make_key normalization (matches OCaml's max_raw = 32).
+const MAX_RAW: i32 = 32;
+
+/// Normalize a RawLambda for structural comparison.
+/// - Alias lets are substituted (variable replaced by its definition)
+/// - Other let-bound variables get sequential normalized names
+/// - Locations are cleared
+/// Returns None if the lambda is too complex (functions, letrec, loops, etc.)
+///
+/// Equivalent to OCaml's `Lambda.make_key`.
+fn make_key(e: &RawLambda) -> Option<RawLambda> {
+    let mut count = 0i32;
+    fn tr_rec(
+        env: &HashMap<Ident, RawLambda>,
+        e: &RawLambda,
+        count: &mut i32,
+        next_id: &mut i32,
+    ) -> Option<RawLambda> {
+        *count += 1;
+        if *count > MAX_RAW {
+            return None; // Too big
+        }
+        match e {
+            RawLambda::Lvar(id) => {
+                if let Some(replacement) = env.get(id) {
+                    Some(replacement.clone())
+                } else {
+                    Some(e.clone())
+                }
+            }
+            RawLambda::Lconst(crate::lambda::Constant::String { .. }) => {
+                // Mutable constants are not shared
+                None
+            }
+            RawLambda::Lconst(_) => Some(e.clone()),
+            RawLambda::LglobalModule(_, _) => Some(e.clone()),
+            RawLambda::Lapply(ap) => {
+                let func = tr_rec(env, &ap.ap_func, count, next_id)?;
+                let args = tr_recs(env, &ap.ap_args, count, next_id)?;
+                Some(RawLambda::Lapply(RawApply {
+                    ap_func: Box::new(func),
+                    ap_args: args,
+                    ..ap.clone()
+                }))
+            }
+            RawLambda::Llet(LetKind::Alias, x, ex, body) => {
+                // Ignore aliases -> substitute
+                let ex = tr_rec(env, ex, count, next_id)?;
+                let mut new_env = env.clone();
+                new_env.insert(x.clone(), ex);
+                tr_rec(&new_env, body, count, next_id)
+            }
+            RawLambda::Llet(kind, x, ex, body)
+                if matches!(
+                    (kind, body.as_ref()),
+                    (LetKind::Strict | LetKind::StrictOpt, RawLambda::Lvar(v)) if v.same(x)
+                ) =>
+            {
+                // Llet (Strict|StrictOpt, x, ex, Lvar v) when v same x -> tr_rec ex
+                tr_rec(env, ex, count, next_id)
+            }
+            RawLambda::Llet(kind, x, ex, body) => {
+                // Because of side effects, keep other lets with normalized names
+                let ex_norm = tr_rec(env, ex, count, next_id)?;
+                let y = Ident::new(x.name(), *next_id, IdentFlags::NONE);
+                *next_id += 1;
+                let mut new_env = env.clone();
+                new_env.insert(x.clone(), RawLambda::Lvar(y.clone()));
+                let body_norm = tr_rec(&new_env, body, count, next_id)?;
+                Some(RawLambda::Llet(*kind, y, Box::new(ex_norm), Box::new(body_norm)))
+            }
+            RawLambda::Lprim(info) => {
+                let args = tr_recs(env, &info.args, count, next_id)?;
+                Some(RawLambda::Lprim(RawPrimInfo {
+                    primitive: info.primitive.clone(),
+                    args,
+                    loc: Location::none(),
+                }))
+            }
+            RawLambda::Lswitch(scrut, sw) => {
+                let scrut_norm = tr_rec(env, scrut, count, next_id)?;
+                let sw_norm = tr_sw(env, sw, count, next_id)?;
+                Some(RawLambda::Lswitch(Box::new(scrut_norm), sw_norm))
+            }
+            RawLambda::LstringSwitch(scrut, cases, default) => {
+                let scrut_norm = tr_rec(env, scrut, count, next_id)?;
+                let mut norm_cases = Vec::new();
+                for (s, act) in cases {
+                    norm_cases.push((s.clone(), tr_rec(env, act, count, next_id)?));
+                }
+                let norm_default = tr_opt(env, default.as_deref(), count, next_id)?;
+                Some(RawLambda::LstringSwitch(
+                    Box::new(scrut_norm),
+                    norm_cases,
+                    norm_default.map(Box::new),
+                ))
+            }
+            RawLambda::LstaticRaise(i, es) => {
+                let args = tr_recs(env, es, count, next_id)?;
+                Some(RawLambda::LstaticRaise(*i, args))
+            }
+            RawLambda::LstaticCatch(e1, xs, e2) => {
+                let e1_norm = tr_rec(env, e1, count, next_id)?;
+                let e2_norm = tr_rec(env, e2, count, next_id)?;
+                Some(RawLambda::LstaticCatch(
+                    Box::new(e1_norm),
+                    xs.clone(),
+                    Box::new(e2_norm),
+                ))
+            }
+            RawLambda::LtryWith(e1, x, e2) => {
+                let e1_norm = tr_rec(env, e1, count, next_id)?;
+                let e2_norm = tr_rec(env, e2, count, next_id)?;
+                Some(RawLambda::LtryWith(
+                    Box::new(e1_norm),
+                    x.clone(),
+                    Box::new(e2_norm),
+                ))
+            }
+            RawLambda::LifThenElse(cond, ifso, ifnot) => {
+                let cond_norm = tr_rec(env, cond, count, next_id)?;
+                let ifso_norm = tr_rec(env, ifso, count, next_id)?;
+                let ifnot_norm = tr_rec(env, ifnot, count, next_id)?;
+                Some(RawLambda::LifThenElse(
+                    Box::new(cond_norm),
+                    Box::new(ifso_norm),
+                    Box::new(ifnot_norm),
+                ))
+            }
+            RawLambda::Lsequence(e1, e2) => {
+                let e1_norm = tr_rec(env, e1, count, next_id)?;
+                let e2_norm = tr_rec(env, e2, count, next_id)?;
+                Some(RawLambda::Lsequence(Box::new(e1_norm), Box::new(e2_norm)))
+            }
+            RawLambda::Lassign(x, e) => {
+                let e_norm = tr_rec(env, e, count, next_id)?;
+                Some(RawLambda::Lassign(x.clone(), Box::new(e_norm)))
+            }
+            RawLambda::Lsend(m, e1, _loc) => {
+                let e1_norm = tr_rec(env, e1, count, next_id)?;
+                Some(RawLambda::Lsend(m.clone(), Box::new(e1_norm), Location::none()))
+            }
+            // Functions, letrec, loops are not simple
+            RawLambda::Lletrec(..) | RawLambda::Lfunction(..)
+            | RawLambda::Lfor(..) | RawLambda::Lwhile(..) => None,
+        }
+    }
+
+    fn tr_recs(
+        env: &HashMap<Ident, RawLambda>,
+        es: &[RawLambda],
+        count: &mut i32,
+        next_id: &mut i32,
+    ) -> Option<Vec<RawLambda>> {
+        es.iter().map(|e| tr_rec(env, e, count, next_id)).collect()
+    }
+
+    fn tr_sw(
+        env: &HashMap<Ident, RawLambda>,
+        sw: &RawLambdaSwitch,
+        count: &mut i32,
+        next_id: &mut i32,
+    ) -> Option<RawLambdaSwitch> {
+        let mut consts = Vec::new();
+        for (tag, act) in &sw.sw_consts {
+            consts.push((*tag, tr_rec(env, act, count, next_id)?));
+        }
+        let mut blocks = Vec::new();
+        for (tag, act) in &sw.sw_blocks {
+            blocks.push((*tag, tr_rec(env, act, count, next_id)?));
+        }
+        let fail = tr_opt(env, sw.sw_failaction.as_deref(), count, next_id)?;
+        Some(RawLambdaSwitch {
+            sw_consts_full: sw.sw_consts_full,
+            sw_consts: consts,
+            sw_blocks_full: sw.sw_blocks_full,
+            sw_blocks: blocks,
+            sw_failaction: fail.map(Box::new),
+            sw_names: sw.sw_names.clone(),
+        })
+    }
+
+    fn tr_opt(
+        env: &HashMap<Ident, RawLambda>,
+        e: Option<&RawLambda>,
+        count: &mut i32,
+        next_id: &mut i32,
+    ) -> Option<Option<RawLambda>> {
+        match e {
+            None => Some(None),
+            Some(e) => Some(Some(tr_rec(env, e, count, next_id)?)),
+        }
+    }
+
+    let mut next_id = 0i32;
+    tr_rec(&HashMap::new(), e, &mut count, &mut next_id)
+}
+
+/// Convert a RawLambda to a string key for comparison purposes.
+/// Returns None if the lambda cannot be normalized.
+fn make_key_string(e: &RawLambda) -> Option<String> {
+    make_key(e).map(|k| format!("{}", RawLambdaPrinter::new(&k)))
+}
+
+// ============================================================================
+// StoreExp — Action deduplication using make_key
+// ============================================================================
+// Ported from OCaml's Switch.Store, specialized for lambda/RawLambda.
+
+/// Whether an action should be shared or is a singleton.
+#[derive(Debug, Clone)]
+pub enum SharedAction {
+    Shared(RawLambda),
+    Single(RawLambda),
+}
+
+/// Action store for deduplicating lambda actions.
+/// Equivalent to OCaml's `StoreExp` (Switch.Store specialized for lambda).
+///
+/// Uses string keys (from `make_key` normalization) for comparison,
+/// since RawLambda doesn't implement PartialEq/Ord.
+pub struct StoreExp {
+    /// Map from normalized key string -> (shared, index).
+    map: BTreeMap<String, (bool, usize)>,
+    /// Next index to assign.
+    next: usize,
+    /// Accumulated actions in reverse order: (must_share, action).
+    acts: Vec<(bool, RawLambda)>,
+}
+
+impl StoreExp {
+    /// Create a new empty store.
+    /// Equivalent to OCaml's `mk_store`.
+    pub fn mk_store() -> Self {
+        StoreExp {
+            map: BTreeMap::new(),
+            next: 0,
+            acts: Vec::new(),
+        }
+    }
+
+    /// Internal: add an action unconditionally (no dedup).
+    fn add(&mut self, must_share: bool, act: RawLambda) -> usize {
+        let i = self.next;
+        self.acts.push((must_share, act));
+        self.next = i + 1;
+        i
+    }
+
+    /// Internal: store an action, deduplicating if possible.
+    fn store(&mut self, must_share: bool, act: RawLambda) -> usize {
+        match make_key_string(&act) {
+            Some(key) => {
+                if let Some(&(shared, i)) = self.map.get(&key) {
+                    if !shared {
+                        self.map.insert(key, (true, i));
+                    }
+                    i
+                } else {
+                    let i = self.add(must_share, act);
+                    self.map.insert(key, (must_share, i));
+                    i
+                }
+            }
+            None => self.add(must_share, act),
+        }
+    }
+
+    /// Store an action (not forced shared).
+    /// Equivalent to OCaml's `act_store`.
+    pub fn act_store(&mut self, act: RawLambda) -> usize {
+        self.store(false, act)
+    }
+
+    /// Store an action that must be shared.
+    /// Equivalent to OCaml's `act_store_shared`.
+    pub fn act_store_shared(&mut self, act: RawLambda) -> usize {
+        self.store(true, act)
+    }
+
+    /// Get the actions array with sharing info.
+    /// Actions that were stored multiple times or marked as must-share
+    /// are wrapped in `Shared`; others are `Single`.
+    /// Equivalent to OCaml's `act_get_shared`.
+    pub fn act_get_shared(&self) -> Vec<SharedAction> {
+        // Build initial array from acts list (reversed in OCaml via List.rev_map)
+        let mut result: Vec<SharedAction> = self
+            .acts
+            .iter()
+            .map(|(shared, act)| {
+                if *shared {
+                    SharedAction::Shared(act.clone())
+                } else {
+                    SharedAction::Single(act.clone())
+                }
+            })
+            .collect();
+
+        // Mark any action that was found in the map as shared (even if not must_share)
+        for (_, &(shared, i)) in self.map.iter() {
+            if shared {
+                if let Some(SharedAction::Single(act)) = result.get(i) {
+                    let act = act.clone();
+                    result[i] = SharedAction::Shared(act);
+                }
+            }
+        }
+
+        result
+    }
+}
+
+// ============================================================================
+// make_exit — Lstaticraise(i, [])
+// ============================================================================
+
+/// Create a static raise with no arguments.
+/// Equivalent to OCaml's `make_exit`.
+pub fn make_exit(i: i32) -> RawLambda {
+    RawLambda::LstaticRaise(i, Vec::new())
+}
+
+// ============================================================================
+// make_catch — Introduce catch if worth it
+// ============================================================================
+
+/// Introduce a catch around `k(d)`, if `d` is not already a simple exit.
+/// If `d` is already `Lstaticraise(_, [])`, just returns `k(d)`.
+/// Otherwise, allocates a new exit number, returns `Lstaticcatch(k(exit(e)), (e,[]), d)`.
+///
+/// Equivalent to OCaml's `make_catch`.
+pub fn make_catch(
+    d: RawLambda,
+    next_raise_count: &mut i32,
+    k: impl FnOnce(RawLambda) -> RawLambda,
+) -> RawLambda {
+    match &d {
+        RawLambda::LstaticRaise(_, args) if args.is_empty() => k(d),
+        _ => {
+            *next_raise_count += 1;
+            let e = *next_raise_count;
+            RawLambda::LstaticCatch(
+                Box::new(k(make_exit(e))),
+                (e, Vec::new()),
+                Box::new(d),
+            )
+        }
+    }
+}
+
+// ============================================================================
+// as_simple_exit — Check if lambda is just an exit
+// ============================================================================
+
+/// Check if a lambda is just a static raise (possibly wrapped in alias lets).
+/// Returns the exit number if so.
+///
+/// Equivalent to OCaml's `as_simple_exit`.
+pub fn as_simple_exit(lam: &RawLambda) -> Option<i32> {
+    match lam {
+        RawLambda::LstaticRaise(i, args) if args.is_empty() => Some(*i),
+        RawLambda::Llet(LetKind::Alias, _, _, e) => as_simple_exit(e),
+        _ => None,
+    }
+}
+
+// ============================================================================
+// make_catch_delayed — Delayed catch with next_raise_count
+// ============================================================================
+
+/// Create a delayed catch: returns (exit_number, wrapper_fn).
+/// If the handler is already a simple exit, the wrapper is the identity.
+/// Otherwise, allocates a new exit number and returns a wrapper that
+/// wraps the body in `Lstaticcatch(body, (i,[]), handler)` (or just returns
+/// `handler` if body is `Lstaticraise(i, _)`).
+///
+/// Equivalent to OCaml's `make_catch_delayed`.
+pub fn make_catch_delayed(
+    handler: RawLambda,
+    next_raise_count: &mut i32,
+) -> (i32, Box<dyn FnOnce(RawLambda) -> RawLambda>) {
+    match as_simple_exit(&handler) {
+        Some(i) => (i, Box::new(|act| act)),
+        None => {
+            *next_raise_count += 1;
+            let i = *next_raise_count;
+            (
+                i,
+                Box::new(move |body: RawLambda| match &body {
+                    RawLambda::LstaticRaise(j, _) if *j == i => handler,
+                    _ => RawLambda::LstaticCatch(
+                        Box::new(body),
+                        (i, Vec::new()),
+                        Box::new(handler),
+                    ),
+                }),
+            )
+        }
+    }
+}
+
+// ============================================================================
+// raw_action — Extract raw (normalized) action
+// ============================================================================
+
+/// Extract the raw (normalized) form of a lambda action.
+/// If normalization succeeds, returns the normalized form; otherwise returns
+/// the original.
+///
+/// Equivalent to OCaml's `raw_action`.
+fn raw_action(l: &RawLambda) -> RawLambda {
+    match make_key(l) {
+        Some(k) => k,
+        None => l.clone(),
+    }
+}
+
+// ============================================================================
+// tr_raw — Transform raw action with catch (raises on failure)
+// ============================================================================
+
+/// Normalize a lambda action. Returns None if normalization fails
+/// (equivalent to OCaml's `tr_raw` which raises Exit on failure).
+fn tr_raw(act: &RawLambda) -> Option<RawLambda> {
+    make_key(act)
+}
+
+/// Convert a normalized RawLambda to a string for comparison.
+fn lambda_to_string(lam: &RawLambda) -> String {
+    format!("{}", RawLambdaPrinter::new(lam))
+}
+
+// ============================================================================
+// same_actions — Check if all actions in a list are the same
+// ============================================================================
+
+/// Check if all actions in a case list are the same lambda.
+/// Returns `Some(act)` with the first action if all are equal,
+/// `None` otherwise.
+///
+/// Equivalent to OCaml's `same_actions`.
+pub fn same_actions(cases: &[(Vec<Pattern>, RawLambda)]) -> Option<RawLambda> {
+    match cases {
+        [] => None,
+        [(_, act)] => Some(act.clone()),
+        [(_, act0), rem @ ..] => {
+            let raw_act0 = tr_raw(act0)?;
+            let raw_act0_str = lambda_to_string(&raw_act0);
+            for (_, act) in rem {
+                let raw_act = tr_raw(act)?;
+                if lambda_to_string(&raw_act) != raw_act0_str {
+                    return None;
+                }
+            }
+            Some(act0.clone())
+        }
+    }
+}
+
+// ============================================================================
+// up_ok_action — Check if swapping two actions is safe
+// ============================================================================
+
+/// Check if two actions are equivalent (safe to swap).
+/// Returns true if both can be normalized and their normalized forms are equal.
+///
+/// Equivalent to OCaml's `up_ok_action`.
+fn up_ok_action(act1: &RawLambda, act2: &RawLambda) -> bool {
+    match (tr_raw(act1), tr_raw(act2)) {
+        (Some(raw1), Some(raw2)) => lambda_to_string(&raw1) == lambda_to_string(&raw2),
+        _ => false,
+    }
+}
+
+// ============================================================================
+// up_ok — Check if swapping two clauses is safe
+// ============================================================================
+
+/// Check if a clause `(ps, act_p)` can be moved past all clauses in `l`.
+/// Safe to swap if either the actions are equivalent or the patterns
+/// are incompatible.
+///
+/// Equivalent to OCaml's `up_ok`.
+fn up_ok(ps: &[Pattern], act_p: &RawLambda, l: &[(Vec<Pattern>, RawLambda)]) -> bool {
+    l.iter().all(|(qs, act_q)| {
+        up_ok_action(act_p, act_q) || !may_compats(ps, qs)
+    })
+}
+
+// ============================================================================
+// simplify_or — Simplify or-patterns
+// ============================================================================
+
+/// Exception used internally by simplify_or to propagate variable patterns up.
+enum VarPat {
+    Var(Pattern),
+}
+
+/// Simplify an or-pattern:
+/// - `_|p` becomes `_` (propagated as Var)
+/// - Records are expanded to all fields
+/// - Aliases are preserved around or-patterns
+///
+/// Equivalent to OCaml's `simplify_or`.
+fn simplify_or(p: &Pattern) -> Pattern {
+    fn simpl_rec(p: &Pattern) -> Result<Pattern, VarPat> {
+        match &p.pat_desc {
+            PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) => {
+                Err(VarPat::Var(p.clone()))
+            }
+            PatternDesc::Tpat_alias(q, id, s) => {
+                match simpl_rec(q) {
+                    Ok(q_simplified) => Ok(Pattern {
+                        pat_desc: PatternDesc::Tpat_alias(
+                            Box::new(q_simplified),
+                            id.clone(),
+                            s.clone(),
+                        ),
+                        ..p.clone()
+                    }),
+                    Err(VarPat::Var(q_var)) => Err(VarPat::Var(Pattern {
+                        pat_desc: PatternDesc::Tpat_alias(
+                            Box::new(q_var),
+                            id.clone(),
+                            s.clone(),
+                        ),
+                        ..p.clone()
+                    })),
+                }
+            }
+            PatternDesc::Tpat_or(p1, p2, o) => {
+                let q1 = simpl_rec(p1)?; // propagates Var if p1 is variable
+                match simpl_rec(p2) {
+                    Ok(q2) => Ok(Pattern {
+                        pat_desc: PatternDesc::Tpat_or(
+                            Box::new(q1),
+                            Box::new(q2),
+                            o.clone(),
+                        ),
+                        ..p.clone()
+                    }),
+                    Err(VarPat::Var(q2)) => Err(VarPat::Var(Pattern {
+                        pat_desc: PatternDesc::Tpat_or(
+                            Box::new(q1),
+                            Box::new(q2),
+                            o.clone(),
+                        ),
+                        ..p.clone()
+                    })),
+                }
+            }
+            PatternDesc::Tpat_record(lbls, closed) => {
+                let all_lbls = all_record_args(lbls);
+                Ok(Pattern {
+                    pat_desc: PatternDesc::Tpat_record(all_lbls, *closed),
+                    ..p.clone()
+                })
+            }
+            _ => Ok(p.clone()),
+        }
+    }
+
+    match simpl_rec(p) {
+        Ok(p) => p,
+        Err(VarPat::Var(p)) => p,
+    }
+}
+
+// ============================================================================
+// simplify_cases — Simplify all cases (swap optimization)
+// ============================================================================
+
+/// Bind a variable to an argument in an action.
+/// Equivalent to OCaml's `Lambda.bind Alias id arg action`.
+fn bind(kind: LetKind, id: &Ident, arg: &RawLambda, action: RawLambda) -> RawLambda {
+    match arg {
+        RawLambda::Lvar(v) if v.same(id) => action,
+        _ => RawLambda::Llet(kind, id.clone(), Box::new(arg.clone()), Box::new(action)),
+    }
+}
+
+/// Simplify the first column of a match:
+/// - Variables are replaced with omega and bound in the action
+/// - Aliases are removed and replaced by bindings in actions
+/// - Records are expanded to all fields
+/// - Or-patterns are simplified (but not removed)
+///
+/// Equivalent to OCaml's `simplify_cases`.
+pub fn simplify_cases(
+    args: &[(RawLambda, LetKind)],
+    cls: Vec<(Vec<Pattern>, RawLambda)>,
+) -> Vec<(Vec<Pattern>, RawLambda)> {
+    assert!(!args.is_empty(), "simplify_cases: empty args");
+
+    let (ref arg, _) = args[0];
+
+    fn simplify(
+        arg: &RawLambda,
+        mut cls: Vec<(Vec<Pattern>, RawLambda)>,
+    ) -> Vec<(Vec<Pattern>, RawLambda)> {
+        if cls.is_empty() {
+            return Vec::new();
+        }
+
+        let (pats, action) = cls.remove(0);
+        assert!(!pats.is_empty(), "simplify_cases: empty pattern row");
+
+        let pat = &pats[0];
+        let patl = &pats[1..];
+
+        match &pat.pat_desc {
+            PatternDesc::Tpat_var(id, _) => {
+                let new_action = bind(LetKind::Alias, id, arg, action);
+                let mut row = vec![omega()];
+                row.extend(patl.iter().cloned());
+                let mut result = vec![(row, new_action)];
+                result.extend(simplify(arg, cls));
+                result
+            }
+            PatternDesc::Tpat_any => {
+                let mut result = vec![(pats, action)];
+                result.extend(simplify(arg, cls));
+                result
+            }
+            PatternDesc::Tpat_alias(p, id, _) => {
+                let new_action = bind(LetKind::Alias, id, arg, action);
+                let mut new_pats = vec![(**p).clone()];
+                new_pats.extend(patl.iter().cloned());
+                cls.insert(0, (new_pats, new_action));
+                simplify(arg, cls)
+            }
+            PatternDesc::Tpat_record(lbls, _) if lbls.is_empty() => {
+                let mut row = vec![omega()];
+                row.extend(patl.iter().cloned());
+                let mut result = vec![(row, action)];
+                result.extend(simplify(arg, cls));
+                result
+            }
+            PatternDesc::Tpat_record(lbls, closed) => {
+                let all_lbls = all_record_args(lbls);
+                let full_pat = Pattern {
+                    pat_desc: PatternDesc::Tpat_record(all_lbls, *closed),
+                    ..pat.clone()
+                };
+                let mut row = vec![full_pat];
+                row.extend(patl.iter().cloned());
+                let mut result = vec![(row, action)];
+                result.extend(simplify(arg, cls));
+                result
+            }
+            PatternDesc::Tpat_or(..) => {
+                let pat_simple = simplify_or(pat);
+                match &pat_simple.pat_desc {
+                    PatternDesc::Tpat_or(..) => {
+                        let mut row = vec![pat_simple];
+                        row.extend(patl.iter().cloned());
+                        let mut result = vec![(row, action)];
+                        result.extend(simplify(arg, cls));
+                        result
+                    }
+                    _ => {
+                        // Simplified away the or — re-process
+                        let mut new_pats = vec![pat_simple];
+                        new_pats.extend(patl.iter().cloned());
+                        cls.insert(0, (new_pats, action));
+                        simplify(arg, cls)
+                    }
+                }
+            }
+            _ => {
+                let mut result = vec![(pats, action)];
+                result.extend(simplify(arg, cls));
+                result
+            }
+        }
+    }
+
+    simplify(arg, cls)
+}
+
+// ============================================================================
+// what_is_cases — Determine what kind of patterns are in cases
+// ============================================================================
+
+/// Determine what kind of pattern the first non-wildcard case has.
+/// Returns the first non-wildcard pattern, or omega if all are wildcards.
+///
+/// Equivalent to OCaml's `what_is_cases`.
+pub fn what_is_cases(cases: &[(Vec<Pattern>, RawLambda)]) -> Pattern {
+    match cases.split_first() {
+        None => omega(),
+        Some(((pats, _), rem)) => {
+            assert!(!pats.is_empty(), "what_is_cases: empty pattern row");
+            match &pats[0].pat_desc {
+                PatternDesc::Tpat_any => what_is_cases(rem),
+                PatternDesc::Tpat_var(..) | PatternDesc::Tpat_or(..) | PatternDesc::Tpat_alias(..) => {
+                    panic!("what_is_cases: applies to simplified matchings only")
+                }
+                _ => pats[0].clone(),
+            }
+        }
+    }
+}
+
+// ============================================================================
+// as_matrix, cons_default, default_compat — Default environment helpers
+// ============================================================================
+// Ported from OCaml's matching.ml lines 588-607.
+
+/// Convert cases to a pattern matrix (taking the minimal rows under le_pats).
+/// Equivalent to OCaml's `as_matrix`.
+pub fn as_matrix(cases: &[(Vec<Pattern>, RawLambda)]) -> Matrix {
+    let rows: Vec<Vec<Pattern>> = cases.iter().map(|(ps, _)| ps.clone()).collect();
+    get_mins(|a: &Vec<Pattern>, b: &Vec<Pattern>| le_pats(a, b), rows)
+}
+
+/// Prepend a matrix entry to the default environment, skipping empty matrices.
+/// Equivalent to OCaml's `cons_default`.
+pub fn cons_default(matrix: Matrix, raise_num: i32, default: DefaultEnv) -> DefaultEnv {
+    if matrix.is_empty() {
+        default
+    } else {
+        let mut result = vec![(matrix, raise_num)];
+        result.extend(default);
+        result
+    }
+}
+
+/// Filter a default environment for entries compatible with pattern p.
+/// For each entry (pss, i), keep only rows whose first pattern is compatible
+/// with p, and drop the first column.
+///
+/// Equivalent to OCaml's `default_compat`.
+pub fn default_compat(p: &Pattern, def: &DefaultEnv) -> DefaultEnv {
+    def.iter()
+        .rev()
+        .fold(Vec::new(), |r, (pss, i)| {
+            let qss: Vec<Vec<Pattern>> = pss
+                .iter()
+                .filter_map(|qs| {
+                    match qs.split_first() {
+                        Some((q, rem)) if may_compat(p, q) => Some(rem.to_vec()),
+                        _ => None,
+                    }
+                })
+                .collect();
+            if qss.is_empty() {
+                r
+            } else {
+                let mut result = vec![(qss, *i)];
+                result.extend(r);
+                result
+            }
+        })
 }
