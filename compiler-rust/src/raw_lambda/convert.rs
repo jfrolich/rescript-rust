@@ -1967,7 +1967,16 @@ impl<'a> RawLambdaConverter<'a> {
                                     arg.exp_type,
                                 )
                             })
-                            .unwrap_or(false) =>
+                            .unwrap_or_else(|| {
+                                // Fallback to self.env when typed env unavailable.
+                                // Safe because type_cannot_contain_undefined only
+                                // needs the env for expand_head and type decl lookup.
+                                type_cannot_contain_undefined(
+                                    self.type_ctx,
+                                    self.env,
+                                    arg.exp_type,
+                                )
+                            }) =>
                     {
                         TagInfo::SomeNotNested
                     }
