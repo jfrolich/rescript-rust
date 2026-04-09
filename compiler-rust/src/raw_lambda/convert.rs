@@ -7714,10 +7714,75 @@ impl<'a> RawLambdaConverter<'a> {
                     simple_let_binding_id(binding).is_none()
                         && !Self::is_irrefutable_pattern(&binding.vb_pat)
                 }) {
-                    return RawLambda::from_lowered(
-                        self.lowered
-                            .convert_let_with_body(rec_flag, bindings, body.into_lowered()),
-                    );
+                    // Use OCaml's simple_for_let / for_let approach via full matching compiler
+                    let mut acc = body;
+                    for binding in bindings.iter().rev() {
+                        let mut value = self.convert_expr_raw(&binding.vb_expr);
+                        let inline_attr =
+                            Self::get_inline_attribute_from(&binding.vb_attributes, self.arena);
+                        value = Self::apply_inline_attribute_raw(value, inline_attr);
+                        if let Some(id) = simple_let_binding_id(binding) {
+                            let kind = match &binding.vb_pat.pat_desc {
+                                PatternDesc::Tpat_alias(inner, _, _)
+                                    if matches!(inner.pat_desc, PatternDesc::Tpat_any)
+                                        && matches!(value, RawLambda::Lvar(_)) =>
+                                {
+                                    LetKind::Alias
+                                }
+                                _ => LetKind::Strict,
+                            };
+                            acc = RawLambda::let_(kind, id, value, acc);
+                        } else {
+                            // Use matching compiler's for_let (OCaml: Matching.for_let)
+                            let pat_act_list = vec![(
+                                binding.vb_pat.clone(),
+                                acc,
+                            )];
+                            let loc = self.loc(binding.vb_pat.pat_loc);
+                            let fname = self.basename_for_loc(loc.clone());
+                            let loc_for_handler = loc.clone();
+                            let handler_fun = move || {
+                                let line = loc_for_handler.loc_start.line;
+                                let char_pos = loc_for_handler.loc_start.column();
+                                let match_failure_ident = predef_exception_ident(
+                                    "Match_failure",
+                                    PREDEF_MATCH_FAILURE_STAMP,
+                                );
+                                let exn = RawLambda::LglobalModule(match_failure_ident, false);
+                                let payload = RawLambda::Lconst(Constant::Block {
+                                    tag: 0,
+                                    tag_info: TagInfo::Tuple,
+                                    elements: vec![
+                                        Constant::string(fname.clone()),
+                                        Constant::int(line),
+                                        Constant::int(char_pos),
+                                    ],
+                                });
+                                RawLambda::Lprim(RawPrimInfo {
+                                    primitive: Primitive::Praise,
+                                    args: vec![RawLambda::Lprim(RawPrimInfo {
+                                        primitive: Primitive::Pmakeblock(
+                                            0,
+                                            TagInfo::Extension,
+                                            Mutable::Immutable,
+                                        ),
+                                        args: vec![exn, payload],
+                                        loc: Location::none(),
+                                    })],
+                                    loc: Location::none(),
+                                })
+                            };
+                            acc = full_matching::compile_matching(
+                                self.type_ctx,
+                                handler_fun,
+                                value,
+                                pat_act_list,
+                                Partial::Partial,
+                                &mut self.next_static_raise,
+                            );
+                        }
+                    }
+                    return acc;
                 }
 
                 let mut acc = body;
