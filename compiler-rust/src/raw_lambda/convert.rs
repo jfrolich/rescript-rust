@@ -3758,9 +3758,10 @@ impl<'a> RawLambdaConverter<'a> {
                 // For complex patterns that simple matchers can't handle,
                 // fall back to the full matching compiler (matching.rs).
                 let partial = *partial;
-                if partial == Partial::Partial {
-                    let _default_raise = self.next_raise_count();
-                }
+                // Note: do NOT allocate a raise_count here for Partial matches.
+                // compile_matching (in matching.rs) allocates its own raise_num
+                // internally when the match is Partial. Allocating one here would
+                // create a spurious exit ID offset.
                 let loc = self.loc(expr.exp_loc);
                 // Use full matching compiler (ported from OCaml's matching.ml)
                 self.compile_full_matching(loc, scrut, cases, partial, expr)
@@ -4555,9 +4556,8 @@ impl<'a> RawLambdaConverter<'a> {
 
         // Compile normal cases with val_id as the scrutinee
         let normal_handler = {
-            if partial == Partial::Partial {
-                let _default_raise = self.next_raise_count();
-            }
+            // Note: do NOT allocate a raise_count here for Partial matches.
+            // compile_matching allocates its own raise_num internally.
             let pat_act_list = self.cases_to_pat_act_list(cases);
             let loc_for_handler = loc.clone();
             let fname = self.basename_for_loc(loc_for_handler.clone());
