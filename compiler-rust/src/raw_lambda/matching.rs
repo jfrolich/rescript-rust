@@ -5955,14 +5955,10 @@ fn scan_def(
             for pat in pats.iter().rev() {
                 klist.insert(0, (get_key_constr(pat), action.clone()));
             }
-            // ctx_lub of list_as_pat pats with ctx
-            // We don't have ctx here; it was captured in to_test.
-            // Actually, we need to use the stored p_ctx from to_test.
-            // The OCaml code does: jumps_add i (ctx_lub (list_as_pat pats) ctx) jumps
-            // But ctx is passed via closure. In our version, pats came from to_test
-            // which already computed ctx_lub. We'll just use empty ctx as approximation.
-            // Actually looking more carefully at OCaml: scan_def captures ctx from the outer
-            // scope. Let's just use an empty jumps here since we'll do it properly below.
+            // OCaml: jumps_add i (ctx_lub (list_as_pat pats) ctx) jumps
+            // TODO: properly track exit jumps from scan_def.
+            // Currently using empty jumps, which means the exit is not
+            // tracked and the catch handler may be missing.
         }
         (klist, jumps)
     } else {
