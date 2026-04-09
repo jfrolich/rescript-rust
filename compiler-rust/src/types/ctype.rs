@@ -2980,19 +2980,39 @@ pub fn expand_head_once<'a>(
 /// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
 pub fn expand_head<'a>(ctx: &'a TypeContext<'a>, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     let mut current = ctx.repr(ty);
-    let mut seen = HashSet::new();
-    // Limit iterations to prevent infinite loops
+    // Stack-allocated cycle detection for up to 20 iterations.
+    // Linear scan is faster than HashSet for this small size.
+    let mut seen = [TypeExprRef(0); 20];
+    let mut seen_len: usize = 0;
     for _ in 0..20 {
-        if !seen.insert(current) {
+        // Check if current was already seen
+        let mut already_seen = false;
+        for i in 0..seen_len {
+            if seen[i] == current {
+                already_seen = true;
+                break;
+            }
+        }
+        if already_seen {
             break;
         }
+        seen[seen_len] = current;
+        seen_len += 1;
         match try_expand_head(ctx, env, current) {
             Some(expanded) => {
                 let expanded = ctx.repr(expanded);
                 if expanded == current {
                     break;
                 }
-                if seen.contains(&expanded) {
+                // Check if expanded was already seen
+                let mut exp_seen = false;
+                for i in 0..seen_len {
+                    if seen[i] == expanded {
+                        exp_seen = true;
+                        break;
+                    }
+                }
+                if exp_seen {
                     break;
                 }
                 current = expanded;
