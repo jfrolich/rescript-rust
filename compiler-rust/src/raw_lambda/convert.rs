@@ -4936,7 +4936,7 @@ impl<'a> RawLambdaConverter<'a> {
         //   catch(catch(tag1_test(exit 1), with(1) tag2_test(exit 2)), with(2) tag3_test ...)
         let tests = {
             let mut ext_cases = extension_cases;
-            // Last case is the outermost — it uses the default as its else branch
+            // Last case uses the default directly in its else branch
             let (last_path, last_act) = ext_cases.pop().unwrap();
             let tag_id = self.id_gen.create("tag");
             let cond = RawLambda::prim(
