@@ -18100,6 +18100,60 @@ fn copy_lookup_signature(
         .collect()
 }
 
+/// Match OCaml's `prefix_idents` + `Subst.value_description`:
+/// When looking up a value through a module path (e.g., `Reducer.reduce`),
+/// create a new value description where internal type paths are rewritten
+/// from `Pident(type_name)` to `Pdot(module_path, type_name)`.
+/// Creates NEW type expression nodes (deep copy + substitution).
+fn subst_value_desc_for_module_lookup(
+    vd: &crate::types::decl::ValueDescription,
+    sig: &[crate::types::decl::SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext<'_>,
+) -> crate::types::decl::ValueDescription {
+    use crate::types::decl::SignatureItem;
+
+    // Build stamp map from SigType idents → Pdot(module_path, type_name)
+    let mut stamp_map = std::collections::HashMap::new();
+    for item in sig.iter() {
+        if let SignatureItem::SigType(id, _, _) = item {
+            if id.stamp() != 0 {
+                stamp_map.insert(id.stamp(), Path::pdot(module_path.clone(), id.name()));
+            }
+        }
+    }
+
+    if stamp_map.is_empty() {
+        return vd.clone();
+    }
+
+    // Deep-copy the value type to create new type expression nodes
+    let mut cache = std::collections::HashMap::new();
+    let copied_ty = copy_lookup_type_expr(ctx, vd.val_type, &mut cache);
+
+    // Apply stamp substitution to the copy
+    let mut visited = std::collections::HashSet::new();
+    let empty_name: std::collections::HashMap<String, Path> = std::collections::HashMap::new();
+    let empty_stamp: std::collections::HashMap<i32, Path> = std::collections::HashMap::new();
+    crate::cmi::persistent_env::substitute_type_expr_path_pub(
+        copied_ty,
+        &stamp_map,
+        &empty_name,
+        &empty_stamp,
+        &empty_name,
+        ctx,
+        &mut visited,
+    );
+
+    crate::types::decl::ValueDescription {
+        val_type: copied_ty,
+        val_kind: vd.val_kind.clone(),
+        val_loc: vd.val_loc.clone(),
+        val_attributes: vd.val_attributes.clone(),
+        val_path: vd.val_path.clone(),
+    }
+}
+
 fn debug_type_summary<'a>(ctx: &'a TypeContext<'a>, ty: TypeExprRef) -> String {
     let mut parts = Vec::new();
     let mut cursor = ctx.repr(ty);
@@ -18856,7 +18910,13 @@ impl Env {
                                         summary
                                     );
                                 }
-                                return Ok((path, vd.clone()));
+                                // Match OCaml prefix_idents + Subst.value_description:
+                                // Create new type expressions with Pdot-qualified paths
+                                // for types defined in the module's signature.
+                                let vd = subst_value_desc_for_module_lookup(
+                                    &vd, &sig, &mod_path, ctx,
+                                );
+                                return Ok((path, vd));
                     }
                     if debug_lookup_value_lid {
                         eprintln!(
