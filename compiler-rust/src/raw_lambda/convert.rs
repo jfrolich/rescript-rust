@@ -2888,14 +2888,15 @@ impl<'a> RawLambdaConverter<'a> {
     /// lambda conversion to emit Const_ModuleAlias (0a) instead of the actual
     /// module reference.
     ///
-    /// This method skips the Tmty_alias short-circuit and directly converts the
-    /// module expression based on its mod_desc, matching OCaml's behavior.
+    /// For true alias modules, wrap_alias_ident_in_constraint adds a
+    /// Tmod_constraint with Tcoerce_alias carrying the normalized alias target.
+    /// When we find Tcoerce_alias + Tmty_alias, we emit 0a and apply the
+    /// coercion (matching OCaml). For non-alias modules, we skip the Tmty_alias
+    /// check to avoid incorrectly emitting 0a.
     fn convert_module_expr_for_pack_raw(
         &mut self,
         module_expr: &ModuleExpr,
     ) -> RawLambda {
-        // Unwrap Tmod_constraint wrappers (from type_pack wrapping)
-        // and apply composed coercions, but skip the Tmty_alias check.
         self.convert_module_expr_for_pack_inner(module_expr, &ModuleCoercion::Tcoerce_none)
     }
 
@@ -2906,12 +2907,33 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> RawLambda {
         match &module_expr.mod_desc {
             ModuleExprDesc::Tmod_constraint(inner, _, _, inner_cc) => {
-                self.convert_module_expr_for_pack_inner(
-                    inner,
-                    &Self::compose_coercions_raw(cc, inner_cc),
-                )
+                let composed = Self::compose_coercions_raw(cc, inner_cc);
+                // If the composed coercion includes Tcoerce_alias and the inner
+                // module is an alias (Tmty_alias), use 0a + Alias to match OCaml.
+                if matches!(composed, ModuleCoercion::Tcoerce_alias(..))
+                    && matches!(inner.mod_type.mty_desc, ModuleTypeDesc::Tmty_alias(_, _))
+                {
+                    return self.apply_coercion_raw(
+                        self.loc(inner.mod_loc),
+                        LetKind::Alias,
+                        &composed,
+                        RawLambda::const_(Constant::ModuleAlias),
+                    );
+                }
+                self.convert_module_expr_for_pack_inner(inner, &composed)
             }
             ModuleExprDesc::Tmod_ident(path, _) => {
+                // Check if this ident is an alias with Tcoerce_alias coercion.
+                if matches!(cc, ModuleCoercion::Tcoerce_alias(..))
+                    && matches!(module_expr.mod_type.mty_desc, ModuleTypeDesc::Tmty_alias(_, _))
+                {
+                    return self.apply_coercion_raw(
+                        self.loc(module_expr.mod_loc),
+                        LetKind::Alias,
+                        cc,
+                        RawLambda::const_(Constant::ModuleAlias),
+                    );
+                }
                 let loc = self.loc(module_expr.mod_loc);
                 let arg = if let Some(env) = self.env_for_module_expr(module_expr) {
                     self.translate_module_path_raw_in_env(env.as_ref(), path, loc.clone())

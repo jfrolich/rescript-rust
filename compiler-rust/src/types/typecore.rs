@@ -16153,7 +16153,8 @@ fn wrap_alias_ident_in_constraint(
             // to MtySignature/MtyFunctor, the alias was a functor result and
             // should NOT be wrapped. If it stays MtyAlias (unresolvable
             // target), it's a true alias and should be wrapped.
-            let is_alias = {
+            // Returns Some(normalized_target) if this is a true alias, None otherwise.
+            let alias_info: Option<Path> = {
                 let md_type = match path {
                     Path::Pident(id) => env.find_module(id.name())
                         .ok()
@@ -16162,13 +16163,9 @@ fn wrap_alias_ident_in_constraint(
                         .ok()
                         .map(|md| md.md_type.clone())
                         .or_else(|| {
-                            // Fallback: resolve through persistent env for
-                            // modules like SectionID.Comparable where the parent
-                            // is a persistent alias.
                             let pe = pers_env.as_mut()?;
                             let parent_name = parent.head_name();
                             let ps = pe.find_pers_struct(&parent_name, ctx)?;
-                            // Find submodule in parent's signature
                             ps.ps_sig.iter().find_map(|item| match item {
                                 crate::types::decl::SignatureItem::SigModule(id, md, _)
                                     if id.name() == name.as_str() =>
@@ -16181,44 +16178,28 @@ fn wrap_alias_ident_in_constraint(
                     _ => None,
                 };
                 match md_type {
-                    // Pdot lookup failed even with persistent env → assume alias
-                    None if matches!(path, Path::Pdot(..)) => true,
+                    None if matches!(path, Path::Pdot(..)) => Some(env.normalize_path(path)),
                     Some(crate::types::decl::ModuleType::MtyAlias(_, ref target)) => {
-                        // Scrape: follow the alias chain with cycle detection.
-                        let mut current = target.clone();
-                        let mut visited = std::collections::HashSet::new();
-                        let mut is_still_alias = true;
-                        for _ in 0..10 {
-                            if !visited.insert(current.name()) {
-                                break;
-                            }
-                            // Try env only — don't resolve through persistent env.
-                            // OCaml's find_module for persistent modules returns
-                            // the raw declaration from the CMI which is typically
-                            // still MtyAlias. We match that by not eagerly loading
-                            // persistent modules to signatures.
-                            let target_mty = env.lookup_module(&current)
-                                .ok()
-                                .map(|md| md.md_type.clone());
-                            match target_mty.as_ref() {
-                                Some(crate::types::decl::ModuleType::MtyAlias(_, next)) => {
-                                    current = next.clone();
-                                }
-                                Some(crate::types::decl::ModuleType::MtySignature(_))
-                                | Some(crate::types::decl::ModuleType::MtyFunctor { .. }) => {
-                                    is_still_alias = false;
-                                    break;
-                                }
-                                _ => break,
-                            }
-                        }
-                        is_still_alias
+                        // Use env.normalize_path to follow the full alias chain,
+                        // matching OCaml's Env.normalize_path behavior.
+                        let normalized = env.normalize_path(target);
+                        // Check if normalization resolved to something concrete.
+                        // If it resolved to the same path, check if the target is
+                        // resolvable to a signature (not a true alias).
+                        let target_is_concrete = env.lookup_module(&normalized)
+                            .ok()
+                            .map(|md| matches!(
+                                md.md_type,
+                                crate::types::decl::ModuleType::MtySignature(_)
+                                | crate::types::decl::ModuleType::MtyFunctor { .. }
+                            ))
+                            .unwrap_or(false);
+                        if target_is_concrete { None } else { Some(normalized) }
                     }
-                    _ => false,
+                    _ => None,
                 }
             };
-            if is_alias {
-                let inner_mty = module.mod_type.clone();
+            if let Some(alias_target) = alias_info {
                 let inner_loc = module.mod_loc;
                 let inner_attrs = module.mod_attributes.clone();
                 crate::types::typedtree::ModuleExpr {
@@ -16226,10 +16207,14 @@ fn wrap_alias_ident_in_constraint(
                         Box::new(module),
                         crate::types::typedtree::ModuleType::placeholder(),
                         ModuleTypeConstraint::Tmodtype_implicit,
-                        ModuleCoercion::Tcoerce_none,
+                        ModuleCoercion::Tcoerce_alias(
+                            crate::types::typedtree::EnvRef(0),
+                            alias_target,
+                            Box::new(ModuleCoercion::Tcoerce_none),
+                        ),
                     ),
                     mod_loc: inner_loc,
-                    mod_type: inner_mty,
+                    mod_type: crate::types::typedtree::ModuleType::placeholder(),
                     mod_env: crate::types::typedtree::EnvRef(0),
                     mod_attributes: inner_attrs,
                 }

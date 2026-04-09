@@ -7337,7 +7337,10 @@ fn type_module_expr_with_alias<'a>(
                 // where p1 is the alias target path. The inner Tmod_ident should have
                 // mod_type = Mty_alias(Mta_absent, path).
                 let alias_target = match &mod_type {
-                    Some(crate::types::decl::ModuleType::MtyAlias(_, p1)) => p1.clone(),
+                    Some(crate::types::decl::ModuleType::MtyAlias(_, p1)) => {
+                        // Match OCaml typemod.ml line 1246: normalize the alias target
+                        env.normalize_path(p1)
+                    }
                     _ => path_clone.clone(),
                 };
 
