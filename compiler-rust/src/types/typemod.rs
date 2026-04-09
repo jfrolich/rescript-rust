@@ -36,7 +36,6 @@ use crate::types::typedtree::{
     TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind,
     ValueBinding,
 };
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
 // ============================================================================
@@ -2843,29 +2842,16 @@ pub fn lookup_module_type_by_lid<'b>(
 ) -> Option<crate::types::decl::ModuleType> {
     use crate::parser::longident::Longident;
     use crate::types::decl::ModuleType as DeclMty;
-    let debug_lookup = std::env::var_os("RUST_DEBUG_LOOKUP_MOD").is_some();
     match lid {
         Longident::Lident(mod_idx) => {
             let mod_name = arena.get_string(*mod_idx);
             // Try local env first
             if let Ok(md) = env.find_module(mod_name) {
-                if debug_lookup {
-                    let kind = match &md.md_type {
-                        DeclMty::MtySignature(_) => "mty-signature",
-                        DeclMty::MtyFunctor { .. } => "mty-functor",
-                        DeclMty::MtyIdent(_) => "mty-ident",
-                        DeclMty::MtyAlias(_, _) => "mty-alias",
-                    };
-                    eprintln!("[lookup-mod] lid={} kind={}", mod_name, kind);
-                }
                 return Some(md.md_type.clone());
             }
             // Try persistent env
             if let Some(pers) = pers_env.as_mut() {
                 if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
-                    if debug_lookup {
-                        eprintln!("[lookup-mod] lid={} kind=mty-signature(persistent)", mod_name);
-                    }
                     return Some(DeclMty::MtySignature(ps.ps_sig.clone()));
                 }
             }
@@ -2904,24 +2890,6 @@ pub fn lookup_module_type_by_lid<'b>(
                                 alias_presence,
                                 Path::pdot(alias_path, submod_name.to_string()),
                             ));
-                        }
-                        if debug_lookup {
-                            let parent_name = match &parent_type {
-                                DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => path.name(),
-                                _ => "<module>".to_string(),
-                            };
-                            let kind = match &sub_md.md_type {
-                                DeclMty::MtySignature(_) => "mty-signature",
-                                DeclMty::MtyFunctor { .. } => "mty-functor",
-                                DeclMty::MtyIdent(_) => "mty-ident",
-                                DeclMty::MtyAlias(_, _) => "mty-alias",
-                            };
-                            eprintln!(
-                                "[lookup-mod] lid={}.{} kind={}",
-                                parent_name,
-                                submod_name,
-                                kind
-                            );
                         }
                         let mut child_mty = sub_md.md_type.clone();
                         crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
@@ -2971,36 +2939,6 @@ fn resolve_mod_type_to_sig_impl<'b>(
     ctx: &'b crate::types::context::TypeContext<'b>,
     visiting: &mut HashSet<Path>,
 ) -> Option<crate::types::decl::Signature> {
-    thread_local! {
-        static RESOLVE_SIG_DEBUG_DEPTH: Cell<usize> = const { Cell::new(0) };
-    }
-
-    struct ResolveSigDebugGuard;
-    impl Drop for ResolveSigDebugGuard {
-        fn drop(&mut self) {
-            RESOLVE_SIG_DEBUG_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-        }
-    }
-
-    let _resolve_sig_debug_guard = if std::env::var_os("RUST_DEBUG_RESOLVE_SIG_DEPTH").is_some() {
-        RESOLVE_SIG_DEBUG_DEPTH.with(|depth| {
-            let next = depth.get() + 1;
-            depth.set(next);
-            if next > 200 {
-                let kind = match mty {
-                    crate::types::decl::ModuleType::MtySignature(_) => "sig".to_string(),
-                    crate::types::decl::ModuleType::MtyIdent(path) => path.name(),
-                    crate::types::decl::ModuleType::MtyAlias(_, path) => path.name(),
-                    crate::types::decl::ModuleType::MtyFunctor { .. } => "functor".to_string(),
-                };
-                panic!("resolve_mod_type_to_sig_impl depth={} kind={}", next, kind);
-            }
-        });
-        Some(ResolveSigDebugGuard)
-    } else {
-        None
-    };
-
     use crate::types::decl::ModuleType as DeclMty;
     match mty {
         DeclMty::MtySignature(sig) => Some(sig.clone()),
@@ -3021,36 +2959,6 @@ fn resolve_path_to_sig_impl<'b>(
     visiting: &mut HashSet<Path>,
 ) -> Option<crate::types::decl::Signature> {
     use crate::types::decl::SignatureItem as SigItem;
-
-    thread_local! {
-        static RESOLVE_PATH_TO_SIG_DEBUG_DEPTH: Cell<usize> = const { Cell::new(0) };
-    }
-
-    struct ResolvePathToSigDebugGuard;
-    impl Drop for ResolvePathToSigDebugGuard {
-        fn drop(&mut self) {
-            RESOLVE_PATH_TO_SIG_DEBUG_DEPTH
-                .with(|depth| depth.set(depth.get().saturating_sub(1)));
-        }
-    }
-
-    let _resolve_path_to_sig_debug_guard =
-        if std::env::var_os("RUST_DEBUG_RESOLVE_PATH_TO_SIG_DEPTH").is_some() {
-            RESOLVE_PATH_TO_SIG_DEBUG_DEPTH.with(|depth| {
-                let next = depth.get() + 1;
-                depth.set(next);
-                if next > 200 {
-                    panic!(
-                        "resolve_path_to_sig_impl depth={} path={}",
-                        next,
-                        path.name()
-                    );
-                }
-            });
-            Some(ResolvePathToSigDebugGuard)
-        } else {
-            None
-        };
 
     if !visiting.insert(path.clone()) {
         return None;
@@ -4408,36 +4316,6 @@ fn scrape_alias_module_type<'b>(
         ctx: &'b crate::types::context::TypeContext<'b>,
         visiting: &mut HashSet<Path>,
     ) -> Option<DeclMty> {
-        thread_local! {
-            static SCRAPE_ALIAS_PATH_DEBUG_DEPTH: Cell<usize> = const { Cell::new(0) };
-        }
-
-        struct ScrapeAliasPathDebugGuard;
-        impl Drop for ScrapeAliasPathDebugGuard {
-            fn drop(&mut self) {
-                SCRAPE_ALIAS_PATH_DEBUG_DEPTH
-                    .with(|depth| depth.set(depth.get().saturating_sub(1)));
-            }
-        }
-
-        let _scrape_alias_path_debug_guard =
-            if std::env::var_os("RUST_DEBUG_SCRAPE_ALIAS_PATH_DEPTH").is_some() {
-                SCRAPE_ALIAS_PATH_DEBUG_DEPTH.with(|depth| {
-                    let next = depth.get() + 1;
-                    depth.set(next);
-                    if next > 200 {
-                        panic!(
-                            "scrape_alias resolve_path depth={} path={}",
-                            next,
-                            path.name()
-                        );
-                    }
-                });
-                Some(ScrapeAliasPathDebugGuard)
-            } else {
-                None
-            };
-
         fn anchored(owner_path: &Path, mty: &DeclMty) -> DeclMty {
             let mut mty = mty.clone();
             anchor_local_module_aliases_to_owner(&mut mty, owner_path);
@@ -4548,15 +4426,6 @@ fn extract_functor_result_type<'b>(
         }
         _ => return None,
     };
-    if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-        let kind = match &functor_mty {
-            DeclMty::MtySignature(_) => "mty-signature",
-            DeclMty::MtyFunctor { .. } => "mty-functor",
-            DeclMty::MtyIdent(_) => "mty-ident",
-            DeclMty::MtyAlias(_, _) => "mty-alias",
-        };
-        eprintln!("[functor-result] lookup_functor_mty={}", kind);
-    }
     let functor_mty = match scrape_alias_module_type(
         &functor_mty,
         env,
@@ -4566,15 +4435,6 @@ fn extract_functor_result_type<'b>(
         Some(scraped) => scraped,
         None => functor_mty,
     };
-    if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-        let kind = match &functor_mty {
-            DeclMty::MtySignature(_) => "mty-signature",
-            DeclMty::MtyFunctor { .. } => "mty-functor",
-            DeclMty::MtyIdent(_) => "mty-ident",
-            DeclMty::MtyAlias(_, _) => "mty-alias",
-        };
-        eprintln!("[functor-result] scraped_functor_mty={}", kind);
-    }
     // Extract the result type if it's a functor
     match functor_mty {
         DeclMty::MtyFunctor { param, result, .. } => {
@@ -4876,9 +4736,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         // Match OCaml transl_value_decl parse_arity/get_arity side effects:
                         // expanding the generalized head seeds simple abbreviations so later
                         // instance() calls preserve physical sharing on nullary aliases.
-                        if std::env::var_os("RUST_SKIP_SIG_VALUE_EXPAND_HEAD").is_none() {
-                            crate::types::ctype::expand_head(ctx, &sig_env, val_type);
-                        }
+                        crate::types::ctype::expand_head(ctx, &sig_env, val_type);
                         items.push(SigItem::SigValue(
                             val_id,
                             ValueDescription {
@@ -5407,34 +5265,6 @@ fn anchor_local_module_aliases_to_owner(
     mty: &mut crate::types::decl::ModuleType,
     owner_path: &Path,
 ) {
-    thread_local! {
-        static ANCHOR_DEBUG_DEPTH: Cell<usize> = const { Cell::new(0) };
-    }
-
-    struct AnchorDebugGuard;
-    impl Drop for AnchorDebugGuard {
-        fn drop(&mut self) {
-            ANCHOR_DEBUG_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-        }
-    }
-
-    let _anchor_debug_guard = if std::env::var_os("RUST_DEBUG_ANCHOR_DEPTH").is_some() {
-        ANCHOR_DEBUG_DEPTH.with(|depth| {
-            let next = depth.get() + 1;
-            depth.set(next);
-            if next > 200 {
-                panic!(
-                    "anchor_local_module_aliases_to_owner depth={} owner={}",
-                    next,
-                    owner_path.name()
-                );
-            }
-        });
-        Some(AnchorDebugGuard)
-    } else {
-        None
-    };
-
     use crate::types::decl::ModuleType as DeclMty;
     use crate::types::decl::SignatureItem as SigItem;
 
@@ -6279,38 +6109,6 @@ fn extract_module_type_from_mod_expr_with_resolver<F>(
 where
     F: FnMut(&Located<LidentIdx>, Option<&Env>) -> Option<crate::types::decl::Signature>,
 {
-    thread_local! {
-        static EXTRACT_MTY_DEBUG_DEPTH: Cell<usize> = const { Cell::new(0) };
-    }
-
-    struct ExtractMtyDebugGuard;
-    impl Drop for ExtractMtyDebugGuard {
-        fn drop(&mut self) {
-            EXTRACT_MTY_DEBUG_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-        }
-    }
-
-    let _extract_mty_debug_guard = if std::env::var_os("RUST_DEBUG_EXTRACT_MTY_DEPTH").is_some() {
-        EXTRACT_MTY_DEBUG_DEPTH.with(|depth| {
-            let next = depth.get() + 1;
-            depth.set(next);
-            if next > 200 {
-                let kind = match &mod_expr.mod_desc {
-                    ModuleExprDesc::Tmod_ident(_, _) => "ident",
-                    ModuleExprDesc::Tmod_structure(_) => "structure",
-                    ModuleExprDesc::Tmod_apply(_, _, _) => "apply",
-                    ModuleExprDesc::Tmod_functor(_, _, _, _) => "functor",
-                    ModuleExprDesc::Tmod_constraint(_, _, _, _) => "constraint",
-                    ModuleExprDesc::Tmod_unpack(_, _) => "unpack",
-                };
-                panic!("extract_module_type_from_mod_expr_with_resolver depth={} kind={}", next, kind);
-            }
-        });
-        Some(ExtractMtyDebugGuard)
-    } else {
-        None
-    };
-
     fn preserve_structure_module_alias(
         mod_expr: &ModuleExpr,
     ) -> Option<crate::types::decl::ModuleType> {
@@ -6365,36 +6163,6 @@ where
             visiting: &mut HashSet<Path>,
         ) -> Option<crate::types::decl::Signature> {
             use crate::types::decl::SignatureItem as SigItem;
-
-            thread_local! {
-                static EXTRACT_RESOLVE_PATH_DEBUG_DEPTH: Cell<usize> = const { Cell::new(0) };
-            }
-
-            struct ExtractResolvePathDebugGuard;
-            impl Drop for ExtractResolvePathDebugGuard {
-                fn drop(&mut self) {
-                    EXTRACT_RESOLVE_PATH_DEBUG_DEPTH
-                        .with(|depth| depth.set(depth.get().saturating_sub(1)));
-                }
-            }
-
-            let _extract_resolve_path_debug_guard =
-                if std::env::var_os("RUST_DEBUG_EXTRACT_RESOLVE_PATH_DEPTH").is_some() {
-                    EXTRACT_RESOLVE_PATH_DEBUG_DEPTH.with(|depth| {
-                        let next = depth.get() + 1;
-                        depth.set(next);
-                        if next > 200 {
-                            panic!(
-                                "extract resolve_path depth={} path={}",
-                                next,
-                                path.name()
-                            );
-                        }
-                    });
-                    Some(ExtractResolvePathDebugGuard)
-                } else {
-                    None
-                };
 
             if !visiting.insert(path.clone()) {
                 return None;
@@ -6900,35 +6668,6 @@ where
                         }
                     }
                     StructureItemDesc::Tstr_include(incl) => {
-                        let debug_extract_include =
-                            std::env::var_os("RUST_DEBUG_EXTRACT_INCLUDE").is_some();
-                        if debug_extract_include {
-                            let incl_desc = match &incl.incl_mod.mod_desc {
-                                ModuleExprDesc::Tmod_ident(path, _) => {
-                                    format!("ident:{}", path.name())
-                                }
-                                ModuleExprDesc::Tmod_structure(_) => "structure".to_string(),
-                                ModuleExprDesc::Tmod_functor(..) => "functor".to_string(),
-                                ModuleExprDesc::Tmod_apply(..) => "apply".to_string(),
-                                ModuleExprDesc::Tmod_constraint(..) => "constraint".to_string(),
-                                ModuleExprDesc::Tmod_unpack(..) => "unpack".to_string(),
-                            };
-                            eprintln!(
-                                "[extract-include] start desc={} incl_type_len={}",
-                                incl_desc,
-                                incl.incl_type.len()
-                            );
-                            if let ModuleExprDesc::Tmod_ident(path, _) = &incl.incl_mod.mod_desc {
-                                let env_has_module = current_env
-                                    .is_some_and(|env| env.lookup_module(path).is_ok());
-                                eprintln!(
-                                    "[extract-include] env_present={} env_has_module={} path={}",
-                                    current_env.is_some(),
-                                    env_has_module,
-                                    path.name()
-                                );
-                            }
-                        }
                         let mut included = false;
                         if !incl.incl_type.is_empty() {
                             for sig_item in incl.incl_type.clone() {
@@ -6946,28 +6685,6 @@ where
                                 type_ctx,
                                 resolve_ident_sig,
                             ) {
-                                if debug_extract_include {
-                                    let kind = match &inner_mty {
-                                        DeclMty::MtySignature(_) => "signature",
-                                        DeclMty::MtyIdent(path) => {
-                                            eprintln!("[extract-include] inner_mty=ident:{}", path.name());
-                                            if let Some(env) = current_env {
-                                                eprintln!(
-                                                    "[extract-include] lookup_modtype({})={}",
-                                                    path.name(),
-                                                    env.lookup_modtype(path).is_ok()
-                                                );
-                                            }
-                                            "ident"
-                                        }
-                                        DeclMty::MtyAlias(_, path) => {
-                                            eprintln!("[extract-include] inner_mty=alias:{}", path.name());
-                                            "alias"
-                                        }
-                                        DeclMty::MtyFunctor { .. } => "functor",
-                                    };
-                                    eprintln!("[extract-include] inner_mty_kind={}", kind);
-                                }
                                 let inner_sig_opt = match inner_mty {
                                     DeclMty::MtySignature(inner_sig) => Some(inner_sig),
                                     other => current_env
@@ -6997,25 +6714,6 @@ where
                                         }),
                                 };
                                 if let Some(inner_sig) = inner_sig_opt {
-                                    if debug_extract_include {
-                                        let items = inner_sig
-                                            .iter()
-                                            .map(|item| match item {
-                                                SigItem::SigValue(id, _) => format!("val:{}", id.name()),
-                                                SigItem::SigType(id, _, _) => format!("type:{}", id.name()),
-                                                SigItem::SigModule(id, _, _) => format!("module:{}", id.name()),
-                                                SigItem::SigModtype(id, _) => format!("modtype:{}", id.name()),
-                                                SigItem::SigTypext(id, _, _) => format!("ext:{}", id.name()),
-                                                SigItem::SigClass => "class".to_string(),
-                                                SigItem::SigClassType => "class_type".to_string(),
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join(", ");
-                                        eprintln!(
-                                            "[extract-include] resolved inner_sig items=[{}]",
-                                            items
-                                        );
-                                    }
                                     for sig_item in inner_sig {
                                         if let Some(env_mut) = local_env.as_mut() {
                                             add_sig_item_to_env(&sig_item, env_mut);
@@ -7029,25 +6727,6 @@ where
                         if !included {
                             if let ModuleExprDesc::Tmod_ident(_, lid) = &incl.incl_mod.mod_desc {
                                 if let Some(inner_sig) = resolve_ident_sig(lid, current_env) {
-                                    if debug_extract_include {
-                                        let items = inner_sig
-                                            .iter()
-                                            .map(|item| match item {
-                                                SigItem::SigValue(id, _) => format!("val:{}", id.name()),
-                                                SigItem::SigType(id, _, _) => format!("type:{}", id.name()),
-                                                SigItem::SigModule(id, _, _) => format!("module:{}", id.name()),
-                                                SigItem::SigModtype(id, _) => format!("modtype:{}", id.name()),
-                                                SigItem::SigTypext(id, _, _) => format!("ext:{}", id.name()),
-                                                SigItem::SigClass => "class".to_string(),
-                                                SigItem::SigClassType => "class_type".to_string(),
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join(", ");
-                                        eprintln!(
-                                            "[extract-include] resolve_ident_sig items=[{}]",
-                                            items
-                                        );
-                                    }
                                     for sig_item in inner_sig {
                                         if let Some(env_mut) = local_env.as_mut() {
                                             add_sig_item_to_env(&sig_item, env_mut);
@@ -7080,25 +6759,6 @@ where
                                         None
                                     });
                                     if let Some(inner_sig) = found_sig {
-                                        if debug_extract_include {
-                                            let items = inner_sig
-                                                .iter()
-                                                .map(|item| match item {
-                                                    SigItem::SigValue(id, _) => format!("val:{}", id.name()),
-                                                    SigItem::SigType(id, _, _) => format!("type:{}", id.name()),
-                                                    SigItem::SigModule(id, _, _) => format!("module:{}", id.name()),
-                                                    SigItem::SigModtype(id, _) => format!("modtype:{}", id.name()),
-                                                    SigItem::SigTypext(id, _, _) => format!("ext:{}", id.name()),
-                                                    SigItem::SigClass => "class".to_string(),
-                                                    SigItem::SigClassType => "class_type".to_string(),
-                                                })
-                                                .collect::<Vec<_>>()
-                                                .join(", ");
-                                            eprintln!(
-                                                "[extract-include] found_sig items=[{}]",
-                                                items
-                                            );
-                                        }
                                         for sig_item in inner_sig {
                                             if let Some(env_mut) = local_env.as_mut() {
                                                 add_sig_item_to_env(&sig_item, env_mut);
@@ -7115,25 +6775,6 @@ where
                                             env,
                                             type_ctx,
                                         ) {
-                                            if debug_extract_include {
-                                                let items = inner_sig
-                                                    .iter()
-                                                    .map(|item| match item {
-                                                        SigItem::SigValue(id, _) => format!("val:{}", id.name()),
-                                                        SigItem::SigType(id, _, _) => format!("type:{}", id.name()),
-                                                        SigItem::SigModule(id, _, _) => format!("module:{}", id.name()),
-                                                        SigItem::SigModtype(id, _) => format!("modtype:{}", id.name()),
-                                                        SigItem::SigTypext(id, _, _) => format!("ext:{}", id.name()),
-                                                        SigItem::SigClass => "class".to_string(),
-                                                        SigItem::SigClassType => "class_type".to_string(),
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                                    .join(", ");
-                                                eprintln!(
-                                                    "[extract-include] resolve_modtype_to_sig items=[{}]",
-                                                    items
-                                                );
-                                            }
                                             for sig_item in inner_sig {
                                                 if let Some(env_mut) = local_env.as_mut() {
                                                     add_sig_item_to_env(&sig_item, env_mut);
@@ -7144,9 +6785,6 @@ where
                                     }
                                 }
                             }
-                        }
-                        if debug_extract_include {
-                            eprintln!("[extract-include] end included={}", included);
                         }
                     }
                     _ => {}
@@ -7199,27 +6837,6 @@ where
                     type_ctx,
                     resolve_ident_sig,
                 );
-            if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-                let functor_desc = match &functor.mod_desc {
-                    ModuleExprDesc::Tmod_ident(_, _) => "ident",
-                    ModuleExprDesc::Tmod_structure(_) => "structure",
-                    ModuleExprDesc::Tmod_functor(_, _, _, _) => "functor",
-                    ModuleExprDesc::Tmod_apply(_, _, _) => "apply",
-                    ModuleExprDesc::Tmod_constraint(_, _, _, _) => "constraint",
-                    ModuleExprDesc::Tmod_unpack(_, _) => "unpack",
-                };
-                let extracted_kind = match extracted_functor_mty.as_ref() {
-                    Some(DeclMty::MtySignature(_)) => "mty-signature",
-                    Some(DeclMty::MtyFunctor { .. }) => "mty-functor",
-                    Some(DeclMty::MtyIdent(_)) => "mty-ident",
-                    Some(DeclMty::MtyAlias(_, _)) => "mty-alias",
-                    None => "none",
-                };
-                eprintln!(
-                    "[extract-apply] functor_desc={} extracted_functor_mty={}",
-                    functor_desc, extracted_kind
-                );
-            }
             if let Some(functor_mty) = extracted_functor_mty {
                 let resolved_functor_mty = match &functor_mty {
                     DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => env
@@ -7227,15 +6844,6 @@ where
                         .unwrap_or(functor_mty),
                     _ => functor_mty,
                 };
-                if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-                    let resolved_kind = match &resolved_functor_mty {
-                        DeclMty::MtySignature(_) => "mty-signature",
-                        DeclMty::MtyFunctor { .. } => "mty-functor",
-                        DeclMty::MtyIdent(_) => "mty-ident",
-                        DeclMty::MtyAlias(_, _) => "mty-alias",
-                    };
-                    eprintln!("[extract-apply] resolved_functor_mty={}", resolved_kind);
-                }
                 if let DeclMty::MtyFunctor { result, .. } = resolved_functor_mty {
                     return Some(*result);
                 }
@@ -7489,34 +7097,12 @@ fn type_module_expr_with_alias<'a>(
             let functor = arena.get_mod_expr(*functor_idx);
             let arg = arena.get_mod_expr(*arg_idx);
             let typed_functor = type_module_expr_with_alias(tctx, env, arena, functor, false)?;
-            if std::env::var_os("RUST_DEBUG_FUNCTOR_APPLY_PROGRESS").is_some() {
-                eprintln!("[functor-apply] typed_functor");
-            }
             let typed_arg = type_module_expr_with_alias(tctx, env, arena, arg, false)?;
-            if std::env::var_os("RUST_DEBUG_FUNCTOR_APPLY_PROGRESS").is_some() {
-                eprintln!("[functor-apply] typed_arg");
-                let desc = match &typed_arg.mod_desc {
-                    ModuleExprDesc::Tmod_ident(_, _) => "ident",
-                    ModuleExprDesc::Tmod_structure(_) => "structure",
-                    ModuleExprDesc::Tmod_functor(_, _, _, _) => "functor",
-                    ModuleExprDesc::Tmod_apply(_, _, _) => "apply",
-                    ModuleExprDesc::Tmod_constraint(_, _, _, _) => "constraint",
-                    ModuleExprDesc::Tmod_unpack(_, _) => "unpack",
-                };
-                eprintln!("[functor-apply] typed_arg_desc={}", desc);
-            }
-
             let extracted_arg_mty = extract_module_type_from_mod_expr_with_ctx(
                 &typed_arg,
                 Some(env),
                 tctx.type_ctx,
             );
-            if std::env::var_os("RUST_DEBUG_FUNCTOR_APPLY_PROGRESS").is_some() {
-                eprintln!(
-                    "[functor-apply] extracted_arg_mty={}",
-                    if extracted_arg_mty.is_some() { "some" } else { "none" }
-                );
-            }
             let arg_mty = extracted_arg_mty
                 .or_else(|| decl_module_type_from_typed_module_expr_for_sig(&typed_arg))
                 .ok_or_else(|| {
@@ -7524,16 +7110,6 @@ fn type_module_expr_with_alias<'a>(
                         "could not extract functor argument module type".to_string(),
                     )
                 })?;
-            if std::env::var_os("RUST_DEBUG_FUNCTOR_APPLY_PROGRESS").is_some() {
-                let kind = match &arg_mty {
-                    crate::types::decl::ModuleType::MtySignature(_) => "mty-signature",
-                    crate::types::decl::ModuleType::MtyFunctor { .. } => "mty-functor",
-                    crate::types::decl::ModuleType::MtyIdent(_) => "mty-ident",
-                    crate::types::decl::ModuleType::MtyAlias(_, _) => "mty-alias",
-                };
-                eprintln!("[functor-apply] arg_mty={}", kind);
-            }
-
             let functor_mty = extract_module_type_from_mod_expr_with_ctx(
                 &typed_functor,
                 Some(env),
@@ -7545,16 +7121,6 @@ fn type_module_expr_with_alias<'a>(
                         "could not extract functor module type".to_string(),
                     )
                 })?;
-            if std::env::var_os("RUST_DEBUG_FUNCTOR_APPLY_PROGRESS").is_some() {
-                let kind = match &functor_mty {
-                    crate::types::decl::ModuleType::MtySignature(_) => "mty-signature",
-                    crate::types::decl::ModuleType::MtyFunctor { .. } => "mty-functor",
-                    crate::types::decl::ModuleType::MtyIdent(_) => "mty-ident",
-                    crate::types::decl::ModuleType::MtyAlias(_, _) => "mty-alias",
-                };
-                eprintln!("[functor-apply] functor_mty={}", kind);
-            }
-
             let functor_mty = scrape_alias_module_type(
                 &functor_mty,
                 env,
@@ -7562,16 +7128,6 @@ fn type_module_expr_with_alias<'a>(
                 tctx.type_ctx,
             )
             .unwrap_or(functor_mty);
-            if std::env::var_os("RUST_DEBUG_FUNCTOR_APPLY_PROGRESS").is_some() {
-                let kind = match &functor_mty {
-                    crate::types::decl::ModuleType::MtySignature(_) => "mty-signature",
-                    crate::types::decl::ModuleType::MtyFunctor { .. } => "mty-functor",
-                    crate::types::decl::ModuleType::MtyIdent(_) => "mty-ident",
-                    crate::types::decl::ModuleType::MtyAlias(_, _) => "mty-alias",
-                };
-                eprintln!("[functor-apply] scraped_functor_mty={}", kind);
-            }
-
             let coercion = match functor_mty {
                 crate::types::decl::ModuleType::MtyFunctor { param_type, .. } => {
                     let param_mty = param_type.map(|inner| *inner).unwrap_or_else(|| {
@@ -7591,10 +7147,6 @@ fn type_module_expr_with_alias<'a>(
                     ));
                 }
             };
-            if std::env::var_os("RUST_DEBUG_FUNCTOR_APPLY_PROGRESS").is_some() {
-                eprintln!("[functor-apply] coercion");
-            }
-
             let typed_apply = ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_apply(
                     Box::new(typed_functor),
@@ -7954,9 +7506,7 @@ pub fn transl_signature<'a>(
                 crate::types::ctype::generalize(ctx, val_ty);
                 // Keep signature value declaration abbreviation memo side effects
                 // aligned with OCaml transl_value_decl.
-                if std::env::var_os("RUST_SKIP_SIG_VALUE_EXPAND_HEAD").is_none() {
-                    crate::types::ctype::expand_head(ctx, &sig_env, val_ty);
-                }
+                crate::types::ctype::expand_head(ctx, &sig_env, val_ty);
                 // For primitives, we need the pval_prim as Vec<String> for the typed tree
                 let val_prim: Vec<String> = vd
                     .pval_prim
@@ -8371,53 +7921,6 @@ fn type_structure_item<'a>(
             ctx.end_def();
             crate::types::ctype::generalize(ctx, val_ty);
 
-            if std::env::var_os("RUST_DEBUG_PRIM_LEVELS").is_some() {
-                let repr_ty = ctx.repr(val_ty);
-                let desc = ctx.get_desc(repr_ty);
-                let desc_kind = match &*desc {
-                    crate::types::TypeDesc::Tconstr { path, .. } => {
-                        format!("Tconstr({})", path.name())
-                    }
-                    crate::types::TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
-                    crate::types::TypeDesc::Tvar(_) => "Tvar".to_string(),
-                    crate::types::TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-                    crate::types::TypeDesc::Tlink(t) => format!("Tlink({})", ctx.repr(*t).0),
-                    crate::types::TypeDesc::Tsubst(t) => format!("Tsubst({})", ctx.repr(*t).0),
-                    crate::types::TypeDesc::Ttuple(ts) => format!("Ttuple({})", ts.len()),
-                    crate::types::TypeDesc::Tobject { .. } => "Tobject".to_string(),
-                    crate::types::TypeDesc::Tfield { .. } => "Tfield".to_string(),
-                    crate::types::TypeDesc::Tnil => "Tnil".to_string(),
-                    crate::types::TypeDesc::Tvariant(_) => "Tvariant".to_string(),
-                    crate::types::TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
-                    crate::types::TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
-                };
-                let arg_levels = match &*desc {
-                    crate::types::TypeDesc::Tconstr { args, .. } => Some(
-                        args.iter()
-                            .map(|arg| {
-                                let r = ctx.repr(*arg);
-                                format!("{}@{}", r.0, ctx.get_level(r))
-                            })
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    ),
-                    _ => None,
-                };
-                eprintln!(
-                    "[prim-levels] stage=post_generalize name={} ty_id={} level={} desc={}",
-                    name_str,
-                    repr_ty.0,
-                    ctx.get_level(repr_ty),
-                    desc_kind
-                );
-                if let Some(arg_levels) = arg_levels {
-                    eprintln!(
-                        "[prim-levels] stage=post_generalize name={} args={}",
-                        name_str, arg_levels
-                    );
-                }
-            }
-
             // OCaml's transl_value_decl calls parse_arity -> get_arity ->
             // expand_head AFTER generalize. The expand_head side effect
             // populates simple_abbrevs with the nullary Tconstr expansion.
@@ -8425,53 +7928,6 @@ fn type_structure_item<'a>(
             // this entry via find_simple_abbrev and returns Tlink to the
             // original instead of a fresh copy — creating node sharing.
             crate::types::ctype::expand_head(ctx, env, val_ty);
-
-            if std::env::var_os("RUST_DEBUG_PRIM_LEVELS").is_some() {
-                let repr_ty = ctx.repr(val_ty);
-                let desc = ctx.get_desc(repr_ty);
-                let desc_kind = match &*desc {
-                    crate::types::TypeDesc::Tconstr { path, .. } => {
-                        format!("Tconstr({})", path.name())
-                    }
-                    crate::types::TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
-                    crate::types::TypeDesc::Tvar(_) => "Tvar".to_string(),
-                    crate::types::TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-                    crate::types::TypeDesc::Tlink(t) => format!("Tlink({})", ctx.repr(*t).0),
-                    crate::types::TypeDesc::Tsubst(t) => format!("Tsubst({})", ctx.repr(*t).0),
-                    crate::types::TypeDesc::Ttuple(ts) => format!("Ttuple({})", ts.len()),
-                    crate::types::TypeDesc::Tobject { .. } => "Tobject".to_string(),
-                    crate::types::TypeDesc::Tfield { .. } => "Tfield".to_string(),
-                    crate::types::TypeDesc::Tnil => "Tnil".to_string(),
-                    crate::types::TypeDesc::Tvariant(_) => "Tvariant".to_string(),
-                    crate::types::TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
-                    crate::types::TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
-                };
-                let arg_levels = match &*desc {
-                    crate::types::TypeDesc::Tconstr { args, .. } => Some(
-                        args.iter()
-                            .map(|arg| {
-                                let r = ctx.repr(*arg);
-                                format!("{}@{}", r.0, ctx.get_level(r))
-                            })
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    ),
-                    _ => None,
-                };
-                eprintln!(
-                    "[prim-levels] stage=post_expand_head name={} ty_id={} level={} desc={}",
-                    name_str,
-                    repr_ty.0,
-                    ctx.get_level(repr_ty),
-                    desc_kind
-                );
-                if let Some(arg_levels) = arg_levels {
-                    eprintln!(
-                        "[prim-levels] stage=post_expand_head name={} args={}",
-                        name_str, arg_levels
-                    );
-                }
-            }
 
             // PPX has already encoded the FFI attributes into pval_prim,
             // so just resolve StrIdx -> String for the typed tree
@@ -8632,14 +8088,6 @@ fn type_structure_item<'a>(
                     internal_type_params.push(type_ref);
                     if let crate::parser::ast::CoreTypeDesc::Ptyp_var(name) = &*core_type.ptyp_desc {
                         tctx.type_variables.insert(name.to_string(), type_ref);
-                        if std::env::var_os("RUST_DEBUG_COMPARE_DECL").is_some()
-                            && type_name_str == "compare"
-                        {
-                            eprintln!(
-                                "[compare-decl] insert type_var name={name} ty={}",
-                                tctx.type_ctx.repr(type_ref).0
-                            );
-                        }
                     }
                     let types_var = match parser_var {
                         ParserVariance::Covariant => TypesVariance::covariant(),
@@ -8663,28 +8111,6 @@ fn type_structure_item<'a>(
                     Some(manifest) => {
                         let manifest_ct = arena.get_core_type(*manifest);
                         let (typed_manifest, type_ref) = transl_type(tctx, &temp_env, manifest_ct)?;
-                        if std::env::var_os("RUST_DEBUG_COMPARE_DECL").is_some()
-                            && type_name_str == "compare"
-                        {
-                            let m = tctx.type_ctx.repr(type_ref);
-                            let d = tctx.type_ctx.get_desc(m);
-                            if let crate::types::type_expr::TypeDesc::Tpackage { args, .. } = &*d {
-                                let parts: Vec<String> = args
-                                    .iter()
-                                    .map(|a| {
-                                        let r = tctx.type_ctx.repr(*a);
-                                        format!("raw{}->repr{}", a.0, r.0)
-                                    })
-                                    .collect();
-                                eprintln!(
-                                    "[compare-decl] manifest type={} args={}",
-                                    m.0,
-                                    parts.join(",")
-                                );
-                            } else {
-                                eprintln!("[compare-decl] manifest type={} non-package", m.0);
-                            }
-                        }
                         (Some(typed_manifest), Some(type_ref))
                     }
                     None => (None, None),
@@ -9836,45 +9262,7 @@ fn type_structure_item<'a>(
             // new copies of non-generic Tconstr preserving their level, which contaminates
             // pattern type variables via update_level_expand during unification.
             for ty in &env_desc_types_for_generalize {
-                if std::env::var_os("RUST_DEBUG_GENERALIZE_CSTR_ARGS").is_some() {
-                    let repr = ctx.repr(*ty);
-                    let desc = ctx.get_desc(repr);
-                    if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*desc {
-                        if path.last() == "spawn_typ"
-                            || path.last() == "pl_typ"
-                            || path.last() == "player_typ"
-                            || path.last() == "enemy_typ"
-                        {
-                            eprintln!(
-                                "[generalize-cstr-args] before path={} ty={} level={} current={}",
-                                path.name(),
-                                repr.0,
-                                ctx.get_level(repr),
-                                ctx.current_level()
-                            );
-                        }
-                    }
-                }
                 crate::types::ctype::generalize(ctx, *ty);
-                if std::env::var_os("RUST_DEBUG_GENERALIZE_CSTR_ARGS").is_some() {
-                    let repr = ctx.repr(*ty);
-                    let desc = ctx.get_desc(repr);
-                    if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*desc {
-                        if path.last() == "spawn_typ"
-                            || path.last() == "pl_typ"
-                            || path.last() == "player_typ"
-                            || path.last() == "enemy_typ"
-                        {
-                            eprintln!(
-                                "[generalize-cstr-args] after path={} ty={} level={} current={}",
-                                path.name(),
-                                repr.0,
-                                ctx.get_level(repr),
-                                ctx.current_level()
-                            );
-                        }
-                    }
-                }
             }
 
             // OCaml typedecl.ml compute_properties_fixpoint:
@@ -10525,117 +9913,6 @@ fn type_structure_item<'a>(
                     &mut resolve_ident_sig,
                 )
             });
-            if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-                let mod_name = mod_name_str;
-                match &final_mod_type {
-                    Some(crate::types::decl::ModuleType::MtySignature(sig)) => {
-                        eprintln!(
-                            "[module-type] module={} kind=signature items={}",
-                            mod_name,
-                            sig.len()
-                        );
-                        for item in sig {
-                            if let crate::types::decl::SignatureItem::SigValue(id, _) = item {
-                                eprintln!("[module-type] module={} sigvalue {}", mod_name, id.name());
-                            }
-                        }
-                    }
-                    Some(crate::types::decl::ModuleType::MtyFunctor { .. }) => {
-                        eprintln!("[module-type] module={} kind=functor", mod_name);
-                    }
-                    Some(crate::types::decl::ModuleType::MtyIdent(path)) => {
-                        eprintln!("[module-type] module={} kind=ident path={}", mod_name, path.name());
-                    }
-                    Some(crate::types::decl::ModuleType::MtyAlias(_, path)) => {
-                        eprintln!("[module-type] module={} kind=alias path={}", mod_name, path.name());
-                    }
-                    None => eprintln!("[module-type] module={} kind=none", mod_name),
-                }
-            }
-            if std::env::var_os("RUST_DEBUG_CSV_MODULE_SIG").is_some() && mod_name_str == "Csv" {
-                if let Some(crate::types::decl::ModuleType::MtySignature(sig)) = &final_mod_type {
-                    eprintln!("[csv-module-sig] raw module=Csv items={}", sig.len());
-                    for item in sig {
-                        match item {
-                            crate::types::decl::SignatureItem::SigType(id, decl, _) => {
-                                let manifest = decl.type_manifest.map(|ty| {
-                                    let ty = tctx.type_ctx.repr(ty);
-                                    let desc = tctx.type_ctx.get_desc(ty);
-                                    match &*desc {
-                                        crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
-                                            path.name()
-                                        }
-                                        crate::types::type_expr::TypeDesc::Tvariant(row) => {
-                                            let mut fields = Vec::new();
-                                            for (label, field) in &row.row_fields {
-                                                let entry = match field {
-                                                    crate::types::type_expr::RowField::Rpresent(Some(arg)) => {
-                                                        let arg = tctx.type_ctx.repr(*arg);
-                                                        let arg_desc = tctx.type_ctx.get_desc(arg);
-                                                        match &*arg_desc {
-                                                            crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
-                                                                format!("{}:{}", label, path.name())
-                                                            }
-                                                            other => format!("{}:{:?}", label, other),
-                                                        }
-                                                    }
-                                                    crate::types::type_expr::RowField::Rpresent(None) => {
-                                                        format!("{}:None", label)
-                                                    }
-                                                    other => format!("{}:{:?}", label, other),
-                                                };
-                                                fields.push(entry);
-                                            }
-                                            format!("Tvariant[{}]", fields.join(","))
-                                        }
-                                        other => format!("{:?}", other),
-                                    }
-                                }).unwrap_or_else(|| "None".to_string());
-                                eprintln!(
-                                    "[csv-module-sig] raw type name={} type_path={} manifest={}",
-                                    id.name(),
-                                    decl.type_path
-                                        .as_ref()
-                                        .map(|p| p.name())
-                                        .unwrap_or_else(|| "<none>".to_string()),
-                                    manifest
-                                );
-                            }
-                            crate::types::decl::SignatureItem::SigValue(id, vd) => {
-                                if id.name() == "success" {
-                                    let mut cursor = tctx.type_ctx.repr(vd.val_type);
-                                    let mut parts = Vec::new();
-                                    for _ in 0..8 {
-                                        let desc = tctx.type_ctx.get_desc(cursor);
-                                        match &*desc {
-                                            crate::types::type_expr::TypeDesc::Tarrow { arg, ret, .. } => {
-                                                let arg = tctx.type_ctx.repr(arg.typ);
-                                                let arg_desc = tctx.type_ctx.get_desc(arg);
-                                                let arg_summary = match &*arg_desc {
-                                                    crate::types::type_expr::TypeDesc::Tconstr { path, .. } => path.name(),
-                                                    other => format!("{:?}", other),
-                                                };
-                                                parts.push(format!("arg:{}", arg_summary));
-                                                cursor = tctx.type_ctx.repr(*ret);
-                                            }
-                                            crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
-                                                parts.push(format!("ret:{}", path.name()));
-                                                break;
-                                            }
-                                            other => {
-                                                parts.push(format!("ret:{:?}", other));
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    eprintln!("[csv-module-sig] raw value success {}", parts.join(" -> "));
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
             let mut new_env = env.clone();
             let item_sig_mod_type = if let Some(decl_mod_type) = final_mod_type {
                 let mut decl_mod_type = decl_mod_type;
@@ -11038,24 +10315,6 @@ fn type_structure_item<'a>(
                     // parsed module-type translation can carry nongeneralized vars.
                     _ => None,
                 };
-                if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-                    let include_mty_kind = match include_mty.as_ref() {
-                        Some(crate::types::decl::ModuleType::MtySignature(_)) => "mty-signature",
-                        Some(crate::types::decl::ModuleType::MtyFunctor { .. }) => "mty-functor",
-                        Some(crate::types::decl::ModuleType::MtyIdent(_)) => "mty-ident",
-                        Some(crate::types::decl::ModuleType::MtyAlias(_, _)) => "mty-alias",
-                        None => "none",
-                    };
-                    let include_mty_path = match include_mty.as_ref() {
-                        Some(crate::types::decl::ModuleType::MtyIdent(path))
-                        | Some(crate::types::decl::ModuleType::MtyAlias(_, path)) => path.name(),
-                        _ => "<none>".to_string(),
-                    };
-                    eprintln!(
-                        "[include-labels] parsed_include_mty={} path={}",
-                        include_mty_kind, include_mty_path
-                    );
-                }
                 include_mty
                     .and_then(|mt| {
                         resolve_mod_type_to_sig(
@@ -11098,38 +10357,6 @@ fn type_structure_item<'a>(
                 Some(tctx.type_ctx),
                 &mut resolve_ident_sig,
             );
-            if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-                let typed_mod_kind = match &typed_mod.mod_desc {
-                    crate::types::typedtree::ModuleExprDesc::Tmod_ident(_, _) => "ident",
-                    crate::types::typedtree::ModuleExprDesc::Tmod_structure(_) => "structure",
-                    crate::types::typedtree::ModuleExprDesc::Tmod_functor(_, _, _, _) => "functor",
-                    crate::types::typedtree::ModuleExprDesc::Tmod_apply(_, _, _) => "apply",
-                    crate::types::typedtree::ModuleExprDesc::Tmod_constraint(_, _, _, _) => "constraint",
-                    crate::types::typedtree::ModuleExprDesc::Tmod_unpack(_, _) => "unpack",
-                };
-                let typed_mty_kind = match &typed_mod.mod_type.mty_desc {
-                    crate::types::typedtree::ModuleTypeDesc::Tmty_ident(_, _) => "mty-ident",
-                    crate::types::typedtree::ModuleTypeDesc::Tmty_alias(_, _) => "mty-alias",
-                    crate::types::typedtree::ModuleTypeDesc::Tmty_signature(_) => "mty-signature",
-                    crate::types::typedtree::ModuleTypeDesc::Tmty_functor(_, _, _, _) => "mty-functor",
-                    crate::types::typedtree::ModuleTypeDesc::Tmty_with(_, _) => "mty-with",
-                    crate::types::typedtree::ModuleTypeDesc::Tmty_typeof(_) => "mty-typeof",
-                    crate::types::typedtree::ModuleTypeDesc::Tmty_placeholder => "mty-placeholder",
-                };
-                let extracted_kind = match extracted_include_mty.as_ref() {
-                    Some(crate::types::decl::ModuleType::MtySignature(_)) => "mty-signature",
-                    Some(crate::types::decl::ModuleType::MtyFunctor { .. }) => "mty-functor",
-                    Some(crate::types::decl::ModuleType::MtyIdent(_)) => "mty-ident",
-                    Some(crate::types::decl::ModuleType::MtyAlias(_, _)) => "mty-alias",
-                    None => "none",
-                };
-                eprintln!(
-                    "[include-labels] typed_mod={} typed_mty={} extracted_mty={}",
-                    typed_mod_kind,
-                    typed_mty_kind,
-                    extracted_kind
-                );
-            }
             let final_include_sig = include_sig.or_else(|| {
                 extracted_include_mty.and_then(|mty| {
                     resolve_mod_type_to_sig(
@@ -11192,14 +10419,6 @@ fn type_structure_item<'a>(
                 sig
             });
             let mut new_env = env.clone();
-            if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-                match &localized_include_sig {
-                    Some(sig_items) => {
-                        eprintln!("[include-labels] include-sig-items={}", sig_items.len())
-                    }
-                    None => eprintln!("[include-labels] include-sig-items=NONE"),
-                }
-            }
             if let Some(sig_items) = &localized_include_sig {
                 // OCaml's include adds all signature items directly to the environment
                 // as if they were defined locally (Pident paths, not Pdot paths).
@@ -11207,21 +10426,9 @@ fn type_structure_item<'a>(
                 for item in sig_items {
                     match item {
                         crate::types::decl::SignatureItem::SigValue(id, desc) => {
-                            if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-                                eprintln!("[include-labels] sigvalue {}", id.name());
-                            }
                             new_env.add_value(id.clone(), desc.clone());
                         }
                         crate::types::decl::SignatureItem::SigType(id, decl, _) => {
-                            if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-                                let kind = match &decl.type_kind {
-                                    crate::types::TypeKind::TypeRecord(_, _) => "record",
-                                    crate::types::TypeKind::TypeVariant(_) => "variant",
-                                    crate::types::TypeKind::TypeAbstract => "abstract",
-                                    crate::types::TypeKind::TypeOpen => "open",
-                                };
-                                eprintln!("[include-labels] sigtype {} kind={}", id.name(), kind);
-                            }
                             new_env.add_type(id.clone(), decl.clone());
                             if let crate::types::TypeKind::TypeVariant(constructors) =
                                 &decl.type_kind
@@ -11331,13 +10538,6 @@ fn type_structure_item<'a>(
                             if let crate::types::TypeKind::TypeRecord(labels, repres) =
                                 &decl.type_kind
                             {
-                                if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-                                    eprintln!(
-                                        "[include-labels] type={} labels={}",
-                                        id.name(),
-                                        labels.len()
-                                    );
-                                }
                                 // Include should expose record labels from included types
                                 // in the current scope, matching OCaml's Env.add_signature.
                                 let ty_res = tctx.type_ctx.new_constr(
@@ -11371,27 +10571,14 @@ fn type_structure_item<'a>(
                                         lbl_loc: ld.ld_loc.clone(),
                                         lbl_attributes: ld.ld_attributes.clone(),
                                     };
-                                    if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-                                        eprintln!(
-                                            "[include-labels] add {} for type {}",
-                                            ld.ld_id.name(),
-                                            id.name()
-                                        );
-                                    }
                                     new_env.add_label(ld.ld_id.clone(), lbl_desc);
                                 }
                             }
                         }
                         crate::types::decl::SignatureItem::SigModule(id, md, _) => {
-                            if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-                                eprintln!("[include-labels] sigmodule {}", id.name());
-                            }
                             new_env.add_module(id.clone(), md.clone());
                         }
                         crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
-                            if std::env::var_os("RUST_DEBUG_INCLUDE_LABELS").is_some() {
-                                eprintln!("[include-labels] sigmodtype {}", id.name());
-                            }
                             new_env.add_modtype(id.clone(), mtd.clone());
                         }
                         _ => {}
