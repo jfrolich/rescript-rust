@@ -2205,8 +2205,7 @@ impl<'a> RawLambdaConverter<'a> {
 
         let mut visiting = HashSet::new();
         match self.resolve_module_type_for_path(env, &path, &mut visiting) {
-            Some(crate::types::decl::ModuleType::MtyAlias(_, alias_path))
-            | Some(crate::types::decl::ModuleType::MtyIdent(alias_path)) => {
+            Some(crate::types::decl::ModuleType::MtyAlias(_, alias_path)) => {
                 self.normalize_module_path_in_env(env, &alias_path)
             }
             _ => path,
