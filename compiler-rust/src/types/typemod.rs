@@ -10083,6 +10083,22 @@ fn type_structure_item<'a>(
                         let typed_mty =
                             transl_modtype(tctx, &rec_env, arena, arena.get_mod_type(*mty))?;
                         let inner_loc = typed_inner.mod_loc;
+                        // Compute coercion between implementation and constraint
+                        let coercion = {
+                            let impl_mty_opt = decl_module_type_from_typed(&typed_inner.mod_type);
+                            let sig_mty_opt = decl_module_type_from_typed(&typed_mty);
+                            match (impl_mty_opt, sig_mty_opt) {
+                                (Some(impl_mty), Some(sig_mty)) => {
+                                    crate::types::includemod::modtypes(
+                                        tctx.type_ctx,
+                                        &rec_env,
+                                        &impl_mty,
+                                        &sig_mty,
+                                    ).unwrap_or(ModuleCoercion::Tcoerce_none)
+                                }
+                                _ => ModuleCoercion::Tcoerce_none,
+                            }
+                        };
                         ModuleExpr {
                             mod_desc: ModuleExprDesc::Tmod_constraint(
                                 Box::new(typed_inner),
@@ -10090,7 +10106,7 @@ fn type_structure_item<'a>(
                                 crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(
                                     Box::new(typed_mty),
                                 ),
-                                ModuleCoercion::Tcoerce_none,
+                                coercion,
                             ),
                             mod_loc: inner_loc,
                             mod_type: ModuleType::placeholder(),
