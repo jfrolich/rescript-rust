@@ -7628,6 +7628,7 @@ fn type_module_expr_with_alias<'a>(
             let is_simple_sig = matches!(
                 &*parsed_mty.pmty_desc,
                 crate::parser::ast::ModuleTypeDesc::Pmty_signature(_)
+                    | crate::parser::ast::ModuleTypeDesc::Pmty_ident(_)
             );
             let coercion = if is_simple_sig {
                 match wrap_constraint(
