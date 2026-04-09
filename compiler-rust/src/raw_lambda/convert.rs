@@ -2689,12 +2689,20 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleCoercion::Tcoerce_primitive(pc) => {
                 self.transl_primitive_raw(&pc.pc_desc, pc.pc_type, pc.pc_loc)
             }
-            ModuleCoercion::Tcoerce_alias(_, path, inner) => self.name_lambda_raw(strict, arg, |this, _| {
+            ModuleCoercion::Tcoerce_alias(env_ref, path, inner) => self.name_lambda_raw(strict, arg, |this, _| {
+                // Normalize the alias path to resolve module aliases (e.g., Belt.List -> Belt_List).
+                // In OCaml, the path in Tcoerce_alias is already normalized during coercion computation.
+                // In Rust, we must normalize here because the coercion may contain unresolved paths.
+                let normalized = if let Some(env) = this.type_ctx.get_typed_env(*env_ref) {
+                    this.normalize_module_path_in_env(env.as_ref(), path)
+                } else {
+                    this.normalize_module_path_in_env(this.env, path)
+                };
                 this.apply_coercion_raw(
                     loc.clone(),
                     LetKind::Alias,
                     inner,
-                    this.translate_normal_path_raw(path, loc.clone()),
+                    this.translate_normal_path_raw(&normalized, loc.clone()),
                 )
             }),
         }
