@@ -4909,15 +4909,29 @@ impl<'a> RawLambdaConverter<'a> {
             loc,
         );
 
-        let default = match default_case {
-            Some(DefaultCase::Any(body)) => body,
-            Some(DefaultCase::Bind(id, body)) => RawLambda::let_(
-                LetKind::Alias,
-                id,
-                RawLambda::var(exn_id.clone()),
-                body,
-            ),
-            None => RawLambda::LstaticRaise(self.next_raise_count(), Vec::new()),
+        // Build the default action and the catch handler for the outermost wrap.
+        // When there's an explicit catch-all (Some), we use a static raise as
+        // the default in the chain and catch it with the real body. When there's
+        // no catch-all (None), we use static raise caught by reraise.
+        let (default, catch_handler) = match default_case {
+            Some(DefaultCase::Any(body)) => {
+                let exit_id = self.next_raise_count();
+                (RawLambda::LstaticRaise(exit_id, Vec::new()), Some((exit_id, body)))
+            }
+            Some(DefaultCase::Bind(id, body)) => {
+                let exit_id = self.next_raise_count();
+                let real_body = RawLambda::let_(
+                    LetKind::Alias,
+                    id,
+                    RawLambda::var(exn_id.clone()),
+                    body,
+                );
+                (RawLambda::LstaticRaise(exit_id, Vec::new()), Some((exit_id, real_body)))
+            }
+            None => {
+                let exit_id = self.next_raise_count();
+                (RawLambda::LstaticRaise(exit_id, Vec::new()), None)
+            }
         };
 
         let exit_id = match &default {
@@ -5020,13 +5034,20 @@ impl<'a> RawLambdaConverter<'a> {
             }
         };
 
-        Some(match exit_id {
-            Some(exit_id) => RawLambda::LstaticCatch(
+        Some(match (exit_id, catch_handler) {
+            // Explicit catch-all: catch the static raise with the real body
+            (Some(exit_id), Some((_, body))) => RawLambda::LstaticCatch(
+                Box::new(tests),
+                (exit_id, Vec::new()),
+                Box::new(body),
+            ),
+            // No catch-all: catch with reraise
+            (Some(exit_id), None) => RawLambda::LstaticCatch(
                 Box::new(tests),
                 (exit_id, Vec::new()),
                 Box::new(reraise),
             ),
-            None => tests,
+            _ => tests,
         })
     }
 
