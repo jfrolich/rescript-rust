@@ -8831,17 +8831,22 @@ fn type_structure_item<'a>(
                                     let inline_path =
                                         Path::pdot(type_path.clone(), cstr_name_str.to_string());
                                     // Create synthetic inline type declaration
+                                    let inline_repres = if has_unboxed {
+                                        crate::types::RecordRepresentation::RecordUnboxed(false)
+                                    } else {
+                                        crate::types::RecordRepresentation::RecordInlined {
+                                            tag: block_tag - 1, // use the tag just assigned
+                                            name: cstr_name_str.to_string(),
+                                            num_nonconsts,
+                                            attrs: vec![], // simplified - parser attrs vs types attrs
+                                        }
+                                    };
                                     let inline_decl = crate::types::TypeDeclaration {
                                         type_params: inline_params.clone(),
                                         type_arity: inline_params.len() as i32,
                                         type_kind: crate::types::TypeKind::TypeRecord(
                                             lbls.clone(),
-                                            crate::types::RecordRepresentation::RecordInlined {
-                                                tag: block_tag - 1, // use the tag just assigned
-                                                name: cstr_name_str.to_string(),
-                                                num_nonconsts,
-                                                attrs: vec![], // simplified - parser attrs vs types attrs
-                                            },
+                                            inline_repres,
                                         ),
                                         type_private: crate::types::PrivateFlag::Public,
                                         type_manifest: None,
@@ -9105,10 +9110,15 @@ fn type_structure_item<'a>(
                                 vec![],
                             )
                         } else {
+                            let repres = if decl_has_unboxed_attr && internal_labels.len() == 1 {
+                                crate::types::RecordRepresentation::RecordUnboxed(false)
+                            } else {
+                                crate::types::RecordRepresentation::RecordRegular
+                            };
                             (
                                 crate::types::TypeKind::TypeRecord(
                                     internal_labels,
-                                    crate::types::RecordRepresentation::RecordRegular,
+                                    repres,
                                 ),
                                 TypedTypeKind::Ttype_record(typed_tree_labels),
                                 vec![],
