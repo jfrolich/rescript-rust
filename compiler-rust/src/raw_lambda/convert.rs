@@ -3729,28 +3729,8 @@ impl<'a> RawLambdaConverter<'a> {
                     let _default_raise = self.next_raise_count();
                 }
                 let loc = self.loc(expr.exp_loc);
-                self.compile_irrefutable_match_raw(scrut, cases)
-                    .or_else(|| {
-                        self.compile_simple_string_match(loc.clone(), scrut, cases, partial)
-                    })
-                    .or_else(|| {
-                        self.compile_simple_variant_match_raw(loc.clone(), scrut, cases, partial)
-                    })
-                    .or_else(|| {
-                        self.compile_simple_tuple_match_raw(loc.clone(), scrut, cases, partial)
-                    })
-                    .or_else(|| {
-                        self.compile_simple_constructor_match_raw(
-                            loc.clone(),
-                            scrut,
-                            cases,
-                            partial,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        // Simple matchers couldn't handle it — use full matching compiler.
-                        self.compile_full_matching(loc, scrut, cases, partial, expr)
-                    })
+                // Use full matching compiler (ported from OCaml's matching.ml)
+                self.compile_full_matching(loc, scrut, cases, partial, expr)
             }
             ExpressionDesc::Texp_try(body, cases) => self
                 .compile_simple_trywith_raw(self.loc(expr.exp_loc), body, cases)
