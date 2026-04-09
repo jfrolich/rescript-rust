@@ -5021,7 +5021,17 @@ impl<'a> RawLambdaConverter<'a> {
                             Primitive::PvalFromOption
                         }
                     })
-                    .unwrap_or(Primitive::PvalFromOption);
+                    .unwrap_or_else(|| {
+                        if type_cannot_contain_undefined(
+                            self.type_ctx,
+                            self.env,
+                            arg_pat.pat_type,
+                        ) {
+                            Primitive::PvalFromOptionNotNest
+                        } else {
+                            Primitive::PvalFromOption
+                        }
+                    });
                 let payload =
                     RawLambda::prim(from_option, vec![RawLambda::var(scrut_id.clone())], pat_loc);
                 // For Tpat_any, OCaml's matching.ml still creates a binding
@@ -6496,20 +6506,19 @@ impl<'a> RawLambdaConverter<'a> {
         let from_option = sub_cases
             .first()
             .and_then(|(pats, _)| pats.first())
-            .and_then(|p| {
-                self.type_ctx
-                    .get_typed_env(p.pat_env)
-                    .map(|env| {
-                        if type_cannot_contain_undefined(
-                            self.type_ctx,
-                            env.as_ref(),
-                            p.pat_type,
-                        ) {
-                            Primitive::PvalFromOptionNotNest
-                        } else {
-                            Primitive::PvalFromOption
-                        }
-                    })
+            .map(|p| {
+                let env_ref = self.type_ctx
+                    .get_typed_env(p.pat_env);
+                let env = env_ref.as_ref().map(|e| e.as_ref()).unwrap_or(self.env);
+                if type_cannot_contain_undefined(
+                    self.type_ctx,
+                    env,
+                    p.pat_type,
+                ) {
+                    Primitive::PvalFromOptionNotNest
+                } else {
+                    Primitive::PvalFromOption
+                }
             })
             .unwrap_or(Primitive::PvalFromOption);
 
