@@ -810,6 +810,178 @@ impl<'a> RawLambdaConverter<'a> {
         InlineAttribute::Default
     }
 
+    /// OCaml's Lambda.make_key: normalize a RawLambda for structural comparison.
+    /// - Alias lets are substituted (variable replaced by its definition)
+    /// - Other let-bound variables get sequential normalized names
+    /// - Locations are ignored
+    /// This allows detecting structurally identical actions that differ only
+    /// in the stamps of locally-bound variables.
+    fn make_action_key(lam: &RawLambda) -> Option<String> {
+        use crate::raw_lambda::print::RawLambdaPrinter;
+
+        // Normalize by substituting alias lets and renaming other bound vars
+        let mut counter = 0i32;
+        let normalized = Self::normalize_for_key(lam, &HashMap::new(), &mut counter)?;
+        Some(format!("{}", RawLambdaPrinter::new(&normalized)))
+    }
+
+    /// Recursively normalize a RawLambda, substituting alias lets and
+    /// renaming other bound variables with sequential stamps.
+    fn normalize_for_key(
+        lam: &RawLambda,
+        env: &HashMap<Ident, RawLambda>,
+        counter: &mut i32,
+    ) -> Option<RawLambda> {
+        match lam {
+            RawLambda::Lvar(id) => {
+                if let Some(replacement) = env.get(id) {
+                    Some(replacement.clone())
+                } else {
+                    Some(lam.clone())
+                }
+            }
+            RawLambda::Lconst(_) => Some(lam.clone()),
+            RawLambda::LglobalModule(_, _) => Some(lam.clone()),
+            RawLambda::Llet(LetKind::Alias, id, ex, body) => {
+                // Substitute alias lets: replace id with normalized ex in body
+                let ex_norm = Self::normalize_for_key(ex, env, counter)?;
+                let mut new_env = env.clone();
+                new_env.insert(id.clone(), ex_norm);
+                Self::normalize_for_key(body, &new_env, counter)
+            }
+            RawLambda::Llet(kind, id, ex, body) => {
+                let ex_norm = Self::normalize_for_key(ex, env, counter)?;
+                // Create a normalized variable name
+                let norm_id = Ident::new(id.name(), *counter, IdentFlags::NONE);
+                *counter += 1;
+                let mut new_env = env.clone();
+                new_env.insert(id.clone(), RawLambda::Lvar(norm_id.clone()));
+                let body_norm = Self::normalize_for_key(body, &new_env, counter)?;
+                Some(RawLambda::Llet(*kind, norm_id, Box::new(ex_norm), Box::new(body_norm)))
+            }
+            RawLambda::Lprim(info) => {
+                let mut args = Vec::with_capacity(info.args.len());
+                for arg in &info.args {
+                    args.push(Self::normalize_for_key(arg, env, counter)?);
+                }
+                Some(RawLambda::Lprim(crate::raw_lambda::RawPrimInfo {
+                    primitive: info.primitive.clone(),
+                    args,
+                    loc: Location::none(),
+                }))
+            }
+            RawLambda::LifThenElse(cond, then_, else_) => {
+                Some(RawLambda::LifThenElse(
+                    Box::new(Self::normalize_for_key(cond, env, counter)?),
+                    Box::new(Self::normalize_for_key(then_, env, counter)?),
+                    Box::new(Self::normalize_for_key(else_, env, counter)?),
+                ))
+            }
+            RawLambda::Lsequence(a, b) => {
+                Some(RawLambda::Lsequence(
+                    Box::new(Self::normalize_for_key(a, env, counter)?),
+                    Box::new(Self::normalize_for_key(b, env, counter)?),
+                ))
+            }
+            RawLambda::LstaticRaise(i, args) => {
+                let mut norm_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    norm_args.push(Self::normalize_for_key(arg, env, counter)?);
+                }
+                Some(RawLambda::LstaticRaise(*i, norm_args))
+            }
+            RawLambda::LstaticCatch(body, (i, params), handler) => {
+                let body_norm = Self::normalize_for_key(body, env, counter)?;
+                let handler_norm = Self::normalize_for_key(handler, env, counter)?;
+                Some(RawLambda::LstaticCatch(
+                    Box::new(body_norm),
+                    (*i, params.clone()),
+                    Box::new(handler_norm),
+                ))
+            }
+            RawLambda::Lapply(ap) => {
+                let func = Self::normalize_for_key(&ap.ap_func, env, counter)?;
+                let mut args = Vec::with_capacity(ap.ap_args.len());
+                for arg in &ap.ap_args {
+                    args.push(Self::normalize_for_key(arg, env, counter)?);
+                }
+                Some(RawLambda::Lapply(crate::raw_lambda::RawApply {
+                    ap_func: Box::new(func),
+                    ap_args: args,
+                    ..ap.clone()
+                }))
+            }
+            // For complex constructs (functions, letrec, loops, etc.),
+            // bail out to avoid complexity — OCaml does the same (Not_simple)
+            RawLambda::Lfunction(_) | RawLambda::Lletrec(_, _)
+            | RawLambda::Lwhile(_, _) | RawLambda::Lfor(_, _, _, _, _) => None,
+            RawLambda::Lswitch(scrut, sw) => {
+                let scrut_norm = Self::normalize_for_key(scrut, env, counter)?;
+                let mut consts = Vec::new();
+                for (tag, act) in &sw.sw_consts {
+                    consts.push((*tag, Self::normalize_for_key(act, env, counter)?));
+                }
+                let mut blocks = Vec::new();
+                for (tag, act) in &sw.sw_blocks {
+                    blocks.push((*tag, Self::normalize_for_key(act, env, counter)?));
+                }
+                let fail = match &sw.sw_failaction {
+                    Some(f) => Some(Box::new(Self::normalize_for_key(f, env, counter)?)),
+                    None => None,
+                };
+                Some(RawLambda::Lswitch(
+                    Box::new(scrut_norm),
+                    crate::raw_lambda::RawLambdaSwitch {
+                        sw_consts_full: sw.sw_consts_full,
+                        sw_consts: consts,
+                        sw_blocks_full: sw.sw_blocks_full,
+                        sw_blocks: blocks,
+                        sw_failaction: fail,
+                        sw_names: sw.sw_names.clone(),
+                    },
+                ))
+            }
+            RawLambda::LtryWith(body, id, handler) => {
+                let body_norm = Self::normalize_for_key(body, env, counter)?;
+                let handler_norm = Self::normalize_for_key(handler, env, counter)?;
+                Some(RawLambda::LtryWith(
+                    Box::new(body_norm),
+                    id.clone(),
+                    Box::new(handler_norm),
+                ))
+            }
+            RawLambda::LstringSwitch(scrut, cases, default) => {
+                let scrut_norm = Self::normalize_for_key(scrut, env, counter)?;
+                let mut norm_cases = Vec::new();
+                for (s, act) in cases {
+                    norm_cases.push((s.clone(), Self::normalize_for_key(act, env, counter)?));
+                }
+                let norm_default = match default {
+                    Some(d) => Some(Box::new(Self::normalize_for_key(d, env, counter)?)),
+                    None => None,
+                };
+                Some(RawLambda::LstringSwitch(
+                    Box::new(scrut_norm),
+                    norm_cases,
+                    norm_default,
+                ))
+            }
+            RawLambda::Lassign(id, ex) => {
+                Some(RawLambda::Lassign(
+                    id.clone(),
+                    Box::new(Self::normalize_for_key(ex, env, counter)?),
+                ))
+            }
+            RawLambda::Lsend(method, obj, loc) => {
+                Some(RawLambda::Lsend(
+                    method.clone(),
+                    Box::new(Self::normalize_for_key(obj, env, counter)?),
+                    Location::none(),
+                ))
+            }
+        }
+    }
+
     /// OCaml's share_actions_sw: deduplicate switch actions by wrapping shared
     /// actions in catch/exit. Only actions that appear >= 2 times are wrapped.
     /// Singleton actions are kept inline. Returns the list of catch handlers.
@@ -824,13 +996,15 @@ impl<'a> RawLambdaConverter<'a> {
         let mut handlers: Vec<(i32, RawLambda)> = Vec::new();
 
         // First pass: count occurrences of each action key
+        // Use make_action_key for alpha-normalized comparison (like OCaml's Lambda.make_key)
         let mut key_counts: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         for (_, act) in sw.sw_consts.iter().chain(sw.sw_blocks.iter()) {
             if matches!(act, RawLambda::LstaticRaise(_, args) if args.is_empty()) {
                 continue;
             }
-            let key = format!("{}", RawLambdaPrinter::new(act));
+            let key = Self::make_action_key(act)
+                .unwrap_or_else(|| format!("{}", RawLambdaPrinter::new(act)));
             *key_counts.entry(key).or_insert(0) += 1;
         }
 
@@ -842,7 +1016,8 @@ impl<'a> RawLambdaConverter<'a> {
             if matches!(action, RawLambda::LstaticRaise(_, args) if args.is_empty()) {
                 continue;
             }
-            let key = format!("{}", RawLambdaPrinter::new(action));
+            let key = Self::make_action_key(action)
+                .unwrap_or_else(|| format!("{}", RawLambdaPrinter::new(action)));
             let count = key_counts.get(&key).copied().unwrap_or(0);
             if count >= 2 {
                 let exit_id = if let Some(&eid) = exit_map.get(&key) {
@@ -861,7 +1036,8 @@ impl<'a> RawLambdaConverter<'a> {
             if matches!(action, RawLambda::LstaticRaise(_, args) if args.is_empty()) {
                 continue;
             }
-            let key = format!("{}", RawLambdaPrinter::new(action));
+            let key = Self::make_action_key(action)
+                .unwrap_or_else(|| format!("{}", RawLambdaPrinter::new(action)));
             let count = key_counts.get(&key).copied().unwrap_or(0);
             if count >= 2 {
                 let exit_id = if let Some(&eid) = exit_map.get(&key) {
