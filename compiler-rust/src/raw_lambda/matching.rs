@@ -6348,11 +6348,11 @@ fn combine_constructor(
                         if cstr.cstr_name == "::"
                             || cstr.cstr_name == "[]"
                             || constructor_has_optional_shape(cstr)
-                            || (cstr.cstr_name == "Some" && cstr.cstr_consts == 1 && cstr.cstr_nonconsts == 1) =>
+                            || ((cstr.cstr_name == "Some" || cstr.cstr_name == "None") && cstr.cstr_consts == 1 && cstr.cstr_nonconsts == 1) =>
                     {
                         // Typically, match on lists or options
                         let is_option = constructor_has_optional_shape(cstr)
-                            || (cstr.cstr_name == "Some" && cstr.cstr_consts == 1 && cstr.cstr_nonconsts == 1);
+                            || ((cstr.cstr_name == "Some" || cstr.cstr_name == "None") && cstr.cstr_consts == 1 && cstr.cstr_nonconsts == 1);
                         let test_arg = if is_option {
                             RawLambda::Lprim(RawPrimInfo {
                                 primitive: Primitive::PisNotNone,
