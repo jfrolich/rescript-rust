@@ -4879,16 +4879,45 @@ impl<'a> RawLambdaConverter<'a> {
             _ => None,
         };
 
-        let tests = extension_cases
-            .into_iter()
-            .rev()
-            .fold(default, |rem, (path, act)| {
+        // Build chain of catch/exit wrappers, each case in its own handler.
+        // OCaml's split_naive + comp_match_handlers wraps each extension case
+        // in catch(test, with (N) next_test), matching:
+        //   (catch (let (tag =a exn) (if (ext_slot_eq tag EXT) act (exit N)))
+        //    with (N) (let (tag =a exn) (if (ext_slot_eq tag EXT2) act2 (exit M)))
+        //    ...)
+        // Build chain of catch/exit wrappers matching OCaml's nesting:
+        // The FIRST case is innermost, subsequent cases wrap around it.
+        //   catch(catch(tag1_test(exit 1), with(1) tag2_test(exit 2)), with(2) tag3_test ...)
+        let tests = {
+            let mut ext_cases = extension_cases;
+            // Last case is the outermost — it uses the default as its else branch
+            let (last_path, last_act) = ext_cases.pop().unwrap();
+            let tag_id = self.id_gen.create("tag");
+            let cond = RawLambda::prim(
+                Primitive::PextensionSlotEq,
+                vec![
+                    RawLambda::var(tag_id.clone()),
+                    self.translate_extension_path_raw(&last_path, loc),
+                ],
+                loc,
+            );
+            let outermost = RawLambda::let_(
+                LetKind::Alias,
+                tag_id,
+                RawLambda::var(exn_id.clone()),
+                RawLambda::LifThenElse(Box::new(cond), Box::new(last_act), Box::new(default)),
+            );
+            // Build from innermost (first case) outward, wrapping each in catch/exit
+            // Allocate all exit IDs first (matching OCaml's next_raise_count ordering)
+            let exit_ids: Vec<i32> = ext_cases.iter().map(|_| self.next_raise_count()).collect();
+            // Build innermost first
+            let first = ext_cases.first().map(|(path, act)| {
                 let tag_id = self.id_gen.create("tag");
                 let cond = RawLambda::prim(
                     Primitive::PextensionSlotEq,
                     vec![
                         RawLambda::var(tag_id.clone()),
-                        self.translate_extension_path_raw(&path, loc),
+                        self.translate_extension_path_raw(path, loc),
                     ],
                     loc,
                 );
@@ -4896,9 +4925,54 @@ impl<'a> RawLambdaConverter<'a> {
                     LetKind::Alias,
                     tag_id,
                     RawLambda::var(exn_id.clone()),
-                    RawLambda::LifThenElse(Box::new(cond), Box::new(act), Box::new(rem)),
+                    RawLambda::LifThenElse(
+                        Box::new(cond),
+                        Box::new(act.clone()),
+                        Box::new(RawLambda::LstaticRaise(exit_ids[0], Vec::new())),
+                    ),
                 )
             });
+            if let Some(inner) = first {
+                // Wrap remaining cases around inner
+                let mut result = inner;
+                for i in 1..ext_cases.len() {
+                    let (path, act) = &ext_cases[i];
+                    let tag_id = self.id_gen.create("tag");
+                    let cond = RawLambda::prim(
+                        Primitive::PextensionSlotEq,
+                        vec![
+                            RawLambda::var(tag_id.clone()),
+                            self.translate_extension_path_raw(path, loc),
+                        ],
+                        loc,
+                    );
+                    let handler = RawLambda::let_(
+                        LetKind::Alias,
+                        tag_id,
+                        RawLambda::var(exn_id.clone()),
+                        RawLambda::LifThenElse(
+                            Box::new(cond),
+                            Box::new(act.clone()),
+                            Box::new(RawLambda::LstaticRaise(exit_ids[i], Vec::new())),
+                        ),
+                    );
+                    result = RawLambda::LstaticCatch(
+                        Box::new(result),
+                        (exit_ids[i - 1], Vec::new()),
+                        Box::new(handler),
+                    );
+                }
+                // Final wrap with outermost (which uses default)
+                result = RawLambda::LstaticCatch(
+                    Box::new(result),
+                    (exit_ids[ext_cases.len() - 1], Vec::new()),
+                    Box::new(outermost),
+                );
+                result
+            } else {
+                outermost
+            }
+        };
 
         Some(match exit_id {
             Some(exit_id) => RawLambda::LstaticCatch(
