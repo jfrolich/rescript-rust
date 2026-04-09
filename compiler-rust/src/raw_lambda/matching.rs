@@ -6472,7 +6472,11 @@ fn convert_polyvar_list(xs: &[(i32, (String, RawLambda))]) -> Vec<(Vec<(i32, Str
     }
 
     entries.sort_by_key(|e| e.stamp);
-    entries.into_iter().map(|e| (e.hash_names, e.act)).collect()
+    entries.into_iter().map(|mut e| {
+        // Sort hashes descending within each group to match OCaml's Switcher.test_sequence ordering
+        e.hash_names.sort_by(|a, b| b.0.cmp(&a.0));
+        (e.hash_names, e.act)
+    }).collect()
 }
 
 /// Create a disjunction of equality tests for polyvar hash values.
