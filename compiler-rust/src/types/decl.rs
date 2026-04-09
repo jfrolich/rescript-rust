@@ -50,6 +50,8 @@ pub struct PrimitiveDescription {
     pub prim_native_name: String,
     /// Native float flag
     pub prim_native_float: bool,
+    /// Is it from a type constructor instead of a concrete function type?
+    pub prim_from_constructor: bool,
 }
 
 // ============================================================================

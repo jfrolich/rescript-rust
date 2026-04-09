@@ -1652,7 +1652,7 @@ impl<'a> RawLambdaConverter<'a> {
         let prim_arity = prim.prim_arity;
 
         // OCaml: if p.prim_from_constructor || prim_arity = 0 then Lprim (prim, [], loc)
-        if prim_arity == 0 {
+        if prim.prim_from_constructor || prim_arity == 0 {
             return RawLambda::prim(resolved, vec![], loc);
         }
 
@@ -7765,7 +7765,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
         };
 
-        if prim.prim_arity == 0 {
+        if prim.prim_from_constructor || prim.prim_arity == 0 {
             RawLambda::prim(primitive, vec![], loc)
         } else {
             let params = if prim.prim_arity == 1 {

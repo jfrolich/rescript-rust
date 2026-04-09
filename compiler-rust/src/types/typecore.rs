@@ -16058,6 +16058,7 @@ fn build_signature_from_structure(
                             prim_arity: primitive_arity_from_typed_core_type(&tvd.val_desc),
                             prim_native_name: tvd.val_prim.get(1).cloned().unwrap_or_default(),
                             prim_native_float: false,
+                            prim_from_constructor: false,
                         },
                     ),
                     val_loc: crate::location::Location::none(),

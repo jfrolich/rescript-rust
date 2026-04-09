@@ -1126,6 +1126,11 @@ fn read_primitive_description(value: &OcamlValue) -> PrimitiveDescription {
             String::new()
         },
         prim_native_float: false,
+        prim_from_constructor: if fields.len() > 4 {
+            fields[4].as_bool()
+        } else {
+            false
+        },
     }
 }
 

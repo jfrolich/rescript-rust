@@ -198,6 +198,13 @@ fn get_primitive_arity_from_type(
     }
 }
 
+/// Check if a type is a Tconstr (type alias) at the top level.
+/// Used to determine prim_from_constructor for external declarations.
+fn is_type_constructor(ctx: &crate::types::context::TypeContext<'_>, ty: TypeExprRef) -> bool {
+    let repr = ctx.repr(ty);
+    matches!(&*ctx.get_desc(repr), crate::types::TypeDesc::Tconstr { .. })
+}
+
 fn primitive_description_from_value_decl(
     arena: &ParseArena,
     ctx: &crate::types::context::TypeContext<'_>,
@@ -214,7 +221,10 @@ fn primitive_description_from_value_decl(
         .get(1)
         .map(|s| arena.get_string(*s).to_string())
         .unwrap_or_default();
-    let prim_arity = get_primitive_arity_from_type(ctx, env, val_ty)
+    let arity_from_type = get_primitive_arity_from_type(ctx, env, val_ty);
+    // OCaml: from_constructor = true when get_arity returns Some AND type is Tconstr
+    let prim_from_constructor = arity_from_type.is_some() && is_type_constructor(ctx, val_ty);
+    let prim_arity = arity_from_type
         .unwrap_or_else(|| arity_from_arrow_core_type(arena, arena.get_core_type(core_type_idx)));
 
     crate::types::PrimitiveDescription {
@@ -222,6 +232,7 @@ fn primitive_description_from_value_decl(
         prim_arity,
         prim_native_name,
         prim_native_float: false,
+        prim_from_constructor,
     }
 }
 
@@ -246,10 +257,15 @@ fn primitive_description_from_typed_value_desc(
 ) -> crate::types::PrimitiveDescription {
     let prim_name = vd.val_prim.first().cloned().unwrap_or_default();
     let prim_native_name = vd.val_prim.get(1).cloned().unwrap_or_default();
-    let prim_arity = match (ctx, env) {
-        (Some(ctx), Some(env)) => get_primitive_arity_from_type(ctx, env, vd.val_desc.ctyp_type)
-            .unwrap_or_else(|| primitive_arity_from_typed_core_type(&vd.val_desc)),
-        _ => primitive_arity_from_typed_core_type(&vd.val_desc),
+    let (prim_arity, prim_from_constructor) = match (ctx, env) {
+        (Some(ctx), Some(env)) => {
+            let arity_from_type = get_primitive_arity_from_type(ctx, env, vd.val_desc.ctyp_type);
+            let from_constructor = arity_from_type.is_some() && is_type_constructor(ctx, vd.val_desc.ctyp_type);
+            let arity = arity_from_type
+                .unwrap_or_else(|| primitive_arity_from_typed_core_type(&vd.val_desc));
+            (arity, from_constructor)
+        }
+        _ => (primitive_arity_from_typed_core_type(&vd.val_desc), false),
     };
 
     crate::types::PrimitiveDescription {
@@ -257,6 +273,7 @@ fn primitive_description_from_typed_value_desc(
         prim_arity,
         prim_native_name,
         prim_native_float: false,
+        prim_from_constructor,
     }
 }
 
