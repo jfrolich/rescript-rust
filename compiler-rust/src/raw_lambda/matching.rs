@@ -5929,7 +5929,7 @@ fn mk_failaction_pos(
             .map(|pat| (pat.clone(), ctx_lub(pat, ctx)))
             .collect();
 
-        let (fail, jmps) = scan_def(Vec::new(), to_test, defs);
+        let (fail, jmps) = scan_def(ctx, Vec::new(), to_test, defs);
         (None, fail, jmps)
     } else {
         // Too many non-matched constructors -> reduced information
@@ -5942,6 +5942,7 @@ fn mk_failaction_pos(
 /// Returns (key-action list, jumps).
 /// Equivalent to OCaml's inner `scan_def` in `mk_failaction_pos`.
 fn scan_def(
+    ctx: &[Ctx],
     env: Vec<(Vec<Pattern>, i32)>,
     to_test: Vec<(Pattern, Vec<Ctx>)>,
     defs: &[(Matrix, i32)],
@@ -5956,25 +5957,30 @@ fn scan_def(
                 klist.insert(0, (get_key_constr(pat), action.clone()));
             }
             // OCaml: jumps_add i (ctx_lub (list_as_pat pats) ctx) jumps
-            // TODO: properly track exit jumps from scan_def.
-            // Currently using empty jumps, which means the exit is not
-            // tracked and the catch handler may be missing.
+            // Track the exit jump using the outer context.
+            // We use ctx directly rather than ctx_lub to avoid context
+            // shape issues (ctx_lub can produce empty right vectors
+            // when the synthesized patterns don't match the context
+            // structure, leading to panics in lshift).
+            if !ctx.is_empty() {
+                jumps = jumps_add(*i, ctx.to_vec(), jumps);
+            }
         }
         (klist, jumps)
     } else {
         match defs.split_first() {
-            None => scan_def(env, Vec::new(), &[]),
+            None => scan_def(ctx, env, Vec::new(), &[]),
             Some(((pss, idef), rem)) => {
                 let (now, later): (Vec<_>, Vec<_>) = to_test
                     .into_iter()
                     .partition(|(_, p_ctx)| ctx_match(p_ctx, pss));
                 if now.is_empty() {
-                    scan_def(env, later, rem)
+                    scan_def(ctx, env, later, rem)
                 } else {
                     let pats: Vec<Pattern> = now.into_iter().map(|(p, _)| p).collect();
                     let mut new_env = vec![(pats, *idef)];
                     new_env.extend(env);
-                    scan_def(new_env, later, rem)
+                    scan_def(ctx, new_env, later, rem)
                 }
             }
         }
