@@ -6524,12 +6524,10 @@ impl<'a> RawLambdaConverter<'a> {
                 let pat_loc_idx = pat.pat_loc;
 
                 if let Some(all_labels) = all_labels {
-                    // Bind ALL fields in position order (OCaml: make_args iterates 0..N)
-                    // Since let bindings wrap inside-out, iterating forward produces
-                    // innermost=first, matching OCaml's output order.
-                    for (name, pos, mutflag, repr, attrs) in all_labels.iter() {
-                        if matches!(repr, RecordRepresentation::RecordUnboxed(_)) {
-                            // Unboxed records: the field IS the scrutinee
+                    // Handle unboxed records separately (field IS the scrutinee)
+                    if all_labels.iter().any(|(_, _, _, repr, _)| matches!(repr, RecordRepresentation::RecordUnboxed(_))) {
+                        for (_, pos, _, repr, _) in all_labels.iter() {
+                            if !matches!(repr, RecordRepresentation::RecordUnboxed(_)) { continue; }
                             if let Some((_, _, inner_pat)) = mentioned.get(pos) {
                                 let field = RawLambda::var(tmp.clone());
                                 if let PatternDesc::Tpat_var(id, _) = &inner_pat.pat_desc {
@@ -6538,60 +6536,99 @@ impl<'a> RawLambdaConverter<'a> {
                                     result = self.bind_irrefutable_pattern_raw(inner_pat, field, result);
                                 }
                             }
-                            continue;
+                        }
+                    } else {
+                        // Collect non-skipped field indices and their let-kinds.
+                        // OCaml's compile_match processes fields in position order (0..N),
+                        // then bind_check uses lower_bind for Alias fields which pushes
+                        // them past existing Alias Llets. StrictOpt (mutable) fields stay
+                        // at the outermost position. We simulate this reordering here.
+                        let mut field_indices: Vec<(usize, LetKind)> = Vec::new();
+                        for (idx, (_, _, mutflag, repr, _)) in all_labels.iter().enumerate() {
+                            if matches!(repr, RecordRepresentation::RecordFloatUnused) { continue; }
+                            let kind = if matches!(mutflag, TypeMutableFlag::Mutable) {
+                                LetKind::StrictOpt
+                            } else {
+                                LetKind::Alias
+                            };
+                            field_indices.push((idx, kind));
                         }
 
-                        let field_pos = match repr {
-                            RecordRepresentation::RecordExtension => pos + 1,
-                            _ => *pos,
-                        };
-                        let info = match repr {
-                            RecordRepresentation::RecordRegular => FieldDbgInfo::Record {
-                                name: name.clone(),
-                                mutable_flag: if matches!(mutflag, TypeMutableFlag::Mutable) {
-                                    crate::parser::ast::MutableFlag::Mutable
-                                } else {
-                                    crate::parser::ast::MutableFlag::Immutable
-                                },
-                            },
-                            RecordRepresentation::RecordFloatUnused => continue,
-                            RecordRepresentation::RecordInlined { .. } => FieldDbgInfo::RecordInline {
-                                name: name.clone(),
-                            },
-                            RecordRepresentation::RecordExtension => FieldDbgInfo::RecordExtension {
-                                name: name.clone(),
-                            },
-                            RecordRepresentation::RecordUnboxed(_) => unreachable!(),
-                        };
-                        let field_let_kind = if matches!(mutflag, TypeMutableFlag::Mutable) {
-                            LetKind::StrictOpt
-                        } else {
-                            LetKind::Alias
-                        };
-
-                        let loc = if let Some((lid, _, _)) = mentioned.get(pos) {
-                            self.loc(lid.loc)
-                        } else {
-                            self.loc(pat_loc_idx)
-                        };
-
-                        let field = RawLambda::prim(
-                            Primitive::Pfield(field_pos, info),
-                            vec![RawLambda::var(tmp.clone())],
-                            loc,
-                        );
-
-                        if let Some((_, _, inner_pat)) = mentioned.get(pos) {
-                            // Mentioned in pattern: bind using the pattern's variable
-                            if let PatternDesc::Tpat_var(id, _) = &inner_pat.pat_desc {
-                                result = RawLambda::let_(field_let_kind, id.clone(), field, result);
+                        // Compute OCaml's output order (outermost first).
+                        // OCaml's compile_match unwinds from last field to first:
+                        // - StrictOpt: wraps outside everything (insert at front)
+                        // - Alias: lower_bind pushes past leading Alias entries
+                        //   (insert at first non-Alias position)
+                        let mut ocaml_order: Vec<(usize, LetKind)> = Vec::new();
+                        for &(idx, kind) in field_indices.iter().rev() {
+                            if kind == LetKind::StrictOpt {
+                                ocaml_order.insert(0, (idx, kind));
                             } else {
-                                result = self.bind_irrefutable_pattern_raw(inner_pat, field, result);
+                                // Alias: find position of first non-Alias entry
+                                let insert_pos = ocaml_order.iter()
+                                    .position(|(_, k)| *k != LetKind::Alias)
+                                    .unwrap_or(ocaml_order.len());
+                                ocaml_order.insert(insert_pos, (idx, kind));
                             }
-                        } else {
-                            // Not mentioned: bind to a fresh match/N variable (OCaml's omega pattern)
-                            let fresh = self.id_gen.create("match");
-                            result = RawLambda::let_(field_let_kind, fresh, field, result);
+                        }
+
+                        // Iterate in REVERSE of ocaml_order for inside-out wrapping.
+                        // Last in ocaml_order (innermost) is wrapped first.
+                        for &(idx, _) in ocaml_order.iter().rev() {
+                            let (name, pos, mutflag, repr, _) = &all_labels[idx];
+
+                            let field_pos = match repr {
+                                RecordRepresentation::RecordExtension => pos + 1,
+                                _ => *pos,
+                            };
+                            let info = match repr {
+                                RecordRepresentation::RecordRegular => FieldDbgInfo::Record {
+                                    name: name.clone(),
+                                    mutable_flag: if matches!(mutflag, TypeMutableFlag::Mutable) {
+                                        crate::parser::ast::MutableFlag::Mutable
+                                    } else {
+                                        crate::parser::ast::MutableFlag::Immutable
+                                    },
+                                },
+                                RecordRepresentation::RecordFloatUnused => continue,
+                                RecordRepresentation::RecordInlined { .. } => FieldDbgInfo::RecordInline {
+                                    name: name.clone(),
+                                },
+                                RecordRepresentation::RecordExtension => FieldDbgInfo::RecordExtension {
+                                    name: name.clone(),
+                                },
+                                RecordRepresentation::RecordUnboxed(_) => unreachable!(),
+                            };
+                            let field_let_kind = if matches!(mutflag, TypeMutableFlag::Mutable) {
+                                LetKind::StrictOpt
+                            } else {
+                                LetKind::Alias
+                            };
+
+                            let loc = if let Some((lid, _, _)) = mentioned.get(pos) {
+                                self.loc(lid.loc)
+                            } else {
+                                self.loc(pat_loc_idx)
+                            };
+
+                            let field = RawLambda::prim(
+                                Primitive::Pfield(field_pos, info),
+                                vec![RawLambda::var(tmp.clone())],
+                                loc,
+                            );
+
+                            if let Some((_, _, inner_pat)) = mentioned.get(pos) {
+                                // Mentioned in pattern: bind using the pattern's variable
+                                if let PatternDesc::Tpat_var(id, _) = &inner_pat.pat_desc {
+                                    result = RawLambda::let_(field_let_kind, id.clone(), field, result);
+                                } else {
+                                    result = self.bind_irrefutable_pattern_raw(inner_pat, field, result);
+                                }
+                            } else {
+                                // Not mentioned: bind to a fresh match/N variable (OCaml's omega pattern)
+                                let fresh = self.id_gen.create("match");
+                                result = RawLambda::let_(field_let_kind, fresh, field, result);
+                            }
                         }
                     }
                 } else {
