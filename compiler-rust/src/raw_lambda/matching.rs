@@ -5591,42 +5591,19 @@ pub fn call_switcher(
 ) -> RawLambda {
     let (edges, (cases, store)) = as_interval(fail, low, high, int_lambda_list);
 
-    // Convert StoreExp to switch::ActionStore for use with switch::zyva
-    // We need to get the shared actions and process them through the switch module.
+    // Convert StoreExp to switch::ActionStore, preserving sharing info.
+    // zyva will handle the shared action processing (abstract_shared).
     let acts = store.act_get_shared();
-
-    // Process shared actions — handle_shared pattern
-    let mut handlers: Vec<(i32, RawLambda)> = Vec::new();
-    let resolved_acts: Vec<RawLambda> = acts
-        .into_iter()
-        .map(|act| match act {
-            SharedAction::Single(a) => a,
-            SharedAction::Shared(a) => {
-                let (i, h) = make_catch_delayed(a, next_raise_count);
-                let dummy = RawLambda::Lconst(crate::lambda::Constant::int(0));
-                let wrapped = h(dummy);
-                match wrapped {
-                    RawLambda::LstaticCatch(_, (exit_id, _), handler) => {
-                        handlers.push((exit_id, *handler));
-                        make_exit(exit_id)
-                    }
-                    other => {
-                        handlers.push((i, other.clone()));
-                        make_exit(i)
-                    }
-                }
-            }
-        })
-        .collect();
-
-    // Build a switch::ActionStore with the resolved actions
     let mut action_store = crate::raw_lambda::switch::ActionStore::new();
-    for act in &resolved_acts {
-        action_store.act_store(act.clone());
+    for act in acts {
+        match act {
+            SharedAction::Single(a) => { action_store.act_store(a); }
+            SharedAction::Shared(a) => { action_store.act_store_shared(a); }
+        }
     }
 
-    // Call the switch compiler
-    let result = crate::raw_lambda::switch::zyva(
+    // Call the switch compiler — it handles shared actions internally via abstract_shared
+    crate::raw_lambda::switch::zyva(
         edges,
         arg,
         &cases,
@@ -5636,10 +5613,7 @@ pub fn call_switcher(
             *next_raise_count += 1;
             *next_raise_count
         },
-    );
-
-    // Wrap with handlers
-    apply_handlers(result, handlers)
+    )
 }
 
 // ============================================================================
