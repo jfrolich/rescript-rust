@@ -36,7 +36,7 @@ use crate::types::typedtree::{
     TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind,
     ValueBinding,
 };
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 // ============================================================================
 // Helper Functions for Path Conversion

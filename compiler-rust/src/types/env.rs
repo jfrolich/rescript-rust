@@ -27,7 +27,7 @@ use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
 use crate::ident::{Ident, IdentFlags};
 use crate::location::Location;
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::sync::Arc;
 
 /// Collect free type variables (Tvar nodes) from a type expression.

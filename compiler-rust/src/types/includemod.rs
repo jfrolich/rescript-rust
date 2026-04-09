@@ -20,7 +20,7 @@ use crate::types::env::Env;
 use crate::types::Path;
 use crate::types::typedtree::ModuleCoercion;
 use crate::types::{TypeContext, TypeExprRef};
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 // ============================================================================
 // Error Types

@@ -29,7 +29,7 @@ use super::path::Path;
 use super::asttypes::PrivateFlag;
 use super::type_expr::{AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 use super::variance::{Variance, VarianceFlag};
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 // ============================================================================
 // Type Errors
 // ============================================================================
@@ -5562,7 +5562,7 @@ pub fn check_univars(ctx: &TypeContext<'_>, vars: &[TypeExprRef]) {
 pub fn copy_type_deep(
     ctx: &TypeContext<'_>,
     ty: TypeExprRef,
-    cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> TypeExprRef {
     let ty = ctx.repr(ty);
 
@@ -5736,19 +5736,19 @@ pub fn copy_type_deep(
 struct CopyCache {
     /// Node identity cache: maps original TypeExprRef → copied TypeExprRef.
     /// Ensures that if the same node is visited twice, we reuse the copy.
-    nodes: std::collections::HashMap<TypeExprRef, TypeExprRef>,
+    nodes: HashMap<TypeExprRef, TypeExprRef>,
 
     /// Scoped marker table for OCaml Ctype.copy variant recursion handling.
     /// Mirrors `more.desc <- Tsubst(Ttuple [more'; t])` without mutating
     /// shared type descriptors in-place.
-    row_more_markers: std::collections::HashMap<TypeExprRef, CopyRowMoreMarker>,
+    row_more_markers: HashMap<TypeExprRef, CopyRowMoreMarker>,
 }
 
 impl CopyCache {
     fn new() -> Self {
         CopyCache {
-            nodes: std::collections::HashMap::new(),
-            row_more_markers: std::collections::HashMap::new(),
+            nodes: HashMap::new(),
+            row_more_markers: HashMap::new(),
         }
     }
 }
@@ -5917,11 +5917,11 @@ pub fn subst_identity_copy_with_partial(
     ty: TypeExprRef,
     reopen_closed_variant_rows: bool,
 ) -> TypeExprRef {
-    let mut seen = std::collections::HashMap::new();
+    let mut seen = HashMap::new();
     // OCaml Subst.typexp uses a temporary `row_more.desc <- Tsubst(Ttuple [...])`
     // marker window to preserve recursive row sharing while copying.
     // Keep the same lifetime semantics in a scoped side table.
-    let mut row_more_markers = std::collections::HashMap::new();
+    let mut row_more_markers = HashMap::new();
     subst_identity_copy_rec(
         ctx,
         ty,
@@ -5941,8 +5941,8 @@ fn subst_identity_copy_rec(
     ctx: &TypeContext<'_>,
     ty: TypeExprRef,
     reopen_closed_variant_rows: bool,
-    seen: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>,
-    row_more_markers: &mut std::collections::HashMap<TypeExprRef, SubstRowMoreMarker>,
+    seen: &mut HashMap<TypeExprRef, TypeExprRef>,
+    row_more_markers: &mut HashMap<TypeExprRef, SubstRowMoreMarker>,
 ) -> TypeExprRef {
     let ty = ctx.repr(ty);
 

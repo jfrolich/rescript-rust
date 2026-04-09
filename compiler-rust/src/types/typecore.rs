@@ -41,7 +41,7 @@ use crate::types::{
     Env, Path, TypeContext, TypeDesc, TypeError, TypeExprRef, UnifyState, ValueDescription,
 };
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 const DICT_PATTERN_ATTRIBUTE: &str = "res.dictPattern";
 const DICT_MAGIC_FIELD_NAME: &str = "dictValuesType";
@@ -3241,7 +3241,7 @@ fn build_as_type(
                 // then refines it through each label's instantiated arg/res types.
                 let ty = ctx.new_var(None);
                 let record_res = first_label.map(|lbl| lbl.lbl_res).unwrap_or(pat.pat_type);
-                let present_fields_by_pos: std::collections::HashMap<i32, &Pattern> = fields
+                let present_fields_by_pos: HashMap<i32, &Pattern> = fields
                     .iter()
                     .map(|(_lid, label_desc, field_pat, _optional)| (label_desc.lbl_pos, field_pat))
                     .collect();
@@ -11252,7 +11252,7 @@ fn type_record(
         typed_base_expr.exp_type = ty_exp;
 
         // Collect the set of overridden label positions
-        let overridden_positions: std::collections::HashSet<i32> = typed_fields
+        let overridden_positions: HashSet<i32> = typed_fields
             .iter()
             .filter_map(|(_, lbl, defn, _)| {
                 if matches!(defn, RecordLabelDefinition::Overridden(..)) {
@@ -14953,7 +14953,7 @@ fn subst_value_desc_for_module_lookup(
     use crate::types::decl::SignatureItem;
 
     // Build stamp map from SigType idents → Pdot(module_path, type_name)
-    let mut stamp_map = std::collections::HashMap::new();
+    let mut stamp_map = HashMap::new();
     for item in sig.iter() {
         if let SignatureItem::SigType(id, _, _) = item {
             if id.stamp() != 0 {
@@ -14967,13 +14967,13 @@ fn subst_value_desc_for_module_lookup(
     }
 
     // Deep-copy the value type to create new type expression nodes
-    let mut cache = std::collections::HashMap::new();
+    let mut cache = HashMap::new();
     let copied_ty = copy_lookup_type_expr(ctx, vd.val_type, &mut cache);
 
     // Apply stamp substitution to the copy
-    let mut visited = std::collections::HashSet::new();
-    let empty_name: std::collections::HashMap<String, Path> = std::collections::HashMap::new();
-    let empty_stamp: std::collections::HashMap<i32, Path> = std::collections::HashMap::new();
+    let mut visited = HashSet::new();
+    let empty_name: HashMap<String, Path> = HashMap::new();
+    let empty_stamp: HashMap<i32, Path> = HashMap::new();
     crate::cmi::persistent_env::substitute_type_expr_path_pub(
         copied_ty,
         &stamp_map,
@@ -15848,7 +15848,7 @@ impl Env {
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
     ) -> Option<(crate::types::decl::Signature, Option<String>)> {
-        use std::collections::HashSet;
+        use HashSet;
 
         fn resolve_module_type_inner<'b>(
             env: &Env,
@@ -16346,8 +16346,8 @@ fn extract_type_path_from_expected_with_persistent_env<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<Path> {
-    let mut visited_types = std::collections::HashSet::new();
-    let mut visited_paths = std::collections::HashSet::new();
+    let mut visited_types = HashSet::new();
+    let mut visited_paths = HashSet::new();
     extract_type_path_from_expected_inner(
         expected_ty,
         env,
@@ -16363,8 +16363,8 @@ fn extract_type_path_from_expected_inner<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
-    visited_types: &mut std::collections::HashSet<usize>,
-    visited_paths: &mut std::collections::HashSet<Path>,
+    visited_types: &mut HashSet<usize>,
+    visited_paths: &mut HashSet<Path>,
 ) -> Option<Path> {
     let ty = ctx.repr(expected_ty);
     if !visited_types.insert(ty.0) {
@@ -17279,8 +17279,8 @@ fn extract_concrete_record_type_info<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<(Path, Vec<TypeExprRef>, crate::types::TypeDeclaration)> {
     let mut current = ctx.repr(record_ty);
-    let mut visited_types = std::collections::HashSet::new();
-    let mut visited_paths = std::collections::HashSet::new();
+    let mut visited_types = HashSet::new();
+    let mut visited_paths = HashSet::new();
 
     loop {
         current = ctx.repr(current);

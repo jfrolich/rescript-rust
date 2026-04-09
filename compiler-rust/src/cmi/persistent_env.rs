@@ -10,7 +10,7 @@
 //! searches the load path for a corresponding `.cmi` file. The search is
 //! case-insensitive on the first character (matching OCaml's `find_in_path_uncap`).
 
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::fs;
 use std::path::Path as FsPath;
 use std::path::PathBuf;

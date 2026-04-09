@@ -970,8 +970,8 @@ fn apply_moregen_constraints(
     // stamp to the implementation's Pident path in all type_exprs.
     {
         let impl_sig = &typed_structure.str_type;
-        let mut stamp_remap: std::collections::HashMap<i32, crate::types::Path> =
-            std::collections::HashMap::new();
+        let mut stamp_remap: ahash::AHashMap<i32, crate::types::Path> =
+            ahash::AHashMap::new();
         // Match OCaml pair_components: remap Sig_type, Sig_module, Sig_modtype
         for iface_item in &iface_sig {
             let (iface_id, find_fn): (&crate::ident::Ident, Box<dyn Fn(&SignatureItem) -> Option<&crate::ident::Ident>>) = match iface_item {
@@ -1007,8 +1007,8 @@ fn apply_moregen_constraints(
     }
 
     // Build a map from value name -> interface type
-    let mut iface_val_types: std::collections::HashMap<String, TypeExprRef> =
-        std::collections::HashMap::new();
+    let mut iface_val_types: ahash::AHashMap<String, TypeExprRef> =
+        ahash::AHashMap::new();
     for item in &iface_sig {
         if let SignatureItem::SigValue(id, vd) = item {
             iface_val_types.insert(id.name().to_string(), vd.val_type);
@@ -1030,7 +1030,7 @@ fn apply_moregen_constraints(
                     if name.as_deref() == Some("wrapJsForReason") {
                         debug.push(format!("=== wrapJsForReason pat_type={:?} level={}",
                             binding.vb_pat.pat_type, type_ctx.get_level(type_ctx.repr(binding.vb_pat.pat_type))));
-                        dump_all_tvars(type_ctx, binding.vb_pat.pat_type, &mut debug, &mut std::collections::HashSet::new(), 0);
+                        dump_all_tvars(type_ctx, binding.vb_pat.pat_type, &mut debug, &mut ahash::AHashSet::new(), 0);
                     }
                 }
             }
@@ -1057,7 +1057,7 @@ fn apply_moregen_constraints(
 fn moregen_link_structure(
     type_ctx: &TypeContext<'_>,
     structure: &crate::types::typedtree::Structure,
-    iface_val_types: &std::collections::HashMap<String, crate::types::type_expr::TypeExprRef>,
+    iface_val_types: &ahash::AHashMap<String, crate::types::type_expr::TypeExprRef>,
     debug: &mut Vec<String>,
 ) {
     for item in &structure.str_items {
@@ -1071,7 +1071,7 @@ fn moregen_link_structure(
                                 name, binding.vb_pat.pat_type, iface_ty));
                             let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
                             moregen_link(type_ctx, binding.vb_pat.pat_type, iface_inst,
-                                &mut std::collections::HashSet::new(), debug);
+                                &mut ahash::AHashSet::new(), debug);
                             if let crate::types::typedtree::ExpressionDesc::Texp_ident(_, _, desc) =
                                 &binding.vb_expr.exp_desc
                             {
@@ -1084,21 +1084,21 @@ fn moregen_link_structure(
                                     type_ctx,
                                     desc.val_type,
                                     iface_inst,
-                                    &mut std::collections::HashSet::new(),
+                                    &mut ahash::AHashSet::new(),
                                     debug,
                                 );
                                 moregen_link_exported_alias(
                                     type_ctx,
                                     binding.vb_pat.pat_type,
                                     desc.val_type,
-                                    &mut std::collections::HashSet::new(),
+                                    &mut ahash::AHashSet::new(),
                                     debug,
                                 );
                                 moregen_link_exported_alias(
                                     type_ctx,
                                     binding.vb_expr.exp_type,
                                     desc.val_type,
-                                    &mut std::collections::HashSet::new(),
+                                    &mut ahash::AHashSet::new(),
                                     debug,
                                 );
                             }
@@ -1119,7 +1119,7 @@ fn moregen_link_structure(
 fn moregen_link_mod_expr(
     type_ctx: &TypeContext<'_>,
     mod_expr: &crate::types::typedtree::ModuleExpr,
-    iface_val_types: &std::collections::HashMap<String, crate::types::type_expr::TypeExprRef>,
+    iface_val_types: &ahash::AHashMap<String, crate::types::type_expr::TypeExprRef>,
     debug: &mut Vec<String>,
 ) {
     match &mod_expr.mod_desc {
@@ -1137,7 +1137,7 @@ fn dump_all_tvars(
     ctx: &TypeContext<'_>,
     ty: crate::types::type_expr::TypeExprRef,
     debug: &mut Vec<String>,
-    seen: &mut std::collections::HashSet<crate::types::type_expr::TypeExprRef>,
+    seen: &mut ahash::AHashSet<crate::types::type_expr::TypeExprRef>,
     depth: usize,
 ) {
     use crate::types::type_expr::{TypeDesc, GENERIC_LEVEL};
@@ -1217,7 +1217,7 @@ fn moregen_link(
     ctx: &TypeContext<'_>,
     impl_ty: crate::types::type_expr::TypeExprRef,
     iface_ty: crate::types::type_expr::TypeExprRef,
-    visited: &mut std::collections::HashSet<(crate::types::type_expr::TypeExprRef, crate::types::type_expr::TypeExprRef)>,
+    visited: &mut ahash::AHashSet<(crate::types::type_expr::TypeExprRef, crate::types::type_expr::TypeExprRef)>,
     debug: &mut Vec<String>,
 ) {
     moregen_link_impl(ctx, impl_ty, iface_ty, visited, debug, false);
@@ -1227,7 +1227,7 @@ fn moregen_link_exported_alias(
     ctx: &TypeContext<'_>,
     impl_ty: crate::types::type_expr::TypeExprRef,
     iface_ty: crate::types::type_expr::TypeExprRef,
-    visited: &mut std::collections::HashSet<(crate::types::type_expr::TypeExprRef, crate::types::type_expr::TypeExprRef)>,
+    visited: &mut ahash::AHashSet<(crate::types::type_expr::TypeExprRef, crate::types::type_expr::TypeExprRef)>,
     debug: &mut Vec<String>,
 ) {
     moregen_link_impl(ctx, impl_ty, iface_ty, visited, debug, true);
@@ -1237,7 +1237,7 @@ fn moregen_link_impl(
     ctx: &TypeContext<'_>,
     impl_ty: crate::types::type_expr::TypeExprRef,
     iface_ty: crate::types::type_expr::TypeExprRef,
-    visited: &mut std::collections::HashSet<(crate::types::type_expr::TypeExprRef, crate::types::type_expr::TypeExprRef)>,
+    visited: &mut ahash::AHashSet<(crate::types::type_expr::TypeExprRef, crate::types::type_expr::TypeExprRef)>,
     debug: &mut Vec<String>,
     allow_generic_anonymous: bool,
 ) {
@@ -1552,7 +1552,7 @@ pub(crate) fn normalize_signature_types(
     use crate::types::ctype::normalize_type;
     use crate::types::decl::SignatureItem;
     use crate::types::typedtree::{ModuleExprDesc, PatternDesc, StructureItemDesc};
-    use std::collections::HashMap;
+    use ahash::AHashMap;
 
     /// Collect bound variable names from a pattern.
     fn collect_bound_names(pat: &crate::types::typedtree::Pattern, names: &mut Vec<String>) {
@@ -1578,8 +1578,8 @@ pub(crate) fn normalize_signature_types(
         }
     }
 
-    fn local_sig_values(sig: &[SignatureItem]) -> HashMap<String, crate::types::type_expr::TypeExprRef> {
-        let mut map = HashMap::new();
+    fn local_sig_values(sig: &[SignatureItem]) -> ahash::AHashMap<String, crate::types::type_expr::TypeExprRef> {
+        let mut map = ahash::AHashMap::new();
         for item in sig {
             if let SignatureItem::SigValue(id, vd) = item {
                 map.insert(id.name().to_string(), vd.val_type);
@@ -1597,7 +1597,7 @@ pub(crate) fn normalize_signature_types(
         let local_values = if allow_local_sig_values {
             local_sig_values(&s.str_type)
         } else {
-            HashMap::new()
+            ahash::AHashMap::new()
         };
 
         for item in &s.str_items {

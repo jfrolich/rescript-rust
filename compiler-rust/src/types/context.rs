@@ -97,7 +97,7 @@ pub struct TypeContext<'a> {
     /// Reuse cache for generic dotted nullary constructors coming from cached
     /// persistent signatures. Keyed by the original source node identity for
     /// the lifetime of this typing context.
-    generic_dotted_constr_copies: RefCell<std::collections::HashMap<TypeExprRef, TypeExprRef>>,
+    generic_dotted_constr_copies: RefCell<ahash::AHashMap<TypeExprRef, TypeExprRef>>,
     /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
     previous_env_id: Cell<u64>,
 
@@ -128,27 +128,27 @@ pub struct TypeContext<'a> {
     /// Global type declaration store, indexed by type name.
     /// Populated when loading CMI module signatures so that type alias
     /// expansion can find declarations for types not directly in the env.
-    type_decl_store: RefCell<std::collections::HashMap<String, super::decl::TypeDeclaration>>,
+    type_decl_store: RefCell<ahash::AHashMap<String, super::decl::TypeDeclaration>>,
 
     /// Global type declaration store, indexed by ident stamp.
     /// Used for looking up CMI-loaded type declarations by their stamp
     /// when the type name is too generic (e.g., "t").
-    type_decl_by_stamp: RefCell<std::collections::HashMap<i32, super::decl::TypeDeclaration>>,
+    type_decl_by_stamp: RefCell<ahash::AHashMap<i32, super::decl::TypeDeclaration>>,
 
     /// Global type declaration store, indexed by full qualified path string.
     /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
-    type_decl_by_path: RefCell<std::collections::HashMap<String, super::decl::TypeDeclaration>>,
+    type_decl_by_path: RefCell<ahash::AHashMap<String, super::decl::TypeDeclaration>>,
 
     /// Cache for type declarations resolved through module signatures (Pdot paths).
     /// Separate from type_decl_by_path to avoid conflicts with expand_head_once
     /// entries which have unqualified paths. This approximates OCaml's
     /// components_of_module_maker lazy caching.
-    resolved_pdot_type_cache: RefCell<std::collections::HashMap<String, super::decl::TypeDeclaration>>,
+    resolved_pdot_type_cache: RefCell<ahash::AHashMap<String, super::decl::TypeDeclaration>>,
 
     /// Cache for resolved module signatures. Keyed by module path name.
     /// Prevents repeated calls to resolve_module_signature_for_path from
     /// creating fresh type copies via copy_lookup_signature_for_subst.
-    resolved_module_sig_cache: RefCell<std::collections::HashMap<String, (Path, super::decl::Signature)>>,
+    resolved_module_sig_cache: RefCell<ahash::AHashMap<String, (Path, super::decl::Signature)>>,
 
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
@@ -156,17 +156,17 @@ pub struct TypeContext<'a> {
     /// Cache of renamed module signatures.
     /// Matches OCaml's lazy ps_sig = Subst.signature Subst.identity sign.
     /// Populated by PersistentEnv::get_renamed_sig, consumed by normalize_path.
-    pub(crate) renamed_module_sigs: RefCell<std::collections::HashMap<String, super::decl::Signature>>,
+    pub(crate) renamed_module_sigs: RefCell<ahash::AHashMap<String, super::decl::Signature>>,
 
     /// Raw (un-renamed) module signatures for persistent modules.
     /// Used by trigger_module_sig_rename to lazily rename on first access
     /// from normalize_path, matching OCaml's lazy ps_sig forcing.
-    raw_module_sigs: RefCell<std::collections::HashMap<String, super::decl::Signature>>,
+    raw_module_sigs: RefCell<ahash::AHashMap<String, super::decl::Signature>>,
 
     /// String table for CMI-decoded Longident components.
     /// CMI decoding happens without a ParseArena, so we allocate synthetic
     /// StrIdx values here and resolve them later when needed.
-    cmi_longident_names: RefCell<std::collections::HashMap<u32, String>>,
+    cmi_longident_names: RefCell<ahash::AHashMap<u32, String>>,
 
     /// Next synthetic StrIdx raw value for CMI longident strings.
     next_cmi_longident_idx: Cell<u32>,
@@ -190,19 +190,19 @@ pub struct TypeContext<'a> {
     /// sharing `t.id`, so the sexp serializer deduplicates them. In Rust, we create
     /// separate TypeExprRef nodes but record the alias here so the sexp serializer
     /// can use the original's dedup key.
-    arity_aliases: RefCell<std::collections::HashMap<TypeExprRef, TypeExprRef>>,
+    arity_aliases: RefCell<ahash::AHashMap<TypeExprRef, TypeExprRef>>,
 
     /// Record type labels cache.
     /// Maps type path (with stamp for uniqueness) → Vec<(field_name, position, mutable, repr, attributes)>.
     /// Populated during type checking when record patterns are processed.
     /// Used by raw lambda conversion to bind ALL record fields (matching OCaml's make_record_matching).
-    record_labels_cache: RefCell<std::collections::HashMap<String, Vec<(String, i32, super::asttypes::MutableFlag, super::decl::RecordRepresentation, Vec<super::decl::Attribute>)>>>,
+    record_labels_cache: RefCell<ahash::AHashMap<String, Vec<(String, i32, super::asttypes::MutableFlag, super::decl::RecordRepresentation, Vec<super::decl::Attribute>)>>>,
 
     /// Stored typedtree environment snapshots, keyed by EnvRef.
     typed_envs: RefCell<Vec<Arc<Env>>>,
 
     /// Reuse EnvRefs for identical logical environments.
-    typed_envs_by_id: RefCell<std::collections::HashMap<u64, EnvRef>>,
+    typed_envs_by_id: RefCell<ahash::AHashMap<u64, EnvRef>>,
 }
 
 impl<'a> TypeContext<'a> {
@@ -216,7 +216,7 @@ impl<'a> TypeContext<'a> {
             saved_levels: RefCell::new(Vec::new()),
             trace_gadt_instances: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
-            generic_dotted_constr_copies: RefCell::new(std::collections::HashMap::new()),
+            generic_dotted_constr_copies: RefCell::new(ahash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: RefCell::new(Vec::new()),
@@ -230,15 +230,15 @@ impl<'a> TypeContext<'a> {
             row_fields: RefCell::new(Vec::new()),
             commutables: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
-            type_decl_store: RefCell::new(std::collections::HashMap::new()),
-            type_decl_by_stamp: RefCell::new(std::collections::HashMap::new()),
-            type_decl_by_path: RefCell::new(std::collections::HashMap::new()),
-            resolved_pdot_type_cache: RefCell::new(std::collections::HashMap::new()),
-            resolved_module_sig_cache: RefCell::new(std::collections::HashMap::new()),
+            type_decl_store: RefCell::new(ahash::AHashMap::new()),
+            type_decl_by_stamp: RefCell::new(ahash::AHashMap::new()),
+            type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
+            resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
+            resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Vec::new()),
-            renamed_module_sigs: RefCell::new(std::collections::HashMap::new()),
-            raw_module_sigs: RefCell::new(std::collections::HashMap::new()),
-            cmi_longident_names: RefCell::new(std::collections::HashMap::new()),
+            renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
+            raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
+            cmi_longident_names: RefCell::new(ahash::AHashMap::new()),
             next_cmi_longident_idx: Cell::new(0xF000_0000),
             predef_int: Cell::new(None),
             predef_char: Cell::new(None),
@@ -250,10 +250,10 @@ impl<'a> TypeContext<'a> {
             predef_bigint: Cell::new(None),
             predef_option_inner: Cell::new(None),
             predef_option_type: Cell::new(None),
-            arity_aliases: RefCell::new(std::collections::HashMap::new()),
-            record_labels_cache: RefCell::new(std::collections::HashMap::new()),
+            arity_aliases: RefCell::new(ahash::AHashMap::new()),
+            record_labels_cache: RefCell::new(ahash::AHashMap::new()),
             typed_envs: RefCell::new(Vec::new()),
-            typed_envs_by_id: RefCell::new(std::collections::HashMap::new()),
+            typed_envs_by_id: RefCell::new(ahash::AHashMap::new()),
         }
     }
 
