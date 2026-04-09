@@ -9,6 +9,7 @@
 
 pub mod convert;
 pub mod lower;
+pub mod matching;
 pub mod print;
 pub mod switch;
 pub(crate) mod typeopt;
