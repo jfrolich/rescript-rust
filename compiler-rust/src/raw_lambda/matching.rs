@@ -7133,8 +7133,7 @@ fn do_compile_matching(
                     )
                 }
                 PatternDesc::Tpat_record(fields, _) if !fields.is_empty() => {
-                    let lbl = &fields[0].1;
-                    let all_labels = get_all_labels(ctx_ref, lbl);
+                    let all_labels = get_all_labels_from_record_fields(fields);
                     let norm_pat = normalize_pat(&pat);
                     compile_no_test(
                         ctx_ref,
@@ -7357,42 +7356,14 @@ fn compile_test_wrapper<K: Clone>(
     }
 }
 
-/// Helper: get all labels for a record type from the label description.
-/// Returns the full label array for record matching.
-///
-/// In OCaml, `lbl.lbl_all` is a direct array reference. In Rust, we need to
-/// look up the type declaration from the environment and extract labels.
-fn get_all_labels(ctx_ref: &TypeContext<'_>, lbl: &LabelDescription) -> Vec<LabelDescription> {
-    // Try to look up the type declaration from the environment to get all labels.
-    // We use the result type (lbl_res) to find the type path.
-    let ty = ctx_ref.repr(lbl.lbl_res);
-    let desc = ctx_ref.get_desc(ty);
-    if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*desc {
-        let path_name = path.name();
-        if let Some(decl) = ctx_ref.find_type_decl_by_path(&path_name) {
-            if let crate::types::decl::TypeKind::TypeRecord(fields, _) = &decl.type_kind {
-                return fields
-                    .iter()
-                    .enumerate()
-                    .map(|(i, ld)| LabelDescription {
-                        lbl_name: ld.ld_id.name().to_string(),
-                        lbl_res: lbl.lbl_res,
-                        lbl_arg: ld.ld_type,
-                        lbl_mut: ld.ld_mutable.clone(),
-                        lbl_optional: ld.ld_optional,
-                        lbl_pos: i as i32,
-                        lbl_all: lbl.lbl_all,
-                        lbl_repres: lbl.lbl_repres.clone(),
-                        lbl_private: lbl.lbl_private.clone(),
-                        lbl_loc: Location::none(),
-                        lbl_attributes: ld.ld_attributes.clone(),
-                    })
-                    .collect();
-            }
-        }
-    }
-    // Fallback: just use the single label we have
-    vec![lbl.clone()]
+/// Extract all record label descriptions from a Tpat_record pattern's fields.
+/// Sorted by field position (lbl_pos).
+fn get_all_labels_from_record_fields(
+    fields: &[(crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>, LabelDescription, Pattern, bool)],
+) -> Vec<LabelDescription> {
+    let mut labels: Vec<LabelDescription> = fields.iter().map(|(_, lbl, _, _)| lbl.clone()).collect();
+    labels.sort_by_key(|l| l.lbl_pos);
+    labels
 }
 
 /// Extract a RowDesc from a type expression (for variant matching).
