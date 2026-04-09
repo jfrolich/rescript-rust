@@ -2696,7 +2696,7 @@ fn insert_or_append(
                         } else if condb(act_q, ps, qs) {
                             // check condition (b) for append
                             let mut new_seen = seen;
-                            new_seen.push(cl.clone());
+                            new_seen.insert(0, cl.clone());
                             return attempt(new_seen, rem, p, ps, act, ors, no);
                         } else {
                             let mut new_p_row = vec![p.clone()];
@@ -2708,13 +2708,13 @@ fn insert_or_append(
                     } else {
                         // p # q, go on with append/insert
                         let mut new_seen = seen;
-                        new_seen.push(cl.clone());
+                        new_seen.insert(0, cl.clone());
                         return attempt(new_seen, rem, p, ps, act, ors, no);
                     }
                 } else {
                     // q is not an or-pat, go on with append/insert
                     let mut new_seen = seen;
-                    new_seen.push(cl.clone());
+                    new_seen.insert(0, cl.clone());
                     return attempt(new_seen, rem, p, ps, act, ors, no);
                 }
             }
@@ -2843,20 +2843,20 @@ fn do_split_or(
                             do_split_or(argo, before, new_ors, new_no, rem, args, def, next_raise)
                         } else if up_ok(&cl.0, act, &ors) {
                             let mut new_before = before;
-                            new_before.push(cl.clone());
+                            new_before.insert(0, cl.clone());
                             do_split_or(argo, new_before, ors, no, rem, args, def, next_raise)
                         } else if or_ok(p, ps, &ors) {
                             let mut new_ors = ors;
-                            new_ors.push(cl.clone());
+                            new_ors.insert(0, cl.clone());
                             do_split_or(argo, before, new_ors, no, rem, args, def, next_raise)
                         } else {
                             let mut new_no = no;
-                            new_no.push(cl.clone());
+                            new_no.insert(0, cl.clone());
                             do_split_or(argo, before, ors, new_no, rem, args, def, next_raise)
                         }
                     } else {
                         let mut new_no = no;
-                        new_no.push(cl.clone());
+                        new_no.insert(0, cl.clone());
                         do_split_or(argo, before, ors, new_no, rem, args, def, next_raise)
                     }
                 }
@@ -2957,7 +2957,7 @@ fn split_exc(
                     let cstr = pat_as_constr(p);
                     if equal_tag(&cstr.cstr_tag, &cstr0.cstr_tag) {
                         let mut new_yes = yes;
-                        new_yes.push(cl.clone());
+                        new_yes.insert(0, cl.clone());
                         split_exc(cstr0, new_yes, rem, args, def, k, next_raise)
                     } else {
                         let yes = rev_vec(yes);
@@ -3057,7 +3057,7 @@ fn split_noexc(
                 }
                 Some(_) => {
                     let mut new_yes = yes;
-                    new_yes.push(cl.clone());
+                    new_yes.insert(0, cl.clone());
                     split_noexc(new_yes, rem, args, def, k, next_raise)
                 }
                 None => panic!("split_noexc: empty pattern row"),
@@ -3176,12 +3176,12 @@ fn split_ex(
             match cl.0.first() {
                 Some(p) if group(p) && up_ok(&cl.0, &cl.1, &no) => {
                     let mut new_yes = yes;
-                    new_yes.push(cl.clone());
+                    new_yes.insert(0, cl.clone());
                     split_ex(group, new_yes, no, rem, args, def, k, next_raise)
                 }
                 _ => {
                     let mut new_no = no;
-                    new_no.push(cl.clone());
+                    new_no.insert(0, cl.clone());
                     split_ex(group, yes, new_no, rem, args, def, k, next_raise)
                 }
             }
@@ -3244,7 +3244,7 @@ fn split_noex(
                 // This enables an extra division in some frequent cases:
                 // last row is made of variables only
                 let mut new_no = no;
-                new_no.push(cl.clone());
+                new_no.insert(0, cl.clone());
                 split_noex(group, yes, new_no, &[], args, def, k, next_raise)
             } else {
                 // Fall through to normal case
@@ -3252,12 +3252,12 @@ fn split_noex(
                 match cl.0.first() {
                     Some(p) if !group(p) && up_ok(&cl.0, &cl.1, &no) => {
                         let mut new_yes = yes;
-                        new_yes.push(cl.clone());
+                        new_yes.insert(0, cl.clone());
                         split_noex(group, new_yes, no, &[], args, def, k, next_raise)
                     }
                     _ => {
                         let mut new_no = no;
-                        new_no.push(cl.clone());
+                        new_no.insert(0, cl.clone());
                         split_noex(group, yes, new_no, &[], args, def, k, next_raise)
                     }
                 }
@@ -3267,12 +3267,12 @@ fn split_noex(
             match cl.0.first() {
                 Some(p) if !group(p) && up_ok(&cl.0, &cl.1, &no) => {
                     let mut new_yes = yes;
-                    new_yes.push(cl.clone());
+                    new_yes.insert(0, cl.clone());
                     split_noex(group, new_yes, no, rem, args, def, k, next_raise)
                 }
                 _ => {
                     let mut new_no = no;
-                    new_no.push(cl.clone());
+                    new_no.insert(0, cl.clone());
                     split_noex(group, yes, new_no, rem, args, def, k, next_raise)
                 }
             }
@@ -3512,13 +3512,13 @@ pub fn split_precompile(
     (info.me, nexts)
 }
 
-///// Identity function — no reversal needed.
+/// Reverse a vector — equivalent to OCaml's `List.rev`.
 ///
-/// In OCaml, items are prepended to lists (`cl :: list`) and then reversed
-/// with `List.rev` to restore original order. In Rust, items are appended
-/// with `.push()`, so they're already in the correct order. The `rev_vec`
-/// calls that ported OCaml's `List.rev` are therefore no-ops.
-fn rev_vec<T>(v: Vec<T>) -> Vec<T> {
+/// Items in `do_split_or` and `insert_or_append` are prepended (via `insert(0,...)`
+/// or by building new vectors with the new item first), matching OCaml's `::` prepend
+/// semantics. The final `List.rev` call restores the original order.
+fn rev_vec<T>(mut v: Vec<T>) -> Vec<T> {
+    v.reverse();
     v
 }
 
@@ -4970,13 +4970,15 @@ fn share_actions_tree(
 }
 
 /// Apply handler wrappers to a result lambda.
-/// The handlers are applied in reverse order (first handler = innermost).
+/// The handlers are applied in forward order (first handler = innermost).
 /// Equivalent to OCaml's `!hs result`.
 fn apply_handlers(mut result: RawLambda, handlers: Vec<(i32, RawLambda)>) -> RawLambda {
     // OCaml composes: hs := fun act -> h(ohs(act))
     // First handler added is innermost, last is outermost.
-    // So we iterate in reverse: last handler wraps first.
-    for (exit_id, handler) in handlers.into_iter().rev() {
+    // Each wrapper h wraps the body in LstaticCatch(body, (i,[]), handler_body).
+    // So iterating forward: first handler wraps result first (innermost),
+    // then each subsequent handler wraps around (outermost).
+    for (exit_id, handler) in handlers.into_iter() {
         match &result {
             RawLambda::LstaticRaise(j, args) if *j == exit_id && args.is_empty() => {
                 result = handler;
