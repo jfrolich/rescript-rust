@@ -3572,13 +3572,11 @@ impl<'a> RawLambdaConverter<'a> {
             }
             StructureItemDesc::Tstr_module(binding) => {
                 let old_len = fields.len();
-                // For Tcoerce_structure, always add the module id (even for
-                // @internal.local/%%private modules) because the coercion uses
-                // position indices from the impl signature which counts ALL
-                // runtime components. For Tcoerce_none, skip hidden modules
-                // to avoid leaking them into the module export block.
+                // OCaml always skips @internal.local modules from the field list,
+                // regardless of coercion type. Hidden modules don't get position
+                // indices in the runtime field layout.
                 let is_hidden = self.rescript_hide_attributes(&binding.mb_attributes);
-                if !is_hidden || matches!(cc, ModuleCoercion::Tcoerce_structure(_, _, _)) {
+                if !is_hidden {
                     fields.push(binding.mb_id.clone());
                 }
                 let body =
