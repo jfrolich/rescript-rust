@@ -3448,9 +3448,13 @@ impl<'a> RawLambdaConverter<'a> {
             }
             StructureItemDesc::Tstr_module(binding) => {
                 let old_len = fields.len();
-                if !self.rescript_hide_attributes(&binding.mb_attributes) {
-                    fields.push(binding.mb_id.clone());
-                }
+                // Always add the module id to fields for correct position tracking,
+                // even for @internal.local (%%private) modules. The Tcoerce_structure
+                // coercion uses position indices from the impl signature, which
+                // counts ALL runtime components including hidden modules. Skipping
+                // hidden modules here would shift subsequent positions and cause
+                // exported fields like `to` to be dropped from the module export.
+                fields.push(binding.mb_id.clone());
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
