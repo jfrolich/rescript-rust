@@ -13982,7 +13982,7 @@ fn inline_record_decl_from_variant_type<'a>(
             matches!(
                 c.cd_args,
                 crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-            ) && c.cd_res.is_none()
+            )
         })
         .count() as i32;
     let num_nonconsts = constrs.len() as i32 - num_consts;
@@ -13992,7 +13992,7 @@ fn inline_record_decl_from_variant_type<'a>(
         let is_constant = matches!(
             cd.cd_args,
             crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-        ) && cd.cd_res.is_none();
+        );
 
         if cd.cd_id.name() == cstr_name {
             let crate::types::ConstructorArguments::CstrRecord(ref labels) = cd.cd_args else {
@@ -20029,14 +20029,13 @@ fn lookup_constructor_in_module<'b>(
                 if let SignatureItem::SigType(_id, type_decl, _rec) = sig_item {
                     if let crate::types::TypeKind::TypeVariant(ref constrs) = type_decl.type_kind {
                         let num_consts = constrs.iter()
-                            .filter(|c| matches!(c.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()) && c.cd_res.is_none())
+                            .filter(|c| matches!(c.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()))
                             .count() as i32;
                         let num_nonconsts = constrs.len() as i32 - num_consts;
                         let mut const_idx = 0i32;
                         let mut block_idx = 0i32;
                         for cd in constrs {
-                            let is_constant = matches!(cd.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty())
-                                && cd.cd_res.is_none();
+                            let is_constant = matches!(cd.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty());
                             if cd.cd_id.name() == cstr_name {
                                 let tag = if is_constant {
                                     crate::types::decl::ConstructorTag::CstrConstant(const_idx)
@@ -22167,14 +22166,13 @@ fn lookup_constructor_by_expected_type<'b>(
     // Check if it's a variant type with a matching constructor
     if let crate::types::TypeKind::TypeVariant(ref constrs) = concrete_type_decl.type_kind {
         let num_consts = constrs.iter()
-            .filter(|c| matches!(c.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()) && c.cd_res.is_none())
+            .filter(|c| matches!(c.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()))
             .count() as i32;
         let num_nonconsts = constrs.len() as i32 - num_consts;
         let mut const_idx = 0i32;
         let mut block_idx = 0i32;
         for cd in constrs {
-            let is_constant = matches!(cd.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty())
-                && cd.cd_res.is_none();
+            let is_constant = matches!(cd.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty());
             if cd.cd_id.name() == cstr_name {
                 let mut inst_cache = HashMap::new();
                 let tag = if is_constant {
@@ -23310,7 +23308,7 @@ fn lookup_type_decl_for_path<'a>(
                             c.cd_args,
                             crate::types::ConstructorArguments::CstrTuple(ref args)
                                 if args.is_empty()
-                        ) && c.cd_res.is_none()
+                        )
                     })
                     .count() as i32;
                 let num_nonconsts = constrs.len() as i32 - num_consts;
@@ -23319,7 +23317,7 @@ fn lookup_type_decl_for_path<'a>(
                     let is_constant = matches!(
                         cd.cd_args,
                         crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-                    ) && cd.cd_res.is_none();
+                    );
 
                     if cd.cd_id.name() == type_name.as_str() {
                         if let crate::types::ConstructorArguments::CstrRecord(labels) = &cd.cd_args

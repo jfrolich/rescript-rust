@@ -2763,15 +2763,14 @@ pub fn add_signature_to_env(
                         let type_path = Path::pdot(module_path.clone(), id.name());
                         let num_consts = constrs
                             .iter()
-                            .filter(|c| matches!(c.cd_args, crate::types::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()) && c.cd_res.is_none())
+                            .filter(|c| matches!(c.cd_args, crate::types::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()))
                             .count() as i32;
                         let num_nonconsts = constrs.len() as i32 - num_consts;
                         let mut const_idx = 0i32;
                         let mut nonconst_idx = 0i32;
 
                         for cd in constrs {
-                            let is_constant = matches!(cd.cd_args, crate::types::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty())
-                                && cd.cd_res.is_none();
+                            let is_constant = matches!(cd.cd_args, crate::types::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty());
 
                             let cstr_tag = if is_constant {
                                 let tag = ConstructorTag::CstrConstant(const_idx);
