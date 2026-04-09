@@ -127,25 +127,98 @@ fn type_cannot_contain_undefined_rec(
     }
 }
 
+/// Get the unboxed representation of a type, if possible.
+/// For an unboxed variant type with a single constructor and single arg,
+/// returns the arg type (recursively expanded). Returns None for recursive types.
+/// Simplified version of OCaml's Typedecl.get_unboxed_type_representation.
+fn get_unboxed_type_representation(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+) -> Option<TypeExprRef> {
+    let mut visited = HashSet::new();
+    get_unboxed_repr_rec(ctx, env, ty, &mut visited)
+}
+
+fn get_unboxed_repr_rec(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+    visited: &mut HashSet<TypeExprRef>,
+) -> Option<TypeExprRef> {
+    if !visited.insert(ty) {
+        return None; // Recursive type
+    }
+    match &*ctx.get_desc(ty) {
+        TypeDesc::Tconstr { path, args, .. } => {
+            let decl = find_type_decl(ctx, env, path)?;
+            if !decl.type_unboxed.unboxed {
+                return Some(ty);
+            }
+            match &decl.type_kind {
+                TypeKind::TypeVariant(cdecls) if cdecls.len() == 1 => {
+                    match &cdecls[0].cd_args {
+                        ConstructorArguments::CstrTuple(tys) if tys.len() == 1 => {
+                            let arg_ty = tys[0];
+                            // Substitute type parameters if needed
+                            // For simple cases (no type params), use arg_ty directly
+                            get_unboxed_repr_rec(ctx, env, arg_ty, visited)
+                        }
+                        ConstructorArguments::CstrRecord(labels) if labels.len() == 1 => {
+                            let arg_ty = labels[0].ld_type;
+                            get_unboxed_repr_rec(ctx, env, arg_ty, visited)
+                        }
+                        _ => Some(ty),
+                    }
+                }
+                _ => Some(ty),
+            }
+        }
+        _ => Some(ty),
+    }
+}
+
 fn scrape_ty(ctx: &TypeContext<'_>, env: &Env, ty: TypeExprRef) -> TypeExprRef {
-    crate::types::ctype::expand_head(ctx, env, ty)
+    // OCaml's scrape_ty uses expand_head_opt (less aggressive) and then handles
+    // unboxed types by getting their representation. We approximate this by
+    // expanding and then checking for the unboxed case.
+    let ty = crate::types::ctype::expand_head(ctx, env, ty);
+    match &*ctx.get_desc(ty) {
+        TypeDesc::Tconstr { path, .. } => {
+            if let Some(decl) = find_type_decl(ctx, env, path) {
+                if decl.type_unboxed.unboxed {
+                    // For unboxed types, try to get the representation type.
+                    // If the type is recursive (representation returns None),
+                    // return the original type without further expansion.
+                    // This matches OCaml's scrape_ty behavior.
+                    match get_unboxed_type_representation(ctx, env, ty) {
+                        Some(repr_ty) => repr_ty,
+                        None => ty,
+                    }
+                } else {
+                    ty
+                }
+            } else {
+                ty
+            }
+        }
+        _ => ty,
+    }
 }
 
 fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
     let Path::Pident(id) = path else {
         return BuiltinPathTest::NotApplicable;
     };
-    // OCaml checks by stamp range (predef stamps), but predef idents are NOT persistent
-    // (they're created with Ident.create, not Ident.create_persistent).
-    // Check by name for predef types — they are always top-level Pident.
-    // Only match non-module paths (predef types have low stamps or stamp 0).
+    // OCaml checks by stamp range (predef stamps are in a known range).
+    // We check by name for predef types, which are always top-level Pident.
     if id.stamp() < 0 {
         return BuiltinPathTest::NotApplicable;
     }
     match id.name() {
-        "option" | "unit" => BuiltinPathTest::ForSureNo,
+        "option" | "unit" | "unknown" => BuiltinPathTest::ForSureNo,
         "int" | "char" | "float" | "bool" | "exn" | "array" | "list" | "result" | "dict"
-        | "bigint" | "string" | "extension_constructor" | "unknown" | "promise" => {
+        | "bigint" | "string" | "extension_constructor" | "promise" => {
             BuiltinPathTest::ForSureYes
         }
         _ => BuiltinPathTest::NotApplicable,
