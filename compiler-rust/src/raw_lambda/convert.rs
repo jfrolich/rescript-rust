@@ -3785,9 +3785,13 @@ impl<'a> RawLambdaConverter<'a> {
                 // Use full matching compiler (ported from OCaml's matching.ml)
                 self.compile_full_matching(loc, scrut, cases, partial, expr)
             }
-            ExpressionDesc::Texp_try(body, cases) => self
-                .compile_simple_trywith_raw(self.loc(expr.exp_loc), body, cases)
-                .unwrap_or_else(|| RawLambda::from_lowered(self.lowered.convert_expr(expr))),
+            ExpressionDesc::Texp_try(body, cases) => {
+                let loc = self.loc(expr.exp_loc);
+                let exn_id = self.name_pattern_ident("exn", cases);
+                let handler = self.compile_trywith_handler_raw(&exn_id, cases);
+                let body_lam = self.convert_expr_raw(body);
+                RawLambda::LtryWith(Box::new(body_lam), exn_id, Box::new(handler))
+            }
             ExpressionDesc::Texp_tuple(items) => {
                 let elems = items
                     .iter()

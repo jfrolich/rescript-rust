@@ -5696,6 +5696,12 @@ fn complete_pats_constrs(
         None => panic!("complete_pats_constrs: empty list"),
         Some(p) => {
             let cstr = pat_as_constr(p);
+
+            // Extension types (cstr_consts < 0) are open — can't enumerate all constructors
+            if cstr.cstr_consts < 0 {
+                return Vec::new();
+            }
+
             let all_tags: Vec<ConstructorTag> = pats.iter().map(|p| get_key_constr(p)).collect();
 
             // Build a set of seen tags
