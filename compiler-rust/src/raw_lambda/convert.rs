@@ -2689,22 +2689,36 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleCoercion::Tcoerce_primitive(pc) => {
                 self.transl_primitive_raw(&pc.pc_desc, pc.pc_type, pc.pc_loc)
             }
-            ModuleCoercion::Tcoerce_alias(env_ref, path, inner) => self.name_lambda_raw(strict, arg, |this, _| {
-                // Normalize the alias path to resolve module aliases (e.g., Belt.List -> Belt_List).
-                // In OCaml, the path in Tcoerce_alias is already normalized during coercion computation.
-                // In Rust, we must normalize here because the coercion may contain unresolved paths.
-                let normalized = if let Some(env) = this.type_ctx.get_typed_env(*env_ref) {
-                    this.normalize_module_path_in_env(env.as_ref(), path)
-                } else {
-                    this.normalize_module_path_in_env(this.env, path)
+            ModuleCoercion::Tcoerce_alias(env_ref, path, inner) => {
+                // Flatten nested Tcoerce_alias: if the inner coercion is also Tcoerce_alias,
+                // skip the outer one and use the innermost path (after normalization).
+                // This matches OCaml's behavior where the coercion path is already fully resolved.
+                let (final_env_ref, final_path, final_inner) = {
+                    let mut er = env_ref;
+                    let mut p = path;
+                    let mut i = inner.as_ref();
+                    while let ModuleCoercion::Tcoerce_alias(inner_er, inner_p, inner_i) = i {
+                        er = inner_er;
+                        p = inner_p;
+                        i = inner_i.as_ref();
+                    }
+                    (er, p, i)
                 };
-                this.apply_coercion_raw(
-                    loc.clone(),
-                    LetKind::Alias,
-                    inner,
-                    this.translate_normal_path_raw(&normalized, loc.clone()),
-                )
-            }),
+                self.name_lambda_raw(strict, arg, |this, _| {
+                    // Normalize the alias path to resolve module aliases (e.g., Belt.List -> Belt_List).
+                    let normalized = if let Some(env) = this.type_ctx.get_typed_env(*final_env_ref) {
+                        this.normalize_module_path_in_env(env.as_ref(), final_path)
+                    } else {
+                        this.normalize_module_path_in_env(this.env, final_path)
+                    };
+                    this.apply_coercion_raw(
+                        loc.clone(),
+                        LetKind::Alias,
+                        final_inner,
+                        this.translate_normal_path_raw(&normalized, loc.clone()),
+                    )
+                })
+            }
         }
     }
 
