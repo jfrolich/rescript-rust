@@ -1060,7 +1060,27 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
                 // more often, causing unwanted alias expansion that changes type identity.
                 // Preserving local Pident aliases matches OCaml's effective behavior.
                 let is_local_pident = matches!(&path, Path::Pident(id) if id.stamp() != 0 && !is_predef_type_name(id.name()));
-                if should_try_expand && !is_local_pident {
+                // Match OCaml: skip expansion in update_level for Pdot paths
+                // through first-class module parameters whose manifest is a
+                // locally-abstract type (non-generic, non-predef Pident).
+                // In OCaml, expand_head_unif doesn't link during unify2, so the
+                // Pdot path form is preserved. Rust's update_level_expand links
+                // eagerly, destroying the path form. Skipping here lets the
+                // general Tconstr/Tconstr expansion path handle it correctly
+                // through unify_after_expansion's relink logic.
+                let is_firstclass_module_pdot = matches!(&path, Path::Pdot(parent, _, _) if !parent.head().is_persistent())
+                    && env.lookup_type(&path).ok().is_some_and(|decl| {
+                        decl.type_manifest.is_some_and(|manifest| {
+                            let m = ctx.repr(manifest);
+                            let m_level = ctx.get_level(m);
+                            let m_desc = ctx.get_desc(m);
+                            m_level != crate::types::type_expr::GENERIC_LEVEL
+                                && matches!(&*m_desc, TypeDesc::Tconstr { path: mp, .. }
+                                    if matches!(mp, Path::Pident(id)
+                                        if id.stamp() != 0 && !is_predef_type_name(id.name())))
+                        })
+                    });
+                if should_try_expand && !is_local_pident && !is_firstclass_module_pdot {
                     if let Some(expanded) = try_expand_head(ctx, env, ty) {
                         let expanded = ctx.repr(expanded);
                         if should_log_v0 {
