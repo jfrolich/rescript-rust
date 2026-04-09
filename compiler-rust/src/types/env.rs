@@ -337,7 +337,7 @@ pub struct Env {
     summary: Arc<EnvSummary>,
 
     /// Local constraints (for GADTs).
-    local_constraints: HashMap<Path, Arc<TypeDeclaration>>,
+    local_constraints: im_rc::HashMap<Path, Arc<TypeDeclaration>>,
 
     /// GADT instance levels.
     gadt_instances: Vec<(i32, Vec<TypeExprRef>)>,
@@ -388,7 +388,7 @@ impl Env {
             modules: BindingTable::new(),
             modtypes: BindingTable::new(),
             summary: Arc::new(EnvSummary::Empty),
-            local_constraints: HashMap::new(),
+            local_constraints: im_rc::HashMap::new(),
             gadt_instances: Vec::new(),
             flags: EnvFlags::default(),
         }
