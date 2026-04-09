@@ -4821,8 +4821,10 @@ impl<'a> RawLambdaConverter<'a> {
         body: RawLambda,
         loc: Location,
     ) -> RawLambda {
+        // OCaml extracts extension fields from last to first (high position first)
+        // matching make_field_args order in matching.ml
         let mut result = body;
-        for (idx, arg_pat) in args.iter().enumerate().rev() {
+        for (idx, arg_pat) in args.iter().enumerate() {
             let field = RawLambda::prim(
                 Primitive::Pfield(idx as i32 + 1, FieldDbgInfo::Extension),
                 vec![RawLambda::var(scrut_id.clone())],
