@@ -7617,20 +7617,65 @@ fn build_label_descriptions(
 /// Follows type links to find the Tvariant row.
 fn extract_row_from_type(ctx_ref: &TypeContext<'_>, ty: TypeExprRef) -> RowDesc {
     use crate::types::type_expr::TypeDesc;
-    let ty = ctx_ref.repr(ty);
-    let desc = ctx_ref.get_desc(ty);
-    match &*desc {
-        TypeDesc::Tvariant(row) => row.clone(),
-        _ => {
-            // Return an empty row as fallback
-            RowDesc {
-                row_fields: Vec::new(),
-                row_more: TypeExprRef(0),
-                row_closed: true,
-                row_fixed: false,
-                row_name: None,
-            }
+    use crate::types::btype;
+
+    // Expand through links, Tconstr, and row_more to find the variant row
+    let mut current = ctx_ref.repr(ty);
+    'outer: for _ in 0..20 {
+        enum Action {
+            ReturnRow(RowDesc),
+            ExpandConstr(i32, String),
+            Follow(TypeExprRef),
+            Stop,
         }
+        let action = {
+            let desc = ctx_ref.get_desc(current);
+            match &*desc {
+                TypeDesc::Tvariant(row) => Action::ReturnRow(btype::row_repr(ctx_ref, row)),
+                TypeDesc::Tconstr { path, .. } => {
+                    let stamp = match path {
+                        crate::types::Path::Pident(id) => id.stamp(),
+                        _ => -1,
+                    };
+                    Action::ExpandConstr(stamp, path.name())
+                }
+                TypeDesc::Tlink(next) => Action::Follow(*next),
+                _ => Action::Stop,
+            }
+        };
+        match action {
+            Action::ReturnRow(row) => return row,
+            Action::ExpandConstr(stamp, path_name) => {
+                if stamp >= 0 {
+                    if let Some(decl) = ctx_ref.find_type_decl_by_stamp(stamp) {
+                        if let Some(manifest) = decl.type_manifest {
+                            current = ctx_ref.repr(manifest);
+                            continue;
+                        }
+                    }
+                }
+                if let Some(decl) = ctx_ref.find_type_decl_by_path(&path_name) {
+                    if let Some(manifest) = decl.type_manifest {
+                        current = ctx_ref.repr(manifest);
+                        continue;
+                    }
+                }
+                break;
+            }
+            Action::Follow(next) => {
+                current = ctx_ref.repr(next);
+            }
+            Action::Stop => break,
+        }
+    }
+
+    // Fallback: empty row
+    RowDesc {
+        row_fields: Vec::new(),
+        row_more: TypeExprRef(0),
+        row_closed: true,
+        row_fixed: false,
+        row_name: None,
     }
 }
 
