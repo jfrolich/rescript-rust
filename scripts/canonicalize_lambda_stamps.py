@@ -20,9 +20,10 @@ import re
 
 def canonicalize(text):
     # Match name/stamp where stamp is a 4+ digit number (>= 1000).
-    # Identifiers can contain letters, digits, underscores, *, $, and ' (e.g., *opt*/1234, $$/1234).
+    # Identifiers can start with letters, _, *, $, or operator chars (~, @, =, etc.)
+    # and contain those plus digits and more operator chars.
     # Stamps < 1000 are field positions, tag numbers, or predef stamps — left unchanged.
-    pattern = re.compile(r'([a-zA-Z_*$][a-zA-Z0-9_*\'$+\-~!@#]*)/(\d{4,})')
+    pattern = re.compile(r'([a-zA-Z_*$~!@#%^&\-+=<>:?|][a-zA-Z0-9_*\'$~!@#%^&\-+=<>:?|.]*)/(\d{4,})')
 
     # Per-name: maps (name, old_stamp) -> canonical_stamp
     stamp_map = {}
