@@ -4865,15 +4865,27 @@ impl<'a> RawLambdaConverter<'a> {
                     if !args.iter().all(Self::is_irrefutable_pattern) {
                         return None;
                     }
+                    let inner = if cstr.cstr_inlined.is_some() {
+                        // Inline record extension: fields accessed directly from exception
+                        match args.as_slice() {
+                            [arg_pat] => self.bind_irrefutable_pattern_raw(
+                                arg_pat,
+                                RawLambda::var(exn_id.clone()),
+                                body,
+                            ),
+                            _ => self.bind_extension_args_trywith_raw(
+                                exn_id, args, body, self.loc(pat.pat_loc),
+                            ),
+                        }
+                    } else {
+                        self.bind_extension_args_trywith_raw(
+                            exn_id, args, body, self.loc(pat.pat_loc),
+                        )
+                    };
                     let act = wrap_aliases_raw(
                         &aliases,
                         RawLambda::var(exn_id.clone()),
-                        self.bind_extension_args_trywith_raw(
-                            exn_id,
-                            args,
-                            body,
-                            self.loc(pat.pat_loc),
-                        ),
+                        inner,
                     );
                     extension_cases.push((path.clone(), act));
                 }
