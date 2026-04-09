@@ -6490,7 +6490,15 @@ impl<'a> RawLambdaConverter<'a> {
                         vec![RawLambda::var(tmp.clone())],
                         pat_loc,
                     );
-                    result = self.bind_irrefutable_pattern_raw(item, field, result);
+                    // OCaml's make_tuple_matching always generates field access
+                    // for ALL positions, even wildcards. The wildcard gets a
+                    // fresh "match" ident that's never used.
+                    if matches!(item.pat_desc, PatternDesc::Tpat_any) {
+                        let match_id = self.id_gen.create("match");
+                        result = RawLambda::let_(LetKind::Alias, match_id, field, result);
+                    } else {
+                        result = self.bind_irrefutable_pattern_raw(item, field, result);
+                    }
                 }
                 match wrap_tmp {
                     // OCaml's compile_matching passes args with Strict kind;
