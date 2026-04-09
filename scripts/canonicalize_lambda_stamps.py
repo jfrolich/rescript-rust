@@ -40,26 +40,7 @@ def canonicalize(text):
             next_per_name[name] = counter + 1
         return f'{name}/{stamp_map[key]}'
 
-    text = pattern.sub(replace, text)
-
-    # Canonicalize static exception exit numbers.
-    # These appear as (exit N), (exit N ...), and with (N) in catch expressions.
-    # Renumber them sequentially so that structurally identical code with different
-    # exit number offsets will compare equal.
-    exit_pattern = re.compile(r'(?<=\(exit )(\d+)(?=[\s)])|(?<=with \()(\d+)(?=\))')
-    exit_map = {}
-    next_exit = [1]
-
-    def replace_exit(m):
-        old_num = int(m.group(1) or m.group(2))
-        if old_num not in exit_map:
-            exit_map[old_num] = next_exit[0]
-            next_exit[0] += 1
-        return str(exit_map[old_num])
-
-    text = exit_pattern.sub(replace_exit, text)
-
-    return text
+    return pattern.sub(replace, text)
 
 if __name__ == '__main__':
     data = sys.stdin.buffer.read().decode('latin-1')
