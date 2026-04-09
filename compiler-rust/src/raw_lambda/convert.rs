@@ -586,6 +586,7 @@ pub struct RawLambdaConverter<'a> {
     persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
     id_gen: IdGenerator,
     next_static_raise: i32,
+    next_negative_raise: i32,
     lowered: LambdaConverter<'a>,
     unit_name: String,
 }
@@ -604,6 +605,7 @@ impl<'a> RawLambdaConverter<'a> {
             persistent_env: None,
             id_gen: IdGenerator::new(),
             next_static_raise: 0,
+            next_negative_raise: 0,
             lowered: LambdaConverter::new(arena),
             unit_name: String::new(),
         }
@@ -623,6 +625,7 @@ impl<'a> RawLambdaConverter<'a> {
             persistent_env: None,
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
+            next_negative_raise: 0,
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name: String::new(),
         }
@@ -643,6 +646,7 @@ impl<'a> RawLambdaConverter<'a> {
             persistent_env: None,
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
+            next_negative_raise: 0,
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name,
         }
@@ -660,6 +664,13 @@ impl<'a> RawLambdaConverter<'a> {
     fn next_raise_count(&mut self) -> i32 {
         self.next_static_raise += 1;
         self.next_static_raise
+    }
+
+    /// Get a negative static exception ID for exception-carrying static catches.
+    /// Matches OCaml's next_negative_raise_count.
+    fn next_negative_raise_count(&mut self) -> i32 {
+        self.next_negative_raise -= 1;
+        self.next_negative_raise
     }
 
     /// Convert typed tree cases to `(Pattern, RawLambda)` pairs for the full
@@ -3734,6 +3745,13 @@ impl<'a> RawLambdaConverter<'a> {
                 *partial,
                 *transformed_jsx,
             ),
+            ExpressionDesc::Texp_match(scrut, cases, exn_cases, partial) if !exn_cases.is_empty() => {
+                // Match with exception cases: wrap in try-with + static catch.
+                // Matches OCaml's transl_match logic from translcore.ml.
+                let loc = self.loc(expr.exp_loc);
+                let partial = *partial;
+                self.compile_match_with_exceptions_raw(loc, scrut, cases, exn_cases, partial, expr)
+            }
             ExpressionDesc::Texp_match(scrut, cases, exn_cases, partial) if exn_cases.is_empty() => {
                 // Try simple matchers first (they handle most common cases
                 // and produce output matching OCaml's simple optimizations).
@@ -4500,6 +4518,143 @@ impl<'a> RawLambdaConverter<'a> {
             scrut_lam,
             pat_act_list,
             partial,
+            &mut self.next_static_raise,
+        )
+    }
+
+    /// Compile a Texp_match with exception cases.
+    /// Matches OCaml's transl_match from translcore.ml.
+    ///
+    /// Structure:
+    ///   Lstaticcatch(
+    ///     Ltrywith(
+    ///       Lstaticraise(static_id, [scrut_value]),
+    ///       exn_id,
+    ///       for_trywith(exn_id, exn_cases)
+    ///     ),
+    ///     (static_id, [val_id]),
+    ///     for_function(val_id, normal_cases)
+    ///   )
+    fn compile_match_with_exceptions_raw(
+        &mut self,
+        loc: Location,
+        scrut: &Expression,
+        cases: &[Case],
+        exn_cases: &[Case],
+        partial: Partial,
+        expr: &Expression,
+    ) -> RawLambda {
+        let exn_id = self.name_pattern_ident("exn", exn_cases);
+        let val_id = self.name_pattern_ident("val", cases);
+
+        // Compile the exception handler: matching on the exception
+        let exn_handler = self.compile_trywith_handler_raw(&exn_id, exn_cases);
+
+        // Compile the normal handler: matching on the scrutinee value
+        let scrut_lam = self.convert_expr_raw(scrut);
+
+        // Compile normal cases with val_id as the scrutinee
+        let normal_handler = {
+            if partial == Partial::Partial {
+                let _default_raise = self.next_raise_count();
+            }
+            let pat_act_list = self.cases_to_pat_act_list(cases);
+            let loc_for_handler = loc.clone();
+            let fname = self.basename_for_loc(loc_for_handler.clone());
+            let handler_fun = || {
+                let line = loc_for_handler.loc_start.line;
+                let char_pos = loc_for_handler.loc_start.column();
+                let match_failure_ident = predef_exception_ident(
+                    "Match_failure",
+                    PREDEF_MATCH_FAILURE_STAMP,
+                );
+                let exn = RawLambda::LglobalModule(match_failure_ident, false);
+                let payload = RawLambda::Lconst(Constant::Block {
+                    tag: 0,
+                    tag_info: TagInfo::Tuple,
+                    elements: vec![
+                        Constant::string(fname.clone()),
+                        Constant::int(line),
+                        Constant::int(char_pos),
+                    ],
+                });
+                RawLambda::Lprim(RawPrimInfo {
+                    primitive: Primitive::Praise,
+                    args: vec![RawLambda::Lprim(RawPrimInfo {
+                        primitive: Primitive::Pmakeblock(
+                            0,
+                            TagInfo::Extension,
+                            Mutable::Immutable,
+                        ),
+                        args: vec![exn, payload],
+                        loc: loc_for_handler.clone(),
+                    })],
+                    loc: loc_for_handler,
+                })
+            };
+            full_matching::compile_matching(
+                self.type_ctx,
+                handler_fun,
+                RawLambda::var(val_id.clone()),
+                pat_act_list,
+                partial,
+                &mut self.next_static_raise,
+            )
+        };
+
+        // Build the structure:
+        // Lstaticcatch(
+        //   Ltrywith(Lstaticraise(id, [scrut_value]), exn_id, exn_handler),
+        //   (id, [val_id]),
+        //   normal_handler
+        // )
+        let static_exception_id = self.next_negative_raise_count();
+
+        let try_body = RawLambda::LstaticRaise(static_exception_id, vec![scrut_lam]);
+        let try_with = RawLambda::LtryWith(
+            Box::new(try_body),
+            exn_id,
+            Box::new(exn_handler),
+        );
+        RawLambda::LstaticCatch(
+            Box::new(try_with),
+            (static_exception_id, vec![val_id]),
+            Box::new(normal_handler),
+        )
+    }
+
+    /// Compile try-with exception handler from exception cases.
+    /// Matches OCaml's Matching.for_trywith.
+    fn compile_trywith_handler_raw(
+        &mut self,
+        exn_id: &Ident,
+        exn_cases: &[Case],
+    ) -> RawLambda {
+        // Try the simple handler first (handles extension constructors)
+        if let Some(handler) = self.compile_simple_trywith_extension_handler_raw(
+            Location::none(),
+            exn_id,
+            exn_cases,
+        ) {
+            return handler;
+        }
+
+        // Fall back to full matching compiler with reraise as default
+        let pat_act_list = self.cases_to_pat_act_list(exn_cases);
+        let exn_id_clone = exn_id.clone();
+        let handler_fun = move || {
+            RawLambda::Lprim(RawPrimInfo {
+                primitive: Primitive::Praise,
+                args: vec![RawLambda::var(exn_id_clone.clone())],
+                loc: Location::none(),
+            })
+        };
+        full_matching::compile_matching(
+            self.type_ctx,
+            handler_fun,
+            RawLambda::var(exn_id.clone()),
+            pat_act_list,
+            Partial::Partial,
             &mut self.next_static_raise,
         )
     }
