@@ -30,10 +30,6 @@ use super::asttypes::PrivateFlag;
 use super::type_expr::{AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 use super::variance::{Variance, VarianceFlag};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-static COPY_CONSTR_DEBUG_EVENTS: AtomicUsize = AtomicUsize::new(0);
-
 // ============================================================================
 // Type Errors
 // ============================================================================
@@ -84,98 +80,6 @@ pub enum SubtypeContext {
 
 /// Result type for type operations.
 pub type TypeResult<T> = Result<T, TypeError>;
-
-fn debug_unify_row_filter(env_var: &str) -> Option<Vec<String>> {
-    std::env::var(env_var).ok().and_then(|raw| {
-        let labels: Vec<String> = raw
-            .split(',')
-            .map(|part| part.trim())
-            .filter(|part| !part.is_empty())
-            .map(|part| part.to_string())
-            .collect();
-        (!labels.is_empty()).then_some(labels)
-    })
-}
-
-fn debug_row_labels(fields: &[(String, RowField)]) -> Vec<String> {
-    fields.iter().map(|(label, _)| label.clone()).collect()
-}
-
-fn debug_unify_rows_enabled(
-    filter: &[String],
-    row1: &RowDesc,
-    row2: &RowDesc,
-    r1: &[(String, RowField)],
-    r2: &[(String, RowField)],
-    pairs: &[(String, RowField, RowField)],
-) -> bool {
-    let mut labels = debug_row_labels(&row1.row_fields);
-    labels.extend(debug_row_labels(&row2.row_fields));
-    labels.extend(debug_row_labels(r1));
-    labels.extend(debug_row_labels(r2));
-    labels.extend(pairs.iter().map(|(label, _, _)| label.clone()));
-    filter.iter().all(|needle| labels.iter().any(|label| label == needle))
-}
-
-fn debug_unify_rows_log(
-    stage: &str,
-    row1: &RowDesc,
-    row2: &RowDesc,
-    r1: &[(String, RowField)],
-    r2: &[(String, RowField)],
-    pairs: &[(String, RowField, RowField)],
-) {
-    eprintln!(
-        "[unify-rows {stage}] row1={{closed:{} fixed:{} labels={:?}}} row2={{closed:{} fixed:{} labels={:?}}} r1={:?} r2={:?} pairs={:?}",
-        row1.row_closed,
-        row1.row_fixed,
-        debug_row_labels(&row1.row_fields),
-        row2.row_closed,
-        row2.row_fixed,
-        debug_row_labels(&row2.row_fields),
-        debug_row_labels(r1),
-        debug_row_labels(r2),
-        pairs.iter().map(|(label, _, _)| label).collect::<Vec<_>>(),
-    );
-}
-
-fn debug_unify_row_field_enabled(label: &str) -> bool {
-    std::env::var("RUST_DEBUG_UNIFY_ROW_FIELD")
-        .ok()
-        .map(|raw| {
-            raw.split(',')
-                .map(|part| part.trim())
-                .filter(|part| !part.is_empty())
-                .any(|needle| needle == label)
-        })
-        .unwrap_or(false)
-}
-
-fn debug_unify_row_types(ctx: &TypeContext<'_>, tys: &[TypeExprRef]) -> String {
-    tys.iter()
-        .map(|ty| {
-            let repr = ctx.repr(*ty);
-            let desc = ctx.get_desc(repr);
-            let summary = match &*desc {
-                TypeDesc::Ttuple(items) => format!(
-                    "Ttuple({})",
-                    items.iter()
-                        .map(|item| ctx.repr(*item).0.to_string())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ),
-                TypeDesc::Tvar(_) => "Tvar".to_string(),
-                TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-                TypeDesc::Tconstr { path, .. } => format!("Tconstr({})", path.name()),
-                TypeDesc::Tvariant(_) => "Tvariant".to_string(),
-                TypeDesc::Tlink(target) => format!("Tlink({})", ctx.repr(*target).0),
-                _ => format!("{:?}", &*desc),
-            };
-            format!("{}:{}", repr.0, summary)
-        })
-        .collect::<Vec<_>>()
-        .join(",")
-}
 
 // ============================================================================
 // Unification Mode
@@ -319,77 +223,8 @@ fn lookup_type_decl_for_path(
     env: &Env,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
-    let debug_lookup_target = std::env::var("RUST_DEBUG_LOOKUP_TYPE").ok();
-    let debug_lookup_target_match = debug_lookup_target
-        .as_deref()
-        .is_some_and(|target| path.name() == target);
-    let debug_lookup = std::env::var_os("RUST_DEBUG_LOOKUP_KEY").is_some()
-        && (path.last() == "key"
-            || path.last() == "id"
-            || path.name() == "Ord.t"
-            || path.last() == "compactDisplay"
-            || path.last() == "currency"
-            || path.last() == "style")
-        || debug_lookup_target_match;
-    let path_name = if debug_lookup { Some(path.name()) } else { None };
-    let describe_decl = |decl: &super::decl::TypeDeclaration| {
-        let manifest = decl
-            .type_manifest
-            .map(|manifest| {
-                let m = ctx.repr(manifest);
-                let d = ctx.get_desc(m);
-                match &*d {
-                    TypeDesc::Tconstr { path, .. } => format!("manifest=Tconstr({})", path.name()),
-                    TypeDesc::Tvar(_) => "manifest=Tvar".to_string(),
-                    TypeDesc::Tunivar(_) => "manifest=Tunivar".to_string(),
-                    TypeDesc::Tarrow { .. } => "manifest=Tarrow".to_string(),
-                    TypeDesc::Ttuple(_) => "manifest=Ttuple".to_string(),
-                    TypeDesc::Tlink(t) => format!("manifest=Tlink({})", ctx.repr(*t).0),
-                    TypeDesc::Tsubst(t) => format!("manifest=Tsubst({})", ctx.repr(*t).0),
-                    TypeDesc::Tobject { .. } => "manifest=Tobject".to_string(),
-                    TypeDesc::Tfield { .. } => "manifest=Tfield".to_string(),
-                    TypeDesc::Tnil => "manifest=Tnil".to_string(),
-                    TypeDesc::Tvariant(_) => "manifest=Tvariant".to_string(),
-                    TypeDesc::Tpoly { .. } => "manifest=Tpoly".to_string(),
-                    TypeDesc::Tpackage { .. } => "manifest=Tpackage".to_string(),
-                }
-            })
-            .unwrap_or_else(|| "manifest=None".to_string());
-        let variance = decl
-            .type_variance
-            .iter()
-            .enumerate()
-            .map(|(i, v)| {
-                format!(
-                    "{}:(mp={},mn={},mw={},inj={},p={},n={},inv={})",
-                    i,
-                    v.mem(VarianceFlag::MayPos),
-                    v.mem(VarianceFlag::MayNeg),
-                    v.mem(VarianceFlag::MayWeak),
-                    v.mem(VarianceFlag::Inj),
-                    v.mem(VarianceFlag::Pos),
-                    v.mem(VarianceFlag::Neg),
-                    v.mem(VarianceFlag::Inv)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        let type_path = decl
-            .type_path
-            .as_ref()
-            .map(|p| p.name())
-            .unwrap_or_else(|| "<none>".to_string());
-        format!("{manifest} type_path={type_path} variance=[{variance}]")
-    };
 
     if let Some(decl) = env.find_local_constraint(path) {
-        if let Some(path_name) = &path_name {
-            eprintln!(
-                "[lookup-type] path={} source=local_constraint {}",
-                path_name,
-                describe_decl(decl)
-            );
-        }
         return Some(decl.clone());
     }
 
@@ -405,42 +240,18 @@ fn lookup_type_decl_for_path(
                 .is_some_and(|decl_path| decl_path.same(path)),
         };
         if exact_lookup {
-            if let Some(path_name) = &path_name {
-                eprintln!(
-                    "[lookup-type] path={} source=env.lookup_type {}",
-                    path_name,
-                    describe_decl(decl)
-                );
-            }
             return Some(decl.clone());
         }
     }
 
     if let Some(decl) = resolve_type_through_modules(ctx, path) {
-        if let Some(path_name) = &path_name {
-            eprintln!(
-                "[lookup-type] path={} source=resolve_type_through_modules {}",
-                path_name,
-                describe_decl(&decl)
-            );
-        }
         return Some(decl);
     }
 
     if let Some(decl) = resolve_type_through_env(ctx, env, path, true) {
-        if let Some(path_name) = &path_name {
-            eprintln!(
-                "[lookup-type] path={} source=resolve_type_through_env {}",
-                path_name,
-                describe_decl(&decl)
-            );
-        }
         return Some(decl);
     }
 
-    if let Some(path_name) = &path_name {
-        eprintln!("[lookup-type] path={} source=none", path_name);
-    }
 
     None
 }
@@ -524,8 +335,6 @@ pub(crate) fn flattened_alias_paths_equivalent(
 
     let name1 = path1.name();
     let name2 = path2.name();
-    let debug_flat = std::env::var_os("RUST_DEBUG_FLAT_EQ").is_some()
-        && (name1.contains("Webapi") || name2.contains("Webapi"));
     let seg1: Vec<&str> = name1.split('.').collect();
     let seg2: Vec<&str> = name2.split('.').collect();
     let candidate = if seg1.len() == seg2.len() + 1
@@ -553,65 +362,23 @@ pub(crate) fn flattened_alias_paths_equivalent(
     } else {
         None
     };
-    if debug_flat {
-        eprintln!(
-            "[flat-eq] path1={} path2={} candidate={}",
-            name1,
-            name2,
-            candidate.is_some()
-        );
-    }
     let Some((long_path, short_path)) = candidate else {
         return false;
     };
 
     let long_decl = lookup_type_decl_for_path(ctx, env, long_path);
     let short_decl = lookup_type_decl_for_path(ctx, env, short_path);
-    if debug_flat {
-        eprintln!(
-            "[flat-eq] long={} short={} long_decl={} short_decl={}",
-            long_path.name(),
-            short_path.name(),
-            long_decl.is_some(),
-            short_decl.is_some()
-        );
-    }
     // The naming shape already proves these are flattened/unflattened forms
     // of the same path family. If declaration lookup fails (common for some
     // external aliases), accept the equivalence directly.
     if long_decl.is_none() || short_decl.is_none() {
-        if debug_flat {
-            eprintln!("[flat-eq] accept=true reason=missing-decl");
-        }
         return true;
     }
     let long_decl = long_decl.unwrap();
     let short_decl = short_decl.unwrap();
-    if debug_flat {
-        let long_type_path = long_decl
-            .type_path
-            .as_ref()
-            .map(|p| p.name())
-            .unwrap_or_else(|| "<none>".to_string());
-        let short_type_path = short_decl
-            .type_path
-            .as_ref()
-            .map(|p| p.name())
-            .unwrap_or_else(|| "<none>".to_string());
-        eprintln!(
-            "[flat-eq] long_manifest={} short_manifest={} long_type_path={} short_type_path={}",
-            long_decl.type_manifest.is_some(),
-            short_decl.type_manifest.is_some(),
-            long_type_path,
-            short_type_path
-        );
-    }
     if (short_decl.type_manifest.is_none() && short_decl.type_path.is_none())
         || (long_decl.type_manifest.is_none() && long_decl.type_path.is_none())
     {
-        if debug_flat {
-            eprintln!("[flat-eq] accept=true reason=opaque-proxy-decl");
-        }
         return true;
     }
 
@@ -622,9 +389,6 @@ pub(crate) fn flattened_alias_paths_equivalent(
             .as_ref()
             .zip(short_decl.type_path.as_ref())
             .is_some_and(|(lp, sp)| lp.same(sp) || lp.name() == sp.name());
-    if debug_flat {
-        eprintln!("[flat-eq] accept={result} reason=decl-check");
-    }
     result
 }
 
@@ -673,75 +437,14 @@ fn add_gadt_equation(
     source_path: &Path,
     destination: TypeExprRef,
 ) {
-    let debug_gadt_eq = std::env::var_os("RUST_DEBUG_GADT_EQ").is_some();
-    let source_name = if debug_gadt_eq {
-        Some(source_path.name())
-    } else {
-        None
-    };
 
     // local_non_recursive_abbrev check: destination must not reference source
     let dest_repr = ctx.repr(destination);
-    if let Some(source_name) = &source_name {
-        let dest_head = {
-            let desc = ctx.get_desc(dest_repr);
-            match &*desc {
-                TypeDesc::Tconstr { path, .. } => path.name(),
-                TypeDesc::Tvar(_) => "Tvar".to_string(),
-                TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-                TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
-                TypeDesc::Ttuple(_) => "Ttuple".to_string(),
-                TypeDesc::Tlink(_) => "Tlink".to_string(),
-                TypeDesc::Tsubst(_) => "Tsubst".to_string(),
-                TypeDesc::Tobject { .. } => "Tobject".to_string(),
-                TypeDesc::Tfield { .. } => "Tfield".to_string(),
-                TypeDesc::Tnil => "Tnil".to_string(),
-                TypeDesc::Tvariant(_) => "Tvariant".to_string(),
-                TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
-                TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
-            }
-        };
-        let existing_manifest = env
-            .find_local_constraint(source_path)
-            .and_then(|decl| decl.type_manifest)
-            .map(|manifest| {
-                let manifest_repr = ctx.repr(manifest);
-                let manifest_head = {
-                    let desc = ctx.get_desc(manifest_repr);
-                    match &*desc {
-                        TypeDesc::Tconstr { path, .. } => path.name(),
-                        TypeDesc::Tvar(_) => "Tvar".to_string(),
-                        TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-                        TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
-                        TypeDesc::Ttuple(_) => "Ttuple".to_string(),
-                        TypeDesc::Tlink(_) => "Tlink".to_string(),
-                        TypeDesc::Tsubst(_) => "Tsubst".to_string(),
-                        TypeDesc::Tobject { .. } => "Tobject".to_string(),
-                        TypeDesc::Tfield { .. } => "Tfield".to_string(),
-                        TypeDesc::Tnil => "Tnil".to_string(),
-                        TypeDesc::Tvariant(_) => "Tvariant".to_string(),
-                        TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
-                        TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
-                    }
-                };
-                (manifest_repr.0, manifest_head)
-            });
-        eprintln!(
-            "[gadt-eq] source={} dest={} dest_head={} existing={:?}",
-            source_name,
-            dest_repr.0,
-            dest_head,
-            existing_manifest
-        );
-    }
     let is_recursive = matches!(
         &*ctx.get_desc(dest_repr),
         TypeDesc::Tconstr { path, .. } if path.same(source_path)
     );
     if is_recursive {
-        if let Some(source_name) = source_name {
-            eprintln!("[gadt-eq] source={} skip recursive", source_name);
-        }
         return;
     }
 
@@ -772,31 +475,6 @@ fn add_gadt_equation(
     };
 
     // Add as a local constraint
-    if let Some(source_name) = source_name {
-        let manifest_repr = ctx.repr(destination_copy);
-        let manifest_head = {
-            let desc = ctx.get_desc(manifest_repr);
-            match &*desc {
-                TypeDesc::Tconstr { path, .. } => path.name(),
-                TypeDesc::Tvar(_) => "Tvar".to_string(),
-                TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-                TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
-                TypeDesc::Ttuple(_) => "Ttuple".to_string(),
-                TypeDesc::Tlink(_) => "Tlink".to_string(),
-                TypeDesc::Tsubst(_) => "Tsubst".to_string(),
-                TypeDesc::Tobject { .. } => "Tobject".to_string(),
-                TypeDesc::Tfield { .. } => "Tfield".to_string(),
-                TypeDesc::Tnil => "Tnil".to_string(),
-                TypeDesc::Tvariant(_) => "Tvariant".to_string(),
-                TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
-                TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
-            }
-        };
-        eprintln!(
-            "[gadt-eq] source={} add manifest={} head={}",
-            source_name, manifest_repr.0, manifest_head
-        );
-    }
     env.add_local_constraint(source_path.clone(), decl);
     // OCaml add_gadt_equation calls cleanup_abbrev after installing the new
     // local constraint so future expansions observe the updated equation.
@@ -915,55 +593,6 @@ pub fn type_contains_variant(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool {
 pub fn link_type(ctx: &TypeContext<'_>, t1: TypeExprRef, t2: TypeExprRef) {
     let t1_repr = ctx.repr(t1);
     let t2_repr = ctx.repr(t2);
-    if let Some(needle) = std::env::var("RUST_DEBUG_LINK_PATH").ok() {
-        let summarize = |ty: TypeExprRef| {
-            let ty = ctx.repr(ty);
-            let desc = ctx.get_desc(ty);
-            match &*desc {
-                TypeDesc::Tconstr { path, .. } => format!("{}@{}", path.name(), ctx.get_level(ty)),
-                TypeDesc::Tvar(_) => format!("Tvar@{}", ctx.get_level(ty)),
-                TypeDesc::Tarrow { .. } => format!("Tarrow@{}", ctx.get_level(ty)),
-                TypeDesc::Ttuple(_) => format!("Ttuple@{}", ctx.get_level(ty)),
-                TypeDesc::Tunivar(_) => format!("Tunivar@{}", ctx.get_level(ty)),
-                TypeDesc::Tpoly { .. } => format!("Tpoly@{}", ctx.get_level(ty)),
-                TypeDesc::Tpackage { .. } => format!("Tpackage@{}", ctx.get_level(ty)),
-                TypeDesc::Tvariant(_) => format!("Tvariant@{}", ctx.get_level(ty)),
-                TypeDesc::Tobject { .. } => format!("Tobject@{}", ctx.get_level(ty)),
-                TypeDesc::Tfield { .. } => format!("Tfield@{}", ctx.get_level(ty)),
-                TypeDesc::Tnil => format!("Tnil@{}", ctx.get_level(ty)),
-                TypeDesc::Tlink(target) => {
-                    format!("Tlink({})@{}", ctx.repr(*target).0, ctx.get_level(ty))
-                }
-                TypeDesc::Tsubst(target) => {
-                    format!("Tsubst({})@{}", ctx.repr(*target).0, ctx.get_level(ty))
-                }
-            }
-        };
-        let matches = |ty: TypeExprRef| {
-            let ty = ctx.repr(ty);
-            match &*ctx.get_desc(ty) {
-                TypeDesc::Tconstr { path, .. } => {
-                    let name = path.name();
-                    name == needle || path.last() == needle || name.contains(&needle)
-                }
-                _ => false,
-            }
-        };
-        if matches(t1_repr) || matches(t2_repr) {
-            eprintln!(
-                "[link-type] source={} repr={} desc={} target={} repr={} desc={}",
-                t1.0,
-                t1_repr.0,
-                summarize(t1_repr),
-                t2.0,
-                t2_repr.0,
-                summarize(t2_repr)
-            );
-            if std::env::var_os("RUST_DEBUG_LINK_BACKTRACE").is_some() {
-                eprintln!("{}", std::backtrace::Backtrace::force_capture());
-            }
-        }
-    }
     let source_name = {
         let desc = ctx.get_desc(t1_repr);
         match &*desc {
@@ -1035,24 +664,10 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
         match &*desc {
             TypeDesc::Tconstr { path, .. } => {
                 let path = path.clone();
-                let debug_v0 = std::env::var_os("RUST_DEBUG_UNIFY_V0").is_some();
-                let should_log_v0 = debug_v0
-                    && matches!(path.name().as_str(), "V0.key" | "V0.id" | "V1.key" | "V1.id");
                 // OCaml ctype.ml:659: when level < get_level env p, try to expand.
                 // get_level returns Path.binding_time which is the root ident's stamp.
                 let binding_time = path_binding_time(&path);
                 let should_try_expand = current != GENERIC_LEVEL && level < binding_time;
-                if should_log_v0 {
-                    eprintln!(
-                        "[unify-v0] update_level_expand-enter ty={} path={} level={} current={} binding_time={} should_try_expand={}",
-                        ty.0,
-                        path.name(),
-                        level,
-                        current,
-                        binding_time,
-                        should_try_expand
-                    );
-                }
                 drop(desc);
                 // Guard: skip expansion for all local Pident types (not predef).
                 // OCaml's update_level tries expansion but often fails for local types
@@ -1083,17 +698,6 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
                 if should_try_expand && !is_local_pident && !is_firstclass_module_pdot {
                     if let Some(expanded) = try_expand_head(ctx, env, ty) {
                         let expanded = ctx.repr(expanded);
-                        if should_log_v0 {
-                            eprintln!(
-                                "[unify-v0] update_level_expand ty={} path={} level={} current={} binding_time={} expanded={}",
-                                ty.0,
-                                path.name(),
-                                level,
-                                current,
-                                binding_time,
-                                expanded.0
-                            );
-                        }
                         if should_preserve_local_t_alias_during_level_update(
                             ctx, &path, expanded,
                         )
@@ -1350,15 +954,6 @@ pub fn resolve_type_through_modules<'a>(
     let mut visiting = HashSet::new();
     let mut current_sig =
         resolve_module_signature_through_cmi(ctx, &load_paths, module_path, &mut visiting)?;
-    let debug_event =
-        std::env::var_os("RUST_DEBUG_EXPAND_EVENT").is_some() && path.name().contains("Event.");
-    if debug_event {
-        eprintln!(
-            "[resolve-type] requested={} module_path={}",
-            path.name(),
-            module_path.name()
-        );
-    }
     // Match OCaml Subst/Mtype behavior for module signatures loaded from cmi:
     // rewrite intra-signature type/module references to qualified access paths
     // (e.g. `componentLike` -> `Jsx.componentLike`, `element` -> `Jsx.element`).
@@ -1391,40 +986,6 @@ pub fn resolve_type_through_modules<'a>(
             if id.name() == type_name {
                 // Cache the target type in the path store
                 let path_name = path.name();
-                if debug_event {
-                    let manifest_summary = decl
-                        .type_manifest
-                        .map(|m| {
-                            let r = ctx.repr(m);
-                            let d = ctx.get_desc(r);
-                            match &*d {
-                                TypeDesc::Tconstr { path, args, .. } => {
-                                    format!(
-                                        "Tconstr {} args={} head_stamp={} head_persistent={}",
-                                        path.name(),
-                                        args.len(),
-                                        path.head().stamp(),
-                                        path.head().is_persistent()
-                                    )
-                                }
-                                TypeDesc::Tvariant(_) => "Tvariant".to_string(),
-                                TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
-                                TypeDesc::Tvar(_) => "Tvar".to_string(),
-                                _ => format!("{:?}", &*d),
-                            }
-                        })
-                        .unwrap_or_else(|| "<none>".to_string());
-                    eprintln!(
-                        "[resolve-type] match type={} stamp={} type_path={} manifest={}",
-                        id.name(),
-                        id.stamp(),
-                        decl.type_path
-                            .as_ref()
-                            .map(|p| p.name())
-                            .unwrap_or_else(|| "<none>".to_string()),
-                        manifest_summary
-                    );
-                }
                 ctx.register_type_decl_by_path(&path_name, decl.clone());
                 result = Some(decl.clone());
             }
@@ -1770,12 +1331,6 @@ fn resolve_type_item_through_env<'a>(
         Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
         _ => return None,
     };
-    let debug_resolve = std::env::var("RUST_DEBUG_RESOLVE_TYPE_ENV")
-        .ok()
-        .is_some_and(|needle| {
-            let path_name = path.name();
-            !needle.is_empty() && (path_name == needle || path_name.contains(&needle))
-        });
 
     let mut visiting = HashSet::new();
     let module_mty = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)?;
@@ -1792,18 +1347,6 @@ fn resolve_type_item_through_env<'a>(
     } else {
         None
     };
-    if debug_resolve {
-        eprintln!(
-            "[resolve-type-env] path={} module_path={} module_mty={:?} alias_target={}",
-            path.name(),
-            module_path.name(),
-            module_mty,
-            alias_target_for_strengthening
-                .as_ref()
-                .map(|p| p.name())
-                .unwrap_or_else(|| "<none>".to_string())
-        );
-    }
     // Match OCaml Env.components_of_module path lookup behavior: when resolving
     // `M.t`, operate on a path-qualified copy of `M`'s signature so sibling
     // references inside manifests are rewritten through the access path.
@@ -1811,18 +1354,6 @@ fn resolve_type_item_through_env<'a>(
 
     for item in &module_sig {
         if let SignatureItem::SigType(id, decl, _) = item {
-            if debug_resolve {
-                eprintln!(
-                    "[resolve-type-env] sig-type id={} match={} manifest={} type_path={}",
-                    id.name(),
-                    id.name() == type_name,
-                    decl.type_manifest.is_some(),
-                    decl.type_path
-                        .as_ref()
-                        .map(|p| p.name())
-                        .unwrap_or_else(|| "<none>".to_string())
-                );
-            }
             if id.name() == type_name {
                 let queried_type_path = Path::pdot(module_path.clone(), type_name.to_string());
                 let self_manifest = decl
@@ -1844,49 +1375,20 @@ fn resolve_type_item_through_env<'a>(
                     if let Some((raw_id, raw_decl)) =
                         lookup_raw_module_sig_type(env, raw_module_path, type_name)
                     {
-                        if debug_resolve {
-                            eprintln!(
-                                "[resolve-type-env] raw-self-manifest-fallback module={} type={} raw_manifest={} raw_type_path={}",
-                                raw_module_path.name(),
-                                type_name,
-                                raw_decl.type_manifest.is_some(),
-                                raw_decl
-                                    .type_path
-                                    .as_ref()
-                                    .map(|p| p.name())
-                                    .unwrap_or_else(|| "<none>".to_string())
-                            );
-                        }
                         return Some((raw_id, raw_decl));
                     }
                 }
                 if let Some(target_path) = alias_target_for_strengthening.as_ref() {
-                    if debug_resolve {
-                        eprintln!(
-                            "[resolve-type-env] strengthen target={} type={}",
-                            target_path.name(),
-                            id.name()
-                        );
-                    }
                     return Some((
                         id.clone(),
                         strengthen_type_decl_for_module_access_path(ctx, target_path, id, decl),
                     ));
-                }
-                if debug_resolve {
-                    eprintln!("[resolve-type-env] returning raw decl type={}", id.name());
                 }
                 return Some((id.clone(), decl.clone()));
             }
         }
     }
 
-    if debug_resolve {
-        eprintln!(
-            "[resolve-type-env] fallback resolve_type_through_modules path={}",
-            path.name()
-        );
-    }
     // Fall back to CMI-based resolution if local env-based lookup didn't find
     // the type item (e.g. when only the persistent path is available).
     resolve_type_through_modules(ctx, path).map(|decl| {
@@ -2024,7 +1526,6 @@ fn try_expand_head<'a>(
     env: &Env,
     ty: TypeExprRef,
 ) -> Option<TypeExprRef> {
-    let debug_image_alias = std::env::var_os("RUST_DEBUG_IMAGE_ALIAS").is_some();
     let ty = ctx.repr(ty);
     let desc = ctx.get_desc(ty);
     match &*desc {
@@ -2040,90 +1541,6 @@ fn try_expand_head<'a>(
             let orig_abbrev = *abbrev;
             let lookup_abbrev = proper_abbrevs(ctx, &path, &args, *abbrev);
             let path_name = path.name();
-            let debug_expand_target = std::env::var("RUST_DEBUG_EXPAND_TYPE").ok();
-            if debug_image_alias && path.head_name() == "imageElement" {
-                eprintln!(
-                    "[image-alias][try-expand-enter] ty={} path={} args={}",
-                    ty.0,
-                    path_name,
-                    args.len()
-                );
-            }
-            let debug_expand = (std::env::var_os("RUST_DEBUG_EXPAND_N_T").is_some()
-                && path_name == "N.t")
-                || (std::env::var_os("RUST_DEBUG_EXPAND_N_VALUE").is_some()
-                    && path_name == "N.value")
-                || (std::env::var_os("RUST_DEBUG_EXPAND_SPRITE_XY").is_some()
-                    && path_name == "Sprite.xy")
-                || (std::env::var_os("RUST_DEBUG_EXPAND_KEY").is_some()
-                    && (path_name == "key"
-                        || path_name.ends_with(".key")
-                        || path_name == "id"
-                        || path_name.ends_with(".id")
-                        || path_name == "Ord.t"))
-                || (std::env::var_os("RUST_DEBUG_EXPAND_COMPARE").is_some()
-                    && path_name == "Comparable.compare")
-                || (std::env::var_os("RUST_DEBUG_EXPAND_CMP").is_some()
-                    && (path_name == "cmp" || path_name.ends_with(".cmp")))
-                || (std::env::var_os("RUST_DEBUG_EXPAND_A").is_some()
-                    && (path_name == "a" || path_name == "bool"))
-                || (std::env::var_os("RUST_DEBUG_EXPAND_STATELESS").is_some()
-                    && (path_name == "stateless"
-                        || path_name == "noRetainedProps"
-                        || path_name == "actionless"
-                        || path_name == "component"
-                        || path_name == "componentSpec"))
-                || (std::env::var_os("RUST_DEBUG_EXPAND_REACT_COMPONENT").is_some()
-                    && (path_name == "React.component"
-                        || path_name.ends_with(".component")
-                        || path_name == "element"
-                        || path_name.ends_with(".element")
-                        || path_name == "componentLike"
-                        || path_name.ends_with(".componentLike")))
-                || (std::env::var_os("RUST_DEBUG_EXPAND_EVENT").is_some()
-                    && (path_name.contains("JsxEvent")
-                        || path_name.contains("ReactEvent")
-                        || path_name == "tag"
-                        || path_name.ends_with(".tag")
-                        || path_name.ends_with("Event.Mouse.t")
-                        || path_name.ends_with("Event.Mouse.tag")))
-                || (std::env::var_os("RUST_DEBUG_EXPAND_LAYERSTYLE").is_some()
-                    && (path_name == "LayerStyleID.t"
-                        || path_name == "LayerStyleID.ID.t"
-                        || path_name == "Layout.Types.t"))
-                || debug_expand_target
-                    .as_deref()
-                    .is_some_and(|target| target == path_name);
-            if debug_expand {
-                eprintln!(
-                    "[expand] path={} enter ty={} level={} env_id={} stamp={} lookup={:?} memo={:?}",
-                    path_name,
-                    ty.0,
-                    ctx.get_level(ty),
-                    env.id(),
-                    path.head().stamp(),
-                    lookup_abbrev,
-                    ctx.get_abbrev_memo(lookup_abbrev)
-                );
-                if path_name == "a" {
-                    let mut locals = Vec::new();
-                    for (p, decl) in env.iter_local_constraints() {
-                        locals.push(format!(
-                            "{} same={} manifest={} newtype={:?}",
-                            p.name(),
-                            p.same(&path),
-                            decl.type_manifest.is_some(),
-                            decl.type_newtype_level
-                        ));
-                    }
-                    eprintln!("[expand] path=a local_constraints={:?}", locals);
-                }
-                if std::env::var_os("RUST_DEBUG_EXPAND_VALUE_BT").is_some() && path_name == "N.value"
-                {
-                    let bt = std::backtrace::Backtrace::capture();
-                    eprintln!("[expand-value-bt]\n{bt:?}");
-                }
-            }
 
             // Try stamp-based lookup first (most precise, handles CMI-loaded types)
             let stamp = match &path {
@@ -2153,199 +1570,17 @@ fn try_expand_head<'a>(
                         } if cached_path.same(&path)
                     )
                 };
-                if debug_expand {
-                    let cached_head = {
-                        let desc = ctx.get_desc(cached_repr);
-                        match &*desc {
-                            TypeDesc::Tconstr { path, .. } => path.name(),
-                            TypeDesc::Tvar(_) => "Tvar".to_string(),
-                            TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-                            TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
-                            TypeDesc::Ttuple(_) => "Ttuple".to_string(),
-                            TypeDesc::Tlink(_) => "Tlink".to_string(),
-                            TypeDesc::Tsubst(_) => "Tsubst".to_string(),
-                            TypeDesc::Tobject { .. } => "Tobject".to_string(),
-                            TypeDesc::Tfield { .. } => "Tfield".to_string(),
-                            TypeDesc::Tnil => "Tnil".to_string(),
-                            TypeDesc::Tvariant(_) => "Tvariant".to_string(),
-                            TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
-                            TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
-                        }
-                    };
-                    eprintln!(
-                        "[expand] path={} cached-candidate ty={} cached={} cached_head={} stale_same_path={} same_ty={}",
-                        path_name,
-                        ty.0,
-                        cached_repr.0,
-                        cached_head,
-                        stale_same_path,
-                        cached_repr == ty
-                    );
-                }
                 if !(cached_repr == ty || stale_same_path) {
                     let level = ctx.get_level(ty);
                     if level != GENERIC_LEVEL {
                         update_level(ctx, level, cached);
-                    }
-                    if debug_image_alias && path.head_name() == "imageElement" {
-                        eprintln!(
-                            "[image-alias][try-expand-return] reason=cached-hit ty={} path={} cached={}",
-                            ty.0,
-                            path.name(),
-                            cached_repr.0
-                        );
-                    }
-                    if debug_expand {
-                        eprintln!(
-                            "[expand] path={} cached-hit ty={} cached={} cached_level={}",
-                            path_name,
-                            ty.0,
-                            cached_repr.0,
-                            ctx.get_level(cached_repr)
-                        );
                     }
                     return Some(cached_repr);
                 }
             }
 
             let expand_with_subst = |params: &[TypeExprRef], manifest: TypeExprRef| -> TypeExprRef {
-                if debug_expand {
-                    let manifest_repr = ctx.repr(manifest);
-                    let arg_dump = args
-                        .iter()
-                        .map(|a| {
-                            let r = ctx.repr(*a);
-                            format!("{}@{}", r.0, ctx.get_level(r))
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    eprintln!(
-                        "[expand] path={} subst-enter manifest={} manifest_level={} args={}",
-                        path_name,
-                        manifest_repr.0,
-                        ctx.get_level(manifest_repr),
-                        arg_dump
-                    );
-                    if std::env::var_os("RUST_DEBUG_EXPAND_TARGET_BT").is_some() {
-                        eprintln!(
-                            "[expand-bt] path={} ty={}\n{:?}",
-                            path_name,
-                            ty.0,
-                            std::backtrace::Backtrace::capture()
-                        );
-                    }
-                }
-                if std::env::var_os("RUST_DEBUG_EXPAND_COMPARE").is_some()
-                    && path_name == "Comparable.compare"
-                {
-                    let params_dump: Vec<String> = params
-                        .iter()
-                        .enumerate()
-                        .map(|(i, p)| {
-                            let r = ctx.repr(*p);
-                            format!("{i}:{}", r.0)
-                        })
-                        .collect();
-                    let manifest_dump = {
-                        let m = ctx.repr(manifest);
-                        let d = ctx.get_desc(m);
-                        match &*d {
-                            TypeDesc::Tpackage { args, .. } => {
-                                let parts: Vec<String> = args
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, a)| {
-                                        let r = ctx.repr(*a);
-                                        format!("{i}:raw{}->repr{}", a.0, r.0)
-                                    })
-                                    .collect();
-                                format!("package {}", parts.join(","))
-                            }
-                            _ => format!("non-package#{}", m.0),
-                        }
-                    };
-                    let args_dump: Vec<String> = args
-                        .iter()
-                        .enumerate()
-                        .map(|(i, a)| {
-                            let r = ctx.repr(*a);
-                            format!("{i}:raw{}->repr{}", a.0, r.0)
-                        })
-                        .collect();
-                    eprintln!(
-                        "[expand-compare] pre-subst params=[{}] manifest={} args=[{}]",
-                        params_dump.join(","),
-                        manifest_dump,
-                        args_dump.join(",")
-                    );
-                }
                 let expanded = subst_with_memo(ctx, env, ty, lookup_abbrev, params, &args, manifest);
-                if std::env::var_os("RUST_DEBUG_EXPAND_COMPONENT").is_some()
-                    && path_name == "component"
-                {
-                    let args_in = args
-                        .iter()
-                        .map(|a| {
-                            let r = ctx.repr(*a);
-                            format!("{}@{}", r.0, ctx.get_level(r))
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    let expanded_repr = ctx.repr(expanded);
-                    let expanded_desc = ctx.get_desc(expanded_repr);
-                    let expanded_dump = match &*expanded_desc {
-                        TypeDesc::Tconstr { path, args, .. } => {
-                            let out = args
-                                .iter()
-                                .map(|a| {
-                                    let r = ctx.repr(*a);
-                                    format!("{}@{}", r.0, ctx.get_level(r))
-                                })
-                                .collect::<Vec<_>>()
-                                .join(",");
-                            format!("{}({})", path.name(), out)
-                        }
-                        other => format!("{other:?}"),
-                    };
-                    drop(expanded_desc);
-                    eprintln!(
-                        "[expand-component] in={} expanded={} repr={} level={}",
-                        args_in,
-                        expanded_dump,
-                        expanded_repr.0,
-                        ctx.get_level(expanded_repr)
-                    );
-                }
-                if debug_expand {
-                    let expanded_repr = ctx.repr(expanded);
-                    let expanded_kind = {
-                        let d = ctx.get_desc(expanded_repr);
-                        match &*d {
-                            TypeDesc::Tconstr { path, .. } => format!("Tconstr({})", path.name()),
-                            TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
-                            TypeDesc::Ttuple(_) => "Ttuple".to_string(),
-                            TypeDesc::Tvar(_) => "Tvar".to_string(),
-                            TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-                            TypeDesc::Tlink(t) => format!("Tlink({})", ctx.repr(*t).0),
-                            TypeDesc::Tsubst(t) => format!("Tsubst({})", ctx.repr(*t).0),
-                            TypeDesc::Tobject { .. } => "Tobject".to_string(),
-                            TypeDesc::Tfield { .. } => "Tfield".to_string(),
-                            TypeDesc::Tnil => "Tnil".to_string(),
-                            TypeDesc::Tvariant(_) => "Tvariant".to_string(),
-                            TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
-                            TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
-                        }
-                    };
-                    eprintln!(
-                        "[expand] path={} subst-exit expanded={} ({}) expanded_level={} ty={} ty_level={}",
-                        path_name,
-                        expanded_repr.0,
-                        expanded_kind,
-                        ctx.get_level(expanded_repr),
-                        ty.0,
-                        ctx.get_level(ty)
-                    );
-                }
                 expanded
             };
 
@@ -2360,104 +1595,10 @@ fn try_expand_head<'a>(
             if let Some(constraint_decl) = env.find_local_constraint(&path) {
                 if let Some(manifest) = constraint_decl.type_manifest {
                     let params = &constraint_decl.type_params;
-                    if debug_expand {
-                        let manifest_repr = ctx.repr(manifest);
-                        let manifest_head = {
-                            let desc = ctx.get_desc(manifest_repr);
-                            match &*desc {
-                                TypeDesc::Tconstr { path, .. } => path.name(),
-                                TypeDesc::Tvar(_) => "Tvar".to_string(),
-                                TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-                                TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
-                                TypeDesc::Ttuple(_) => "Ttuple".to_string(),
-                                TypeDesc::Tlink(_) => "Tlink".to_string(),
-                                TypeDesc::Tsubst(_) => "Tsubst".to_string(),
-                                TypeDesc::Tobject { .. } => "Tobject".to_string(),
-                                TypeDesc::Tfield { .. } => "Tfield".to_string(),
-                                TypeDesc::Tnil => "Tnil".to_string(),
-                                TypeDesc::Tvariant(_) => "Tvariant".to_string(),
-                                TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
-                                TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
-                            }
-                        };
-                        eprintln!(
-                            "[expand] path={} local-constraint manifest={} head={} params={} args={}",
-                            path_name,
-                            manifest_repr.0,
-                            manifest_head,
-                            params.len(),
-                            args.len()
-                        );
-                    }
                     if params.len() == args.len() {
                         let expanded = expand_with_subst(params, manifest);
-                        if std::env::var_os("RUST_DEBUG_EXPAND_COMPARE").is_some()
-                            && path_name == "Comparable.compare"
-                        {
-                            let params_dump: Vec<String> = params
-                                .iter()
-                                .map(|p| {
-                                    let r = ctx.repr(*p);
-                                    format!("{}@{}", r.0, ctx.get_level(r))
-                                })
-                                .collect();
-                            let args_dump: Vec<String> = args
-                                .iter()
-                                .map(|a| {
-                                    let r = ctx.repr(*a);
-                                    let d = ctx.get_desc(r);
-                                    match &*d {
-                                        TypeDesc::Tconstr { path, .. } => path.name(),
-                                        TypeDesc::Tvar(name) => format!("Tvar({name:?})"),
-                                        _ => format!("ty#{}", r.0),
-                                    }
-                                })
-                                .collect();
-                            let expanded_repr = ctx.repr(expanded);
-                            let expanded_dump = match &*ctx.get_desc(expanded_repr) {
-                                TypeDesc::Tpackage { args, .. } => args
-                                    .iter()
-                                    .map(|a| {
-                                        let r = ctx.repr(*a);
-                                        let d = ctx.get_desc(r);
-                                        match &*d {
-                                            TypeDesc::Tconstr { path, .. } => path.name(),
-                                            TypeDesc::Tvar(name) => format!("Tvar({name:?})"),
-                                            _ => format!("ty#{}", r.0),
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(","),
-                                _ => format!("non-package#{}", expanded_repr.0),
-                            };
-                            eprintln!(
-                                "[expand-compare] params={} args={} expanded_args={}",
-                                params_dump.join(","),
-                                args_dump.join(","),
-                                expanded_dump
-                            );
-                        }
-                        if debug_image_alias && path.head_name() == "imageElement" {
-                            let expanded_repr = ctx.repr(expanded);
-                            let expanded_name = {
-                                let d = ctx.get_desc(expanded_repr);
-                                match &*d {
-                                    TypeDesc::Tconstr { path, .. } => path.name(),
-                                    _ => "<non-constr>".to_string(),
-                                }
-                            };
-                            eprintln!(
-                                "[image-alias][try-expand-return] reason=local-constraint ty={} path={} expanded={} {}",
-                                ty.0,
-                                path.name(),
-                                expanded_repr.0,
-                                expanded_name
-                            );
-                        }
                         return Some(expanded);
                     }
-                } else if debug_expand {
-                    eprintln!("[expand] path={} local-constraint no-manifest", path_name);
                 }
             }
 
@@ -2497,12 +1638,6 @@ fn try_expand_head<'a>(
                         _ => false,
                     };
                     if self_manifest && alias_backed_parent {
-                        if debug_expand {
-                            eprintln!(
-                                "[expand] path={} env.lookup_type synthetic self-manifest; defer qualified resolution",
-                                path_name
-                            );
-                        }
                     } else if let Some(manifest) = env_decl.type_manifest {
                         if can_expand_decl_manifest(env_decl, manifest) {
                             let params = &env_decl.type_params;
@@ -2510,28 +1645,14 @@ fn try_expand_head<'a>(
                                 return Some(expand_with_subst(params, manifest));
                             }
                             forbid_fallback_manifest_expansion = true;
-                            if debug_expand {
-                                eprintln!(
-                                    "[expand] path={} env.lookup_type arity-mismatch params={} args={}",
-                                    path_name,
-                                    params.len(),
-                                    args.len()
-                                );
-                            }
                         } else {
                             forbid_fallback_manifest_expansion = true;
-                            if debug_expand {
-                                eprintln!("[expand] path={} env.lookup_type manifest hidden", path_name);
-                            }
                         }
                     } else {
                         // Abstract type with no manifest found in env.
                         // Don't fall through to stamp-based lookup — the env is
                         // authoritative and this type should NOT be expanded.
                         forbid_fallback_manifest_expansion = true;
-                        if debug_expand {
-                            eprintln!("[expand] path={} env.lookup_type no-manifest (abstract, blocking stamp-fallback)", path_name);
-                        }
                     }
                 }
             }
@@ -2552,28 +1673,10 @@ fn try_expand_head<'a>(
                     if can_expand_decl_manifest(&stamp_decl, manifest) {
                         let params = &stamp_decl.type_params;
                         if params.len() == args.len() {
-                            if debug_expand {
-                                eprintln!(
-                                    "[expand] path={} stamp-lookup manifest params={} args={}",
-                                    path_name,
-                                    params.len(),
-                                    args.len()
-                                );
-                            }
                             return Some(expand_with_subst(params, manifest));
                         } else {
                             forbid_fallback_manifest_expansion = true;
-                            if debug_expand {
-                                eprintln!(
-                                    "[expand] path={} stamp-lookup arity-mismatch params={} args={}",
-                                    path_name,
-                                    params.len(),
-                                    args.len()
-                                );
-                            }
                         }
-                    } else if debug_expand {
-                        eprintln!("[expand] path={} stamp-lookup manifest hidden", path_name);
                     }
                 }
             }
@@ -2590,13 +1693,6 @@ fn try_expand_head<'a>(
                         && decl.type_params.len() == args.len()
                         && !decl_type_path.same(&path)
                     {
-                        if debug_expand {
-                            eprintln!(
-                                "[expand] path={} resolve_type_through_env type_path rewrite -> {}",
-                                path_name,
-                                decl_type_path.name()
-                            );
-                        }
                         let level = ctx.get_level(ty);
                         let rewritten = ctx.new_type(TypeDesc::Tconstr {
                             path: decl_type_path.clone(),
@@ -2653,13 +1749,6 @@ fn try_expand_head<'a>(
                             _ => None,
                         };
                         if let Some(target_path) = immediate_alias_target_path {
-                            if debug_expand {
-                                eprintln!(
-                                    "[expand] path={} resolve_type_through_env parameterized synthetic self-manifest; rewriting to alias target {}",
-                                    path_name,
-                                    target_path.name()
-                                );
-                            }
                             let level = ctx.get_level(ty);
                             let rewritten = ctx.new_type(TypeDesc::Tconstr {
                                 path: target_path,
@@ -2673,45 +1762,13 @@ fn try_expand_head<'a>(
                     if can_expand_decl_manifest(&decl, manifest) {
                         let params = &decl.type_params;
                         if params.len() == args.len() {
-                            if debug_expand {
-                                eprintln!(
-                                    "[expand] path={} resolve_type_through_env authoritative manifest params={} args={}",
-                                    path_name,
-                                    params.len(),
-                                    args.len()
-                                );
-                            }
                             return Some(expand_with_subst(params, manifest));
                         } else {
                             forbid_fallback_manifest_expansion = true;
-                            if debug_expand {
-                                eprintln!(
-                                    "[expand] path={} resolve_type_through_env arity-mismatch params={} args={}",
-                                    path_name,
-                                    params.len(),
-                                    args.len()
-                                );
-                            }
                         }
-                    } else if debug_expand {
-                        eprintln!(
-                            "[expand] path={} resolve_type_through_env manifest hidden",
-                            path_name
-                        );
-                        forbid_fallback_manifest_expansion = true;
                     } else {
                         forbid_fallback_manifest_expansion = true;
                     }
-                } else if debug_expand {
-                    let type_path = decl
-                        .type_path
-                        .as_ref()
-                        .map(|p| p.name())
-                        .unwrap_or_else(|| "<none>".to_string());
-                    eprintln!(
-                        "[expand] path={} resolve_type_through_env authoritative no-manifest type_path={} private={:?} kind={:?}",
-                        path_name, type_path, decl.type_private, decl.type_kind
-                    );
                 }
             }
 
@@ -2720,39 +1777,10 @@ fn try_expand_head<'a>(
             // over-expand local aliases (e.g. LayerStyleID.ID.t -> string) and
             // diverge from OCaml's identity/linking behavior.
             let allow_global_fallbacks = path.head().is_persistent();
-            if debug_expand && !allow_global_fallbacks {
-                eprintln!(
-                    "[expand] path={} skip-global-fallbacks non-persistent head={} forbid_manifest_fallback={}",
-                    path_name,
-                    path.head_name(),
-                    forbid_fallback_manifest_expansion
-                );
-            }
 
             // 2. Try stamp-based global store (for CMI types with non-zero stamps)
             if allow_global_fallbacks && let Some(stamp) = stamp {
-                if debug_expand {
-                    let has_decl = ctx.find_type_decl_by_stamp(stamp).is_some();
-                    eprintln!(
-                        "[expand] path={} stamp-lookup stamp={} found={}",
-                        path_name, stamp, has_decl
-                    );
-                }
                 if let Some(store_decl) = ctx.find_type_decl_by_stamp(stamp) {
-                    if debug_expand {
-                        eprintln!(
-                            "[expand] path={} stamp-decl manifest={} params={} args={} type_path={}",
-                            path_name,
-                            store_decl.type_manifest.is_some(),
-                            store_decl.type_params.len(),
-                            args.len(),
-                            store_decl
-                                .type_path
-                                .as_ref()
-                                .map(|p| p.name())
-                                .unwrap_or_else(|| "<none>".to_string())
-                        );
-                    }
                     if let Some(manifest) = store_decl.type_manifest {
                         if !forbid_fallback_manifest_expansion
                             && can_expand_decl_manifest(&store_decl, manifest)
@@ -2760,32 +1788,8 @@ fn try_expand_head<'a>(
                             let params = &store_decl.type_params;
                             if params.len() == args.len() {
                                 let expanded = expand_with_subst(params, manifest);
-                                if debug_image_alias && path.head_name() == "imageElement" {
-                                    let expanded_repr = ctx.repr(expanded);
-                                    let expanded_name = {
-                                        let d = ctx.get_desc(expanded_repr);
-                                        match &*d {
-                                            TypeDesc::Tconstr { path, .. } => path.name(),
-                                            _ => "<non-constr>".to_string(),
-                                        }
-                                    };
-                                    eprintln!(
-                                        "[image-alias][try-expand-return] reason=stamp ty={} path={} expanded={} {}",
-                                        ty.0,
-                                        path.name(),
-                                        expanded_repr.0,
-                                        expanded_name
-                                    );
-                                }
                                 return Some(expanded);
                             }
-                        } else if debug_expand && forbid_fallback_manifest_expansion {
-                            eprintln!(
-                                "[expand] path={} stamp-decl manifest expansion blocked by authoritative lookup",
-                                path_name
-                            );
-                        } else if debug_expand {
-                            eprintln!("[expand] path={} stamp-decl manifest hidden", path_name);
                         }
                     }
                     if let Some(type_path) = store_decl.type_path.as_ref() {
@@ -2794,13 +1798,6 @@ fn try_expand_head<'a>(
                             && store_decl.type_params.len() == args.len()
                             && !type_path.same(&path)
                         {
-                            if debug_expand {
-                                eprintln!(
-                                    "[expand] path={} stamp-decl type_path rewrite -> {}",
-                                    path_name,
-                                    type_path.name()
-                                );
-                            }
                             let level = ctx.get_level(ty);
                             let rewritten = ctx.new_type(TypeDesc::Tconstr {
                                 path: type_path.clone(),
@@ -2824,44 +1821,9 @@ fn try_expand_head<'a>(
                         {
                             let params = &store_decl.type_params;
                             if params.len() == args.len() {
-                                if debug_expand {
-                                    eprintln!(
-                                        "[expand] path={} type_decl_by_path manifest params={} args={}",
-                                        path_name,
-                                        params.len(),
-                                        args.len()
-                                    );
-                                }
                                 let expanded = expand_with_subst(params, manifest);
-                                if debug_image_alias && path.head_name() == "imageElement" {
-                                    let expanded_repr = ctx.repr(expanded);
-                                    let expanded_name = {
-                                        let d = ctx.get_desc(expanded_repr);
-                                        match &*d {
-                                            TypeDesc::Tconstr { path, .. } => path.name(),
-                                            _ => "<non-constr>".to_string(),
-                                        }
-                                    };
-                                    eprintln!(
-                                        "[image-alias][try-expand-return] reason=decl-by-path ty={} path={} expanded={} {}",
-                                        ty.0,
-                                        path.name(),
-                                        expanded_repr.0,
-                                        expanded_name
-                                    );
-                                }
                                 return Some(expanded);
                             }
-                        } else if debug_expand && forbid_fallback_manifest_expansion {
-                            eprintln!(
-                                "[expand] path={} type_decl_by_path manifest expansion blocked by authoritative lookup",
-                                path_name
-                            );
-                        } else if debug_expand {
-                            eprintln!(
-                                "[expand] path={} type_decl_by_path manifest hidden",
-                                path_name
-                            );
                         }
                     }
                 }
@@ -2874,44 +1836,9 @@ fn try_expand_head<'a>(
                         {
                             let params = &resolved_decl.type_params;
                             if params.len() == args.len() {
-                                if debug_expand {
-                                    eprintln!(
-                                        "[expand] path={} resolve_type_through_modules manifest params={} args={}",
-                                        path_name,
-                                        params.len(),
-                                        args.len()
-                                    );
-                                }
                                 let expanded = expand_with_subst(params, manifest);
-                                if debug_image_alias && path.head_name() == "imageElement" {
-                                    let expanded_repr = ctx.repr(expanded);
-                                    let expanded_name = {
-                                        let d = ctx.get_desc(expanded_repr);
-                                        match &*d {
-                                            TypeDesc::Tconstr { path, .. } => path.name(),
-                                            _ => "<non-constr>".to_string(),
-                                        }
-                                    };
-                                    eprintln!(
-                                        "[image-alias][try-expand-return] reason=resolve-modules ty={} path={} expanded={} {}",
-                                        ty.0,
-                                        path.name(),
-                                        expanded_repr.0,
-                                        expanded_name
-                                    );
-                                }
                                 return Some(expanded);
                             }
-                        } else if debug_expand && forbid_fallback_manifest_expansion {
-                            eprintln!(
-                                "[expand] path={} resolve_type_through_modules manifest expansion blocked by authoritative lookup",
-                                path_name
-                            );
-                        } else if debug_expand {
-                            eprintln!(
-                                "[expand] path={} resolve_type_through_modules manifest hidden",
-                                path_name
-                            );
                         }
                     }
                 }
@@ -2924,21 +1851,6 @@ fn try_expand_head<'a>(
             // attempt can find the type declaration.
             let path_norm = normalize_path_full(ctx, env, &path);
             if path_norm != path {
-                if debug_image_alias && path.head_name() == "imageElement" {
-                    eprintln!(
-                        "[image-alias][try-expand-norm] ty={} {} -> {}",
-                        ty.0,
-                        path.name(),
-                        path_norm.name()
-                    );
-                }
-                if debug_expand {
-                    eprintln!(
-                        "[expand] path={} normalize fallback path_norm={}",
-                        path_name,
-                        path_norm.name()
-                    );
-                }
                 let level = ctx.get_level(ty);
                 let normalized = ctx.new_type(TypeDesc::Tconstr {
                     path: path_norm,
@@ -2948,16 +1860,6 @@ fn try_expand_head<'a>(
                 ctx.set_level(normalized, level);
                 Some(normalized)
             } else {
-                if debug_image_alias && path.head_name() == "imageElement" {
-                    eprintln!(
-                        "[image-alias][try-expand-none] ty={} path={} no-change",
-                        ty.0,
-                        path.name()
-                    );
-                }
-                if debug_expand {
-                    eprintln!("[expand] path={} no expansion", path_name);
-                }
                 None
             }
         }
@@ -3287,47 +2189,9 @@ fn subst_with_memo(
     let old_level = ctx.current_level();
     ctx.set_current_level(tconstr_level);
 
-    let debug_expand_fn = std::env::var_os("RUST_DEBUG_EXPAND_FN").is_some()
-        && matches!(&*ctx.get_desc(ctx.repr(ty)), TypeDesc::Tconstr { path, .. } if path.name() == "fn");
-    let debug_expand_sprite_xy = std::env::var_os("RUST_DEBUG_EXPAND_SPRITE_XY_SUBST").is_some()
-        && matches!(&*ctx.get_desc(ctx.repr(ty)), TypeDesc::Tconstr { path, .. } if path.name() == "Sprite.xy");
-    if debug_expand_fn {
-        let ty_repr = ctx.repr(ty);
-        let arg_levels: Vec<String> = args
-            .iter()
-            .map(|a| {
-                let r = ctx.repr(*a);
-                format!("{}@{}", r.0, ctx.get_level(r))
-            })
-            .collect();
-        let param_levels: Vec<String> = params
-            .iter()
-            .map(|p| {
-                let r = ctx.repr(*p);
-                format!("{}@{}", r.0, ctx.get_level(r))
-            })
-            .collect();
-        eprintln!(
-            "[expand-fn] stage=enter ty={} ty_level={} params={} args={}",
-            ty_repr.0,
-            ctx.get_level(ty_repr),
-            param_levels.join(","),
-            arg_levels.join(",")
-        );
-    }
 
     // 1. Create stub variable (OCaml: body0 = newvar())
     let body0 = ctx.new_var(None);
-    if debug_expand_sprite_xy {
-        let ty_repr = ctx.repr(ty);
-        eprintln!(
-            "[expand-sprite-xy-subst] stage=body0 ty={} body0={} level_ty={} level_body0={}",
-            ty_repr.0,
-            body0.0,
-            ctx.get_level(ty_repr),
-            ctx.get_level(body0)
-        );
-    }
 
     // OCaml's Tconstr carries `ref (ref Mnil)` — each node gets its own
     // mutable inner ref. Rust's alloc_abbrev_nil() returns a shared sentinel
@@ -3355,31 +2219,7 @@ fn subst_with_memo(
     ctx.set_current_abbreviations(memo_ref);
 
     let (fresh_params, fresh_body) = instance_parameterized_type(ctx, params, body);
-    if debug_expand_sprite_xy {
-        let body0_repr = ctx.repr(body0);
-        let fresh_body_repr = ctx.repr(fresh_body);
-        eprintln!(
-            "[expand-sprite-xy-subst] stage=after_instance body0={} repr_body0={} fresh_body={} repr_fresh_body={}",
-            body0.0,
-            body0_repr.0,
-            fresh_body.0,
-            fresh_body_repr.0
-        );
-    }
 
-    if debug_expand_fn {
-        let fresh_param_levels: Vec<String> = fresh_params
-            .iter()
-            .map(|p| {
-                let r = ctx.repr(*p);
-                format!("{}@{}", r.0, ctx.get_level(r))
-            })
-            .collect();
-        eprintln!(
-            "[expand-fn] stage=after_instance fresh_params={}",
-            fresh_param_levels.join(",")
-        );
-    }
 
     // 5. Clear instantiation abbreviations before the unifications below.
     // OCaml sets the global `abbreviations` ref back to `ref Mnil` here rather
@@ -3393,17 +2233,6 @@ fn subst_with_memo(
         // Preserve previous behavior if full unification fails.
         link_type(ctx, body0, fresh_body);
     }
-    if debug_expand_sprite_xy {
-        let body0_repr = ctx.repr(body0);
-        let fresh_body_repr = ctx.repr(fresh_body);
-        eprintln!(
-            "[expand-sprite-xy-subst] stage=after_unify_body body0={} repr_body0={} fresh_body={} repr_fresh_body={}",
-            body0.0,
-            body0_repr.0,
-            fresh_body.0,
-            fresh_body_repr.0
-        );
-    }
 
     // 7. Bind params to args (OCaml: List.iter2 (!unify' env) params' args)
     for (p, a) in fresh_params.iter().zip(args.iter()) {
@@ -3411,39 +2240,7 @@ fn subst_with_memo(
             link_type(ctx, *p, *a);
         }
     }
-    if debug_expand_sprite_xy {
-        let body0_repr = ctx.repr(body0);
-        let fresh_body_repr = ctx.repr(fresh_body);
-        eprintln!(
-            "[expand-sprite-xy-subst] stage=after_unify_args body0={} repr_body0={} fresh_body={} repr_fresh_body={}",
-            body0.0,
-            body0_repr.0,
-            fresh_body.0,
-            fresh_body_repr.0
-        );
-    }
 
-    if debug_expand_fn {
-        let arg_levels: Vec<String> = args
-            .iter()
-            .map(|a| {
-                let r = ctx.repr(*a);
-                format!("{}@{}", r.0, ctx.get_level(r))
-            })
-            .collect();
-        let fresh_param_levels: Vec<String> = fresh_params
-            .iter()
-            .map(|p| {
-                let r = ctx.repr(*p);
-                format!("{}@{}", r.0, ctx.get_level(r))
-            })
-            .collect();
-        eprintln!(
-            "[expand-fn] stage=after_unify fresh_params={} args={}",
-            fresh_param_levels.join(","),
-            arg_levels.join(",")
-        );
-    }
 
     // 8. Restore typing level after all substitutions/unifications.
     ctx.set_current_level(old_level);
@@ -3534,9 +2331,6 @@ fn unify_after_expansion<'a>(
     t2: TypeExprRef,
     t2_expanded: TypeExprRef,
 ) -> TypeResult<()> {
-    let debug_unify_after = std::env::var_os("RUST_DEBUG_UNIFY_AFTER_EXPAND").is_some();
-    let debug_unify_after_alias =
-        std::env::var_os("RUST_DEBUG_UNIFY_AFTER_EXPAND_ALIAS").is_some();
     let type_name = |r: TypeExprRef| {
         let d = ctx.get_desc(ctx.repr(r));
         match &*d {
@@ -3551,64 +2345,8 @@ fn unify_after_expansion<'a>(
             _ => format!("<non-constr:{}>", ctx.repr(r).0),
         }
     };
-    let alias_tracked = if debug_unify_after_alias {
-        let n1 = type_name(t1);
-        let n2 = type_name(t2);
-        let tracked = |n: &str| {
-            n.contains("LayerStyleID.ID.t")
-                || n.contains("LayerStyleID.t")
-                || n.contains("Layout.Types.t")
-        };
-        tracked(&n1) || tracked(&n2)
-    } else {
-        false
-    };
-    let debug_image_alias = std::env::var_os("RUST_DEBUG_IMAGE_ALIAS").is_some();
-    let debug_image_pair = if debug_image_alias {
-        let n1 = {
-            let d = ctx.get_desc(ctx.repr(t1));
-            match &*d {
-                TypeDesc::Tconstr { path, .. } => Some(path.name()),
-                _ => None,
-            }
-        };
-        let n2 = {
-            let d = ctx.get_desc(ctx.repr(t2));
-            match &*d {
-                TypeDesc::Tconstr { path, .. } => Some(path.name()),
-                _ => None,
-            }
-        };
-        let tracked = |name: Option<&str>| {
-            matches!(
-                name,
-                Some("Html.imageElement")
-                    | Some("Dom_html.imageElement")
-                    | Some("Js.Undefined.t")
-                    | Some("Js.undefined")
-            )
-        };
-        tracked(n1.as_deref()) || tracked(n2.as_deref())
-    } else {
-        false
-    };
     let t1_changed = t1_expanded != t1;
     let t2_changed = t2_expanded != t2;
-    if alias_tracked {
-        eprintln!(
-            "[unify-after-expand-alias] enter t1={}({}) t1e={}({}) t2={}({}) t2e={}({}) t1_changed={} t2_changed={}",
-            ctx.repr(t1).0,
-            type_name(t1),
-            ctx.repr(t1_expanded).0,
-            type_name(t1_expanded),
-            ctx.repr(t2).0,
-            type_name(t2),
-            ctx.repr(t2_expanded).0,
-            type_name(t2_expanded),
-            t1_changed,
-            t2_changed
-        );
-    }
     if !t1_changed && !t2_changed {
         return unify(ctx, state, t1_expanded, t2_expanded);
     }
@@ -3624,37 +2362,7 @@ fn unify_after_expansion<'a>(
 
     let lhs = ctx.repr(lhs);
     let rhs = ctx.repr(rhs);
-    if alias_tracked {
-        eprintln!(
-            "[unify-after-expand-alias] branch swap={} lhs={}({}) rhs={}({}) relink_target={}({})",
-            swap,
-            lhs.0,
-            type_name(lhs),
-            rhs.0,
-            type_name(rhs),
-            ctx.repr(relink_target).0,
-            type_name(relink_target)
-        );
-    }
-    if debug_unify_after {
-        eprintln!(
-            "[unify-after-expand] t1={} t1e={} t2={} t2e={} t1_changed={} t2_changed={} swap={} lhs={} rhs={} relink_target={}",
-            t1.0,
-            t1_expanded.0,
-            t2.0,
-            t2_expanded.0,
-            t1_changed,
-            t2_changed,
-            swap,
-            lhs.0,
-            rhs.0,
-            relink_target.0
-        );
-    }
     if lhs == rhs {
-        if debug_unify_after {
-            eprintln!("[unify-after-expand] lhs==rhs early-ok");
-        }
         return Ok(());
     }
 
@@ -3692,19 +2400,7 @@ fn unify_after_expansion<'a>(
     }
 
     let unify_result = unify(ctx, state, lhs, rhs);
-    if debug_unify_after {
-        eprintln!("[unify-after-expand] unify(lhs,rhs) ok={}", unify_result.is_ok());
-    }
     unify_result?;
-    if alias_tracked {
-        eprintln!(
-            "[unify-after-expand-alias] post-unify lhs={}({}) rhs={}({})",
-            ctx.repr(lhs).0,
-            type_name(lhs),
-            ctx.repr(rhs).0,
-            type_name(rhs)
-        );
-    }
 
     if state.mode != crate::types::UnifyMode::Pattern {
         // Match OCaml unify3 expression mode:
@@ -3714,56 +2410,9 @@ fn unify_after_expansion<'a>(
         let to_ty = ctx.repr(relink_target);
         if lhs != to_ty && !deep_occur(ctx, lhs, to_ty) {
             ctx.set_desc(lhs, TypeDesc::Tlink(to_ty));
-            if alias_tracked {
-                eprintln!(
-                    "[unify-after-expand-alias] relink lhs={} -> target={} target_name={}",
-                    lhs.0,
-                    to_ty.0,
-                    type_name(to_ty)
-                );
-            }
-            if debug_unify_after {
-                eprintln!(
-                    "[unify-after-expand] relink lhs={} -> target={}",
-                    lhs.0, to_ty.0
-                );
-            }
         }
     }
-    if alias_tracked {
-        eprintln!(
-            "[unify-after-expand-alias] exit t1={}({}) t2={}({})",
-            ctx.repr(t1).0,
-            type_name(t1),
-            ctx.repr(t2).0,
-            type_name(t2)
-        );
-    }
 
-    if debug_image_pair {
-        let r1 = ctx.repr(t1);
-        let r2 = ctx.repr(t2);
-        let r1e = ctx.repr(t1_expanded);
-        let r2e = ctx.repr(t2_expanded);
-        let name = |r: TypeExprRef| {
-            let d = ctx.get_desc(r);
-            match &*d {
-                TypeDesc::Tconstr { path, .. } => path.name(),
-                _ => "<non-constr>".to_string(),
-            }
-        };
-        eprintln!(
-            "[image-alias][unify-after] t1={}({}) t2={}({}) t1e={}({}) t2e={}({})",
-            r1.0,
-            name(r1),
-            r2.0,
-            name(r2),
-            r1e.0,
-            name(r1e),
-            r2e.0,
-            name(r2e)
-        );
-    }
 
     Ok(())
 }
@@ -4003,31 +2652,6 @@ fn unify_types<'a>(
                 abbrev: abbrev2,
             },
         ) => {
-            let debug_image_alias = std::env::var_os("RUST_DEBUG_IMAGE_ALIAS").is_some();
-            let debug_v0 = std::env::var_os("RUST_DEBUG_UNIFY_V0").is_some();
-            if debug_v0 {
-                let p1 = path1.name();
-                let p2 = path2.name();
-                if p1 == "V0.key"
-                    || p1 == "V0.id"
-                    || p2 == "V0.key"
-                    || p2 == "V0.id"
-                    || p1 == "V1.key"
-                    || p1 == "V1.id"
-                    || p2 == "V1.key"
-                    || p2 == "V1.id"
-                {
-                    eprintln!(
-                        "[unify-v0] enter t1={}({})@{} t2={}({})@{}",
-                        t1.0,
-                        p1,
-                        ctx.get_level(t1),
-                        t2.0,
-                        p2,
-                        ctx.get_level(t2),
-                    );
-                }
-            }
             if !path1.same(path2) {
                 let p1 = path1.name();
                 let p2 = path2.name();
@@ -4079,24 +2703,6 @@ fn unify_types<'a>(
                         }
                     }
                 }
-                let debug_image_alias_pair = debug_image_alias
-                    && ((p1 == "Html.imageElement"
-                        || p1 == "Dom_html.imageElement"
-                        || p1 == "Js.Undefined.t"
-                        || p1 == "Js.undefined")
-                        || (p2 == "Html.imageElement"
-                            || p2 == "Dom_html.imageElement"
-                            || p2 == "Js.Undefined.t"
-                            || p2 == "Js.undefined"));
-                if debug_image_alias_pair {
-                    eprintln!(
-                        "[image-alias][unify-mismatch] t1={} {} t2={} {}",
-                        t1.0,
-                        p1,
-                        t2.0,
-                        p2
-                    );
-                }
 
                 // Narrow fallback for local submodule-path aliases where one side
                 // is exactly one segment longer than the other:
@@ -4145,13 +2751,6 @@ fn unify_types<'a>(
                             false
                         };
                         if alias_matches {
-                            if std::env::var_os("RUST_DEBUG_TCONSTR_UNIFY").is_some() {
-                                eprintln!(
-                                    "[tconstr-unify:qualified-alias] keep={} drop={}",
-                                    long_path.name(),
-                                    short_path.name()
-                                );
-                            }
                             let pairs: Vec<_> = args1
                                 .iter()
                                 .zip(args2.iter())
@@ -4205,16 +2804,6 @@ fn unify_types<'a>(
                             false
                         };
                         if alias_matches {
-                            if std::env::var_os("RUST_DEBUG_FLAT_ALIAS_UNIFY").is_some() {
-                                eprintln!(
-                                    "[flat-alias-unify] long_ty={} long_path={} short_ty={} short_path={} args={}",
-                                    ctx.repr(long_ty).0,
-                                    long_path.name(),
-                                    ctx.repr(short_ty).0,
-                                    short_path.name(),
-                                    args1.len()
-                                );
-                            }
                             let pairs: Vec<_> = args1
                                 .iter()
                                 .zip(args2.iter())
@@ -4251,12 +2840,6 @@ fn unify_types<'a>(
                             && seg2[2..] == seg1[1..];
                     let flattened_family = p1.contains("__") != p2.contains("__");
                     if same_root_drop_one || flattened_family {
-                        if std::env::var_os("RUST_DEBUG_TCONSTR_UNIFY").is_some() {
-                            eprintln!(
-                                "[tconstr-unify:same-identity] lhs={} rhs={}",
-                                p1, p2
-                            );
-                        }
                         let pairs: Vec<_> = args1
                             .iter()
                             .zip(args2.iter())
@@ -4307,28 +2890,6 @@ fn unify_types<'a>(
                 if let Some(env) = state.env() {
                     let exp1 = expand_head(ctx, env, t1);
                     let exp2 = expand_head(ctx, env, t2);
-                    if debug_image_alias_pair {
-                        let exp1_repr = ctx.repr(exp1);
-                        let exp2_repr = ctx.repr(exp2);
-                        let exp1_head = {
-                            let d = ctx.get_desc(exp1_repr);
-                            match &*d {
-                                TypeDesc::Tconstr { path, .. } => path.name(),
-                                _ => "<non-constr>".to_string(),
-                            }
-                        };
-                        let exp2_head = {
-                            let d = ctx.get_desc(exp2_repr);
-                            match &*d {
-                                TypeDesc::Tconstr { path, .. } => path.name(),
-                                _ => "<non-constr>".to_string(),
-                            }
-                        };
-                        eprintln!(
-                            "[image-alias][unify-expand] exp1={} {} exp2={} {}",
-                            exp1_repr.0, exp1_head, exp2_repr.0, exp2_head
-                        );
-                    }
                     if exp1 != t1 || exp2 != t2 {
                         return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                     }
@@ -4392,22 +2953,6 @@ fn unify_types<'a>(
             let args2 = args2.clone();
             let path_name = path1.head_name().to_string();
             let path_full = path1.name();
-            if std::env::var_os("RUST_DEBUG_UNIFY_REACT_ELEMENT").is_some()
-                && path_full == "React.element"
-                && args1.is_empty()
-            {
-                eprintln!(
-                    "[unify-react-element] t1={}@{} t2={}@{} abbrev1={:?} memo1={:?} abbrev2={:?} memo2={:?}",
-                    t1.0,
-                    ctx.get_level(t1),
-                    t2.0,
-                    ctx.get_level(t2),
-                    abbrev1,
-                    ctx.get_abbrev_memo(*abbrev1),
-                    abbrev2,
-                    ctx.get_abbrev_memo(*abbrev2)
-                );
-            }
             drop(desc1);
             drop(desc2);
 
@@ -4733,61 +3278,6 @@ fn unify_types<'a>(
                     };
                     // Only retry if at least one side actually changed
                     if exp1 != t1 || exp2 != t2 {
-                        if std::env::var_os("RUST_DEBUG_PACK_UNIFY").is_some() {
-                            let t1_desc = ctx.get_desc(t1);
-                            let t2_desc = ctx.get_desc(t2);
-                            let is_pack_constr = matches!((&*t1_desc, &*t2_desc), (TypeDesc::Tpackage { .. }, TypeDesc::Tconstr { .. }))
-                                || matches!((&*t1_desc, &*t2_desc), (TypeDesc::Tconstr { .. }, TypeDesc::Tpackage { .. }));
-                            if is_pack_constr {
-                                drop(t1_desc);
-                                drop(t2_desc);
-                                let describe_args = |ty: TypeExprRef| -> String {
-                                    let repr = ctx.repr(ty);
-                                    let desc = ctx.get_desc(repr);
-                                    match &*desc {
-                                        TypeDesc::Tconstr { args, path, .. } => {
-                                            let parts: Vec<String> = args
-                                                .iter()
-                                                .enumerate()
-                                                .map(|(i, a)| {
-                                                    let r = ctx.repr(*a);
-                                                    format!("{i}:raw{}->repr{}", a.0, r.0)
-                                                })
-                                                .collect();
-                                            format!("Tconstr({}) args=[{}]", path.name(), parts.join(","))
-                                        }
-                                        TypeDesc::Tpackage { args, path, .. } => {
-                                            let parts: Vec<String> = args
-                                                .iter()
-                                                .enumerate()
-                                                .map(|(i, a)| {
-                                                    let r = ctx.repr(*a);
-                                                    let d = ctx.get_desc(r);
-                                                    let kind = match &*d {
-                                                        TypeDesc::Tconstr { path, .. } => path.name(),
-                                                        TypeDesc::Tvar(name) => format!("Tvar({name:?})"),
-                                                        _ => format!("ty#{}", r.0),
-                                                    };
-                                                    format!("{i}:raw{}->repr{}={kind}", a.0, r.0)
-                                                })
-                                                .collect();
-                                            format!("Tpackage({}) args=[{}]", path.name(), parts.join(","))
-                                        }
-                                        _ => format!("other#{}", repr.0),
-                                    }
-                                };
-                                eprintln!(
-                                    "[pack-unify] t1={} exp1={} t2={} exp2={}",
-                                    describe_args(t1),
-                                    describe_args(exp1),
-                                    describe_args(t2),
-                                    describe_args(exp2)
-                                );
-                            } else {
-                                drop(t1_desc);
-                                drop(t2_desc);
-                            }
-                        }
                         return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                     }
                 }
@@ -4953,13 +3443,6 @@ fn unify_rows<'a>(
     let row2 = row_repr(ctx, row2);
 
     let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
-    let debug_filter = debug_unify_row_filter("RUST_DEBUG_UNIFY_ROWS");
-    let debug_rows = debug_filter
-        .as_ref()
-        .is_some_and(|filter| debug_unify_rows_enabled(filter, &row1, &row2, &r1, &r2, &pairs));
-    if debug_rows {
-        debug_unify_rows_log("start", &row1, &row2, &r1, &r2, &pairs);
-    }
 
     let rm1 = row_more(ctx, &row1);
     let rm2 = row_more(ctx, &row2);
@@ -5054,22 +3537,6 @@ fn unify_rows<'a>(
         } else {
             rest.to_vec()
         };
-        if debug_rows {
-            eprintln!(
-                "[unify-rows set-more] target={{closed:{} fixed:{} labels=[{}]}} rest=[{}]",
-                row.row_closed,
-                row_is_fixed,
-                row.row_fields
-                    .iter()
-                    .map(|(label, _)| label.as_str())
-                    .collect::<Vec<_>>()
-                    .join(","),
-                rest.iter()
-                    .map(|(label, _)| label.as_str())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-        }
         if (!rest.is_empty() && (row.row_closed || row_is_fixed))
             || (closed && row_is_fixed && !row.row_closed)
         {
@@ -5108,9 +3575,6 @@ fn unify_rows<'a>(
         set_more(ctx, state, &row2, &r1)?;
         set_more(ctx, state, &row1, &r2)?;
         for (label, f1, f2) in &pairs {
-            if debug_rows {
-                eprintln!("[unify-rows field] label={label}");
-            }
             unify_row_field(ctx, state, fixed1, fixed2, more, label, f1, f2)?;
         }
         if super::btype::static_row(ctx, &row1) {
@@ -5146,7 +3610,6 @@ fn unify_row_field<'a>(
     // Follow links before matching, like OCaml does
     let f1 = super::btype::row_field_repr(ctx, field1);
     let f2 = super::btype::row_field_repr(ctx, field2);
-    let debug_field = debug_unify_row_field_enabled(label);
     match (&f1, &f2) {
         (RowField::Rpresent(Some(t1)), RowField::Rpresent(Some(t2))) => unify(ctx, state, *t1, *t2),
         (RowField::Rpresent(None), RowField::Rpresent(None)) => Ok(()),
@@ -5167,26 +3630,7 @@ fn unify_row_field<'a>(
                 ..
             },
         ) => {
-            if debug_field {
-                eprintln!(
-                    "[unify-row-field enter] label={} fixed=({}, {}) c=({}, {}) m=({}, {}) e=({}, {}) tl1=[{}] tl2=[{}]",
-                    label,
-                    fixed1,
-                    fixed2,
-                    c1,
-                    c2,
-                    m1,
-                    m2,
-                    e1.0,
-                    e2.0,
-                    debug_unify_row_types(ctx, types1),
-                    debug_unify_row_types(ctx, types2),
-                );
-            }
             if e1 == e2 {
-                if debug_field {
-                    eprintln!("[unify-row-field short-circuit] label={} same-link", label);
-                }
                 return Ok(());
             }
 
@@ -5203,14 +3647,6 @@ fn unify_row_field<'a>(
                 ctx.set_row_field(*e2, shared);
                 for (t1, t2) in types1.iter().zip(types2.iter()) {
                     unify(ctx, state, *t1, *t2)?;
-                }
-                if debug_field {
-                    eprintln!(
-                        "[unify-row-field fixed-fast] label={} tl1=[{}] tl2=[{}]",
-                        label,
-                        debug_unify_row_types(ctx, types1),
-                        debug_unify_row_types(ctx, types2),
-                    );
                 }
                 return Ok(());
             }
@@ -5235,15 +3671,6 @@ fn unify_row_field<'a>(
                     let has_existing_link =
                         ctx.get_row_field(*e1).is_some() || ctx.get_row_field(*e2).is_some();
                     if has_existing_link {
-                        if debug_field {
-                            eprintln!(
-                                "[unify-row-field redo] label={} all=[{}] e1_linked={} e2_linked={}",
-                                label,
-                                debug_unify_row_types(ctx, &all_types),
-                                ctx.get_row_field(*e1).is_some(),
-                                ctx.get_row_field(*e2).is_some(),
-                            );
-                        }
                         return unify_row_field(ctx, state, fixed1, fixed2, more, label, &f1, &f2);
                     }
                 }
@@ -5261,19 +3688,7 @@ fn unify_row_field<'a>(
             };
             let tl2_prime = remq(&tl2, &tl1);
             let tl1_prime = remq(&tl1, &tl2);
-            let tl1_prime_debug = debug_field.then(|| debug_unify_row_types(ctx, &tl1_prime));
-            let tl2_prime_debug = debug_field.then(|| debug_unify_row_types(ctx, &tl2_prime));
 
-            if debug_field {
-                eprintln!(
-                    "[unify-row-field remq] label={} tl1=[{}] tl2=[{}] tl1'=[{}] tl2'=[{}]",
-                    label,
-                    debug_unify_row_types(ctx, &tl1),
-                    debug_unify_row_types(ctx, &tl2),
-                    tl1_prime_debug.as_deref().unwrap_or(""),
-                    tl2_prime_debug.as_deref().unwrap_or(""),
-                );
-            }
 
             let more_level = ctx.get_level(ctx.repr(more));
             for ty in tl1_prime.iter().chain(tl2_prime.iter()) {
@@ -5295,16 +3710,6 @@ fn unify_row_field<'a>(
             };
             ctx.set_row_field(*e1, f1_prime);
             ctx.set_row_field(*e2, f2_prime);
-            if debug_field {
-                eprintln!(
-                    "[unify-row-field set] label={} e1={} e2={} tl1'=[{}] tl2'=[{}]",
-                    label,
-                    e1.0,
-                    e2.0,
-                    tl1_prime_debug.as_deref().unwrap_or(""),
-                    tl2_prime_debug.as_deref().unwrap_or(""),
-                );
-            }
             Ok(())
         }
 
@@ -5925,117 +4330,7 @@ fn generalize_expansive_rec(
                 .map(|decl| decl.type_variance.clone())
                 .unwrap_or_else(|| vec![Variance::MAY_INV; args.len()]);
             if !args.is_empty() && variances.iter().all(|v| *v == Variance::NULL) {
-                if std::env::var_os("RUST_DEBUG_NULL_VARIANCE_FALLBACK").is_some() {
-                    eprintln!(
-                        "[null-variance-fallback] path={} phase=generalize_expansive args={}",
-                        path.name(),
-                        args.len()
-                    );
-                }
                 variances = vec![Variance::MAY_INV; args.len()];
-            }
-            if let Some(target) = std::env::var("RUST_DEBUG_GENERALIZE_PATH").ok() {
-                if path.name() == target {
-                    let arg_levels_before = args
-                        .iter()
-                        .map(|arg| {
-                            let r = ctx.repr(*arg);
-                            format!("{}@{}", r.0, ctx.get_level(r))
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    let vars = variances
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| {
-                            format!(
-                                "{}:(mp={},mn={},mw={},inj={},p={},n={},inv={})",
-                                i,
-                                v.mem(VarianceFlag::MayPos),
-                                v.mem(VarianceFlag::MayNeg),
-                                v.mem(VarianceFlag::MayWeak),
-                                v.mem(VarianceFlag::Inj),
-                                v.mem(VarianceFlag::Pos),
-                                v.mem(VarianceFlag::Neg),
-                                v.mem(VarianceFlag::Inv)
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    eprintln!(
-                        "[generalize-path] path={} args={} variances={} var_level={} current_level={} before={}",
-                        path.name(),
-                        args.len(),
-                        vars,
-                        var_level,
-                        ctx.current_level(),
-                        arg_levels_before
-                    );
-                }
-            }
-            if std::env::var_os("RUST_DEBUG_GENERALIZE_T1").is_some() && path.head_name() == "t1" {
-                let arg_levels_before = args
-                    .iter()
-                    .map(|arg| {
-                        let r = ctx.repr(*arg);
-                        format!("{}@{}", r.0, ctx.get_level(r))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let vars = variances
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| format!("{i}:{v:?}"))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                eprintln!(
-                    "[generalize-t1] path={} args={} variances={} var_level={} current_level={} before={}",
-                    path.name(),
-                    args.len(),
-                    vars,
-                    var_level,
-                    ctx.current_level(),
-                    arg_levels_before
-                );
-            }
-            if std::env::var_os("RUST_DEBUG_GENERALIZE_COMPONENTSPEC").is_some()
-                && path.last() == "componentSpec"
-            {
-                let arg_levels_before = args
-                    .iter()
-                    .map(|arg| {
-                        let r = ctx.repr(*arg);
-                        format!("{}@{}", r.0, ctx.get_level(r))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let vars = variances
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        format!(
-                            "{}:(mp={},mn={},mw={},inj={},p={},n={},inv={})",
-                            i,
-                            v.mem(VarianceFlag::MayPos),
-                            v.mem(VarianceFlag::MayNeg),
-                            v.mem(VarianceFlag::MayWeak),
-                            v.mem(VarianceFlag::Inj),
-                            v.mem(VarianceFlag::Pos),
-                            v.mem(VarianceFlag::Neg),
-                            v.mem(VarianceFlag::Inv)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                eprintln!(
-                    "[generalize-componentspec] path={} args={} variances={} var_level={} current_level={} before={}",
-                    path.name(),
-                    args.len(),
-                    vars,
-                    var_level,
-                    ctx.current_level(),
-                    arg_levels_before
-                );
             }
             for (index, arg) in args.iter().enumerate() {
                 let variance = variances.get(index).copied().unwrap_or(Variance::MAY_INV);
@@ -6044,30 +4339,6 @@ fn generalize_expansive_rec(
                 } else {
                     generalize_expansive_rec(ctx, env, var_level, visited, *arg);
                 }
-            }
-            if std::env::var_os("RUST_DEBUG_GENERALIZE_T1").is_some() && path.head_name() == "t1" {
-                let arg_levels_after = args
-                    .iter()
-                    .map(|arg| {
-                        let r = ctx.repr(*arg);
-                        format!("{}@{}", r.0, ctx.get_level(r))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                eprintln!("[generalize-t1] after={}", arg_levels_after);
-            }
-            if std::env::var_os("RUST_DEBUG_GENERALIZE_COMPONENTSPEC").is_some()
-                && path.last() == "componentSpec"
-            {
-                let arg_levels_after = args
-                    .iter()
-                    .map(|arg| {
-                        let r = ctx.repr(*arg);
-                        format!("{}@{}", r.0, ctx.get_level(r))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                eprintln!("[generalize-componentspec] after={}", arg_levels_after);
             }
         }
         Action::Package { args } => {
@@ -7014,118 +5285,6 @@ pub fn instance_constructor(
         .iter()
         .map(|&arg| copy_type_cached(ctx, arg, &mut cache))
         .collect();
-    if std::env::var_os("RUST_DEBUG_INSTANCE_CSTR").is_some()
-        && (cstr.cstr_name == "Node"
-            || cstr.cstr_name == "Empty"
-            || cstr.cstr_name == "SPlayer"
-            || cstr.cstr_name == "SEnemy"
-            || cstr.cstr_name == "Some"
-            || cstr.cstr_name == "One"
-            || cstr.cstr_name == "Two"
-            || cstr.cstr_name == "Three")
-    {
-        let res_repr = ctx.repr(ty_res);
-        let args = ty_args
-            .iter()
-            .map(|arg| {
-                let r = ctx.repr(*arg);
-                let desc = ctx.get_desc(r);
-                match &*desc {
-                    TypeDesc::Tconstr { path, args, .. } => {
-                        let arg_dump = args
-                            .iter()
-                            .map(|a| {
-                                let ar = ctx.repr(*a);
-                                let ad = ctx.get_desc(ar);
-                                match &*ad {
-                                    TypeDesc::Tconstr { path, .. } => {
-                                        format!("{}:{}@{}", path.name(), ar.0, ctx.get_level(ar))
-                                    }
-                                    TypeDesc::Tvar(_) => {
-                                        format!("Tvar:{}@{}", ar.0, ctx.get_level(ar))
-                                    }
-                                    TypeDesc::Tunivar(_) => {
-                                        format!("Tunivar:{}@{}", ar.0, ctx.get_level(ar))
-                                    }
-                                    _ => format!("{}@{}", ar.0, ctx.get_level(ar)),
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        format!("{}:{}@{}<{}>", path.name(), r.0, ctx.get_level(r), arg_dump)
-                    }
-                    TypeDesc::Tvar(_) => format!("Tvar:{}@{}", r.0, ctx.get_level(r)),
-                    TypeDesc::Tunivar(_) => format!("Tunivar:{}@{}", r.0, ctx.get_level(r)),
-                    _ => format!("{}@{}", r.0, ctx.get_level(r)),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        let src_args = cstr
-            .cstr_args
-            .iter()
-            .map(|arg| {
-                let r = ctx.repr(*arg);
-                let desc = ctx.get_desc(r);
-                match &*desc {
-                    TypeDesc::Tconstr { path, args, .. } => {
-                        let arg_dump = args
-                            .iter()
-                            .map(|a| {
-                                let ar = ctx.repr(*a);
-                                let ad = ctx.get_desc(ar);
-                                match &*ad {
-                                    TypeDesc::Tconstr { path, .. } => {
-                                        format!("{}:{}@{}", path.name(), ar.0, ctx.get_level(ar))
-                                    }
-                                    TypeDesc::Tvar(_) => {
-                                        format!("Tvar:{}@{}", ar.0, ctx.get_level(ar))
-                                    }
-                                    TypeDesc::Tunivar(_) => {
-                                        format!("Tunivar:{}@{}", ar.0, ctx.get_level(ar))
-                                    }
-                                    _ => format!("{}@{}", ar.0, ctx.get_level(ar)),
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        format!("{}:{}@{}<{}>", path.name(), r.0, ctx.get_level(r), arg_dump)
-                    }
-                    TypeDesc::Tvar(_) => format!("Tvar:{}@{}", r.0, ctx.get_level(r)),
-                    TypeDesc::Tunivar(_) => format!("Tunivar:{}@{}", r.0, ctx.get_level(r)),
-                    _ => format!("{}@{}", r.0, ctx.get_level(r)),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        let res_desc = ctx.get_desc(res_repr);
-        let res_head = match &*res_desc {
-            TypeDesc::Tconstr { path, .. } => path.name(),
-            TypeDesc::Tvar(_) => "Tvar".to_string(),
-            TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-            _ => format!("ty#{}", res_repr.0),
-        };
-        let src_res_repr = ctx.repr(cstr.cstr_res);
-        let src_res_desc = ctx.get_desc(src_res_repr);
-        let src_res_head = match &*src_res_desc {
-            TypeDesc::Tconstr { path, .. } => path.name(),
-            TypeDesc::Tvar(_) => "Tvar".to_string(),
-            TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-            _ => format!("ty#{}", src_res_repr.0),
-        };
-        eprintln!(
-            "[instance-cstr] name={} src_res={}:{}@{} src_args=[{}] res={}:{}@{} args=[{}]",
-            cstr.cstr_name,
-            src_res_head,
-            src_res_repr.0,
-            ctx.get_level(src_res_repr),
-            src_args,
-            res_head,
-            res_repr.0,
-            ctx.get_level(res_repr),
-            args
-        );
-    }
     (ty_args, ty_res)
 }
 
@@ -7287,10 +5446,6 @@ pub fn instance_label(
     fixed: bool,
     lbl: &super::LabelDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef, TypeExprRef) {
-    if std::env::var_os("RUST_PANIC_INSTANCE_LABEL").is_some() {
-        panic!("instance_label invoked");
-    }
-    let should_debug_label = std::env::var_os("RUST_DEBUG_INSTANCE_LABEL").is_some();
     let summarize = |ty: TypeExprRef| -> String {
         let ty = ctx.repr(ty);
         let desc = ctx.get_desc(ty);
@@ -7335,15 +5490,6 @@ pub fn instance_label(
             other => format!("{:?}#{}@{}", other, ty.0, ctx.get_level(ty)),
         }
     };
-    if should_debug_label {
-        eprintln!(
-            "[instance-label] stage=enter name={} fixed={} arg={} res={}",
-            lbl.lbl_name,
-            fixed,
-            summarize(lbl.lbl_arg),
-            summarize(lbl.lbl_res)
-        );
-    }
 
     // Match OCaml ctype.ml instance_label:
     //   let ty_res = copy lbl.lbl_res
@@ -7353,13 +5499,6 @@ pub fn instance_label(
     // copy lbl_res / copy lbl_arg must share the same copy window.
     let mut cache = CopyCache::new();
     let ty_res = copy_type_cached(ctx, lbl.lbl_res, &mut cache);
-    if should_debug_label {
-        eprintln!(
-            "[instance-label] stage=after-copy-res name={} ty_res={}",
-            lbl.lbl_name,
-            summarize(ty_res)
-        );
-    }
     let arg_repr = ctx.repr(lbl.lbl_arg);
     let (poly_vars, ty_arg) = {
         let desc = ctx.get_desc(arg_repr);
@@ -7384,43 +5523,15 @@ pub fn instance_label(
                     let mut state = UnifyState::new();
                     let _ = unify(ctx, &mut state, ty_arg, shared_body);
                 }
-                if should_debug_label {
-                    eprintln!(
-                        "[instance-label] stage=arg-poly name={} vars={} shared_body={} ty_arg={}",
-                        lbl.lbl_name,
-                        vars.len(),
-                        shared_body
-                            .map(|t| summarize(t))
-                            .unwrap_or_else(|| "<none>".to_string()),
-                        summarize(ty_arg)
-                    );
-                }
                 (poly_vars, ty_arg)
             }
             _ => {
                 drop(desc);
                 let copied = copy_type_cached(ctx, lbl.lbl_arg, &mut cache);
-                if should_debug_label {
-                    eprintln!(
-                        "[instance-label] stage=arg-copy name={} src={} copied={}",
-                        lbl.lbl_name,
-                        summarize(lbl.lbl_arg),
-                        summarize(copied)
-                    );
-                }
                 (vec![], copied)
             }
         }
     };
-    if should_debug_label {
-        eprintln!(
-            "[instance-label] stage=exit name={} ty_arg={} ty_res={} poly_vars={}",
-            lbl.lbl_name,
-            summarize(ty_arg),
-            summarize(ty_res),
-            poly_vars.len()
-        );
-    }
     (poly_vars, ty_arg, ty_res)
 }
 
@@ -8252,8 +6363,6 @@ fn copy_type_cached(
     cache: &mut CopyCache,
 ) -> TypeExprRef {
     let ty = ctx.repr(ty);
-    let debug_copy_constr = std::env::var_os("RUST_DEBUG_COPY_CONSTR").is_some();
-    let debug_copy_path = std::env::var("RUST_DEBUG_COPY_PATH").ok();
 
     // OCaml Ctype.copy marker precedence:
     // if `more.desc` is temporarily `Tsubst(Ttuple [more'; t])`,
@@ -8326,32 +6435,6 @@ fn copy_type_cached(
     // Determine action based on type level and descriptor.
     let action = {
         let desc = ctx.get_desc(ty);
-        if debug_copy_constr || debug_copy_path.is_some() {
-            if let TypeDesc::Tconstr { path, .. } = &*desc {
-                let name = path.name();
-                let path_match = debug_copy_path
-                    .as_deref()
-                    .is_some_and(|needle| name.contains(needle));
-                if path_match
-                    || name == "ticker"
-                    || name == "Ticker_map.t"
-                    || name == "Belt.List.t"
-                    || name == "list"
-                    || name == "int"
-                    || name == "string"
-                    || name == "option"
-                    || name == "Stdlib.JSON.t"
-                    || name == "JSON.t"
-                {
-                    eprintln!(
-                        "[rust-copy-constr] inspect ty={} level={} name={}",
-                        ty.0,
-                        ctx.get_level(ty),
-                        name
-                    );
-                }
-            }
-        }
 
         if level != GENERIC_LEVEL {
             match &*desc {
@@ -8370,32 +6453,6 @@ fn copy_type_cached(
                 // Match that behavior: return self for all non-generic Tconstr.
                 TypeDesc::Tconstr { path, .. } => {
                     let path_name = path.name();
-                    let path_match = debug_copy_path
-                        .as_deref()
-                        .is_some_and(|needle| path_name.contains(needle));
-                    if debug_copy_constr || path_match {
-                        let name = path.name();
-                        if path_match
-                            || name == "ticker"
-                            || name == "Ticker_map.t"
-                            || name == "Belt.List.t"
-                            || name == "list"
-                            || name == "int"
-                            || name == "string"
-                            || name == "option"
-                            || name == "Jsx.element"
-                            || name == "React.element"
-                            || name == "Stdlib.JSON.t"
-                            || name == "JSON.t"
-                        {
-                            eprintln!(
-                                "[rust-copy-constr] return-self ty={} level={} name={}",
-                                ty.0,
-                                ctx.get_level(ty),
-                                name
-                            );
-                        }
-                    }
                     CopyAction::ReturnSelf
                 }
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
@@ -8415,32 +6472,6 @@ fn copy_type_cached(
                 TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
                 TypeDesc::Tconstr { path, args, .. } => {
                     let path_name = path.name();
-                    let path_match = debug_copy_path
-                        .as_deref()
-                        .is_some_and(|needle| path_name.contains(needle));
-                    if debug_copy_constr || path_match {
-                        let name = path.name();
-                        if path_match
-                            || name == "ticker"
-                            || name == "Ticker_map.t"
-                            || name == "Belt.List.t"
-                            || name == "list"
-                            || name == "int"
-                            || name == "string"
-                            || name == "option"
-                            || name == "Jsx.element"
-                            || name == "React.element"
-                            || name == "Stdlib.JSON.t"
-                            || name == "JSON.t"
-                        {
-                            eprintln!(
-                                "[rust-copy-constr] copy-constr ty={} level={} name={}",
-                                ty.0,
-                                ctx.get_level(ty),
-                                name
-                            );
-                        }
-                    }
                     CopyAction::Constr {
                         path: path.clone(),
                         args: args.clone(),
@@ -8535,47 +6566,6 @@ fn copy_type_cached(
                 CopyAction::Constr { path, args } => {
                     let abbrevs = ctx.current_abbreviations();
                     let lookup_abbrevs = proper_abbrevs(ctx, &path, &args, abbrevs);
-                    let debug_copy_constr = std::env::var_os("RUST_DEBUG_COPY_CONSTR").is_some();
-                    let debug_copy_constr_bt =
-                        std::env::var_os("RUST_DEBUG_COPY_CONSTR_BT").is_some();
-                    let full_path_name = if debug_copy_constr || debug_copy_path.is_some() {
-                        Some(path.name())
-                    } else {
-                        None
-                    };
-                    let debug_path_name = if (debug_copy_constr || debug_copy_path.is_some())
-                        && (debug_copy_path
-                            .as_deref()
-                            .is_some_and(|needle| path.name().contains(needle))
-                            || path.last() == "value"
-                            || path.last() == "xy"
-                            || path.last() == "imageElement"
-                            || path.last() == "key"
-                            || path.last() == "elt"
-                            || path.last() == "stateless"
-                            || path.last() == "noRetainedProps"
-                            || path.last() == "actionless"
-                            || path.last() == "componentSpec"
-                            || path.last() == "component"
-                            || full_path_name.as_deref() == Some("Ord.t")
-                            || full_path_name.as_deref() == Some("Js_string2.t")
-                            || full_path_name.as_deref() == Some("Js.String2.t")
-                            || full_path_name.as_deref() == Some("int")
-                            || full_path_name.as_deref() == Some("string")
-                            || full_path_name.as_deref() == Some("option")
-                            || full_path_name.as_deref() == Some("N.t")
-                            || full_path_name.as_deref() == Some("Belt.MutableSet.Int.t")
-                            || full_path_name.as_deref() == Some("LayerStyleID.ID.t")
-                            || full_path_name.as_deref() == Some("Layout.Types.t")
-                            || full_path_name.as_deref() == Some("Jsx.element")
-                            || full_path_name.as_deref() == Some("React.element")
-                            || full_path_name.as_deref() == Some("Stdlib.JSON.t")
-                            || full_path_name.as_deref() == Some("JSON.t"))
-                    {
-                        full_path_name.clone()
-                    } else {
-                        None
-                    };
 
                     let is_local_nonpersistent =
                         matches!(&path, Path::Pident(id) if !id.is_persistent());
@@ -8601,74 +6591,10 @@ fn copy_type_cached(
                         let stale_local_generic_hit = is_local_nonpersistent
                             && found_cached.is_none()
                             && ctx.get_level(found_source) == GENERIC_LEVEL;
-                        if let Some(path_name) = &debug_path_name {
-                            eprintln!(
-                                "[copy-constr] hit path={} ty={} level={} head_stamp={} lookup={:?} found_ty={} found_ty_level={} found_source={} found_source_level={} found_repr={} found_cached={} stale_local_generic_hit={}",
-                                path_name,
-                                ty.0,
-                                level,
-                                path.head().stamp(),
-                                lookup_abbrevs,
-                                found_ty.0,
-                                found_ty_level,
-                                found_source.0,
-                                found_source_level,
-                                found_repr.0,
-                                found_cached.is_some(),
-                                stale_local_generic_hit
-                            );
-                            if debug_copy_constr_bt
-                                && (path_name == "React.element"
-                                    || path_name == "Stdlib.JSON.t"
-                                    || path_name == "JSON.t")
-                            {
-                                let event =
-                                    COPY_CONSTR_DEBUG_EVENTS.fetch_add(1, Ordering::Relaxed);
-                                if event < 40 {
-                                    eprintln!(
-                                        "[copy-constr-bt] event={} kind=hit path={} ty={} found_source={} found_repr={}\n{:?}",
-                                        event,
-                                        path_name,
-                                        ty.0,
-                                        found_source.0,
-                                        found_repr.0,
-                                        std::backtrace::Backtrace::capture()
-                                    );
-                                }
-                            }
-                        }
                         if !stale_local_generic_hit && found_repr != placeholder {
                             cache.nodes.insert(ty, found_repr);
                             ctx.set_desc(placeholder, TypeDesc::Tlink(found_repr));
                             return found_repr;
-                        }
-                    } else if let Some(path_name) = &debug_path_name {
-                        let memo_state = ctx.get_abbrev_memo(lookup_abbrevs);
-                        eprintln!(
-                            "[copy-constr] miss path={} ty={} level={} head_stamp={} lookup={:?} memo={:?}",
-                            path_name,
-                            ty.0,
-                            level,
-                            path.head().stamp(),
-                            lookup_abbrevs,
-                            memo_state
-                        );
-                        if debug_copy_constr_bt
-                            && (path_name == "React.element"
-                                || path_name == "Stdlib.JSON.t"
-                                || path_name == "JSON.t")
-                        {
-                            let event = COPY_CONSTR_DEBUG_EVENTS.fetch_add(1, Ordering::Relaxed);
-                            if event < 40 {
-                                eprintln!(
-                                    "[copy-constr-bt] event={} kind=miss path={} ty={} memo={:?}\n{:?}",
-                                    event,
-                                    path_name,
-                                    ty.0,
-                                    memo_state,
-                                    std::backtrace::Backtrace::capture()
-                                );
-                            }
                         }
                     }
 
@@ -8681,24 +6607,6 @@ fn copy_type_cached(
                         AbbrevMemo::Mcons { .. } => ctx.alloc_abbrev(AbbrevMemo::Mlink(abbrevs)),
                         memo => ctx.alloc_abbrev(memo),
                     };
-                    if let Some(path_name) = &debug_path_name {
-                        let args_dump = args_copy
-                            .iter()
-                            .map(|arg| {
-                                let arg = ctx.repr(*arg);
-                                format!("{}@{}", arg.0, ctx.get_level(arg))
-                            })
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        eprintln!(
-                            "[copy-constr] fresh path={} source_ty={} placeholder={} level={} args=[{}]",
-                            path_name,
-                            ty.0,
-                            placeholder.0,
-                            ctx.get_level(placeholder),
-                            args_dump
-                        );
-                    }
 
                     TypeDesc::Tconstr {
                         path,
