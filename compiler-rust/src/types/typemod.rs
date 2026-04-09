@@ -7625,11 +7625,9 @@ fn type_module_expr_with_alias<'a>(
             // constraints (Pmty_signature), not `module type of` which can
             // cause infinite recursion in module type expansion.
             let parsed_mty = arena.get_mod_type(*mod_type_idx);
-            // Compute coercion for all constraint forms except Pmty_typeof
-            // (which can cause infinite recursion in module type expansion).
-            let is_simple_sig = !matches!(
+            let is_simple_sig = matches!(
                 &*parsed_mty.pmty_desc,
-                crate::parser::ast::ModuleTypeDesc::Pmty_typeof(_)
+                crate::parser::ast::ModuleTypeDesc::Pmty_signature(_)
             );
             let coercion = if is_simple_sig {
                 match wrap_constraint(
