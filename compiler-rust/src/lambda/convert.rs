@@ -279,7 +279,9 @@ impl<'a> LambdaConverter<'a> {
                 }
             }
             ExpressionDesc::Texp_pack(_) => Lambda::unit(),
-            ExpressionDesc::Texp_extension_constructor(_, _) => Lambda::unit(),
+            ExpressionDesc::Texp_extension_constructor(_, path) => {
+                self.translate_extension_path(path, self.loc(expr.exp_loc))
+            }
         }
     }
 
@@ -919,11 +921,13 @@ impl<'a> LambdaConverter<'a> {
                     loc,
                 )
             }
-            ConstructorTag::CstrExtension(_path) => {
-                let args_lam = args.iter().map(|e| self.convert_expr(e)).collect();
+            ConstructorTag::CstrExtension(path) => {
+                let mut all_args = Vec::with_capacity(args.len() + 1);
+                all_args.push(self.translate_extension_path(path, loc.clone()));
+                all_args.extend(args.iter().map(|e| self.convert_expr(e)));
                 Lambda::prim(
                     Primitive::Pmakeblock(0, TagInfo::Extension, Mutable::Immutable),
-                    args_lam,
+                    all_args,
                     loc,
                 )
             }
@@ -1005,6 +1009,27 @@ impl<'a> LambdaConverter<'a> {
             elements,
             loc,
         )
+    }
+
+    fn translate_extension_path(&self, path: &crate::types::Path, loc: Location) -> Lambda {
+        match path {
+            crate::types::Path::Pident(id) => {
+                if id.is_global() {
+                    Lambda::global_module(id.clone(), false)
+                } else {
+                    Lambda::var(id.clone())
+                }
+            }
+            crate::types::Path::Pdot(prefix, name, pos) => {
+                let prefix_lam = self.translate_extension_path(prefix, loc.clone());
+                Lambda::prim(
+                    Primitive::Pfield(*pos, FieldDbgInfo::Module { name: name.clone() }),
+                    vec![prefix_lam],
+                    loc,
+                )
+            }
+            crate::types::Path::Papply(_, _) => Lambda::unit(),
+        }
     }
 
     fn translate_value_path(&self, loc_idx: LocIdx, path: &crate::types::Path) -> Lambda {

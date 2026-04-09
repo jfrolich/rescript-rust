@@ -3018,6 +3018,7 @@ pub fn add_signature_to_env(
                 }
             }
             SignatureItem::SigTypext(id, ext, _status) => {
+                let ext_slot = pos;
                 pos += 1; // Extension constructors occupy runtime slots
                 let ext_type_path = substitute_sig_path(&ext.ext_type_path, sig_items, module_path);
                 // Add extension constructor
@@ -3039,9 +3040,9 @@ pub fn add_signature_to_env(
                             labels.len() as i32
                         }
                     },
-                    cstr_tag: ConstructorTag::CstrExtension(Path::pdot(
-                        module_path.clone(),
+                    cstr_tag: ConstructorTag::CstrExtension(slot_path(
                         id.name(),
+                        ext_slot,
                     )),
                     cstr_consts: 0,
                     cstr_nonconsts: 0,
