@@ -16446,18 +16446,21 @@ fn type_pack(
         }
     };
 
-    // OCaml's type_package calls type_module with alias=false (the default).
-    // We match this: alias=false ensures mod_type is the actual type (not
-    // Tmty_alias) and Tcoerce_alias wrapping is only added for true alias
-    // modules (not persistent modules with MtySignature).
     let typed_module = crate::types::typemod::type_module_expr_with_alias_mode(
         tctx,
         env,
         tctx.arena,
         module_expr,
-        false,
+        true,
     )
     .map_err(|e| TypeCoreError::Other(format!("pack: {e:?}")))?;
+
+    // Match OCaml type_module_aux: wrap Tmod_ident for alias modules in
+    // Tmod_constraint implicit. This happens when alias=false in OCaml
+    // (type_package calls type_module with alias=false). We use alias=true
+    // to avoid breaking pack type checking, then add the wrapping post-hoc.
+    // Handles both top-level Tmod_ident and nested Tmod_constraint(Tmod_ident).
+    let typed_module = wrap_alias_ident_in_constraint(typed_module, env, &mut tctx.persistent_env, tctx.type_ctx);
 
     if debug_pack {
         let full_loc = tctx.arena.to_location(loc);
