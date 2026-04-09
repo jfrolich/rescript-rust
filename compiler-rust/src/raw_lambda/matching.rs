@@ -2423,3 +2423,1045 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
     collect(lam, &mut fv);
     fv
 }
+
+// ============================================================================
+// Layer 4: Grouping and splitting
+// ============================================================================
+// Ported from OCaml's matching.ml lines 659-1090.
+// This layer implements the pattern grouping predicates, or-pattern
+// operations, and the split/precompile functions that prepare pattern
+// matchings for compilation.
+
+// ============================================================================
+// is_guarded — Check if an action has a guard (anticipated staticraise)
+// ============================================================================
+// Ported from OCaml's lambda.ml lines 603-606.
+
+/// Check if a lambda action is guarded (contains `if ... then ... else staticraise(0, [])`).
+/// Equivalent to OCaml's `Lambda.is_guarded`.
+fn is_guarded(lam: &RawLambda) -> bool {
+    match lam {
+        RawLambda::LifThenElse(_, _, else_br) => {
+            matches!(else_br.as_ref(), RawLambda::LstaticRaise(0, args) if args.is_empty())
+        }
+        RawLambda::Llet(_, _, _, body) => is_guarded(body),
+        _ => false,
+    }
+}
+
+// ============================================================================
+// Group predicates (lines 659-700)
+// ============================================================================
+
+/// Extract the constructor description from a construct pattern.
+/// Equivalent to OCaml's `pat_as_constr`.
+fn pat_as_constr(p: &Pattern) -> &crate::types::ConstructorDescription {
+    match &p.pat_desc {
+        PatternDesc::Tpat_construct(_, cstr, _) => cstr,
+        _ => panic!("Matching.pat_as_constr"),
+    }
+}
+
+/// Group predicate for constant patterns.
+/// Equivalent to OCaml's `group_constant`.
+fn group_constant(p: &Pattern) -> bool {
+    matches!(&p.pat_desc, PatternDesc::Tpat_constant(_))
+}
+
+/// Group predicate for constructor patterns.
+/// Equivalent to OCaml's `group_constructor`.
+fn group_constructor(p: &Pattern) -> bool {
+    matches!(&p.pat_desc, PatternDesc::Tpat_construct(_, _, _))
+}
+
+/// Group predicate for variant patterns.
+/// Equivalent to OCaml's `group_variant`.
+fn group_variant(p: &Pattern) -> bool {
+    matches!(&p.pat_desc, PatternDesc::Tpat_variant(_, _, _))
+}
+
+/// Group predicate for variable/wildcard patterns.
+/// Equivalent to OCaml's `group_var`.
+fn group_var(p: &Pattern) -> bool {
+    matches!(&p.pat_desc, PatternDesc::Tpat_any)
+}
+
+/// Group predicate for tuple patterns (including wildcard).
+/// Equivalent to OCaml's `group_tuple`.
+fn group_tuple(p: &Pattern) -> bool {
+    matches!(&p.pat_desc, PatternDesc::Tpat_tuple(_) | PatternDesc::Tpat_any)
+}
+
+/// Group predicate for record patterns (including wildcard).
+/// Equivalent to OCaml's `group_record`.
+fn group_record(p: &Pattern) -> bool {
+    matches!(&p.pat_desc, PatternDesc::Tpat_record(_, _) | PatternDesc::Tpat_any)
+}
+
+/// Group predicate for array patterns.
+/// Equivalent to OCaml's `group_array`.
+fn group_array(p: &Pattern) -> bool {
+    matches!(&p.pat_desc, PatternDesc::Tpat_array(_))
+}
+
+/// Get the appropriate group predicate for a pattern.
+/// Equivalent to OCaml's `get_group`.
+fn get_group(p: &Pattern) -> fn(&Pattern) -> bool {
+    match &p.pat_desc {
+        PatternDesc::Tpat_any => group_var,
+        PatternDesc::Tpat_constant(_) => group_constant,
+        PatternDesc::Tpat_construct(_, _, _) => group_constructor,
+        PatternDesc::Tpat_tuple(_) => group_tuple,
+        PatternDesc::Tpat_record(_, _) => group_record,
+        PatternDesc::Tpat_array(_) => group_array,
+        PatternDesc::Tpat_variant(_, _, _) => group_variant,
+        _ => panic!("Matching.get_group"),
+    }
+}
+
+/// Check if a pattern is an or-pattern.
+/// Equivalent to OCaml's `is_or`.
+fn is_or(p: &Pattern) -> bool {
+    matches!(&p.pat_desc, PatternDesc::Tpat_or(_, _, _))
+}
+
+// ============================================================================
+// Or-pattern operations (lines 708-773)
+// ============================================================================
+
+/// Condition (a) for appending to the Or matrix: p and q are incompatible.
+/// Equivalent to OCaml's `conda`.
+fn conda(p: &Pattern, q: &Pattern) -> bool {
+    !may_compat(p, q)
+}
+
+/// Condition (b) for appending: action is not guarded and qs <= ps.
+/// Equivalent to OCaml's `condb`.
+fn condb(act: &RawLambda, ps: &[Pattern], qs: &[Pattern]) -> bool {
+    !is_guarded(act) && le_pats(qs, ps)
+}
+
+/// Check if p can be appended/inserted into the or-matrix l, given
+/// surrounding patterns ps.
+/// Equivalent to OCaml's `or_ok`.
+fn or_ok(p: &Pattern, ps: &[Pattern], l: &[(Vec<Pattern>, RawLambda)]) -> bool {
+    l.iter().all(|(row, act)| {
+        match row.split_first() {
+            Some((q, qs)) if is_or(q) => conda(p, q) || condb(act, ps, qs),
+            _ => true,
+        }
+    })
+}
+
+/// Check if two patterns are equivalent (each le the other).
+/// Equivalent to OCaml's `equiv_pat`.
+fn equiv_pat(p: &Pattern, q: &Pattern) -> bool {
+    le_pat(p, q) && le_pat(q, p)
+}
+
+/// Get equivalent or-patterns from the front of the list.
+/// Returns (equivalent_clauses, remaining_clauses).
+/// Equivalent to OCaml's `get_equiv`.
+fn get_equiv(
+    p: &Pattern,
+    l: &[(Vec<Pattern>, RawLambda)],
+) -> (Vec<(Vec<Pattern>, RawLambda)>, Vec<(Vec<Pattern>, RawLambda)>) {
+    match l.split_first() {
+        Some((cl, rem)) => {
+            match cl.0.first() {
+                Some(q) if equiv_pat(p, q) => {
+                    let (mut others, rem) = get_equiv(p, rem);
+                    others.insert(0, cl.clone());
+                    (others, rem)
+                }
+                _ => (Vec::new(), l.to_vec()),
+            }
+        }
+        None => (Vec::new(), Vec::new()),
+    }
+}
+
+/// Insert or append a pattern in the Or matrix.
+/// Returns (updated_ors, updated_no).
+/// Equivalent to OCaml's `insert_or_append`.
+fn insert_or_append(
+    p: &Pattern,
+    ps: &[Pattern],
+    act: &RawLambda,
+    ors: Vec<(Vec<Pattern>, RawLambda)>,
+    no: Vec<(Vec<Pattern>, RawLambda)>,
+) -> (Vec<(Vec<Pattern>, RawLambda)>, Vec<(Vec<Pattern>, RawLambda)>) {
+    fn attempt(
+        seen: Vec<(Vec<Pattern>, RawLambda)>,
+        rest: &[(Vec<Pattern>, RawLambda)],
+        p: &Pattern,
+        ps: &[Pattern],
+        act: &RawLambda,
+        ors: &[(Vec<Pattern>, RawLambda)],
+        no: &[(Vec<Pattern>, RawLambda)],
+    ) -> (Vec<(Vec<Pattern>, RawLambda)>, Vec<(Vec<Pattern>, RawLambda)>) {
+        match rest.split_first() {
+            Some((cl, rem)) => {
+                let (q_head, qs) = match cl.0.split_first() {
+                    Some((q, qs)) => (q, qs),
+                    None => panic!("insert_or_append: empty pattern row"),
+                };
+                let act_q = &cl.1;
+                if is_or(q_head) {
+                    if may_compat(p, q_head) {
+                        if extract_vars(BTreeSet::new(), p).is_empty()
+                            && extract_vars(BTreeSet::new(), q_head).is_empty()
+                            && equiv_pat(p, q_head)
+                        {
+                            // attempt insert, for equivalent orpats with no variables
+                            let (_, not_e) = get_equiv(q_head, rem);
+                            if or_ok(p, ps, &not_e)
+                                && seen.iter().all(|seen_cl| {
+                                    match seen_cl.0.first() {
+                                        Some(q) => !may_compat(p, q),
+                                        None => panic!("insert_or_append: empty seen row"),
+                                    }
+                                })
+                            {
+                                // insert
+                                let mut new_p_row = vec![p.clone()];
+                                new_p_row.extend_from_slice(ps);
+                                let mut result: Vec<(Vec<Pattern>, RawLambda)> = Vec::new();
+                                // List.rev_append seen ((p :: ps, act) :: cl :: rem)
+                                for item in seen.into_iter().rev() {
+                                    result.push(item);
+                                }
+                                result.push((new_p_row, act.clone()));
+                                result.push(cl.clone());
+                                result.extend_from_slice(rem);
+                                return (result, no.to_vec());
+                            } else {
+                                // fail to insert or append
+                                let mut new_p_row = vec![p.clone()];
+                                new_p_row.extend_from_slice(ps);
+                                let mut new_no = vec![(new_p_row, act.clone())];
+                                new_no.extend_from_slice(no);
+                                return (ors.to_vec(), new_no);
+                            }
+                        } else if condb(act_q, ps, qs) {
+                            // check condition (b) for append
+                            let mut new_seen = seen;
+                            new_seen.push(cl.clone());
+                            return attempt(new_seen, rem, p, ps, act, ors, no);
+                        } else {
+                            let mut new_p_row = vec![p.clone()];
+                            new_p_row.extend_from_slice(ps);
+                            let mut new_no = vec![(new_p_row, act.clone())];
+                            new_no.extend_from_slice(no);
+                            return (ors.to_vec(), new_no);
+                        }
+                    } else {
+                        // p # q, go on with append/insert
+                        let mut new_seen = seen;
+                        new_seen.push(cl.clone());
+                        return attempt(new_seen, rem, p, ps, act, ors, no);
+                    }
+                } else {
+                    // q is not an or-pat, go on with append/insert
+                    let mut new_seen = seen;
+                    new_seen.push(cl.clone());
+                    return attempt(new_seen, rem, p, ps, act, ors, no);
+                }
+            }
+            None => {
+                // [] in fact — success in appending
+                let mut new_p_row = vec![p.clone()];
+                new_p_row.extend_from_slice(ps);
+                let mut result = vec![(new_p_row, act.clone())];
+                result.extend(ors.iter().cloned());
+                // Wait — OCaml does (p :: ps, act) :: ors which prepends.
+                // But actually: the seen list is empty at this point (all consumed),
+                // and OCaml returns ((p :: ps, act) :: ors, no).
+                // But ors here is the ORIGINAL ors, not what we've been iterating.
+                // Actually, we're iterating ors itself. At this point we've consumed
+                // all of ors (rest is empty), so ors should be reconstructed.
+                // Let me re-read the OCaml...
+                //
+                // attempt [] ors  -- seen=[], iterating over ors
+                // when we hit None (end of ors list):
+                //   ((p :: ps, act) :: ors, no)
+                // But ors here is the CLOSURE variable, the original ors!
+                // So we prepend to the original ors list.
+                //
+                // Wait no, in OCaml the `ors` in the closure is the original parameter.
+                // The function `attempt seen = function ...` iterates over its argument,
+                // which IS ors (called as `attempt [] ors`).
+                // When it reaches [], it returns ((p::ps, act) :: ors, no) using
+                // the OUTER ors binding. But the outer ors IS the same list being iterated.
+                // So this is: prepend new clause to ors.
+                return (result, no.to_vec());
+            }
+        }
+    }
+
+    attempt(Vec::new(), &ors, p, ps, act, &ors, &no)
+}
+
+// ============================================================================
+// Rebuild functions (lines 777-793)
+// ============================================================================
+
+/// Reconstruct a matrix from a half-compiled pattern matching.
+/// Equivalent to OCaml's `rebuild_matrix`.
+fn rebuild_matrix(pmh: &PmHalfCompiled) -> Matrix {
+    match pmh {
+        PmHalfCompiled::Pm(pm) => as_matrix(&pm.cases),
+        PmHalfCompiled::PmOr(por) => por.or_matrix.clone(),
+        PmHalfCompiled::PmVar(x) => add_omega_column(&rebuild_matrix(&x.inside)),
+    }
+}
+
+/// Reconstruct default information from half-compiled pm list.
+/// Equivalent to OCaml's `rebuild_default`.
+fn rebuild_default(nexts: &[(i32, PmHalfCompiled)], def: DefaultEnv) -> DefaultEnv {
+    match nexts.split_first() {
+        None => def,
+        Some(((e, pmh), rem)) => {
+            let mut result = vec![(add_omega_column(&rebuild_matrix(pmh)), *e)];
+            result.extend(rebuild_default(rem, def));
+            result
+        }
+    }
+}
+
+/// Wrap nexts with PmVar nodes.
+/// Equivalent to OCaml's `rebuild_nexts`.
+fn rebuild_nexts(
+    arg: &RawLambda,
+    nexts: Vec<(i32, PmHalfCompiled)>,
+    k: Vec<(i32, PmHalfCompiled)>,
+) -> Vec<(i32, PmHalfCompiled)> {
+    // List.fold_right (\(e, pm) k -> (e, PmVar {inside = pm; var_arg = arg}) :: k) nexts k
+    nexts.into_iter().rev().fold(k, |mut acc, (e, pm)| {
+        acc.insert(0, (e, PmHalfCompiled::PmVar(PmVarCompiled {
+            inside: Box::new(pm),
+            var_arg: arg.clone(),
+        })));
+        acc
+    })
+}
+
+// ============================================================================
+// Split functions (lines 814-1090)
+// ============================================================================
+
+/// Split a matching, directed first by or-patterns, then by tests/variable transitions.
+/// Equivalent to OCaml's `split_or`.
+fn split_or(
+    argo: &Option<Ident>,
+    cls: Vec<(Vec<Pattern>, RawLambda)>,
+    args: &[(RawLambda, LetKind)],
+    def: DefaultEnv,
+    next_raise: &mut i32,
+) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
+    let cls = simplify_cases(args, cls);
+
+    do_split_or(argo, Vec::new(), Vec::new(), Vec::new(), &cls, args, &def, next_raise)
+}
+
+/// Inner do_split for split_or.
+fn do_split_or(
+    argo: &Option<Ident>,
+    before: Vec<(Vec<Pattern>, RawLambda)>,
+    ors: Vec<(Vec<Pattern>, RawLambda)>,
+    no: Vec<(Vec<Pattern>, RawLambda)>,
+    rest: &[(Vec<Pattern>, RawLambda)],
+    args: &[(RawLambda, LetKind)],
+    def: &DefaultEnv,
+    next_raise: &mut i32,
+) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
+    match rest.split_first() {
+        None => {
+            let before = rev_vec(before);
+            let ors = rev_vec(ors);
+            let no = rev_vec(no);
+            cons_next_or(argo, before, ors, &no, args, def, next_raise)
+        }
+        Some((cl, rem)) => {
+            match cl.0.split_first() {
+                Some((p, ps)) => {
+                    let act = &cl.1;
+                    if up_ok(&cl.0, act, &no) {
+                        if is_or(p) {
+                            let (new_ors, new_no) = insert_or_append(p, ps, act, ors, no);
+                            do_split_or(argo, before, new_ors, new_no, rem, args, def, next_raise)
+                        } else if up_ok(&cl.0, act, &ors) {
+                            let mut new_before = before;
+                            new_before.push(cl.clone());
+                            do_split_or(argo, new_before, ors, no, rem, args, def, next_raise)
+                        } else if or_ok(p, ps, &ors) {
+                            let mut new_ors = ors;
+                            new_ors.push(cl.clone());
+                            do_split_or(argo, before, new_ors, no, rem, args, def, next_raise)
+                        } else {
+                            let mut new_no = no;
+                            new_no.push(cl.clone());
+                            do_split_or(argo, before, ors, new_no, rem, args, def, next_raise)
+                        }
+                    } else {
+                        let mut new_no = no;
+                        new_no.push(cl.clone());
+                        do_split_or(argo, before, ors, new_no, rem, args, def, next_raise)
+                    }
+                }
+                None => panic!("split_or: empty pattern row"),
+            }
+        }
+    }
+}
+
+/// cons_next helper for split_or.
+fn cons_next_or(
+    argo: &Option<Ident>,
+    yes: Vec<(Vec<Pattern>, RawLambda)>,
+    yesor: Vec<(Vec<Pattern>, RawLambda)>,
+    no: &[(Vec<Pattern>, RawLambda)],
+    args: &[(RawLambda, LetKind)],
+    def: &DefaultEnv,
+    next_raise: &mut i32,
+) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
+    if no.is_empty() {
+        precompile_or(argo, yes, yesor, args, def.clone(), Vec::new(), next_raise)
+    } else {
+        let (info, nexts) = do_split_or(
+            argo,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            no,
+            args,
+            def,
+            next_raise,
+        );
+        let idef = {
+            *next_raise += 1;
+            *next_raise
+        };
+        let new_def = cons_default(info.matrix.clone(), idef, def.clone());
+        let mut new_nexts = vec![(idef, info.me)];
+        new_nexts.extend(nexts);
+        precompile_or(argo, yes, yesor, args, new_def, new_nexts, next_raise)
+    }
+}
+
+/// Ultra-naive splitting, close to semantics, used for extension constructors.
+/// Equivalent to OCaml's `split_naive`.
+fn split_naive(
+    cls: &[(Vec<Pattern>, RawLambda)],
+    args: &[(RawLambda, LetKind)],
+    def: DefaultEnv,
+    k: Vec<(i32, PmHalfCompiled)>,
+    next_raise: &mut i32,
+) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
+    match cls.split_first() {
+        None => panic!("split_naive: empty cases"),
+        Some((cl, rem)) => {
+            match cl.0.first() {
+                Some(p) if group_constructor(p) => {
+                    split_exc(pat_as_constr(p), vec![cl.clone()], rem, args, def, k, next_raise)
+                }
+                Some(_) => {
+                    split_noexc(vec![cl.clone()], rem, args, def, k, next_raise)
+                }
+                None => panic!("split_naive: empty pattern row"),
+            }
+        }
+    }
+}
+
+/// Split on extension constructors (naive).
+fn split_exc(
+    cstr0: &crate::types::ConstructorDescription,
+    yes: Vec<(Vec<Pattern>, RawLambda)>,
+    rest: &[(Vec<Pattern>, RawLambda)],
+    args: &[(RawLambda, LetKind)],
+    def: DefaultEnv,
+    k: Vec<(i32, PmHalfCompiled)>,
+    next_raise: &mut i32,
+) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
+    match rest.split_first() {
+        None => {
+            let yes = rev_vec(yes);
+            (
+                PmHalfCompiledInfo {
+                    me: PmHalfCompiled::Pm(PatternMatching {
+                        cases: yes.clone(),
+                        args: args.to_vec(),
+                        default: def.clone(),
+                    }),
+                    matrix: as_matrix(&yes),
+                    top_default: def,
+                },
+                k,
+            )
+        }
+        Some((cl, rem)) => {
+            match cl.0.first() {
+                Some(p) if group_constructor(p) => {
+                    let cstr = pat_as_constr(p);
+                    if equal_tag(&cstr.cstr_tag, &cstr0.cstr_tag) {
+                        let mut new_yes = yes;
+                        new_yes.push(cl.clone());
+                        split_exc(cstr0, new_yes, rem, args, def, k, next_raise)
+                    } else {
+                        let yes = rev_vec(yes);
+                        let (info, nexts) = split_exc(cstr, vec![cl.clone()], rem, args, def.clone(), k, next_raise);
+                        let idef = {
+                            *next_raise += 1;
+                            *next_raise
+                        };
+                        let new_def = cons_default(info.matrix.clone(), idef, def);
+                        let mut new_nexts = vec![(idef, info.me)];
+                        new_nexts.extend(nexts);
+                        (
+                            PmHalfCompiledInfo {
+                                me: PmHalfCompiled::Pm(PatternMatching {
+                                    cases: yes.clone(),
+                                    args: args.to_vec(),
+                                    default: new_def.clone(),
+                                }),
+                                matrix: as_matrix(&yes),
+                                top_default: new_def,
+                            },
+                            new_nexts,
+                        )
+                    }
+                }
+                Some(_) => {
+                    let yes = rev_vec(yes);
+                    let (info, nexts) = split_noexc(vec![cl.clone()], rem, args, def.clone(), k, next_raise);
+                    let idef = {
+                        *next_raise += 1;
+                        *next_raise
+                    };
+                    let new_def = cons_default(info.matrix.clone(), idef, def);
+                    let mut new_nexts = vec![(idef, info.me)];
+                    new_nexts.extend(nexts);
+                    (
+                        PmHalfCompiledInfo {
+                            me: PmHalfCompiled::Pm(PatternMatching {
+                                cases: yes.clone(),
+                                args: args.to_vec(),
+                                default: new_def.clone(),
+                            }),
+                            matrix: as_matrix(&yes),
+                            top_default: new_def,
+                        },
+                        new_nexts,
+                    )
+                }
+                None => panic!("split_exc: empty pattern row"),
+            }
+        }
+    }
+}
+
+/// Split on non-extension constructors (naive).
+fn split_noexc(
+    yes: Vec<(Vec<Pattern>, RawLambda)>,
+    rest: &[(Vec<Pattern>, RawLambda)],
+    args: &[(RawLambda, LetKind)],
+    def: DefaultEnv,
+    k: Vec<(i32, PmHalfCompiled)>,
+    next_raise: &mut i32,
+) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
+    match rest.split_first() {
+        None => {
+            let yes = rev_vec(yes);
+            precompile_var(args, yes, def, k, next_raise)
+        }
+        Some((cl, rem)) => {
+            match cl.0.first() {
+                Some(p) if group_constructor(p) => {
+                    let yes = rev_vec(yes);
+                    let (info, nexts) = split_exc(
+                        pat_as_constr(p),
+                        vec![cl.clone()],
+                        rem,
+                        args,
+                        def.clone(),
+                        k,
+                        next_raise,
+                    );
+                    let idef = {
+                        *next_raise += 1;
+                        *next_raise
+                    };
+                    precompile_var(
+                        args,
+                        yes,
+                        cons_default(info.matrix.clone(), idef, def),
+                        {
+                            let mut new_nexts = vec![(idef, info.me)];
+                            new_nexts.extend(nexts);
+                            new_nexts
+                        },
+                        next_raise,
+                    )
+                }
+                Some(_) => {
+                    let mut new_yes = yes;
+                    new_yes.push(cl.clone());
+                    split_noexc(new_yes, rem, args, def, k, next_raise)
+                }
+                None => panic!("split_noexc: empty pattern row"),
+            }
+        }
+    }
+}
+
+/// Split on constructors using group predicates.
+/// Equivalent to OCaml's `split_constr`.
+fn split_constr(
+    cls: &[(Vec<Pattern>, RawLambda)],
+    args: &[(RawLambda, LetKind)],
+    def: DefaultEnv,
+    k: Vec<(i32, PmHalfCompiled)>,
+    next_raise: &mut i32,
+) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
+    let ex_pat = what_is_cases(cls);
+    match &ex_pat.pat_desc {
+        PatternDesc::Tpat_any => {
+            precompile_var(args, cls.to_vec(), def, k, next_raise)
+        }
+        PatternDesc::Tpat_construct(_, cstr, _)
+            if matches!(&cstr.cstr_tag, ConstructorTag::CstrExtension(_)) =>
+        {
+            split_naive(cls, args, def, k, next_raise)
+        }
+        _ => {
+            let group = get_group(&ex_pat);
+            match cls.split_first() {
+                Some((cl, rem)) => {
+                    match cl.0.first() {
+                        Some(p) if group(p) => {
+                            split_ex(group, vec![cl.clone()], Vec::new(), rem, args, def, k, next_raise)
+                        }
+                        _ => {
+                            split_noex(group, vec![cl.clone()], Vec::new(), rem, args, def, k, next_raise)
+                        }
+                    }
+                }
+                None => panic!("split_constr: empty cases"),
+            }
+        }
+    }
+}
+
+/// split_ex: raise constructor rows up.
+fn split_ex(
+    group: fn(&Pattern) -> bool,
+    yes: Vec<(Vec<Pattern>, RawLambda)>,
+    no: Vec<(Vec<Pattern>, RawLambda)>,
+    rest: &[(Vec<Pattern>, RawLambda)],
+    args: &[(RawLambda, LetKind)],
+    def: DefaultEnv,
+    k: Vec<(i32, PmHalfCompiled)>,
+    next_raise: &mut i32,
+) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
+    match rest.split_first() {
+        None => {
+            let yes = rev_vec(yes);
+            let no = rev_vec(no);
+            match no.split_first() {
+                None => {
+                    (
+                        PmHalfCompiledInfo {
+                            me: PmHalfCompiled::Pm(PatternMatching {
+                                cases: yes.clone(),
+                                args: args.to_vec(),
+                                default: def.clone(),
+                            }),
+                            matrix: as_matrix(&yes),
+                            top_default: def,
+                        },
+                        k,
+                    )
+                }
+                Some((no_cl, no_rem)) => {
+                    if yes.is_empty() {
+                        // Could not succeed in raising up a constr matching up
+                        split_noex(group, vec![no_cl.clone()], Vec::new(), no_rem, args, def, k, next_raise)
+                    } else {
+                        let (info, nexts) = split_noex(
+                            group,
+                            vec![no_cl.clone()],
+                            Vec::new(),
+                            no_rem,
+                            args,
+                            def.clone(),
+                            k,
+                            next_raise,
+                        );
+                        let idef = {
+                            *next_raise += 1;
+                            *next_raise
+                        };
+                        let new_def = cons_default(info.matrix.clone(), idef, def);
+                        let mut new_nexts = vec![(idef, info.me)];
+                        new_nexts.extend(nexts);
+                        (
+                            PmHalfCompiledInfo {
+                                me: PmHalfCompiled::Pm(PatternMatching {
+                                    cases: yes.clone(),
+                                    args: args.to_vec(),
+                                    default: new_def.clone(),
+                                }),
+                                matrix: as_matrix(&yes),
+                                top_default: new_def,
+                            },
+                            new_nexts,
+                        )
+                    }
+                }
+            }
+        }
+        Some((cl, rem)) => {
+            match cl.0.first() {
+                Some(p) if group(p) && up_ok(&cl.0, &cl.1, &no) => {
+                    let mut new_yes = yes;
+                    new_yes.push(cl.clone());
+                    split_ex(group, new_yes, no, rem, args, def, k, next_raise)
+                }
+                _ => {
+                    let mut new_no = no;
+                    new_no.push(cl.clone());
+                    split_ex(group, yes, new_no, rem, args, def, k, next_raise)
+                }
+            }
+        }
+    }
+}
+
+/// split_noex: raise non-constructor rows up.
+fn split_noex(
+    group: fn(&Pattern) -> bool,
+    yes: Vec<(Vec<Pattern>, RawLambda)>,
+    no: Vec<(Vec<Pattern>, RawLambda)>,
+    rest: &[(Vec<Pattern>, RawLambda)],
+    args: &[(RawLambda, LetKind)],
+    def: DefaultEnv,
+    k: Vec<(i32, PmHalfCompiled)>,
+    next_raise: &mut i32,
+) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
+    match rest.split_first() {
+        None => {
+            let yes = rev_vec(yes);
+            let no = rev_vec(no);
+            match no.split_first() {
+                None => {
+                    precompile_var(args, yes, def, k, next_raise)
+                }
+                Some((no_cl, no_rem)) => {
+                    let (info, nexts) = split_ex(
+                        group,
+                        vec![no_cl.clone()],
+                        Vec::new(),
+                        no_rem,
+                        args,
+                        def.clone(),
+                        k,
+                        next_raise,
+                    );
+                    let idef = {
+                        *next_raise += 1;
+                        *next_raise
+                    };
+                    precompile_var(
+                        args,
+                        yes,
+                        cons_default(info.matrix.clone(), idef, def),
+                        {
+                            let mut new_nexts = vec![(idef, info.me)];
+                            new_nexts.extend(nexts);
+                            new_nexts
+                        },
+                        next_raise,
+                    )
+                }
+            }
+        }
+        Some((_cl, _rem)) if rest.len() == 1 => {
+            // Check for the special case: last row is all variables and yes is non-empty
+            let cl = &rest[0];
+            if cl.0.iter().all(|p| group_var(p)) && !yes.is_empty() {
+                // This enables an extra division in some frequent cases:
+                // last row is made of variables only
+                let mut new_no = no;
+                new_no.push(cl.clone());
+                split_noex(group, yes, new_no, &[], args, def, k, next_raise)
+            } else {
+                // Fall through to normal case
+                let cl = &rest[0];
+                match cl.0.first() {
+                    Some(p) if !group(p) && up_ok(&cl.0, &cl.1, &no) => {
+                        let mut new_yes = yes;
+                        new_yes.push(cl.clone());
+                        split_noex(group, new_yes, no, &[], args, def, k, next_raise)
+                    }
+                    _ => {
+                        let mut new_no = no;
+                        new_no.push(cl.clone());
+                        split_noex(group, yes, new_no, &[], args, def, k, next_raise)
+                    }
+                }
+            }
+        }
+        Some((cl, rem)) => {
+            match cl.0.first() {
+                Some(p) if !group(p) && up_ok(&cl.0, &cl.1, &no) => {
+                    let mut new_yes = yes;
+                    new_yes.push(cl.clone());
+                    split_noex(group, new_yes, no, rem, args, def, k, next_raise)
+                }
+                _ => {
+                    let mut new_no = no;
+                    new_no.push(cl.clone());
+                    split_noex(group, yes, new_no, rem, args, def, k, next_raise)
+                }
+            }
+        }
+    }
+}
+
+/// Precompile variable patterns: if the match argument is a variable,
+/// split further on the second column.
+/// Equivalent to OCaml's `precompile_var`.
+fn precompile_var(
+    args: &[(RawLambda, LetKind)],
+    cls: Vec<(Vec<Pattern>, RawLambda)>,
+    def: DefaultEnv,
+    k: Vec<(i32, PmHalfCompiled)>,
+    next_raise: &mut i32,
+) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
+    match args {
+        [] => panic!("precompile_var: empty args"),
+        [_, arg_rest @ ..] if !arg_rest.is_empty() => {
+            // Check if second arg is Lvar
+            match &arg_rest[0].0 {
+                RawLambda::Lvar(v) => {
+                    if cls.len() == 1 {
+                        // as split as it can
+                        dont_precompile_var(args, cls, def, k)
+                    } else {
+                        // Precompile: strip first pattern from each case
+                        let var_cls: Vec<(Vec<Pattern>, RawLambda)> = cls
+                            .iter()
+                            .map(|(ps, act)| {
+                                match ps.split_first() {
+                                    Some((_, rest)) => (rest.to_vec(), act.clone()),
+                                    None => panic!("precompile_var: empty pattern row"),
+                                }
+                            })
+                            .collect();
+                        let var_def = make_default(
+                            &|_p: &Pattern, rem: &[Pattern]| Ok(rem.to_vec()),
+                            &def,
+                        );
+                        let av = arg_rest[0].0.clone();
+                        let (first_info, nexts) = split_or(
+                            &Some(v.clone()),
+                            var_cls,
+                            arg_rest,
+                            var_def,
+                            next_raise,
+                        );
+
+                        // Compute top information
+                        if nexts.is_empty() {
+                            // If you need
+                            dont_precompile_var(args, cls, def, k)
+                        } else {
+                            let rfirst = PmHalfCompiledInfo {
+                                me: PmHalfCompiled::PmVar(PmVarCompiled {
+                                    inside: Box::new(first_info.me),
+                                    var_arg: av.clone(),
+                                }),
+                                matrix: add_omega_column(&first_info.matrix),
+                                top_default: rebuild_default(&nexts, def),
+                            };
+                            let rnexts = rebuild_nexts(&av, nexts, k);
+                            (rfirst, rnexts)
+                        }
+                    }
+                }
+                _ => dont_precompile_var(args, cls, def, k),
+            }
+        }
+        _ => dont_precompile_var(args, cls, def, k),
+    }
+}
+
+/// Don't precompile: just wrap the cases in a PatternMatching.
+/// Equivalent to OCaml's `dont_precompile_var`.
+fn dont_precompile_var(
+    args: &[(RawLambda, LetKind)],
+    cls: Vec<(Vec<Pattern>, RawLambda)>,
+    def: DefaultEnv,
+    k: Vec<(i32, PmHalfCompiled)>,
+) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
+    (
+        PmHalfCompiledInfo {
+            me: PmHalfCompiled::Pm(PatternMatching {
+                cases: cls.clone(),
+                args: args.to_vec(),
+                default: def.clone(),
+            }),
+            matrix: as_matrix(&cls),
+            top_default: def,
+        },
+        k,
+    )
+}
+
+/// Precompile or-patterns.
+/// Equivalent to OCaml's `precompile_or`.
+fn precompile_or(
+    argo: &Option<Ident>,
+    cls: Vec<(Vec<Pattern>, RawLambda)>,
+    ors: Vec<(Vec<Pattern>, RawLambda)>,
+    args: &[(RawLambda, LetKind)],
+    def: DefaultEnv,
+    k: Vec<(i32, PmHalfCompiled)>,
+    next_raise: &mut i32,
+) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
+    if ors.is_empty() {
+        return split_constr(&cls, args, def, k, next_raise);
+    }
+
+    // do_cases processes the or-pattern list
+    let (end_body, handlers) = do_cases_or(argo, &ors, args, &def, next_raise);
+
+    let matrix = as_matrix(&[cls.as_slice(), ors.as_slice()].concat());
+    let body = PatternMatching {
+        cases: [cls, end_body].concat(),
+        args: args.to_vec(),
+        default: def.clone(),
+    };
+    (
+        PmHalfCompiledInfo {
+            me: PmHalfCompiled::PmOr(PmOrCompiled {
+                body,
+                handlers,
+                or_matrix: matrix.clone(),
+            }),
+            matrix,
+            top_default: def,
+        },
+        k,
+    )
+}
+
+/// Process or-pattern cases for precompile_or.
+/// Equivalent to the inner `do_cases` in OCaml's `precompile_or`.
+fn do_cases_or(
+    argo: &Option<Ident>,
+    ors: &[(Vec<Pattern>, RawLambda)],
+    args: &[(RawLambda, LetKind)],
+    def: &DefaultEnv,
+    next_raise: &mut i32,
+) -> (Vec<(Vec<Pattern>, RawLambda)>, Vec<(Matrix, i32, Vec<Ident>, PatternMatching)>) {
+    match ors.split_first() {
+        None => (Vec::new(), Vec::new()),
+        Some((cl, rem)) => {
+            match cl.0.first() {
+                Some(orp) if is_or(orp) => {
+                    let patl = &cl.0[1..];
+                    let action = &cl.1;
+
+                    let (others, rem) = get_equiv(orp, rem);
+
+                    let orpm_cases = {
+                        let mut cases = vec![(patl.to_vec(), action.clone())];
+                        cases.extend(others.iter().map(|(ps, act)| {
+                            match ps.split_first() {
+                                Some((_, rest)) => (rest.to_vec(), act.clone()),
+                                None => panic!("do_cases_or: empty pattern row"),
+                            }
+                        }));
+                        cases
+                    };
+                    let orpm_args = match args.split_first() {
+                        Some((_, r)) => r.to_vec(),
+                        None => panic!("do_cases_or: empty args"),
+                    };
+                    let orpm = PatternMatching {
+                        cases: orpm_cases,
+                        args: orpm_args,
+                        default: default_compat(orp, def),
+                    };
+
+                    let vars: Vec<Ident> = {
+                        let orp_vars = extract_vars(BTreeSet::new(), orp);
+                        let pm_fv = pm_free_variables(&orpm);
+                        orp_vars.intersection(&pm_fv).cloned().collect()
+                    };
+
+                    let or_num = {
+                        *next_raise += 1;
+                        *next_raise
+                    };
+                    let new_patl = omega_list(patl);
+
+                    let mk_new_action = |vs: &[Ident]| -> RawLambda {
+                        RawLambda::LstaticRaise(
+                            or_num,
+                            vs.iter().map(|v| RawLambda::Lvar(v.clone())).collect(),
+                        )
+                    };
+
+                    let (body, handlers) = do_cases_or(argo, &rem, args, def, next_raise);
+
+                    let exploded = explode_or_pat(
+                        argo,
+                        &new_patl,
+                        &mk_new_action,
+                        body,
+                        &vars.iter().cloned().collect(),
+                        &[],
+                        orp,
+                    );
+
+                    let new_body = match exploded {
+                        Ok(b) => b,
+                        Err(_) => panic!("do_cases_or: Cannot_flatten"),
+                    };
+
+                    let mat = vec![vec![orp.clone()]];
+                    let mut new_handlers = vec![(mat, or_num, vars, orpm)];
+                    new_handlers.extend(handlers);
+                    (new_body, new_handlers)
+                }
+                _ => {
+                    // Not an or-pattern head
+                    let (mut new_ord, new_to_catch) = do_cases_or(argo, rem, args, def, next_raise);
+                    new_ord.insert(0, cl.clone());
+                    (new_ord, new_to_catch)
+                }
+            }
+        }
+    }
+}
+
+/// Top-level split_precompile.
+/// Equivalent to OCaml's `split_precompile`.
+pub fn split_precompile(
+    argo: &Option<Ident>,
+    pm: &PatternMatching,
+    next_raise: &mut i32,
+) -> (PmHalfCompiled, Vec<(i32, PmHalfCompiled)>) {
+    let (info, nexts) = split_or(argo, pm.cases.clone(), &pm.args, pm.default.clone(), next_raise);
+    // Debug output omitted (dbg = false in OCaml)
+    (info.me, nexts)
+}
+
+/// Helper: reverse a vector (equivalent to List.rev).
+fn rev_vec<T>(mut v: Vec<T>) -> Vec<T> {
+    v.reverse();
+    v
+}
