@@ -1291,17 +1291,30 @@ impl<'a> TypeContext<'a> {
     /// to point directly to the representative, improving
     /// subsequent lookup performance.
     pub fn repr(&self, t: TypeExprRef) -> TypeExprRef {
-        // Iterative traversal avoids recursive stack growth on long link chains
-        // and protects against accidental cycles in malformed link graphs.
-        let mut current = t;
-        let mut chain: Vec<TypeExprRef> = Vec::new();
-        let mut seen: std::collections::HashSet<TypeExprRef> = std::collections::HashSet::new();
-
-        loop {
-            if !seen.insert(current) {
-                break;
+        // Fast path: check if t is already a representative (no link).
+        // This avoids any allocation for the common case.
+        let first_next = {
+            let desc = self.get_desc(t);
+            match &*desc {
+                TypeDesc::Tlink(next) => *next,
+                TypeDesc::Tfield {
+                    kind: FieldKind::Fabsent,
+                    rest,
+                    ..
+                } => *rest,
+                _ => return t,
             }
+        };
 
+        // Follow chain to the end, collecting nodes for path compression.
+        // Uses a fixed-size stack buffer — chains longer than 32 are
+        // vanishingly rare and just won't get full compression.
+        let mut chain = [TypeExprRef(0); 32];
+        let mut chain_len: usize = 1;
+        chain[0] = t;
+
+        let mut current = first_next;
+        for _ in 0..10_000 {
             let next = {
                 let desc = self.get_desc(current);
                 match &*desc {
@@ -1314,18 +1327,21 @@ impl<'a> TypeContext<'a> {
                     _ => None,
                 }
             };
-
             match next {
                 Some(next_ref) => {
-                    chain.push(current);
+                    if chain_len < 32 {
+                        chain[chain_len] = current;
+                        chain_len += 1;
+                    }
                     current = next_ref;
                 }
                 None => break,
             }
         }
 
-        // Path compression for every traversed node.
-        for node in chain {
+        // Path compression: relink all traversed nodes to the representative.
+        for i in 0..chain_len {
+            let node = chain[i];
             if node != current {
                 self.set_desc(node, TypeDesc::Tlink(current));
             }
