@@ -5200,20 +5200,28 @@ impl<'a> RawLambdaConverter<'a> {
                 }
 
                 let exit_id = self.next_raise_count();
-                let offset_arg = if first == 0 {
-                    scrut_var.clone()
-                } else {
+                // When the range starts at 0, OCaml's Switch module uses
+                // (>= x (last+1)) via a Sep split rather than (isout last x).
+                // Both are semantically equivalent for non-negative values,
+                // but we match OCaml's output for parity.
+                let is_out = if first == 0 {
                     RawLambda::prim(
+                        Primitive::Pintcomp(Comparison::Ge),
+                        vec![scrut_var.clone(), RawLambda::const_(Constant::int(last + 1))],
+                        loc,
+                    )
+                } else {
+                    let offset_arg = RawLambda::prim(
                         Primitive::Poffsetint(-first),
                         vec![scrut_var.clone()],
                         loc,
+                    );
+                    RawLambda::prim(
+                        Primitive::Pisout(last - first),
+                        vec![offset_arg],
+                        loc,
                     )
                 };
-                let is_out = RawLambda::prim(
-                    Primitive::Pisout(last - first),
-                    vec![offset_arg],
-                    loc,
-                );
 
                 // If all cases map to the same static raise, use it directly
                 // instead of generating a switch (matches OCaml's share_actions)
