@@ -7,7 +7,7 @@
 //! in the stamp sequence.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 
 use crate::types::context::TypeContext;
 use crate::types::decl::ModuleDeclaration;
