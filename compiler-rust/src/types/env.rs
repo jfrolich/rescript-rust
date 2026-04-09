@@ -1011,7 +1011,9 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
                 for cd in constrs {
                     let is_constant = matches!(cd.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty());
 
-                    let cstr_tag = if is_constant {
+                    let cstr_tag = if decl.type_unboxed.unboxed {
+                        ConstructorTag::CstrUnboxed
+                    } else if is_constant {
                         let tag = ConstructorTag::CstrConstant(const_idx);
                         const_idx += 1;
                         tag

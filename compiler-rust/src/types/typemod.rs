@@ -8116,6 +8116,11 @@ fn type_structure_item<'a>(
                     None => (None, None),
                 };
 
+                // Check for @unboxed attribute (only applies to single-constructor variants)
+                let decl_has_unboxed_attr = decl.ptype_attributes.iter().any(|attr| {
+                    arena.get_string(attr.0.txt) == "unboxed"
+                });
+
                 // Convert the type kind - create both internal and typed tree versions
                 let (internal_type_kind, typed_tree_kind, constructors) = match &decl.ptype_kind {
                     crate::parser::ast::TypeKind::Ptype_abstract => (
@@ -8294,6 +8299,10 @@ fn type_structure_item<'a>(
 
                         let mut const_tag = 0i32;
                         let mut block_tag = 0i32;
+                        // @unboxed is only the single-constructor OCaml-style unboxed
+                        // when there's exactly one constructor. Multi-constructor
+                        // @unboxed is ReScript's "untagged variants" which uses different handling.
+                        let has_unboxed = decl_has_unboxed_attr && num_consts + num_nonconsts == 1;
 
                         for (cstr_idx, cstr) in cstrs.iter().enumerate() {
                             // Handle variant spread expansion
@@ -8315,7 +8324,9 @@ fn type_structure_item<'a>(
                                         find_existing_loc_idx(arena, &source_cstr.cd_loc)
                                             .unwrap_or(cstr.pcd_loc);
                                     let sc_is_const = matches!(&source_cstr.cd_args, crate::types::ConstructorArguments::CstrTuple(args) if args.is_empty());
-                                    let sc_tag = if sc_is_const {
+                                    let sc_tag = if has_unboxed {
+                                        crate::types::ConstructorTag::CstrUnboxed
+                                    } else if sc_is_const {
                                         let t = const_tag;
                                         const_tag += 1;
                                         crate::types::ConstructorTag::CstrConstant(t)
@@ -8796,7 +8807,9 @@ fn type_structure_item<'a>(
                             };
 
                             // Determine the tag
-                            let tag = if is_constant {
+                            let tag = if has_unboxed {
+                                crate::types::ConstructorTag::CstrUnboxed
+                            } else if is_constant {
                                 let t = const_tag;
                                 const_tag += 1;
                                 crate::types::ConstructorTag::CstrConstant(t)
@@ -9121,7 +9134,11 @@ fn type_structure_item<'a>(
                     type_loc: arena.to_location(decl.ptype_loc),
                     type_attributes: parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
                     type_immediate: false,
-                    type_unboxed: crate::types::UnboxedStatus::default(),
+                    type_unboxed: if decl_has_unboxed_attr && constructors.len() <= 1 {
+                        crate::types::UnboxedStatus::TRUE_FALSE
+                    } else {
+                        crate::types::UnboxedStatus::default()
+                    },
                     type_inlined_types: vec![],
                     type_path: None,
                 };

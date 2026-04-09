@@ -16051,7 +16051,9 @@ fn lookup_constructor_in_module<'b>(
                         for cd in constrs {
                             let is_constant = matches!(cd.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty());
                             if cd.cd_id.name() == cstr_name {
-                                let tag = if is_constant {
+                                let tag = if type_decl.type_unboxed.unboxed {
+                                    crate::types::decl::ConstructorTag::CstrUnboxed
+                                } else if is_constant {
                                     crate::types::decl::ConstructorTag::CstrConstant(const_idx)
                                 } else {
                                     crate::types::decl::ConstructorTag::CstrBlock(block_idx)
@@ -18017,7 +18019,9 @@ fn lookup_constructor_by_expected_type<'b>(
             let is_constant = matches!(cd.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty());
             if cd.cd_id.name() == cstr_name {
                 let mut inst_cache = HashMap::new();
-                let tag = if is_constant {
+                let tag = if concrete_type_decl.type_unboxed.unboxed {
+                    crate::types::decl::ConstructorTag::CstrUnboxed
+                } else if is_constant {
                     crate::types::decl::ConstructorTag::CstrConstant(const_idx)
                 } else {
                     crate::types::decl::ConstructorTag::CstrBlock(block_idx)
