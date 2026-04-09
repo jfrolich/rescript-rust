@@ -23,7 +23,7 @@ def canonicalize(text):
     # Identifiers can start with letters, _, *, $, or operator chars (~, @, =, etc.)
     # and contain those plus digits and more operator chars.
     # Stamps < 1000 are field positions, tag numbers, or predef stamps — left unchanged.
-    pattern = re.compile(r'([a-zA-Z_*$~!@#%^&\-+=<>:?|][a-zA-Z0-9_*\'$~!@#%^&\-+=<>:?|.]*)/(\d{4,})')
+    pattern = re.compile(r'([a-zA-Z_*$~!@#%^&\-+=<>:?|.][a-zA-Z0-9_*\'$~!@#%^&\-+=<>:?|.()]*)/(\d{4,})')
 
     # Per-name: maps (name, old_stamp) -> canonical_stamp
     stamp_map = {}
