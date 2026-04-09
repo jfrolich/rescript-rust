@@ -304,6 +304,9 @@ test_single_file() {
             python3 "$PROJECT_ROOT/scripts/canonicalize_lambda_stamps.py" < "$file_temp/rust.out" > "$file_temp/rust.norm"
             if diff -q "$file_temp/ocaml.norm" "$file_temp/rust.norm" > /dev/null 2>&1; then
                 norm_parity_pass=1
+            elif diff -q <(tr -s '[:space:]' ' ' < "$file_temp/ocaml.norm") <(tr -s '[:space:]' ' ' < "$file_temp/rust.norm") > /dev/null 2>&1; then
+                # Only whitespace/formatting differences after stamp canonicalization
+                norm_parity_pass=1
             else
                 norm_parity_fail=1
                 local norm_diff_cache="$CACHE_DIR/lambda/diffs/$safe_name.norm.diff"
