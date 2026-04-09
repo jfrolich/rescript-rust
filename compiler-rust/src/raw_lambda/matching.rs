@@ -24,7 +24,7 @@ use crate::types::asttypes::MutableFlag;
 use crate::types::type_expr::{RowDesc, RowField};
 use crate::types::btype;
 use crate::types::context::TypeContext;
-use crate::lambda::{Primitive, FieldDbgInfo};
+use crate::lambda::{Comparison, Primitive, FieldDbgInfo, SwitchNames};
 use crate::raw_lambda::typeopt::{constructor_has_optional_shape, has_untagged, type_cannot_contain_undefined};
 
 // ============================================================================
@@ -4658,4 +4658,1009 @@ fn divide_array(ctx: &[Ctx], pm: &PatternMatching) -> Vec<(usize, Cell)> {
         ctx,
         pm,
     )
+}
+
+// ============================================================================
+// Layer 7: String matching — OCaml matching.ml lines 1532-1659
+// ============================================================================
+
+/// Threshold for switching from dichotomic tree to sequential tests.
+/// Equivalent to OCaml's `strings_test_threshold`.
+const STRINGS_TEST_THRESHOLD: usize = 8;
+
+/// Bind a switch argument to a variable if it's not already a variable.
+/// Equivalent to OCaml's `bind_sw`.
+fn bind_sw(arg: RawLambda, k: impl FnOnce(RawLambda) -> RawLambda) -> RawLambda {
+    match &arg {
+        RawLambda::Lvar(_) => k(arg),
+        _ => {
+            let id = Ident::create_local("switch");
+            let var = RawLambda::Lvar(id.clone());
+            let body = k(var);
+            RawLambda::Llet(LetKind::Strict, id, Box::new(arg), Box::new(body))
+        }
+    }
+}
+
+/// Build a sequential string equality test sequence.
+/// Equivalent to OCaml's `make_string_test_sequence`.
+fn make_string_test_sequence(
+    loc: Location,
+    arg: RawLambda,
+    sw: Vec<(String, RawLambda)>,
+    d: Option<RawLambda>,
+) -> RawLambda {
+    let (d, sw) = match d {
+        None => {
+            let mut sw = sw;
+            assert!(!sw.is_empty());
+            let (_, d) = sw.remove(0);
+            (d, sw)
+        }
+        Some(d) => (d, sw),
+    };
+    bind_sw(arg, |arg| {
+        // fold_right: iterate from the end
+        let mut result = d;
+        for (s, lam) in sw.into_iter().rev() {
+            result = RawLambda::LifThenElse(
+                Box::new(RawLambda::Lprim(RawPrimInfo {
+                    primitive: Primitive::Pstringcomp(Comparison::Neq),
+                    args: vec![
+                        arg.clone(),
+                        RawLambda::Lconst(crate::lambda::Constant::ImmString(s)),
+                    ],
+                    loc: loc.clone(),
+                })),
+                Box::new(result),
+                Box::new(lam),
+            );
+        }
+        result
+    })
+}
+
+/// Split a list into three parts: before middle, middle element, after middle.
+/// Equivalent to OCaml's `split`.
+fn split<T>(k: usize, xs: Vec<T>) -> (Vec<T>, T, Vec<T>) {
+    assert!(!xs.is_empty());
+    let mut iter = xs.into_iter();
+    if k <= 1 {
+        let x0 = iter.next().unwrap();
+        let rest: Vec<T> = iter.collect();
+        (Vec::new(), x0, rest)
+    } else {
+        let x0 = iter.next().unwrap();
+        let rest: Vec<T> = iter.collect();
+        let (mut xs, y0, ys) = split(k - 2, rest);
+        xs.insert(0, x0);
+        (xs, y0, ys)
+    }
+}
+
+/// Zero lambda constant.
+/// Equivalent to OCaml's `zero_lam`.
+fn zero_lam() -> RawLambda {
+    RawLambda::Lconst(crate::lambda::Constant::int(0))
+}
+
+/// Three-way test on an integer value (less than, equal, greater than zero).
+/// Equivalent to OCaml's `tree_way_test`.
+fn tree_way_test(loc: Location, arg: RawLambda, lt: RawLambda, eq: RawLambda, gt: RawLambda) -> RawLambda {
+    RawLambda::LifThenElse(
+        Box::new(RawLambda::Lprim(RawPrimInfo {
+            primitive: Primitive::Pintcomp(Comparison::Lt),
+            args: vec![arg.clone(), zero_lam()],
+            loc: loc.clone(),
+        })),
+        Box::new(lt),
+        Box::new(RawLambda::LifThenElse(
+            Box::new(RawLambda::Lprim(RawPrimInfo {
+                primitive: Primitive::Pintcomp(Comparison::Lt),
+                args: vec![zero_lam(), arg],
+                loc,
+            })),
+            Box::new(gt),
+            Box::new(eq),
+        )),
+    )
+}
+
+/// Build a dichotomic string test tree.
+/// Equivalent to OCaml's `do_make_string_test_tree`.
+fn do_make_string_test_tree(
+    loc: Location,
+    arg: RawLambda,
+    sw: Vec<(String, RawLambda)>,
+    delta: usize,
+    d: Option<RawLambda>,
+) -> RawLambda {
+    let len = sw.len();
+    if len <= STRINGS_TEST_THRESHOLD + delta {
+        make_string_test_sequence(loc, arg, sw, d)
+    } else {
+        let (lt, (s, act), gt) = split(len, sw);
+        bind_sw(
+            RawLambda::Lprim(RawPrimInfo {
+                primitive: Primitive::Pstringcomp(Comparison::Eq),
+                args: vec![
+                    arg.clone(),
+                    RawLambda::Lconst(crate::lambda::Constant::ImmString(s)),
+                ],
+                loc: loc.clone(),
+            }),
+            |r| {
+                tree_way_test(
+                    loc.clone(),
+                    r,
+                    do_make_string_test_tree(loc.clone(), arg.clone(), lt, delta, d.clone()),
+                    act,
+                    do_make_string_test_tree(loc.clone(), arg.clone(), gt, delta, d.clone()),
+                )
+            },
+        )
+    }
+}
+
+/// Expand a string switch into a test tree.
+/// Entry point for string matching.
+/// Equivalent to OCaml's `expand_stringswitch`.
+pub fn expand_stringswitch(
+    loc: Location,
+    arg: RawLambda,
+    sw: Vec<(String, RawLambda)>,
+    d: Option<RawLambda>,
+    next_raise_count: &mut i32,
+) -> RawLambda {
+    match d {
+        None => bind_sw(arg, |arg| {
+            do_make_string_test_tree(loc, arg, sw, 0, None)
+        }),
+        Some(e) => bind_sw(arg, |arg| {
+            make_catch(e, next_raise_count, |d| {
+                do_make_string_test_tree(loc, arg, sw, 1, Some(d))
+            })
+        }),
+    }
+}
+
+// ============================================================================
+// Generic test trees — Sharing (OCaml matching.ml lines 1609-1659)
+// ============================================================================
+
+/// Add handler if shared.
+/// Returns a vector of handlers and a function that resolves shared actions.
+/// Equivalent to OCaml's `handle_shared`.
+///
+/// In OCaml this returns `(hs_ref, handle_shared_fn)` where `hs_ref` is a
+/// mutable ref to a composed function. In Rust we collect handlers into a Vec
+/// and compose them at the end.
+fn handle_shared(
+    next_raise_count: &mut i32,
+) -> (Vec<(i32, RawLambda)>, Box<dyn FnMut(SharedAction) -> RawLambda + '_>) {
+    // We collect handlers as we process shared actions.
+    // The OCaml code builds a closure chain: hs := fun act -> h(ohs(act))
+    // We'll collect them in a Vec and apply them in reverse order at the end.
+    let mut handlers: Vec<(i32, Box<dyn FnOnce(RawLambda) -> RawLambda>)> = Vec::new();
+
+    // We need the handler function to be callable multiple times, but each call
+    // can add to handlers. Use a separate vec that we'll move out at the end.
+    // Actually, let's use a different approach: return the handlers separately.
+
+    // The handle_shared closure needs to mutably borrow next_raise_count
+    // and also accumulate handlers.
+    let handler_list: Vec<(i32, Box<dyn FnOnce(RawLambda) -> RawLambda>)> = Vec::new();
+
+    // Return the handler list by value, and a closure that processes each action
+    (Vec::new(), Box::new(move |act: SharedAction| {
+        match act {
+            SharedAction::Single(a) => a,
+            SharedAction::Shared(a) => {
+                // This path is handled below in the actual implementation
+                // since we need mutable access to the handler list
+                a
+            }
+        }
+    }))
+}
+
+/// Process shared actions for tree-based matching.
+/// Returns `(wrapper_fn, processed_sw, processed_d)`.
+/// The wrapper_fn wraps the result with catch handlers.
+///
+/// Equivalent to OCaml's `share_actions_tree`.
+fn share_actions_tree(
+    sw: Vec<(Constant, RawLambda)>,
+    d: Option<RawLambda>,
+    next_raise_count: &mut i32,
+) -> (Vec<(i32, RawLambda)>, Vec<(Constant, RawLambda)>, Option<RawLambda>) {
+    let mut store = StoreExp::mk_store();
+
+    // Default action is always shared
+    let d_idx = match &d {
+        None => None,
+        Some(d) => Some(store.act_store_shared(d.clone())),
+    };
+
+    // Store all other actions
+    let sw_indices: Vec<(Constant, usize)> = sw
+        .into_iter()
+        .map(|(cst, act)| (cst, store.act_store(act)))
+        .collect();
+
+    // Retrieve all actions, including potential default
+    let acts = store.act_get_shared();
+
+    // Process shared actions — OCaml's handle_shared
+    let mut handlers: Vec<(i32, Box<dyn FnOnce(RawLambda) -> RawLambda>)> = Vec::new();
+    let resolved_acts: Vec<RawLambda> = acts
+        .into_iter()
+        .map(|act| match act {
+            SharedAction::Single(a) => a,
+            SharedAction::Shared(a) => {
+                let (i, h) = make_catch_delayed(a, next_raise_count);
+                handlers.push((i, h));
+                make_exit(i)
+            }
+        })
+        .collect();
+
+    // Reconstruct default and switch list
+    let d = match d_idx {
+        None => None,
+        Some(idx) => Some(resolved_acts[idx].clone()),
+    };
+    let sw: Vec<(Constant, RawLambda)> = sw_indices
+        .into_iter()
+        .map(|(cst, j)| (cst, resolved_acts[j].clone()))
+        .collect();
+
+    // Build the handler wrappers as (exit_id, handler_body) pairs
+    // OCaml composes: hs := fun act -> h(ohs(act))
+    // This means the FIRST handler added is the INNERMOST catch.
+    // We collect (i, h) pairs where h is the catch wrapper.
+    let handler_pairs: Vec<(i32, RawLambda)> = handlers
+        .into_iter()
+        .map(|(i, h)| {
+            // h is a FnOnce that wraps body in LstaticCatch if needed.
+            // We need to extract the handler body from it.
+            // Actually, make_catch_delayed returns (i, wrapper).
+            // To get the handler body, we can call h with a static raise as body
+            // and it will wrap with LstaticCatch(body, (i, []), handler_body).
+            // But that's roundabout. Let's rethink.
+
+            // Actually, we need to store the wrapper functions and apply them
+            // to the final result. Let's return them directly.
+            // The caller will apply them in order.
+
+            // For now, call the wrapper with a dummy to extract the handler.
+            // h(Lstaticraise(i, [])) returns handler directly.
+            // h(anything_else) returns LstaticCatch(anything_else, (i, []), handler).
+            let dummy = RawLambda::Lconst(crate::lambda::Constant::int(0));
+            let wrapped = h(dummy);
+            match wrapped {
+                RawLambda::LstaticCatch(_, (exit_id, _), handler) => (exit_id, *handler),
+                // If h was identity (handler was already a simple exit), this won't be reached
+                // because make_catch_delayed returns identity for simple exits, so the action
+                // would have been the exit itself, not going through Shared path.
+                other => (i, other),
+            }
+        })
+        .collect();
+
+    (handler_pairs, sw, d)
+}
+
+/// Apply handler wrappers to a result lambda.
+/// The handlers are applied in reverse order (first handler = innermost).
+/// Equivalent to OCaml's `!hs result`.
+fn apply_handlers(mut result: RawLambda, handlers: Vec<(i32, RawLambda)>) -> RawLambda {
+    // OCaml composes: hs := fun act -> h(ohs(act))
+    // First handler added is innermost, last is outermost.
+    // So we iterate in reverse: last handler wraps first.
+    for (exit_id, handler) in handlers.into_iter().rev() {
+        match &result {
+            RawLambda::LstaticRaise(j, args) if *j == exit_id && args.is_empty() => {
+                result = handler;
+            }
+            _ => {
+                result = RawLambda::LstaticCatch(
+                    Box::new(result),
+                    (exit_id, Vec::new()),
+                    Box::new(handler),
+                );
+            }
+        }
+    }
+    result
+}
+
+/// Remove duplicate entries from a sorted (constant, lambda) list.
+/// Keeps the first occurrence of each constant.
+/// Equivalent to OCaml's `uniq_lambda_list`.
+fn uniq_lambda_list(sw: Vec<(Constant, RawLambda)>) -> Vec<(Constant, RawLambda)> {
+    if sw.len() <= 1 {
+        return sw;
+    }
+    let mut result: Vec<(Constant, RawLambda)> = Vec::new();
+    let mut iter = sw.into_iter();
+    let first = iter.next().unwrap();
+    result.push(first);
+    for (c2, lam2) in iter {
+        let last_c = &result.last().unwrap().0;
+        if const_compare(last_c, &c2) == std::cmp::Ordering::Equal {
+            // Duplicate — skip (keep the first, which is already in result)
+            // OCaml keeps p1 (first) and drops the second
+        } else {
+            result.push((c2, lam2));
+        }
+    }
+    result
+}
+
+/// Sort a (constant, lambda) list by constant value, then remove duplicates.
+/// Equivalent to OCaml's `sort_lambda_list`.
+fn sort_lambda_list(mut l: Vec<(Constant, RawLambda)>) -> Vec<(Constant, RawLambda)> {
+    l.sort_by(|(x, _), (y, _)| const_compare(x, y));
+    uniq_lambda_list(l)
+}
+
+// ============================================================================
+// Layer 8: Integer/switch matching — OCaml matching.ml lines 1661-1941
+// ============================================================================
+
+/// Cut a list at position n, returning (first_n_elements, rest).
+/// Equivalent to OCaml's `cut`.
+fn cut<T>(n: usize, l: Vec<T>) -> (Vec<T>, Vec<T>) {
+    if n == 0 {
+        return (Vec::new(), l);
+    }
+    assert!(!l.is_empty(), "cut: list too short");
+    let mut iter = l.into_iter();
+    let mut first = Vec::with_capacity(n);
+    for _ in 0..n {
+        first.push(iter.next().expect("cut: list too short"));
+    }
+    let rest: Vec<T> = iter.collect();
+    (first, rest)
+}
+
+/// Sequential equality tests with a fail action.
+/// Equivalent to OCaml's `do_tests_fail`.
+fn do_tests_fail(
+    loc: Location,
+    fail: RawLambda,
+    tst: Primitive,
+    arg: RawLambda,
+    cases: &[(Constant, RawLambda)],
+) -> RawLambda {
+    if cases.is_empty() {
+        return fail;
+    }
+    let (c, act) = &cases[0];
+    let rest = &cases[1..];
+    RawLambda::LifThenElse(
+        Box::new(RawLambda::Lprim(RawPrimInfo {
+            primitive: tst.clone(),
+            args: vec![arg.clone(), typed_const_to_lambda_const(c)],
+            loc: loc.clone(),
+        })),
+        Box::new(do_tests_fail(loc, fail, tst, arg, rest)),
+        Box::new(act.clone()),
+    )
+}
+
+/// Sequential equality tests without a fail action.
+/// Equivalent to OCaml's `do_tests_nofail`.
+fn do_tests_nofail(
+    loc: Location,
+    tst: Primitive,
+    arg: RawLambda,
+    cases: &[(Constant, RawLambda)],
+) -> RawLambda {
+    assert!(!cases.is_empty(), "Matching.do_tests_nofail");
+    if cases.len() == 1 {
+        return cases[0].1.clone();
+    }
+    let (c, act) = &cases[0];
+    let rest = &cases[1..];
+    RawLambda::LifThenElse(
+        Box::new(RawLambda::Lprim(RawPrimInfo {
+            primitive: tst.clone(),
+            args: vec![arg.clone(), typed_const_to_lambda_const(c)],
+            loc: loc.clone(),
+        })),
+        Box::new(do_tests_nofail(loc, tst, arg, rest)),
+        Box::new(act.clone()),
+    )
+}
+
+/// Convert a typedtree constant to a lambda constant wrapped in Lconst.
+/// Equivalent to OCaml's `Lconst(Const_base c)`.
+fn typed_const_to_lambda_const(c: &Constant) -> RawLambda {
+    let lc = match c {
+        Constant::Int(i) => crate::lambda::Constant::int(*i as i32),
+        Constant::Char(c) => crate::lambda::Constant::Char(*c),
+        Constant::String(s, _) => crate::lambda::Constant::String {
+            s: s.clone(),
+            delim: None,
+        },
+        Constant::Float(f) => crate::lambda::Constant::Float(f.clone()),
+        Constant::BigInt(positive, v) => crate::lambda::Constant::BigInt {
+            negative: !*positive,
+            value: v.clone(),
+        },
+    };
+    RawLambda::Lconst(lc)
+}
+
+/// Build a test sequence for constant matching.
+/// Uses dichotomic splitting when there are enough cases and a less-than test is available.
+/// Equivalent to OCaml's `make_test_sequence`.
+fn make_test_sequence(
+    loc: Location,
+    fail: Option<RawLambda>,
+    tst: Primitive,
+    lt_tst: Primitive,
+    arg: RawLambda,
+    const_lambda_list: Vec<(Constant, RawLambda)>,
+    next_raise_count: &mut i32,
+) -> RawLambda {
+    let const_lambda_list = sort_lambda_list(const_lambda_list);
+    let (handlers, const_lambda_list, fail) =
+        share_actions_tree(const_lambda_list, fail, next_raise_count);
+
+    fn make_test_seq_inner(
+        loc: &Location,
+        fail: &Option<RawLambda>,
+        tst: &Primitive,
+        lt_tst: &Primitive,
+        arg: &RawLambda,
+        const_lambda_list: &[(Constant, RawLambda)],
+    ) -> RawLambda {
+        if const_lambda_list.len() >= 4 && !matches!(lt_tst, Primitive::Pignore) {
+            split_sequence(loc, fail, tst, lt_tst, arg, const_lambda_list)
+        } else {
+            match fail {
+                None => do_tests_nofail(loc.clone(), tst.clone(), arg.clone(), const_lambda_list),
+                Some(fail) => do_tests_fail(loc.clone(), fail.clone(), tst.clone(), arg.clone(), const_lambda_list),
+            }
+        }
+    }
+
+    fn split_sequence(
+        loc: &Location,
+        fail: &Option<RawLambda>,
+        tst: &Primitive,
+        lt_tst: &Primitive,
+        arg: &RawLambda,
+        const_lambda_list: &[(Constant, RawLambda)],
+    ) -> RawLambda {
+        let mid = const_lambda_list.len() / 2;
+        let (list1, list2) = const_lambda_list.split_at(mid);
+        let pivot_const = &list2[0].0;
+        RawLambda::LifThenElse(
+            Box::new(RawLambda::Lprim(RawPrimInfo {
+                primitive: lt_tst.clone(),
+                args: vec![arg.clone(), typed_const_to_lambda_const(pivot_const)],
+                loc: loc.clone(),
+            })),
+            Box::new(make_test_seq_inner(loc, fail, tst, lt_tst, arg, list1)),
+            Box::new(make_test_seq_inner(loc, fail, tst, lt_tst, arg, list2)),
+        )
+    }
+
+    let result = make_test_seq_inner(&loc, &fail, &tst, &lt_tst, &arg, &const_lambda_list);
+    apply_handlers(result, handlers)
+}
+
+// ============================================================================
+// SArg module — Switch module arguments (OCaml matching.ml lines 1708-1758)
+// ============================================================================
+// The SArg module in OCaml provides the primitives needed by Switch.Make.
+// In Rust, the switch.rs module already has these functions built in.
+// The functions below provide matching.ml-level wrappers.
+
+/// SArg: make a primitive application.
+/// Equivalent to OCaml's `SArg.make_prim`.
+fn sarg_make_prim(p: Primitive, args: Vec<RawLambda>) -> RawLambda {
+    RawLambda::Lprim(RawPrimInfo {
+        primitive: p,
+        args,
+        loc: Location::none(),
+    })
+}
+
+/// SArg: add an offset to an argument.
+/// Equivalent to OCaml's `SArg.make_offset`.
+fn sarg_make_offset(arg: RawLambda, n: i32) -> RawLambda {
+    if n == 0 {
+        arg
+    } else {
+        RawLambda::Lprim(RawPrimInfo {
+            primitive: Primitive::Poffsetint(n),
+            args: vec![arg],
+            loc: Location::none(),
+        })
+    }
+}
+
+/// SArg: bind a variable.
+/// Equivalent to OCaml's `SArg.bind`.
+fn sarg_bind(arg: RawLambda, body: impl FnOnce(RawLambda) -> RawLambda) -> RawLambda {
+    match &arg {
+        RawLambda::Lvar(v) => {
+            let newarg = arg.clone();
+            let result = body(newarg);
+            RawLambda::Llet(LetKind::Alias, v.clone(), Box::new(arg), Box::new(result))
+        }
+        _ => {
+            let newvar = Ident::create_local("switcher");
+            let newarg = RawLambda::Lvar(newvar.clone());
+            let result = body(newarg);
+            RawLambda::Llet(LetKind::Alias, newvar, Box::new(arg), Box::new(result))
+        }
+    }
+}
+
+/// SArg: make a constant integer.
+/// Equivalent to OCaml's `SArg.make_const`.
+fn sarg_make_const(i: i32) -> RawLambda {
+    RawLambda::Lconst(crate::lambda::Constant::int(i))
+}
+
+/// SArg: make an `isout` test.
+/// Equivalent to OCaml's `SArg.make_isout`.
+fn sarg_make_isout(h: RawLambda, arg: RawLambda) -> RawLambda {
+    RawLambda::Lprim(RawPrimInfo {
+        primitive: Primitive::Pisout(match &h {
+            RawLambda::Lconst(crate::lambda::Constant::Int { i, .. }) => *i,
+            _ => 0,
+        }),
+        args: vec![arg],
+        loc: Location::none(),
+    })
+}
+
+/// SArg: make an `isin` test.
+/// Equivalent to OCaml's `SArg.make_isin`.
+fn sarg_make_isin(h: RawLambda, arg: RawLambda) -> RawLambda {
+    RawLambda::Lprim(RawPrimInfo {
+        primitive: Primitive::Pnot,
+        args: vec![sarg_make_isout(h, arg)],
+        loc: Location::none(),
+    })
+}
+
+/// SArg: make an if-then-else.
+/// Equivalent to OCaml's `SArg.make_if`.
+fn sarg_make_if(cond: RawLambda, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
+    RawLambda::LifThenElse(Box::new(cond), Box::new(ifso), Box::new(ifnot))
+}
+
+/// SArg: make a switch.
+/// Equivalent to OCaml's `SArg.make_switch`.
+fn sarg_make_switch(
+    _loc: Location,
+    arg: RawLambda,
+    cases: &[usize],
+    acts: &[RawLambda],
+    offset: i32,
+    sw_names: Option<SwitchNames>,
+) -> RawLambda {
+    let mut l: Vec<(i32, RawLambda)> = Vec::new();
+    for i in (0..cases.len()).rev() {
+        l.push((offset + i as i32, acts[cases[i]].clone()));
+    }
+    l.reverse();
+    RawLambda::Lswitch(
+        Box::new(arg),
+        RawLambdaSwitch {
+            sw_consts_full: false,
+            sw_consts: l,
+            sw_blocks_full: false,
+            sw_blocks: Vec::new(),
+            sw_failaction: None,
+            sw_names,
+        },
+    )
+}
+
+// ============================================================================
+// Action sharing for Lswitch argument (OCaml matching.ml lines 1761-1833)
+// ============================================================================
+
+/// Deduplicate switch actions by wrapping shared actions in catch/exit.
+/// Equivalent to OCaml's `share_actions_sw`.
+pub fn share_actions_sw(
+    sw: RawLambdaSwitch,
+    next_raise_count: &mut i32,
+) -> (Vec<(i32, RawLambda)>, RawLambdaSwitch) {
+    let mut store = StoreExp::mk_store();
+
+    // Store fail action as shared
+    let fail_idx = match &sw.sw_failaction {
+        None => None,
+        Some(fail) => Some(store.act_store_shared(*fail.clone())),
+    };
+
+    // Store const and block actions
+    let consts: Vec<(i32, usize)> = sw
+        .sw_consts
+        .iter()
+        .map(|(i, e)| (*i, store.act_store(e.clone())))
+        .collect();
+    let blocks: Vec<(i32, usize)> = sw
+        .sw_blocks
+        .iter()
+        .map(|(i, e)| (*i, store.act_store(e.clone())))
+        .collect();
+
+    // Get shared actions
+    let acts = store.act_get_shared();
+
+    // Process shared actions (handle_shared pattern)
+    let mut handlers: Vec<(i32, RawLambda)> = Vec::new();
+    let resolved_acts: Vec<RawLambda> = acts
+        .into_iter()
+        .map(|act| match act {
+            SharedAction::Single(a) => a,
+            SharedAction::Shared(a) => {
+                let (i, h) = make_catch_delayed(a, next_raise_count);
+                // Extract handler body from the wrapper function
+                let dummy = RawLambda::Lconst(crate::lambda::Constant::int(0));
+                let wrapped = h(dummy);
+                match wrapped {
+                    RawLambda::LstaticCatch(_, (exit_id, _), handler) => {
+                        handlers.push((exit_id, *handler));
+                        make_exit(exit_id)
+                    }
+                    other => {
+                        // h was identity — the handler was already a simple exit
+                        handlers.push((i, other.clone()));
+                        make_exit(i)
+                    }
+                }
+            }
+        })
+        .collect();
+
+    // Reconstruct fail
+    let fail = match fail_idx {
+        None => None,
+        Some(idx) => Some(Box::new(resolved_acts[idx].clone())),
+    };
+
+    let new_sw = RawLambdaSwitch {
+        sw_consts_full: sw.sw_consts_full,
+        sw_consts: consts
+            .into_iter()
+            .map(|(i, j)| (i, resolved_acts[j].clone()))
+            .collect(),
+        sw_blocks_full: sw.sw_blocks_full,
+        sw_blocks: blocks
+            .into_iter()
+            .map(|(i, j)| (i, resolved_acts[j].clone()))
+            .collect(),
+        sw_failaction: fail,
+        sw_names: sw.sw_names,
+    };
+
+    (handlers, new_sw)
+}
+
+/// Reintroduce fail action in switch argument.
+/// When a static exit appears >= 3 times in the cases and there's no failaction,
+/// extract it as the failaction to reduce switch size.
+/// Equivalent to OCaml's `reintroduce_fail`.
+pub fn reintroduce_fail(sw: RawLambdaSwitch) -> RawLambdaSwitch {
+    if sw.sw_failaction.is_some() {
+        return sw;
+    }
+
+    let mut counts: HashMap<i32, i32> = HashMap::new();
+    let seen = |counts: &mut HashMap<i32, i32>, lam: &RawLambda| {
+        if let Some(i) = as_simple_exit(lam) {
+            let old = counts.get(&i).copied().unwrap_or(0);
+            counts.insert(i, old + 1);
+        }
+    };
+
+    for (_, l) in &sw.sw_consts {
+        seen(&mut counts, l);
+    }
+    for (_, l) in &sw.sw_blocks {
+        seen(&mut counts, l);
+    }
+
+    let mut i_max: i32 = -1;
+    let mut max: i32 = -1;
+    for (&i, &c) in &counts {
+        if c > max || (c == max && i > i_max) {
+            i_max = i;
+            max = c;
+        }
+    }
+
+    if max >= 3 {
+        let default = i_max;
+        let remove = |ls: Vec<(i32, RawLambda)>| -> Vec<(i32, RawLambda)> {
+            ls.into_iter()
+                .filter(|(_, lam)| match as_simple_exit(lam) {
+                    Some(j) => j != default,
+                    None => true,
+                })
+                .collect()
+        };
+        RawLambdaSwitch {
+            sw_consts_full: sw.sw_consts_full,
+            sw_consts: remove(sw.sw_consts),
+            sw_blocks_full: sw.sw_blocks_full,
+            sw_blocks: remove(sw.sw_blocks),
+            sw_failaction: Some(Box::new(make_exit(default))),
+            sw_names: sw.sw_names,
+        }
+    } else {
+        sw
+    }
+}
+
+// ============================================================================
+// Switcher = Switch.Make(SArg) — uses switch.rs (OCaml matching.ml line 1835)
+// ============================================================================
+
+// The Switcher module is already ported in switch.rs.
+// The following functions provide the matching.ml-level interface.
+
+/// Get the last key from a sorted list of (int, lambda) pairs.
+/// Equivalent to OCaml's `last`.
+fn last_key(def: i32, l: &[(i32, RawLambda)]) -> i32 {
+    match l.last() {
+        None => def,
+        Some((x, _)) => *x,
+    }
+}
+
+/// Get the edge values (low, high) from a sorted list.
+/// Equivalent to OCaml's `get_edges`.
+fn get_edges(low: i32, high: i32, l: &[(i32, RawLambda)]) -> (i32, i32) {
+    match l.first() {
+        None => (low, high),
+        Some((x, _)) => (*x, last_key(high, l)),
+    }
+}
+
+/// Convert a sorted int-lambda list with a fail action into intervals.
+/// Equivalent to OCaml's `as_interval_canfail`.
+fn as_interval_canfail(
+    fail: RawLambda,
+    low: i32,
+    high: i32,
+    l: &[(i32, RawLambda)],
+) -> (Vec<(i32, i32, usize)>, StoreExp) {
+    let mut store = StoreExp::mk_store();
+
+    let fail_idx = store.act_store(fail);
+    assert_eq!(fail_idx, 0); // fail has action index 0
+
+    fn nofail_rec(
+        cur_low: i32,
+        cur_high: i32,
+        cur_act: usize,
+        rest: &[(i32, RawLambda)],
+        high: i32,
+        store: &mut StoreExp,
+    ) -> Vec<(i32, i32, usize)> {
+        if rest.is_empty() {
+            if cur_high == high {
+                vec![(cur_low, cur_high, cur_act)]
+            } else {
+                vec![(cur_low, cur_high, cur_act), (cur_high + 1, high, 0)]
+            }
+        } else {
+            let (i, ref act_i) = rest[0];
+            let act_index = store.act_store(act_i.clone());
+            if cur_high + 1 == i {
+                if act_index == cur_act {
+                    nofail_rec(cur_low, i, cur_act, &rest[1..], high, store)
+                } else if act_index == 0 {
+                    let mut r = vec![(cur_low, i - 1, cur_act)];
+                    r.extend(fail_rec(i, i, &rest[1..], high, store));
+                    r
+                } else {
+                    let mut r = vec![(cur_low, i - 1, cur_act)];
+                    r.extend(nofail_rec(i, i, act_index, &rest[1..], high, store));
+                    r
+                }
+            } else if act_index == 0 {
+                let mut r = vec![(cur_low, cur_high, cur_act)];
+                r.extend(fail_rec(cur_high + 1, cur_high + 1, rest, high, store));
+                r
+            } else {
+                let mut r = vec![
+                    (cur_low, cur_high, cur_act),
+                    (cur_high + 1, i - 1, 0),
+                ];
+                r.extend(nofail_rec(i, i, act_index, &rest[1..], high, store));
+                r
+            }
+        }
+    }
+
+    fn fail_rec(
+        cur_low: i32,
+        cur_high: i32,
+        rest: &[(i32, RawLambda)],
+        high: i32,
+        store: &mut StoreExp,
+    ) -> Vec<(i32, i32, usize)> {
+        if rest.is_empty() {
+            vec![(cur_low, cur_high, 0)]
+        } else {
+            let (i, ref act_i) = rest[0];
+            let index = store.act_store(act_i.clone());
+            if index == 0 {
+                fail_rec(cur_low, i, &rest[1..], high, store)
+            } else {
+                let mut r = vec![(cur_low, i - 1, 0)];
+                r.extend(nofail_rec(i, i, index, &rest[1..], high, store));
+                r
+            }
+        }
+    }
+
+    let intervals = if l.is_empty() {
+        vec![(low, high, 0)]
+    } else {
+        let (i, ref act_i) = l[0];
+        let index = store.act_store(act_i.clone());
+        if index == 0 {
+            fail_rec(low, i, &l[1..], high, &mut store)
+        } else if low < i {
+            let mut r = vec![(low, i - 1, 0)];
+            r.extend(nofail_rec(i, i, index, &l[1..], high, &mut store));
+            r
+        } else {
+            nofail_rec(i, i, index, &l[1..], high, &mut store)
+        }
+    };
+
+    (intervals, store)
+}
+
+/// Convert a sorted int-lambda list (no fail action) into intervals.
+/// Equivalent to OCaml's `as_interval_nofail`.
+fn as_interval_nofail(l: &[(i32, RawLambda)]) -> (Vec<(i32, i32, usize)>, StoreExp) {
+    let mut store = StoreExp::mk_store();
+
+    fn some_hole(l: &[(i32, RawLambda)]) -> bool {
+        if l.len() <= 1 {
+            return false;
+        }
+        l.windows(2).any(|w| w[1].0 > w[0].0 + 1)
+    }
+
+    fn i_rec(
+        cur_low: i32,
+        cur_high: i32,
+        cur_act: usize,
+        rest: &[(i32, RawLambda)],
+        store: &mut StoreExp,
+    ) -> Vec<(i32, i32, usize)> {
+        if rest.is_empty() {
+            vec![(cur_low, cur_high, cur_act)]
+        } else {
+            let (i, ref act) = rest[0];
+            let act_index = store.act_store(act.clone());
+            if act_index == cur_act {
+                i_rec(cur_low, i, cur_act, &rest[1..], store)
+            } else {
+                let mut r = vec![(cur_low, cur_high, cur_act)];
+                r.extend(i_rec(i, i, act_index, &rest[1..], store));
+                r
+            }
+        }
+    }
+
+    assert!(!l.is_empty());
+    let (i, ref act) = l[0];
+    let has_hole = some_hole(&l[1..]);
+    let act_index = if has_hole {
+        store.act_store_shared(act.clone())
+    } else {
+        store.act_store(act.clone())
+    };
+    assert_eq!(act_index, 0);
+    let inters = i_rec(i, i, act_index, &l[1..], &mut store);
+
+    (inters, store)
+}
+
+/// Sort an int-lambda list by key.
+/// Equivalent to OCaml's `sort_int_lambda_list`.
+fn sort_int_lambda_list(mut l: Vec<(i32, RawLambda)>) -> Vec<(i32, RawLambda)> {
+    l.sort_by(|(i1, _), (i2, _)| i1.cmp(i2));
+    l
+}
+
+/// Convert an int-lambda list into intervals for the switch compiler.
+/// Equivalent to OCaml's `as_interval`.
+fn as_interval(
+    fail: Option<RawLambda>,
+    low: i32,
+    high: i32,
+    l: Vec<(i32, RawLambda)>,
+) -> ((i32, i32), (Vec<(i32, i32, usize)>, StoreExp)) {
+    let l = sort_int_lambda_list(l);
+    let edges = get_edges(low, high, &l);
+    let result = match fail {
+        None => as_interval_nofail(&l),
+        Some(act) => as_interval_canfail(act, low, high, &l),
+    };
+    (edges, result)
+}
+
+/// Compile an integer switch using the switch module.
+/// Equivalent to OCaml's `call_switcher`.
+pub fn call_switcher(
+    loc: Location,
+    fail: Option<RawLambda>,
+    arg: RawLambda,
+    low: i32,
+    high: i32,
+    int_lambda_list: Vec<(i32, RawLambda)>,
+    sw_names: Option<SwitchNames>,
+    next_raise_count: &mut i32,
+) -> RawLambda {
+    let (edges, (cases, store)) = as_interval(fail, low, high, int_lambda_list);
+
+    // Convert StoreExp to switch::ActionStore for use with switch::zyva
+    // We need to get the shared actions and process them through the switch module.
+    let acts = store.act_get_shared();
+
+    // Process shared actions — handle_shared pattern
+    let mut handlers: Vec<(i32, RawLambda)> = Vec::new();
+    let resolved_acts: Vec<RawLambda> = acts
+        .into_iter()
+        .map(|act| match act {
+            SharedAction::Single(a) => a,
+            SharedAction::Shared(a) => {
+                let (i, h) = make_catch_delayed(a, next_raise_count);
+                let dummy = RawLambda::Lconst(crate::lambda::Constant::int(0));
+                let wrapped = h(dummy);
+                match wrapped {
+                    RawLambda::LstaticCatch(_, (exit_id, _), handler) => {
+                        handlers.push((exit_id, *handler));
+                        make_exit(exit_id)
+                    }
+                    other => {
+                        handlers.push((i, other.clone()));
+                        make_exit(i)
+                    }
+                }
+            }
+        })
+        .collect();
+
+    // Build a switch::ActionStore with the resolved actions
+    let mut action_store = crate::raw_lambda::switch::ActionStore::new();
+    for act in &resolved_acts {
+        action_store.act_store(act.clone());
+    }
+
+    // Call the switch compiler
+    let result = crate::raw_lambda::switch::zyva(
+        edges,
+        arg,
+        &cases,
+        &action_store,
+        sw_names,
+        &mut || {
+            *next_raise_count += 1;
+            *next_raise_count
+        },
+    );
+
+    // Wrap with handlers
+    apply_handlers(result, handlers)
 }
