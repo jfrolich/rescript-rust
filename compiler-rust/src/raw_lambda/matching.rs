@@ -5324,7 +5324,7 @@ pub fn share_actions_sw(
         .map(|act| match act {
             SharedAction::Single(a) => a,
             SharedAction::Shared(a) => {
-                let (i, h) = make_catch_delayed(a, next_raise_count);
+                let (i, h) = make_catch_delayed(a.clone(), next_raise_count);
                 // Extract handler body from the wrapper function
                 let dummy = RawLambda::Lconst(crate::lambda::Constant::int(0));
                 let wrapped = h(dummy);
@@ -5333,9 +5333,10 @@ pub fn share_actions_sw(
                         handlers.push((exit_id, *handler));
                         make_exit(exit_id)
                     }
-                    other => {
-                        // h was identity — the handler was already a simple exit
-                        handlers.push((i, other.clone()));
+                    _ => {
+                        // h was identity — the action is already a simple exit.
+                        // Use the original action directly; the exit already
+                        // targets an existing handler, no new wrapper needed.
                         make_exit(i)
                     }
                 }
