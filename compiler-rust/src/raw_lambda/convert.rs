@@ -497,6 +497,12 @@ fn wrap_aliases(aliases: &[Ident], scrut: Lambda, body: Lambda) -> Lambda {
 
 fn wrap_aliases_raw(aliases: &[Ident], scrut: RawLambda, body: RawLambda) -> RawLambda {
     aliases.iter().rev().fold(body, |acc, id| {
+        // Skip self-bindings (e.g., `let e/1 =a e/1` when alias matches scrutinee var)
+        if let RawLambda::Lvar(scrut_id) = &scrut {
+            if scrut_id.same(id) {
+                return acc;
+            }
+        }
         RawLambda::let_(LetKind::Alias, id.clone(), scrut.clone(), acc)
     })
 }
