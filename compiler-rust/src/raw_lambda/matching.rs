@@ -6365,83 +6365,133 @@ fn combine_constructor(
     }
 }
 
+/// Convert a polyvar int_lambda_list by grouping entries with the same action.
+/// Equivalent to OCaml's `Polyvar_pattern_match.convert`.
+///
+/// Groups entries that have the same lambda action together, producing a list
+/// of `(hash_names, action)` pairs sorted by first occurrence (stamp).
+fn convert_polyvar_list(xs: &[(i32, (String, RawLambda))]) -> Vec<(Vec<(i32, String)>, RawLambda)> {
+    // Group by action equality using string-based comparison (like OCaml's make_key).
+    // Each entry gets a stamp (its original index) for stable sorting.
+    struct Entry {
+        stamp: usize,
+        hash_names: Vec<(i32, String)>,
+        act: RawLambda,
+        key: Option<String>,
+    }
+
+    let mut entries: Vec<Entry> = Vec::new();
+
+    for (i, (hash, (name, act))) in xs.iter().enumerate() {
+        // Use debug format as a key for structural comparison
+        let key = format!("{:?}", act);
+        // Try to find an existing entry with the same action key
+        let found_idx = entries.iter().position(|e| {
+            match (&e.key, &key) {
+                (Some(k1), k2) => k1 == k2,
+                _ => false,
+            }
+        });
+        if let Some(idx) = found_idx {
+            entries[idx].hash_names.push((*hash, name.clone()));
+        } else {
+            entries.push(Entry {
+                stamp: i,
+                hash_names: vec![(*hash, name.clone())],
+                act: act.clone(),
+                key: Some(key),
+            });
+        }
+    }
+
+    entries.sort_by_key(|e| e.stamp);
+    entries.into_iter().map(|e| (e.hash_names, e.act)).collect()
+}
+
+/// Create a disjunction of equality tests for polyvar hash values.
+/// Equivalent to OCaml's `Polyvar_pattern_match.or_list`.
+fn or_list_polyvar(arg: &RawLambda, hash_names: &[(i32, String)]) -> RawLambda {
+    let (first_hash, first_name) = &hash_names[0];
+    let init = RawLambda::Lprim(RawPrimInfo {
+        primitive: Primitive::Pintcomp(Comparison::Eq),
+        args: vec![
+            arg.clone(),
+            RawLambda::Lconst(crate::lambda::constant::Constant::Pointer(format!("{}a", first_hash))),
+        ],
+        loc: Location::none(),
+    });
+    hash_names[1..].iter().fold(init, |acc, (hash, _name)| {
+        RawLambda::Lprim(RawPrimInfo {
+            primitive: Primitive::Psequor,
+            args: vec![
+                acc,
+                RawLambda::Lprim(RawPrimInfo {
+                    primitive: Primitive::Pintcomp(Comparison::Eq),
+                    args: vec![
+                        arg.clone(),
+                        RawLambda::Lconst(crate::lambda::constant::Constant::Pointer(format!("{}a", hash))),
+                    ],
+                    loc: Location::none(),
+                }),
+            ],
+            loc: Location::none(),
+        })
+    })
+}
+
+/// Build an if-chain from converted polyvar list.
+/// Used by both make_test_sequence_variant_constant and call_switcher_variant_constant.
+fn polyvar_if_chain(
+    fail: Option<RawLambda>,
+    arg: &RawLambda,
+    int_lambda_list: &[(i32, (String, RawLambda))],
+) -> RawLambda {
+    let converted = convert_polyvar_list(int_lambda_list);
+    match (converted.split_first(), &fail) {
+        (Some(((_, default_act), rest)), &None) => {
+            // No fail: first action is default, rest are if-then-else
+            rest.iter().rev().fold(default_act.clone(), |acc, (hash_names, act)| {
+                let predicate = or_list_polyvar(arg, hash_names);
+                RawLambda::LifThenElse(Box::new(predicate), Box::new(act.clone()), Box::new(acc))
+            })
+        }
+        (_, &Some(ref fail_act)) => {
+            // With fail: fail is default, all entries are if-then-else
+            converted.iter().rev().fold(fail_act.clone(), |acc, (hash_names, act)| {
+                let predicate = or_list_polyvar(arg, hash_names);
+                RawLambda::LifThenElse(Box::new(predicate), Box::new(act.clone()), Box::new(acc))
+            })
+        }
+        (None, &None) => panic!("polyvar_if_chain: empty list with no fail"),
+    }
+}
+
 /// Make a test sequence for variant constant matching.
-/// Equivalent to OCaml's `make_test_sequence_variant_constant`.
+/// Equivalent to OCaml's `Polyvar_pattern_match.make_test_sequence_variant_constant`.
 fn make_test_sequence_variant_constant(
     fail: Option<RawLambda>,
     arg: RawLambda,
     int_lambda_list: &[(i32, (String, RawLambda))],
-    next_raise_count: &mut i32,
+    _next_raise_count: &mut i32,
 ) -> RawLambda {
-    let mapped: Vec<(i32, RawLambda)> = int_lambda_list
-        .iter()
-        .map(|(a, (_, c))| (*a, c.clone()))
-        .collect();
-    let (_, (cases, store)) = as_interval(fail, i32::MIN, i32::MAX, mapped);
-
-    let acts = store.act_get_shared();
-    let mut handlers: Vec<(i32, RawLambda)> = Vec::new();
-    let resolved_acts: Vec<RawLambda> = acts
-        .into_iter()
-        .map(|act| match act {
-            SharedAction::Single(a) => a,
-            SharedAction::Shared(a) => {
-                let (i, h) = make_catch_delayed(a, next_raise_count);
-                let dummy = RawLambda::Lconst(crate::lambda::Constant::int(0));
-                let wrapped = h(dummy);
-                match wrapped {
-                    RawLambda::LstaticCatch(_, (exit_id, _), handler) => {
-                        handlers.push((exit_id, *handler));
-                        make_exit(exit_id)
-                    }
-                    other => {
-                        handlers.push((i, other.clone()));
-                        make_exit(i)
-                    }
-                }
-            }
-        })
-        .collect();
-
-    let mut action_store = crate::raw_lambda::switch::ActionStore::new();
-    for act in &resolved_acts {
-        action_store.act_store(act.clone());
-    }
-
-    let result = crate::raw_lambda::switch::zyva(
-        (i32::MIN, i32::MAX),
-        arg,
-        &cases,
-        &action_store,
-        None,
-        &mut || {
-            *next_raise_count += 1;
-            *next_raise_count
-        },
-    );
-
-    apply_handlers(result, handlers)
+    polyvar_if_chain(fail, &arg, int_lambda_list)
 }
 
 /// Call switcher for variant constant matching.
-/// Equivalent to OCaml's `call_switcher_variant_constant`.
+/// Equivalent to OCaml's `Polyvar_pattern_match.call_switcher_variant_constant`.
 fn call_switcher_variant_constant(
-    loc: Location,
+    _loc: Location,
     fail: Option<RawLambda>,
     arg: RawLambda,
     int_lambda_list: &[(i32, (String, RawLambda))],
-    names: Option<SwitchNames>,
-    next_raise_count: &mut i32,
+    _names: Option<SwitchNames>,
+    _next_raise_count: &mut i32,
 ) -> RawLambda {
-    let mapped: Vec<(i32, RawLambda)> = int_lambda_list
-        .iter()
-        .map(|(a, (_, c))| (*a, c.clone()))
-        .collect();
-    call_switcher(loc, fail, arg, i32::MIN, i32::MAX, mapped, names, next_raise_count)
+    polyvar_if_chain(fail, &arg, int_lambda_list)
 }
 
 /// Call switcher for variant non-constant (block) matching.
-/// Equivalent to OCaml's `call_switcher_variant_constr`.
+/// Equivalent to OCaml's `Polyvar_pattern_match.call_switcher_variant_constr`.
 fn call_switcher_variant_constr(
     loc: Location,
     fail: Option<RawLambda>,
@@ -6451,10 +6501,6 @@ fn call_switcher_variant_constr(
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let v = Ident::create_local("variant");
-    let mapped: Vec<(i32, RawLambda)> = int_lambda_list
-        .iter()
-        .map(|(a, (_, c))| (*a, c.clone()))
-        .collect();
     RawLambda::Llet(
         LetKind::Alias,
         v.clone(),
@@ -6463,13 +6509,11 @@ fn call_switcher_variant_constr(
             args: vec![arg],
             loc: loc.clone(),
         })),
-        Box::new(call_switcher(
+        Box::new(call_switcher_variant_constant(
             loc,
             fail,
             RawLambda::Lvar(v),
-            i32::MIN,
-            i32::MAX,
-            mapped,
+            int_lambda_list,
             names,
             next_raise_count,
         )),
