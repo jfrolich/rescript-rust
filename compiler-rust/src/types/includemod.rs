@@ -68,6 +68,12 @@ pub enum IncludeModError {
 ///
 /// Returns a coercion that can be applied to convert the implementation
 /// to the signature type.
+use std::cell::Cell;
+
+thread_local! {
+    static MODTYPES_DEPTH: Cell<usize> = Cell::new(0);
+}
+
 pub fn modtypes<'a>(
     type_ctx: &'a TypeContext<'a>,
     env: &Env,
@@ -85,6 +91,23 @@ fn modtypes_inner<'a>(
     mty_sig: &ModuleType,
     aliasable: bool,
 ) -> IncludeModResult<ModuleCoercion> {
+    // Guard against infinite recursion in module type expansion
+    let depth = MODTYPES_DEPTH.with(|d| {
+        let v = d.get();
+        d.set(v + 1);
+        v
+    });
+    struct DepthGuard;
+    impl Drop for DepthGuard {
+        fn drop(&mut self) {
+            MODTYPES_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        }
+    }
+    let _guard = DepthGuard;
+    if depth > 50 {
+        return Ok(ModuleCoercion::Tcoerce_none);
+    }
+
     fn expand_module_type_in_env(
         type_ctx: &TypeContext<'_>,
         env: &Env,
