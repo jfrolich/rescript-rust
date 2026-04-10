@@ -1829,6 +1829,56 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    /// Like specialize_comparison but uses the expression's stored env for type checks.
+    /// This avoids the issue where self.env (the initial env) doesn't have local type
+    /// definitions, causing expand_head to produce incorrect expansions.
+    fn specialize_comparison_with_env(
+        &self,
+        table: ComparisonSpecialization,
+        arg: &Expression,
+    ) -> Primitive {
+        let ty = arg.exp_type;
+        // Try using the expression's stored env first for is_base_type
+        let env = self.type_ctx.get_typed_env(arg.exp_env);
+        let env_ref = env.as_deref().unwrap_or(self.env);
+
+        let is_base = |name: &str| -> bool {
+            // Check without expansion first
+            match &*self.type_ctx.get_desc(self.type_ctx.repr(ty)) {
+                TypeDesc::Tconstr { path, .. } if path.head_name() == name || path.last() == name => {
+                    return true;
+                }
+                _ => {}
+            }
+            // Expand with the expression's env
+            let expanded = crate::types::ctype::expand_head(self.type_ctx, env_ref, ty);
+            if expanded != self.type_ctx.repr(ty) {
+                match &*self.type_ctx.get_desc(expanded) {
+                    TypeDesc::Tconstr { path, .. } => {
+                        path.head_name() == name || path.last() == name
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        };
+
+        if is_base("int") || is_base("char") || self.is_immediate_type(ty) {
+            table.intcomp
+        } else if is_base("float") {
+            table.floatcomp
+        } else if is_base("string") {
+            table.stringcomp
+        } else if is_base("bigint") {
+            table.bigintcomp
+        } else if is_base("bool") {
+            table.boolcomp
+        } else {
+            table.objcomp
+        }
+    }
+
     fn has_constant_constructor_arg(expr: &Expression) -> bool {
         matches!(
             &expr.exp_desc,
@@ -2076,6 +2126,11 @@ impl<'a> RawLambdaConverter<'a> {
                 {
                     return table.intcomp;
                 }
+                // Use arg's type directly for specialization, matching OCaml's
+                // transl_prim_2 which checks the arg's exp_type via its env.
+                // specialize_primitive_raw falls back to funct.exp_type with self.env
+                // which may not have local type definitions, causing incorrect expansion.
+                return self.specialize_comparison_with_env(table, arg1);
             }
         }
 
