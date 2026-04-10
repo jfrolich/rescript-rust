@@ -802,11 +802,18 @@ impl Env {
             }
 
             match path {
-                Path::Pident(id) => env
-                    .modules
-                    .find_by_ident(id)
-                    .map(|m| m.as_ref())
-                    .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string())),
+                Path::Pident(id) => {
+                    let result = env
+                        .modules
+                        .find_by_ident(id)
+                        .or_else(|| {
+                            // Fallback: try name-based lookup for stamp mismatches
+                            env.modules.find_by_name(id.name())
+                        })
+                        .map(|m| m.as_ref())
+                        .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string()));
+                    result
+                }
                 Path::Pdot(parent, name, _) => {
                     let parent_md = lookup_module_inner(env, parent, visiting)?;
                     lookup_submodule_in_module_type(env, &parent_md.md_type, name, visiting)
