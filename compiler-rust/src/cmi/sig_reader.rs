@@ -1097,13 +1097,15 @@ fn read_attributes(value: &OcamlValue) -> Vec<Attribute> {
         .iter()
         .filter_map(|attr| match attr {
             OcamlValue::Block(_, fields) if !fields.is_empty() => {
+                let attr_name = read_attribute_name(&fields[0]);
                 let payload = if fields.len() > 1 {
-                    read_attribute_payload(&fields[1])
+                    let p = read_attribute_payload(&fields[1]);
+                    p
                 } else {
                     AttributePayload::Empty
                 };
                 Some(Attribute {
-                    attr_name: read_attribute_name(&fields[0]),
+                    attr_name,
                     attr_payload: payload,
                     attr_loc: fields.get(2).map(read_location).unwrap_or_else(Location::none),
                 })
@@ -1131,27 +1133,28 @@ fn read_attribute_payload(value: &OcamlValue) -> AttributePayload {
     }
 }
 
-/// Try to extract a string from PStr([Pstr_eval(Pexp_constant(Pconst_string(...)))])
+/// Try to extract a string from a PStr attribute payload.
+/// The payload structure varies but we try multiple patterns.
 fn extract_str_payload_string(structure: &OcamlValue) -> Option<String> {
-    // The structure is a list of structure items
-    let items = structure.as_list();
-    let item = items.first()?;
-    // Pstr_eval is tag 0: Block(0, [expr, attrs])
-    let (tag, fields) = item.as_block_opt()?;
-    if tag != 0 || fields.is_empty() { return None; }
-    let expr = &fields[0];
-    // Expression: Block(_, [pexp_desc, ...])
-    let (_, expr_fields) = expr.as_block_opt()?;
-    if expr_fields.is_empty() { return None; }
-    let pexp_desc = &expr_fields[0];
-    // Pexp_constant is tag 1: Block(1, [constant])
-    let (desc_tag, desc_fields) = pexp_desc.as_block_opt()?;
-    if desc_tag != 1 || desc_fields.is_empty() { return None; }
-    let constant = &desc_fields[0];
-    // Pconst_string is tag 2: Block(2, [string, loc, delim])
-    let (const_tag, const_fields) = constant.as_block_opt()?;
-    if const_tag != 2 || const_fields.is_empty() { return None; }
-    Some(const_fields[0].as_string().to_string())
+    // Walk the tree looking for any string value
+    fn find_string_in_value(v: &OcamlValue, depth: usize) -> Option<String> {
+        if depth > 8 { return None; }
+        match v {
+            OcamlValue::String(s) => Some(s.clone()),
+            OcamlValue::Block(_, fields) => {
+                for f in fields.iter() {
+                    if let Some(s) = find_string_in_value(f, depth + 1) {
+                        return Some(s);
+                    }
+                }
+                None
+            }
+            // Lists are represented as nested Block(0, [head, tail]) chains
+            // ending in Int(0) for nil
+            _ => None,
+        }
+    }
+    find_string_in_value(structure, 0)
 }
 
 /// Read a Primitive.description.
