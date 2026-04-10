@@ -110,6 +110,10 @@ fn parser_attr_to_decl_attr(
                         } else {
                             crate::types::decl::AttributePayload::Structure(vec![])
                         }
+                    } else if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = expr.pexp_desc.as_ref() {
+                        // @as(undefined), @as(null) — identifier payloads
+                        let name = arena.lident_last(lid.txt);
+                        crate::types::decl::AttributePayload::Ident(name.to_string())
                     } else {
                         crate::types::decl::AttributePayload::Structure(vec![])
                     }
