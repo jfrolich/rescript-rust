@@ -3981,15 +3981,18 @@ impl<'a> RawLambdaConverter<'a> {
                 self.compile_match_with_exceptions_raw(loc, scrut, cases, exn_cases, partial, expr)
             }
             ExpressionDesc::Texp_match(scrut, cases, exn_cases, partial) if exn_cases.is_empty() => {
-                // Try simple matchers first (they handle most common cases
-                // and produce output matching OCaml's simple optimizations).
-                // For complex patterns that simple matchers can't handle,
-                // fall back to the full matching compiler (matching.rs).
+                // For single-case matches with unboxed constructor patterns,
+                // use the irrefutable path which correctly handles transparent field access.
+                if cases.len() == 1 && cases[0].c_guard.is_none() {
+                    if let PatternDesc::Tpat_construct(_, cstr, _) = &cases[0].c_lhs.pat_desc {
+                        if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) {
+                            if let Some(result) = self.compile_irrefutable_match_raw(scrut, cases) {
+                                return result;
+                            }
+                        }
+                    }
+                }
                 let partial = *partial;
-                // Note: do NOT allocate a raise_count here for Partial matches.
-                // compile_matching (in matching.rs) allocates its own raise_num
-                // internally when the match is Partial. Allocating one here would
-                // create a spurious exit ID offset.
                 let loc = self.loc(expr.exp_loc);
                 // Use full matching compiler (ported from OCaml's matching.ml)
                 self.compile_full_matching(loc, scrut, cases, partial, expr)
@@ -7314,6 +7317,15 @@ impl<'a> RawLambdaConverter<'a> {
                 if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) =>
             {
                 if let Some(arg) = args.first() {
+                    // For unboxed constructors with inline records, the value IS the
+                    // single field directly. Unwrap single-field inline records to
+                    // bind the inner pattern to the scrutinee as an alias.
+                    if let PatternDesc::Tpat_record(fields, _) = &arg.pat_desc {
+                        if fields.len() == 1 {
+                            let (_, _, inner_pat, _) = &fields[0];
+                            return self.bind_irrefutable_pattern_raw(inner_pat, scrut, body);
+                        }
+                    }
                     self.bind_irrefutable_pattern_raw(arg, scrut, body)
                 } else {
                     body
