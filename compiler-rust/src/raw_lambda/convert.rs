@@ -8156,19 +8156,29 @@ impl<'a> RawLambdaConverter<'a> {
             .map(|expr| self.convert_expr_raw(expr))
             .unwrap_or_else(RawLambda::unit);
         // OCaml's transl_function recurses into inner params first, then wraps
-        // the outer param's pattern binding. This means the LAST param's bindings
-        // are innermost, and the FIRST param's bindings are outermost.
-        // Process forward (not reversed) to match this order.
-        for (param, id) in all_params.iter().zip(param_ids.iter()) {
+        // with Matching.for_function. Since for_function uses lower_bind which
+        // pushes Alias bindings past existing ones, processing in REVERSE produces
+        // the same order as OCaml's recursive approach.
+        for (param, id) in all_params.iter().zip(param_ids.iter()).rev() {
             let pat = Self::param_pattern(param);
             body = match &pat.pat_desc {
                 PatternDesc::Tpat_any => body,
                 PatternDesc::Tpat_var(bound, _) if bound.same(id) => body,
                 PatternDesc::Tpat_alias(_, bound, _) if bound.same(id) => body,
-                _ if Self::is_irrefutable_pattern(&pat) => {
-                    self.raw_simple_for_let(&pat, RawLambda::var(id.clone()), body)
+                _ => {
+                    // Use the matching compiler (for_function) to get lower_bind
+                    // behavior that pushes field bindings into conditional branches.
+                    let loc = self.loc(pat.pat_loc);
+                    let pat_act = vec![(pat, body)];
+                    full_matching::for_function(
+                        self.type_ctx,
+                        loc,
+                        RawLambda::var(id.clone()),
+                        pat_act,
+                        Partial::Total,
+                        &mut self.next_static_raise,
+                    )
                 }
-                _ => body,
             };
         }
         let lambda = RawLambda::function_(
