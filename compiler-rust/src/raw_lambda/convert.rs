@@ -2889,7 +2889,16 @@ impl<'a> RawLambdaConverter<'a> {
                             );
                         }
                         _ => {
-                            if let Some(id) = fields.get(*pos).cloned() {
+                            // Use position-based lookup, but verify the name matches.
+                            // When @internal.local modules shift positions, fall back
+                            // to name-based lookup.
+                            let id = fields.get(*pos).cloned().and_then(|id| {
+                                if id.name() == _name.as_str() { Some(id) }
+                                else { fields.iter().rev().find(|f| f.name() == _name.as_str()).cloned() }
+                            }).or_else(|| {
+                                fields.iter().rev().find(|f| f.name() == _name.as_str()).cloned()
+                            });
+                            if let Some(id) = id {
                                 if is_top_level {
                                     export_ids.push(id.clone());
                                 }
