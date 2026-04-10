@@ -127,6 +127,28 @@ fn type_cannot_contain_undefined_rec(
     }
 }
 
+/// Fast path for type_cannot_contain_undefined that doesn't require an env.
+/// Checks type descriptor directly for types that are always safe
+/// (Ttuple, Tarrow, Tvariant, Tpackage, Tconstr for builtin types).
+pub(crate) fn type_cannot_contain_undefined_no_env(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+) -> bool {
+    let ty = ctx.repr(ty);
+    match &*ctx.get_desc(ty) {
+        TypeDesc::Tconstr { path, .. } => match type_is_builtin_path_but_option(path) {
+            BuiltinPathTest::ForSureYes => true,
+            BuiltinPathTest::ForSureNo => false,
+            BuiltinPathTest::NotApplicable => false, // can't determine without env
+        },
+        TypeDesc::Ttuple(_)
+        | TypeDesc::Tvariant(_)
+        | TypeDesc::Tpackage { .. }
+        | TypeDesc::Tarrow { .. } => true,
+        _ => false,
+    }
+}
+
 /// Get the unboxed representation of a type, if possible.
 /// For an unboxed variant type with a single constructor and single arg,
 /// returns the arg type (recursively expanded). Returns None for recursive types.

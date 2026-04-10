@@ -28,7 +28,7 @@ use crate::types::context::TypeContext;
 use crate::types::typedtree::Partial;
 use crate::lambda::{Comparison, Primitive, FieldDbgInfo, SwitchNames, TagInfo};
 use crate::lambda::primitive::Mutable;
-use crate::raw_lambda::typeopt::{constructor_has_optional_shape, has_untagged, type_cannot_contain_undefined};
+use crate::raw_lambda::typeopt::{constructor_has_optional_shape, has_untagged, type_cannot_contain_undefined, type_cannot_contain_undefined_no_env};
 
 // ============================================================================
 // Omega (wildcard) helpers — ported from parmatch.ml
@@ -3993,8 +3993,8 @@ fn make_constr_matching(
                                 if args_inner.len() == 1 =>
                             {
                                 let pat = &args_inner[0];
-                                let env_opt =
-                                    ctx_ref.get_typed_env(pat.pat_env);
+                                // First try env-based check
+                                let env_opt = ctx_ref.get_typed_env(pat.pat_env);
                                 let can_skip = env_opt
                                     .map(|env| {
                                         type_cannot_contain_undefined(
@@ -4003,7 +4003,14 @@ fn make_constr_matching(
                                             pat.pat_type,
                                         )
                                     })
-                                    .unwrap_or(false);
+                                    .unwrap_or_else(|| {
+                                        // Fast path: check type descriptor directly
+                                        // (works for Ttuple, Tarrow, Tvariant, Tpackage
+                                        // which always return true)
+                                        type_cannot_contain_undefined_no_env(
+                                            ctx_ref, pat.pat_type,
+                                        )
+                                    });
                                 if can_skip {
                                     Primitive::PvalFromOptionNotNest
                                 } else {
