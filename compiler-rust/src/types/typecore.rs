@@ -4212,6 +4212,7 @@ pub fn type_expect<'a>(
 
     let loc = expr.pexp_loc.clone();
     let ctx = tctx.type_ctx;
+    let exp_env_ref = ctx.store_typed_env(env);
     // Keep alias expansion aligned with the current typing environment.
     // OCaml passes `env` through all Ctype operations; in Rust we update the
     // unify-state snapshot on each type_expect entry.
@@ -4254,7 +4255,7 @@ pub fn type_expect<'a>(
                 ExpressionDesc::Texp_constant(constant),
                 loc,
                 ty,
-                EnvRef(0),
+                exp_env_ref,
                 expr.pexp_attributes.clone(),
             ))
         }
@@ -4286,7 +4287,7 @@ pub fn type_expect<'a>(
                 ExpressionDesc::Texp_tuple(typed_exprs),
                 loc,
                 result_ty,
-                EnvRef(0),
+                exp_env_ref,
                 expr.pexp_attributes.clone(),
             ))
         }
@@ -4309,7 +4310,7 @@ pub fn type_expect<'a>(
                 ExpressionDesc::Texp_let(*rec_flag, typed_bindings, Box::new(typed_body)),
                 loc,
                 body_type,
-                EnvRef(0),
+                exp_env_ref,
                 expr.pexp_attributes.clone(),
             ))
         }
@@ -4328,7 +4329,7 @@ pub fn type_expect<'a>(
                 ExpressionDesc::Texp_sequence(Box::new(typed_e1), Box::new(typed_e2)),
                 loc,
                 e2_type,
-                EnvRef(0),
+                exp_env_ref,
                 expr.pexp_attributes.clone(),
             ))
         }
@@ -4366,7 +4367,7 @@ pub fn type_expect<'a>(
                         ),
                         loc,
                         then_exp_type,
-                        EnvRef(0),
+                        exp_env_ref,
                         expr.pexp_attributes.clone(),
                     ))
                 }
@@ -4389,7 +4390,7 @@ pub fn type_expect<'a>(
                         ),
                         loc,
                         then_exp_type,
-                        EnvRef(0),
+                        exp_env_ref,
                         expr.pexp_attributes.clone(),
                     ))
                 }
@@ -4417,7 +4418,7 @@ pub fn type_expect<'a>(
                 ExpressionDesc::Texp_while(Box::new(typed_cond), Box::new(typed_body)),
                 loc,
                 result_unit_ty,
-                EnvRef(0),
+                exp_env_ref,
                 expr.pexp_attributes.clone(),
             ))
         }
@@ -4446,7 +4447,7 @@ pub fn type_expect<'a>(
                 ExpressionDesc::Texp_assert(Box::new(typed_e)),
                 loc,
                 exp_type,
-                EnvRef(0),
+                exp_env_ref,
                 expr.pexp_attributes.clone(),
             ))
         }
@@ -4476,7 +4477,7 @@ pub fn type_expect<'a>(
                 ExpressionDesc::Texp_array(typed_exprs),
                 loc,
                 array_ty,
-                EnvRef(0),
+                exp_env_ref,
                 expr.pexp_attributes.clone(),
             ))
         }
