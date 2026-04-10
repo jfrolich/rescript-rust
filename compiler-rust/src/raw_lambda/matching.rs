@@ -6263,9 +6263,82 @@ fn transl_extension_path(
     //   transl_normal_path (Env.normalize_path_prefix env path)
     if let Some(typed_env) = ctx_ref.get_typed_env(env) {
         let normalized = typed_env.normalize_path_prefix(path);
+        // If normalization didn't resolve (still Pdot chain), try via type context's
+        // resolved module sig cache for persistent module aliases
+        let normalized = normalize_path_via_ctx(ctx_ref, &normalized);
         transl_normal_path(&normalized)
     } else {
-        transl_normal_path(path)
+        let normalized = normalize_path_via_ctx(ctx_ref, path);
+        transl_normal_path(&normalized)
+    }
+}
+
+/// Normalize a value path's prefix through the type context's module sig cache.
+/// This handles persistent module aliases that Env::normalize_path can't resolve.
+fn normalize_path_via_ctx(
+    ctx_ref: &TypeContext<'_>,
+    path: &crate::types::path::Path,
+) -> crate::types::path::Path {
+    use crate::types::path::Path;
+    use crate::types::decl::{ModuleType, SignatureItem};
+
+    match path {
+        Path::Pdot(prefix, name, pos) => {
+            // First normalize the prefix recursively
+            let norm_prefix = normalize_module_path_via_ctx(ctx_ref, prefix);
+            if norm_prefix == **prefix {
+                path.clone()
+            } else {
+                Path::Pdot(Box::new(norm_prefix), name.clone(), *pos)
+            }
+        }
+        _ => path.clone(),
+    }
+}
+
+/// Normalize a module path through the type context's module sig cache.
+fn normalize_module_path_via_ctx(
+    ctx_ref: &TypeContext<'_>,
+    path: &crate::types::path::Path,
+) -> crate::types::path::Path {
+    use crate::types::path::Path;
+    use crate::types::decl::{ModuleType, SignatureItem};
+
+    // First normalize prefix recursively for Pdot
+    let path = match path {
+        Path::Pdot(prefix, name, pos) => {
+            let norm_prefix = normalize_module_path_via_ctx(ctx_ref, prefix);
+            if norm_prefix == **prefix {
+                path.clone()
+            } else {
+                Path::Pdot(Box::new(norm_prefix), name.clone(), *pos)
+            }
+        }
+        _ => path.clone(),
+    };
+
+    // Check if this path resolves to a module alias via sig caches
+    match &path {
+        Path::Pdot(prefix, name, _) => {
+            // Try to find the parent module's signature from multiple caches
+            let prefix_name = prefix.name();
+            let sig_opt = ctx_ref.find_resolved_module_sig(&prefix_name)
+                .map(|(_, sig)| sig)
+                .or_else(|| ctx_ref.renamed_module_sigs.borrow().get(&prefix_name).cloned());
+            if let Some(sig) = sig_opt {
+                for item in &sig {
+                    if let SignatureItem::SigModule(id, md, _) = item {
+                        if id.name() == name {
+                            if let ModuleType::MtyAlias(_, alias_path) = &md.md_type {
+                                return normalize_module_path_via_ctx(ctx_ref, alias_path);
+                            }
+                        }
+                    }
+                }
+            }
+            path
+        }
+        _ => path,
     }
 }
 
