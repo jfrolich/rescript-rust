@@ -80,6 +80,14 @@ impl OcamlValue {
         }
     }
 
+    /// Try to get as block, returning None if not a block.
+    pub fn as_block_opt(&self) -> Option<(u8, &[OcamlValue])> {
+        match self {
+            OcamlValue::Block(tag, fields) => Some((*tag, fields.as_ref())),
+            _ => None,
+        }
+    }
+
     /// Get as bool (Int 0 = false, Int 1 = true).
     pub fn as_bool(&self) -> bool {
         self.as_int() != 0

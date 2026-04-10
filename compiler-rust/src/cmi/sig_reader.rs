@@ -1096,14 +1096,62 @@ fn read_attributes(value: &OcamlValue) -> Vec<Attribute> {
         .as_list()
         .iter()
         .filter_map(|attr| match attr {
-            OcamlValue::Block(_, fields) if !fields.is_empty() => Some(Attribute {
-                attr_name: read_attribute_name(&fields[0]),
-                attr_payload: AttributePayload::Empty,
-                attr_loc: fields.get(2).map(read_location).unwrap_or_else(Location::none),
-            }),
+            OcamlValue::Block(_, fields) if !fields.is_empty() => {
+                let payload = if fields.len() > 1 {
+                    read_attribute_payload(&fields[1])
+                } else {
+                    AttributePayload::Empty
+                };
+                Some(Attribute {
+                    attr_name: read_attribute_name(&fields[0]),
+                    attr_payload: payload,
+                    attr_loc: fields.get(2).map(read_location).unwrap_or_else(Location::none),
+                })
+            }
             _ => None,
         })
         .collect()
+}
+
+/// Read an attribute payload from a CMI.
+/// OCaml payload type: attribute_payload = PStr | PSig | PTyp | PPat
+fn read_attribute_payload(value: &OcamlValue) -> AttributePayload {
+    match value {
+        // PStr(structure) — tag 0
+        OcamlValue::Block(0, fields) if !fields.is_empty() => {
+            // Try to extract a simple string constant from a PStr payload
+            // PStr([{pstr_desc = Pstr_eval({pexp_desc = Pexp_constant(Pconst_string(s, _, _))}, _)}])
+            if let Some(s) = extract_str_payload_string(&fields[0]) {
+                AttributePayload::Str(s)
+            } else {
+                AttributePayload::Empty
+            }
+        }
+        _ => AttributePayload::Empty,
+    }
+}
+
+/// Try to extract a string from PStr([Pstr_eval(Pexp_constant(Pconst_string(...)))])
+fn extract_str_payload_string(structure: &OcamlValue) -> Option<String> {
+    // The structure is a list of structure items
+    let items = structure.as_list();
+    let item = items.first()?;
+    // Pstr_eval is tag 0: Block(0, [expr, attrs])
+    let (tag, fields) = item.as_block_opt()?;
+    if tag != 0 || fields.is_empty() { return None; }
+    let expr = &fields[0];
+    // Expression: Block(_, [pexp_desc, ...])
+    let (_, expr_fields) = expr.as_block_opt()?;
+    if expr_fields.is_empty() { return None; }
+    let pexp_desc = &expr_fields[0];
+    // Pexp_constant is tag 1: Block(1, [constant])
+    let (desc_tag, desc_fields) = pexp_desc.as_block_opt()?;
+    if desc_tag != 1 || desc_fields.is_empty() { return None; }
+    let constant = &desc_fields[0];
+    // Pconst_string is tag 2: Block(2, [string, loc, delim])
+    let (const_tag, const_fields) = constant.as_block_opt()?;
+    if const_tag != 2 || const_fields.is_empty() { return None; }
+    Some(const_fields[0].as_string().to_string())
 }
 
 /// Read a Primitive.description.

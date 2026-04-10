@@ -2900,8 +2900,8 @@ pub fn add_signature_to_env(
                                             lbl_all: crate::types::decl::LabelArrayRef(0),
                                             lbl_repres: repres.clone(),
                                             lbl_private: decl.type_private,
-                                            lbl_loc: crate::location::Location::none(),
-                                            lbl_attributes: vec![],
+                                            lbl_loc: ld.ld_loc.clone(),
+                                            lbl_attributes: ld.ld_attributes.clone(),
                                         };
                                         if as_opened {
                                             env.add_opened_label(ld.ld_id.clone(), label_desc);
@@ -2938,8 +2938,8 @@ pub fn add_signature_to_env(
                                 lbl_all: crate::types::decl::LabelArrayRef(0), // placeholder
                                 lbl_repres: repr.clone(),
                                 lbl_private: decl.type_private,
-                                lbl_loc: crate::location::Location::none(),
-                                lbl_attributes: vec![],
+                                lbl_loc: ld.ld_loc.clone(),
+                                lbl_attributes: ld.ld_attributes.clone(),
                             };
                             if as_opened {
                                 env.add_opened_label(ld.ld_id.clone(), label_desc);
