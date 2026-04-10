@@ -2416,14 +2416,69 @@ impl<'a> RawLambdaConverter<'a> {
             }
             crate::types::Path::Pdot(prefix, name, pos) => {
                 let prefix_lam = self.translate_normal_path_raw(prefix, loc);
+                // If position is -1 (from normalize_path alias following),
+                // try to resolve the correct position from the module's signature
+                let resolved_pos = if *pos < 0 {
+                    self.resolve_field_position_in_module(prefix, name).unwrap_or(*pos)
+                } else {
+                    *pos
+                };
                 RawLambda::prim(
-                    Primitive::Pfield(*pos, FieldDbgInfo::Module { name: name.clone() }),
+                    Primitive::Pfield(resolved_pos, FieldDbgInfo::Module { name: name.clone() }),
                     vec![prefix_lam],
                     loc,
                 )
             }
             crate::types::Path::Papply(_, _) => RawLambda::unit(),
         }
+    }
+
+    /// Resolve the runtime field position of a name within a module's signature.
+    fn resolve_field_position_in_module(
+        &self,
+        module_path: &crate::types::Path,
+        field_name: &str,
+    ) -> Option<i32> {
+        use crate::types::decl::{ModuleType, SignatureItem, ValueKind};
+        // Try to find the module's type from the env or persistent env
+        let md_type = self.env.lookup_module(module_path).ok()
+            .map(|md| md.md_type.clone())
+            .or_else(|| {
+                // For persistent modules (Belt_Id, etc.), try the persistent env
+                if let crate::types::Path::Pident(id) = module_path {
+                    if id.is_persistent() || id.is_global() {
+                        if let Some(ref pers) = self.persistent_env {
+                            let sig = pers.read_raw_sig(id.name(), self.type_ctx)?;
+                            return Some(ModuleType::MtySignature(sig));
+                        }
+                    }
+                }
+                None
+            })?;
+        let sig = match &md_type {
+            ModuleType::MtySignature(sig) => sig,
+            _ => return None,
+        };
+        let mut runtime_pos = 0i32;
+        for item in sig {
+            match item {
+                SignatureItem::SigValue(id, desc) if !matches!(desc.val_kind, ValueKind::ValPrim(_)) => {
+                    if id.name() == field_name {
+                        return Some(runtime_pos);
+                    }
+                    runtime_pos += 1;
+                }
+                SignatureItem::SigModule(id, _, _) | SignatureItem::SigTypext(id, _, _) => {
+                    if id.name() == field_name {
+                        return Some(runtime_pos);
+                    }
+                    runtime_pos += 1;
+                }
+                SignatureItem::SigValue(_, _) => {} // primitive, not runtime
+                _ => {} // types, modtypes - not runtime
+            }
+        }
+        None
     }
 
     fn resolve_module_type_for_path(
