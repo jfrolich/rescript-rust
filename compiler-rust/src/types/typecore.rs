@@ -2085,7 +2085,7 @@ fn build_or_pat(
                     PatternDesc::Tpat_any,
                     LocIdx::none(),
                     ty,
-                    EnvRef(0),
+                    tctx.type_ctx.store_typed_env(env),
                     Attributes::new(),
                 );
                 pats.push((label.clone(), Some(Box::new(arg_pat))));
@@ -2131,7 +2131,7 @@ fn build_or_pat(
                 PatternDesc::Tpat_variant(label, arg, RowDescRef(0)),
                 ghost_loc.clone(),
                 ty,
-                EnvRef(0),
+                tctx.type_ctx.store_typed_env(env),
                 Attributes::new(),
             )
         })
@@ -2146,7 +2146,7 @@ fn build_or_pat(
             PatternDesc::Tpat_or(Box::new(pat0), Box::new(acc), None),
             ghost_loc.clone(),
             ty,
-            EnvRef(0),
+            tctx.type_ctx.store_typed_env(env),
             Attributes::new(),
         )
     });
@@ -2323,6 +2323,7 @@ fn type_pattern_inner(
     _explode: i32,
 ) -> TypeCoreResult<Pattern> {
     use crate::parser::ast::PatternDesc as PD;
+    let pat_env_ref = tctx.type_ctx.store_typed_env(env);
 
     let expanded_pat = maybe_expand_variant_spread_in_pattern(tctx, env, pat, expected_ty)?;
     let pat = expanded_pat.as_ref().unwrap_or(pat);
@@ -2336,7 +2337,7 @@ fn type_pattern_inner(
                 PatternDesc::Tpat_any,
                 loc,
                 expected_ty,
-                EnvRef(0),
+                pat_env_ref,
                 pat.ppat_attributes.clone(),
             ))
         }
@@ -2356,7 +2357,7 @@ fn type_pattern_inner(
                 PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
                 loc,
                 expected_ty,
-                EnvRef(0),
+                pat_env_ref,
                 pat.ppat_attributes.clone(),
             ))
         }
@@ -2373,7 +2374,7 @@ fn type_pattern_inner(
                 PatternDesc::Tpat_constant(constant),
                 loc,
                 expected_ty,
-                EnvRef(0),
+                pat_env_ref,
                 pat.ppat_attributes.clone(),
             ))
         }
@@ -2403,7 +2404,7 @@ fn type_pattern_inner(
                 PatternDesc::Tpat_tuple(typed_pats),
                 loc,
                 expected_ty,
-                EnvRef(0),
+                pat_env_ref,
                 pat.ppat_attributes.clone(),
             ))
         }
@@ -2461,7 +2462,7 @@ fn type_pattern_inner(
                 ),
                 loc,
                 expected_ty,
-                EnvRef(0),
+                pat_env_ref,
                 pat.ppat_attributes.clone(),
             ))
         }
@@ -2514,7 +2515,7 @@ fn type_pattern_inner(
                 PatternDesc::Tpat_or(Box::new(typed_p1), Box::new(typed_p2), None),
                 loc,
                 expected_ty,
-                EnvRef(0),
+                pat_env_ref,
                 pat.ppat_attributes.clone(),
             ))
         }
@@ -2536,7 +2537,7 @@ fn type_pattern_inner(
                 PatternDesc::Tpat_array(typed_pats),
                 loc,
                 expected_ty,
-                EnvRef(0),
+                pat_env_ref,
                 pat.ppat_attributes.clone(),
             ))
         }
@@ -2653,7 +2654,7 @@ fn type_pattern_inner(
                 PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
                 loc,
                 expected_ty,
-                EnvRef(0),
+                pat_env_ref,
                 Attributes::new(),
             );
             Ok(typed_pat.with_pat_extra(
@@ -2685,7 +2686,7 @@ fn type_pattern_inner(
                 PatternDesc::Tpat_any,
                 loc,
                 expected_ty,
-                EnvRef(0),
+                pat_env_ref,
                 pat.ppat_attributes.clone(),
             ))
         }
@@ -3638,7 +3639,7 @@ fn type_pattern_construct(
         PatternDesc::Tpat_construct(lid.clone(), cstr_desc, typed_args),
         loc.clone(),
         expected_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         pat.ppat_attributes.clone(),
     ))
 }
@@ -3697,7 +3698,7 @@ fn type_pattern_variant(
         PatternDesc::Tpat_variant(label.to_string(), typed_arg, RowDescRef(0)),
         loc.clone(),
         expected_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         pat.ppat_attributes.clone(),
     ))
 }
@@ -3846,7 +3847,7 @@ fn type_pattern_record(
                 PatternDesc::Tpat_construct(some_lid, some_cstr, vec![typed_inner]),
                 parsed_pat.ppat_loc,
                 field_ty,
-                EnvRef(0),
+                tctx.type_ctx.store_typed_env(env),
                 Attributes::new(),
             )
         } else {
@@ -3866,7 +3867,7 @@ fn type_pattern_record(
         PatternDesc::Tpat_record(typed_fields, closed_flag),
         loc.clone(),
         expected_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         pat.ppat_attributes.clone(),
     ))
 }
@@ -4013,7 +4014,7 @@ fn type_pattern_constraint_poly_var(
                 pat_desc: PatternDesc::Tpat_var(id, convert_located_stridx(&name, tctx.arena)),
                 pat_loc: lloc,
                 pat_type: ctype_ty,
-                pat_env: EnvRef(0),
+                pat_env: tctx.type_ctx.store_typed_env(env),
                 pat_attributes: Attributes::new(),
                 pat_extra: vec![constraint_extra],
             })
