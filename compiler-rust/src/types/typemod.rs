@@ -2602,6 +2602,22 @@ fn push_sig_values_from_env_pattern(
                 push_sig_values_from_env_pattern(env, p, sig_items);
             }
         }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, p, _) in fields {
+                push_sig_values_from_env_pattern(env, p, sig_items);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, pats) | PatternDesc::Tpat_array(pats) => {
+            for p in pats {
+                push_sig_values_from_env_pattern(env, p, sig_items);
+            }
+        }
+        PatternDesc::Tpat_variant(_, Some(inner), _) => {
+            push_sig_values_from_env_pattern(env, inner, sig_items);
+        }
+        PatternDesc::Tpat_or(left, _, _) => {
+            push_sig_values_from_env_pattern(env, left, sig_items);
+        }
         _ => {}
     }
 }
