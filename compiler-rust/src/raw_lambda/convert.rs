@@ -1882,6 +1882,7 @@ impl<'a> RawLambdaConverter<'a> {
             "%lebigint" => Some(Primitive::Pbigintcomp(crate::lambda::Comparison::Le)),
             "%gtbigint" => Some(Primitive::Pbigintcomp(crate::lambda::Comparison::Gt)),
             "%gebigint" => Some(Primitive::Pbigintcomp(crate::lambda::Comparison::Ge)),
+            "%unsafe_to_method" => Some(Primitive::PjsFnMethod),
             // #-prefixed primitives (from OCaml's translcore.ml prim_table)
             "#null" => Some(Primitive::Pnull),
             "#undefined" => Some(Primitive::Pundefined),
