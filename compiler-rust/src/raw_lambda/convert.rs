@@ -1882,6 +1882,8 @@ impl<'a> RawLambdaConverter<'a> {
             "%lebigint" => Some(Primitive::Pbigintcomp(crate::lambda::Comparison::Le)),
             "%gtbigint" => Some(Primitive::Pbigintcomp(crate::lambda::Comparison::Gt)),
             "%gebigint" => Some(Primitive::Pbigintcomp(crate::lambda::Comparison::Ge)),
+            // Method wrapping
+            "%unsafe_to_method" => Some(Primitive::PjsFnMethod),
             // #-prefixed primitives (from OCaml's translcore.ml prim_table)
             "#null" => Some(Primitive::Pnull),
             "#undefined" => Some(Primitive::Pundefined),
@@ -2235,7 +2237,24 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 RecordRepresentation::RecordFloatUnused => RawLambda::unit(),
                 RecordRepresentation::RecordUnboxed(_) => match elems.as_slice() {
-                    [value] => value.clone(),
+                    [value] => {
+                        // OCaml: uncurried encoding - if label starts with 'I',
+                        // extract arity and wrap with #fn_mk(arity)
+                        let first_lbl_name = &fields[0].1.lbl_name;
+                        if first_lbl_name.starts_with('I') {
+                            if let Ok(arity) = first_lbl_name[1..].parse::<i32>() {
+                                RawLambda::prim(
+                                    Primitive::PjsFnMake(arity),
+                                    vec![value.clone()],
+                                    loc,
+                                )
+                            } else {
+                                value.clone()
+                            }
+                        } else {
+                            value.clone()
+                        }
+                    }
                     _ => RawLambda::unit(),
                 },
                 RecordRepresentation::RecordInlined {
