@@ -273,10 +273,16 @@ fn modtypes_inner<'a>(
             // In a full implementation, we would extend the environment with the parameter
             let result_coercion = modtypes_inner(type_ctx, env, result_impl, result_sig, false)?;
 
-            Ok(ModuleCoercion::Tcoerce_functor(
-                Box::new(param_coercion),
-                Box::new(result_coercion),
-            ))
+            // If both parameter and result coercions are identity, return identity
+            if matches!((&param_coercion, &result_coercion),
+                (ModuleCoercion::Tcoerce_none, ModuleCoercion::Tcoerce_none)) {
+                Ok(ModuleCoercion::Tcoerce_none)
+            } else {
+                Ok(ModuleCoercion::Tcoerce_functor(
+                    Box::new(param_coercion),
+                    Box::new(result_coercion),
+                ))
+            }
         }
 
         // Signature implementation matches identifier signature
