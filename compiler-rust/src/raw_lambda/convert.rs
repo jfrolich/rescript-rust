@@ -2930,9 +2930,11 @@ impl<'a> RawLambdaConverter<'a> {
                 self.wrap_id_pos_list_raw(
                     loc,
                     &filtered_id_pos,
-                    |_, _name, pos| {
+                    |_, name, pos| {
                         fields
                             .get(pos)
+                            .filter(|id| id.name() == name)
+                            .or_else(|| fields.iter().rev().find(|f| f.name() == name))
                             .cloned()
                             .map(RawLambda::var)
                             .unwrap_or_else(RawLambda::unit)
