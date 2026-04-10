@@ -572,6 +572,10 @@ impl Env {
             Path::Pident(id) => self
                 .types
                 .find_by_ident(id)
+                .or_else(|| {
+                    // Fallback: try name-based lookup for stamp mismatches
+                    self.types.find_by_name(id.name())
+                })
                 .map(|t| t.as_ref())
                 .ok_or_else(|| EnvError::TypeNotFound(id.name().to_string())),
             Path::Pdot(parent, name, _) => {
