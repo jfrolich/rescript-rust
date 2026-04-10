@@ -8227,6 +8227,38 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    /// OCaml's Parmatch.inactive: checks if a pattern has no mutable field access.
+    /// Returns false for Partial, or if the pattern accesses any mutable record fields.
+    fn parmatch_inactive(pat: &Pattern, partial: Partial) -> bool {
+        match partial {
+            Partial::Partial => false,
+            Partial::Total => Self::pattern_inactive(pat),
+        }
+    }
+
+    fn pattern_inactive(pat: &Pattern) -> bool {
+        match &pat.pat_desc {
+            PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => true,
+            PatternDesc::Tpat_constant(_) => true,
+            PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_construct(_, _, ps) => {
+                ps.iter().all(|p| Self::pattern_inactive(p))
+            }
+            PatternDesc::Tpat_alias(p, _, _) => Self::pattern_inactive(p),
+            PatternDesc::Tpat_variant(_, None, _) => true,
+            PatternDesc::Tpat_variant(_, Some(p), _) => Self::pattern_inactive(p),
+            PatternDesc::Tpat_record(fields, _) => {
+                fields.iter().all(|(_, lbl, p, _)| {
+                    lbl.lbl_mut == crate::types::asttypes::MutableFlag::Immutable
+                        && Self::pattern_inactive(p)
+                })
+            }
+            PatternDesc::Tpat_or(p, q, _) => {
+                Self::pattern_inactive(p) && Self::pattern_inactive(q)
+            }
+            PatternDesc::Tpat_array(_) => false,
+        }
+    }
+
     fn flatten_function_by_arity<'b>(
         &self,
         params: &'b [FunctionParam],
@@ -8248,13 +8280,28 @@ impl<'a> RawLambdaConverter<'a> {
         let mut current_body = &cases[0].c_rhs;
 
         while all_params.len() < target_arity {
+            // OCaml checks Parmatch.inactive on the current level's pattern
+            // before flattening into the inner function (translcore.ml line 1061)
+            let last_param = all_params.last().unwrap();
+            let last_pat = Self::param_pattern(last_param);
+            if !Self::parmatch_inactive(&last_pat, current_partial) {
+                break;
+            }
+
             match &current_body.exp_desc {
                 ExpressionDesc::Texp_function {
                     params: inner_params,
                     body: inner_cases,
                     partial: inner_partial,
-                    ..
-                } if inner_cases.len() == 1 && inner_cases[0].c_guard.is_none() => {
+                    arity: inner_arity,
+                    async_: inner_async,
+                } if inner_cases.len() == 1
+                    && inner_cases[0].c_guard.is_none()
+                    // OCaml's transl_function only flattens when inner arity is None
+                    // and the inner function is not async (matching lines 1053, 1061)
+                    && self.arena.get_arity(*inner_arity).is_none()
+                    && !inner_async =>
+                {
                     all_params.extend(inner_params.iter());
                     current_partial = *inner_partial;
                     current_body = &inner_cases[0].c_rhs;
