@@ -1353,6 +1353,10 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn is_base_type(&self, ty: TypeExprRef, name: &str) -> bool {
+        self.is_base_type_with_env(ty, name, self.env)
+    }
+
+    fn is_base_type_with_env(&self, ty: TypeExprRef, name: &str, env: &crate::types::env::Env) -> bool {
         // First try without expansion (common case)
         match self.type_desc(ty) {
             TypeDesc::Tconstr { path, .. } if path.head_name() == name || path.last() == name => {
@@ -1361,7 +1365,7 @@ impl<'a> RawLambdaConverter<'a> {
             _ => {}
         }
         // Expand type aliases (like OCaml's scrape/expand_head_opt)
-        let expanded = crate::types::ctype::expand_head(self.type_ctx, self.env, ty);
+        let expanded = crate::types::ctype::expand_head(self.type_ctx, env, ty);
         if expanded != self.type_ctx.repr(ty) {
             match &*self.type_ctx.get_desc(expanded) {
                 TypeDesc::Tconstr { path, .. } => {
@@ -1838,41 +1842,21 @@ impl<'a> RawLambdaConverter<'a> {
         arg: &Expression,
     ) -> Primitive {
         let ty = arg.exp_type;
-        // Try using the expression's stored env first for is_base_type
-        let env = self.type_ctx.get_typed_env(arg.exp_env);
+        let env = self.env_for_expr(arg);
         let env_ref = env.as_deref().unwrap_or(self.env);
 
-        let is_base = |name: &str| -> bool {
-            // Check without expansion first
-            match &*self.type_ctx.get_desc(self.type_ctx.repr(ty)) {
-                TypeDesc::Tconstr { path, .. } if path.head_name() == name || path.last() == name => {
-                    return true;
-                }
-                _ => {}
-            }
-            // Expand with the expression's env
-            let expanded = crate::types::ctype::expand_head(self.type_ctx, env_ref, ty);
-            if expanded != self.type_ctx.repr(ty) {
-                match &*self.type_ctx.get_desc(expanded) {
-                    TypeDesc::Tconstr { path, .. } => {
-                        path.head_name() == name || path.last() == name
-                    }
-                    _ => false,
-                }
-            } else {
-                false
-            }
-        };
-
-        if is_base("int") || is_base("char") || self.is_immediate_type(ty) {
+        if self.is_base_type_with_env(ty, "int", env_ref)
+            || self.is_base_type_with_env(ty, "char", env_ref)
+            || self.is_immediate_type(ty)
+        {
             table.intcomp
-        } else if is_base("float") {
+        } else if self.is_base_type_with_env(ty, "float", env_ref) {
             table.floatcomp
-        } else if is_base("string") {
+        } else if self.is_base_type_with_env(ty, "string", env_ref) {
             table.stringcomp
-        } else if is_base("bigint") {
+        } else if self.is_base_type_with_env(ty, "bigint", env_ref) {
             table.bigintcomp
-        } else if is_base("bool") {
+        } else if self.is_base_type_with_env(ty, "bool", env_ref) {
             table.boolcomp
         } else {
             table.objcomp
