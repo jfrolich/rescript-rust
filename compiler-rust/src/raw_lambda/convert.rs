@@ -8164,7 +8164,6 @@ impl<'a> RawLambdaConverter<'a> {
             body = match &pat.pat_desc {
                 PatternDesc::Tpat_any => body,
                 PatternDesc::Tpat_var(bound, _) if bound.same(id) => body,
-                PatternDesc::Tpat_alias(_, bound, _) if bound.same(id) => body,
                 _ => {
                     // Use the matching compiler (for_function) to get lower_bind
                     // behavior that pushes field bindings into conditional branches.
