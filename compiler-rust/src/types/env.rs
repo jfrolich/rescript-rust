@@ -874,7 +874,22 @@ impl Env {
                 .find_by_ident(id)
                 .map(|m| m.as_ref())
                 .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string())),
-            Path::Pdot(_, name, _) => self.find_modtype(name),
+            Path::Pdot(parent, name, _) => {
+                // Try to find the modtype through the parent module's signature
+                if let Ok(parent_md) = self.lookup_module(parent) {
+                    if let super::decl::ModuleType::MtySignature(ref sig) = parent_md.md_type {
+                        for item in sig {
+                            if let super::decl::SignatureItem::SigModtype(id, decl) = item {
+                                if id.name() == name {
+                                    return Ok(decl);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Fallback to name-based lookup
+                self.find_modtype(name)
+            }
             Path::Papply(_, _) => Err(EnvError::ModuleNotFound(
                 "(functor application)".to_string(),
             )),
