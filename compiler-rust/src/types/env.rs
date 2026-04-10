@@ -574,7 +574,51 @@ impl Env {
                 .find_by_ident(id)
                 .map(|t| t.as_ref())
                 .ok_or_else(|| EnvError::TypeNotFound(id.name().to_string())),
-            Path::Pdot(_, name, _) => self.find_type(name),
+            Path::Pdot(parent, name, _) => {
+                // Try to find the type through the parent module's signature first.
+                // Follow MtyIdent/MtyAlias to resolve the module type to a signature.
+                if let Ok(parent_md) = self.lookup_module(parent) {
+                    // Search parent module's signature for the type
+                    fn find_type_in_module_type<'a>(
+                        env: &'a Env,
+                        mty: &'a super::decl::ModuleType,
+                        name: &str,
+                        depth: usize,
+                    ) -> Option<&'a super::decl::TypeDeclaration> {
+                        if depth > 10 { return None; }
+                        match mty {
+                            super::decl::ModuleType::MtySignature(sig) => {
+                                for item in sig {
+                                    if let super::decl::SignatureItem::SigType(id, decl, _) = item {
+                                        if id.name() == name {
+                                            return Some(decl);
+                                        }
+                                    }
+                                }
+                                None
+                            }
+                            super::decl::ModuleType::MtyIdent(type_path)
+                            | super::decl::ModuleType::MtyAlias(_, type_path) => {
+                                if let Ok(mtd) = env.lookup_modtype(type_path) {
+                                    if let Some(resolved) = &mtd.mtd_type {
+                                        return find_type_in_module_type(env, resolved, name, depth + 1);
+                                    }
+                                }
+                                if let Ok(md) = env.lookup_module(type_path) {
+                                    return find_type_in_module_type(env, &md.md_type, name, depth + 1);
+                                }
+                                None
+                            }
+                            _ => None,
+                        }
+                    }
+                    if let Some(decl) = find_type_in_module_type(self, &parent_md.md_type, name, 0) {
+                        return Ok(decl);
+                    }
+                }
+                // Fallback to name-based lookup
+                self.find_type(name)
+            }
             Path::Papply(_, _) => Err(EnvError::TypeNotFound("(functor application)".to_string())),
         }
     }
