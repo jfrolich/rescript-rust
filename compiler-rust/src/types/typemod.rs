@@ -10111,7 +10111,16 @@ fn type_structure_item<'a>(
                         let inner_loc = typed_inner.mod_loc;
                         // Compute coercion between implementation and constraint
                         let coercion = {
-                            let impl_mty_opt = decl_module_type_from_typed(&typed_inner.mod_type);
+                            // Try mod_type first, then try extracting from the typed module expr
+                            let impl_mty_opt = decl_module_type_from_typed(&typed_inner.mod_type)
+                                .or_else(|| {
+                                    extract_module_type_from_mod_expr_with_resolver(
+                                        &typed_inner,
+                                        Some(&rec_env),
+                                        Some(tctx.type_ctx),
+                                        &mut |_, _| None,
+                                    )
+                                });
                             let sig_mty_opt = decl_module_type_from_typed(&typed_mty);
                             match (impl_mty_opt, sig_mty_opt) {
                                 (Some(impl_mty), Some(sig_mty)) => {
