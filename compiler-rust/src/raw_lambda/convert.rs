@@ -8155,7 +8155,11 @@ impl<'a> RawLambdaConverter<'a> {
         let mut body = final_body
             .map(|expr| self.convert_expr_raw(expr))
             .unwrap_or_else(RawLambda::unit);
-        for (param, id) in all_params.iter().zip(param_ids.iter()).rev() {
+        // OCaml's transl_function recurses into inner params first, then wraps
+        // the outer param's pattern binding. This means the LAST param's bindings
+        // are innermost, and the FIRST param's bindings are outermost.
+        // Process forward (not reversed) to match this order.
+        for (param, id) in all_params.iter().zip(param_ids.iter()) {
             let pat = Self::param_pattern(param);
             body = match &pat.pat_desc {
                 PatternDesc::Tpat_any => body,
