@@ -2394,7 +2394,10 @@ impl<'a> RawLambdaConverter<'a> {
 
         let copy_id = self.id_gen.create("newrecord");
         let mut body = RawLambda::var(copy_id.clone());
-        for (_, lbl, def, _) in fields.iter().rev() {
+        // OCaml uses Array.fold_left which processes fields left-to-right.
+        // Each Lsequence(upd, cont) wraps the update around the continuation,
+        // so the LAST field ends up outermost in the sequence chain.
+        for (_, lbl, def, _) in fields.iter() {
             let RecordLabelDefinition::Overridden(_, expr) = def else {
                 continue;
             };
