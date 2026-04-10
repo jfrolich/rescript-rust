@@ -1055,8 +1055,13 @@ fn type_declarations<'a>(
         });
     }
 
-    // Check variance
-    if impl_decl.type_variance.len() == sig_decl.type_variance.len() {
+    // Check variance — only for abstract, private, or open types
+    // (matches OCaml's includecore.ml: need_variance = abstr || private || open)
+    let is_abstract = matches!(impl_decl.type_kind, crate::types::decl::TypeKind::TypeAbstract);
+    let is_private = matches!(impl_decl.type_private, crate::types::PrivateFlag::Private);
+    let is_open = matches!(impl_decl.type_kind, crate::types::decl::TypeKind::TypeOpen);
+    let need_variance = is_abstract || is_private || is_open;
+    if need_variance && impl_decl.type_variance.len() == sig_decl.type_variance.len() {
         for (i, (impl_var, sig_var)) in impl_decl
             .type_variance
             .iter()
