@@ -919,8 +919,14 @@ impl Env {
                 .map(|m| m.as_ref())
                 .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string())),
             Path::Pdot(parent, name, _) => {
-                // Try to find the modtype through the parent module's signature
-                if let Ok(parent_md) = self.lookup_module(parent) {
+                // Try to find the modtype through the parent module's signature.
+                // First try ident-based lookup, then name-based for stamp mismatches.
+                let parent_md = self.lookup_module(parent)
+                    .or_else(|_| {
+                        // Fallback: try by name if stamp doesn't match
+                        self.find_module(parent.last())
+                    });
+                if let Ok(parent_md) = parent_md {
                     if let super::decl::ModuleType::MtySignature(ref sig) = parent_md.md_type {
                         for item in sig {
                             if let super::decl::SignatureItem::SigModtype(id, decl) = item {
