@@ -130,17 +130,31 @@ fn type_cannot_contain_undefined_rec(
 /// Fast path for type_cannot_contain_undefined that doesn't require an env.
 /// Checks type descriptor directly for types that are always safe
 /// (Ttuple, Tarrow, Tvariant, Tpackage, Tconstr for builtin types).
+/// Also tries to expand Tconstr types via type declarations.
 pub(crate) fn type_cannot_contain_undefined_no_env(
     ctx: &TypeContext<'_>,
     ty: TypeExprRef,
 ) -> bool {
     let ty = ctx.repr(ty);
     match &*ctx.get_desc(ty) {
-        TypeDesc::Tconstr { path, .. } => match type_is_builtin_path_but_option(path) {
-            BuiltinPathTest::ForSureYes => true,
-            BuiltinPathTest::ForSureNo => false,
-            BuiltinPathTest::NotApplicable => false, // can't determine without env
-        },
+        TypeDesc::Tconstr { path, .. } => {
+            match type_is_builtin_path_but_option(path) {
+                BuiltinPathTest::ForSureYes => true,
+                BuiltinPathTest::ForSureNo => false,
+                BuiltinPathTest::NotApplicable => {
+                    // Try finding the type declaration
+                    if let Some(decl) = find_type_decl(ctx, &crate::types::env::Env::empty(), path) {
+                        match &decl.type_kind {
+                            TypeKind::TypeRecord(_, _) => true,
+                            TypeKind::TypeAbstract => decl.type_attributes.iter().any(is_not_undefined_attr),
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                }
+            }
+        }
         TypeDesc::Ttuple(_)
         | TypeDesc::Tvariant(_)
         | TypeDesc::Tpackage { .. }
