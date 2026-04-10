@@ -608,6 +608,13 @@ fn signature_item<'a>(
                 }
             }
             if let Some((pos, impl_id, impl_mod_decl)) = found {
+                // When impl and target modules have the same stamp (e.g., when
+                // the target was cloned from impl by simplify_signature), skip
+                // strengthening and return Tcoerce_none. Strengthening can create
+                // false mismatches for modules with internal value shadowing.
+                if impl_id.same(id) {
+                    return Ok((pos, ModuleCoercion::Tcoerce_none));
+                }
                 let strengthened_impl =
                     crate::types::ctype::strengthen_module_type_for_inclusion_path(
                         type_ctx,
