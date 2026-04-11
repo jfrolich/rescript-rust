@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 644/657 (98.0%), 2 parity failures + 11 compile issues, 2 hunks
+**Status:** 650/657 (98.9%), 3 parity failures + 4 compile issues, 4 hunks
 
 ## Goal
 
@@ -14,19 +14,16 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 ## Current Baseline
 
 - OCaml compile coverage: **657/657**
-- Rust compile coverage: **646/657** on the 16-way authoritative run
-- Unoptimized lambda parity: **644/657**
-- Parity hunks: **2**
+- Rust compile coverage: **653/657** on the 16-way authoritative run
+- Unoptimized lambda parity: **650/657**
+- Parity hunks: **4**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 - Raw timeouts on the authoritative run: `Import.res`, `global_module_alias_test.res`
-- Raw crashes on the authoritative run: `belt_hashmap_test.res`,
-  `bs_map_set_dict_test.res`, `bs_poly_map_test.res`,
-  `bs_poly_mutable_map_test.res`, `bs_poly_mutable_set_test.res`,
-  `bs_poly_set_test.res`, `defunctor_make_test.res`,
-  `derive_projector_test.res`, `int_map.res`
-- `coercion_module_alias_test.res`, `DynamicImportModuleWithAlias.res`,
-  `import_side_effect.res`, and `test_non_export.res` now reach focused raw parity
-  after restoring OCaml's real `type_package` entry path.
+- Raw crashes on the authoritative run: `defunctor_make_test.res`,
+  `derive_projector_test.res`
+- `belt_hashmap_test.res`, `bs_map_set_dict_test.res`, `bs_poly_mutable_map_test.res`,
+  `bs_poly_mutable_set_test.res`, `bs_poly_set_test.res`, and the `int_map` cluster now
+  compile again after restoring OCaml's strengthened packed-module path behavior.
 
 ## Working Rules
 
@@ -37,14 +34,20 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 2 Parity Failures by Category
+## Remaining 3 Parity Failures by Category
 
 ### Dict pattern compilation (2 files)
 json_decorders, stdlib_Stdlib_DictTests
 
 **Issue:** Dict synthetic labels / narrow optional-wrapper stripping fixed the earlier
-cluster, and the alias/module-path regressions are gone again. Only the two Dict-focused
-raw diffs still remain on the parity side.
+cluster, and the alias/module-path regressions are gone again. Two Dict-focused raw diffs
+still remain.
+
+### Remaining collection raw shape difference (1 file)
+bs_poly_map_test
+
+**Issue:** the package/path crash cluster is gone, leaving one collection-specific raw lambda
+parity file outside the Dict path.
 
 ## Additional Raw Compile Issues
 
@@ -160,6 +163,28 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (packed modules now compare strengthened path-based module types)
+
+After restoring OCaml's real `type_package` entry point, the remaining pack/unpack crash
+cluster (`belt_hashmap_test`, `bs_map_set_dict_test`, `bs_poly_*`, `int_map`) was no longer
+an alias-mode issue. The crash logs showed Rust comparing the package signature against an
+unstrengthened local module signature for the packed module path (`module(Y)`), while OCaml's
+`type_module env m` returns a module expression whose `mod_type` is already strengthened with
+that access path.
+
+Rust now:
+- reuses the packed module path extracted from the typed module expression
+- strengthens the extracted packed-module type with that path before running the package
+  inclusion check
+- removes the temporary `type_pack` debug tracing and the now-unused post-hoc alias-wrapper
+  helper from the previous workaround path
+
+**Result:** the clean authoritative raw baseline improves to **650/657** with **4** hunks.
+Compile coverage returns to **653/657**: the pack/unpack collection crash cluster disappears,
+leaving only the two existing timeouts (`Import`, `global_module_alias_test`) and the two
+module-related crashes (`defunctor_make_test`, `derive_projector_test`). The parity side is
+down to `bs_poly_map_test`, `json_decorders`, and `stdlib_Stdlib_DictTests`.
 
 ### 2026-04-11 (type_package now uses OCaml's real alias=false module typing)
 

@@ -13406,115 +13406,6 @@ fn build_signature_from_structure(
     sig
 }
 
-/// Type check pack expression (first-class module).
-/// Recursively wrap Tmod_ident for alias modules in Tmod_constraint implicit.
-/// Handles both direct Tmod_ident and Tmod_constraint(Tmod_ident, explicit).
-fn wrap_alias_ident_in_constraint(
-    mut module: crate::types::typedtree::ModuleExpr,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext<'_>,
-) -> crate::types::typedtree::ModuleExpr {
-    use crate::types::typedtree::{ModuleExprDesc, ModuleTypeConstraint, ModuleCoercion};
-
-    match &module.mod_desc {
-        ModuleExprDesc::Tmod_ident(path, _) => {
-            // Match OCaml scrape_alias (env.ml:1435): resolve alias chains
-            // until reaching a non-alias module type. If the chain resolves
-            // to MtySignature/MtyFunctor, the alias was a functor result and
-            // should NOT be wrapped. If it stays MtyAlias (unresolvable
-            // target), it's a true alias and should be wrapped.
-            // Returns Some(normalized_target) if this is a true alias, None otherwise.
-            let alias_info: Option<Path> = {
-                let md_type = match path {
-                    Path::Pident(id) => env.find_module(id.name())
-                        .ok()
-                        .map(|md| md.md_type.clone()),
-                    Path::Pdot(parent, name, _) => env.lookup_module(path)
-                        .ok()
-                        .map(|md| md.md_type.clone())
-                        .or_else(|| {
-                            let pe = pers_env.as_mut()?;
-                            let parent_name = parent.head_name();
-                            let ps = pe.find_pers_struct(&parent_name, ctx)?;
-                            ps.ps_sig.iter().find_map(|item| match item {
-                                crate::types::decl::SignatureItem::SigModule(id, md, _)
-                                    if id.name() == name.as_str() =>
-                                {
-                                    Some(md.md_type.clone())
-                                }
-                                _ => None,
-                            })
-                        }),
-                    _ => None,
-                };
-                match md_type {
-                    None if matches!(path, Path::Pdot(..)) => Some(env.normalize_path(path)),
-                    Some(crate::types::decl::ModuleType::MtyAlias(_, ref target)) => {
-                        // Use env.normalize_path to follow the full alias chain,
-                        // matching OCaml's Env.normalize_path behavior.
-                        let normalized = env.normalize_path(target);
-                        // Check if normalization resolved to something concrete.
-                        // If it resolved to the same path, check if the target is
-                        // resolvable to a signature (not a true alias).
-                        let target_is_concrete = env.lookup_module(&normalized)
-                            .ok()
-                            .map(|md| matches!(
-                                md.md_type,
-                                crate::types::decl::ModuleType::MtySignature(_)
-                                | crate::types::decl::ModuleType::MtyFunctor { .. }
-                            ))
-                            .unwrap_or(false);
-                        if target_is_concrete { None } else { Some(normalized) }
-                    }
-                    _ => None,
-                }
-            };
-            if let Some(alias_target) = alias_info {
-                let inner_loc = module.mod_loc;
-                let inner_attrs = module.mod_attributes.clone();
-                let env_ref = ctx.store_typed_env(env);
-                crate::types::typedtree::ModuleExpr {
-                    mod_desc: ModuleExprDesc::Tmod_constraint(
-                        Box::new(module),
-                        crate::types::typedtree::ModuleType::placeholder(),
-                        ModuleTypeConstraint::Tmodtype_implicit,
-                        ModuleCoercion::Tcoerce_alias(
-                            env_ref,
-                            alias_target,
-                            Box::new(ModuleCoercion::Tcoerce_none),
-                        ),
-                    ),
-                    mod_loc: inner_loc,
-                    mod_type: crate::types::typedtree::ModuleType::placeholder(),
-                    mod_env: env_ref,
-                    mod_attributes: inner_attrs,
-                }
-            } else {
-                module
-            }
-        }
-        ModuleExprDesc::Tmod_constraint(..) => {
-            // Recurse: deconstruct, wrap inner, reconstruct
-            let crate::types::typedtree::ModuleExpr {
-                mod_desc, mod_loc, mod_type, mod_env, mod_attributes
-            } = module;
-            if let ModuleExprDesc::Tmod_constraint(inner, mty, constraint, coercion) = mod_desc {
-                let wrapped_inner = wrap_alias_ident_in_constraint(*inner, env, pers_env, ctx);
-                crate::types::typedtree::ModuleExpr {
-                    mod_desc: ModuleExprDesc::Tmod_constraint(
-                        Box::new(wrapped_inner), mty, constraint, coercion,
-                    ),
-                    mod_loc, mod_type, mod_env, mod_attributes,
-                }
-            } else {
-                unreachable!()
-            }
-        }
-        _ => module,
-    }
-}
-
 fn type_pack(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -13524,8 +13415,6 @@ fn type_pack(
     _context: Option<TypeClashContext>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-
-
     // Match OCaml typecore/typemod type_package flow:
     // - the expected type must be a package
     // - type the packed module expression
@@ -13618,11 +13507,12 @@ fn type_pack(
     // module path (`mkpath mp name`) when the packed module expression provides
     // an identifiable module path (Tmod_ident or implicit Tmod_constraint over it).
     // Fallback to expected args for non-identifiable module expressions.
-    let pack_args = if let Some(pack_module_path) = packed_module_path_from_expr(&typed_module) {
+    let packed_module_path = packed_module_path_from_expr(&typed_module);
+    let pack_args = if let Some(pack_module_path) = packed_module_path.as_ref() {
         let mut rebuilt_args = Vec::with_capacity(pack_lids.len());
         let mut can_rebuild = true;
         for lid in &pack_lids {
-            match mkpath_from_pack_lid(&pack_module_path, lid, tctx.arena, ctx) {
+            match mkpath_from_pack_lid(pack_module_path, lid, tctx.arena, ctx) {
                 Some(path) => rebuilt_args.push(ctx.new_generic_constr(path, vec![])),
                 None => {
                     can_rebuild = false;
@@ -13666,6 +13556,16 @@ fn type_pack(
             )
         })
         .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]))
+    };
+    let arg_mty = if let Some(pack_module_path) = packed_module_path.as_ref() {
+        crate::types::ctype::strengthen_module_type_for_inclusion_path(
+            ctx,
+            env,
+            pack_module_path,
+            &arg_mty,
+        )
+    } else {
+        arg_mty
     };
     let coercion = crate::types::includemod::modtypes(ctx, env, &arg_mty, &decl_package_mty)
         .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
