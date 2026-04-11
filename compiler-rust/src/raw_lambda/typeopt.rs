@@ -270,8 +270,8 @@ fn find_type_decl(ctx: &TypeContext<'_>, env: &Env, path: &Path) -> Option<TypeD
         Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => {
             ctx.find_type_decl_by_stamp(id.stamp()).map(|decl| decl.clone())
         }
-        _ => ctx
-            .find_resolved_pdot_type(&path.name())
+        _ => crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path)
+            .or_else(|| ctx.find_resolved_pdot_type(&path.name()))
             .or_else(|| ctx.find_type_decl_by_path(&path.name()).map(|decl| decl.clone()))
             .or_else(|| env.lookup_type(path).ok().cloned()),
     }

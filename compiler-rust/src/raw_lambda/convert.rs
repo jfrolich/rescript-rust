@@ -26,6 +26,7 @@ use crate::raw_lambda::{RawLambda, RawPrimInfo};
 use crate::raw_lambda::matching as full_matching;
 use crate::raw_lambda::typeopt::{
     constructor_has_optional_shape, type_cannot_contain_undefined,
+    type_cannot_contain_undefined_no_env,
 };
 use crate::types::context::TypeContext;
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
@@ -37,6 +38,7 @@ use crate::types::typedtree::{
     FunctionParamPattern, MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc, ModuleTypeDesc,
     Partial, Pattern, PatternDesc, RecordLabelDefinition, Structure, StructureItem,
     StructureItemDesc, ValueBinding,
+    EnvRef,
 };
 use crate::types::SignatureItem;
 
@@ -802,6 +804,54 @@ impl<'a> RawLambdaConverter<'a> {
             Some(crate::types::Path::pident(Ident::create_persistent(
                 self.unit_name.clone(),
             )))
+        }
+    }
+
+    fn register_module_type_paths(
+        &self,
+        module_path: &crate::types::Path,
+        module_type: &crate::types::decl::ModuleType,
+    ) {
+        match module_type {
+            crate::types::decl::ModuleType::MtySignature(sig) => {
+                self.register_signature_type_paths(Some(module_path), sig);
+            }
+            crate::types::decl::ModuleType::MtyFunctor { result, .. } => {
+                self.register_module_type_paths(module_path, result);
+            }
+            crate::types::decl::ModuleType::MtyIdent(_)
+            | crate::types::decl::ModuleType::MtyAlias(_, _) => {}
+        }
+    }
+
+    fn register_signature_type_paths(
+        &self,
+        prefix: Option<&crate::types::Path>,
+        sig: &[SignatureItem],
+    ) {
+        for item in sig {
+            match item {
+                SignatureItem::SigType(id, decl, _) => {
+                    if id.stamp() != 0 {
+                        self.type_ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                    }
+                    if let Some(prefix) = prefix {
+                        let path = crate::types::Path::pdot(prefix.clone(), id.name());
+                        self.type_ctx
+                            .register_type_decl_by_path(&path.name(), decl.clone());
+                    }
+                }
+                SignatureItem::SigModule(id, md, _) => {
+                    let module_path = md.md_path.clone().unwrap_or_else(|| {
+                        prefix.map_or_else(
+                            || crate::types::Path::pident(id.clone()),
+                            |prefix| crate::types::Path::pdot(prefix.clone(), id.name()),
+                        )
+                    });
+                    self.register_module_type_paths(&module_path, &md.md_type);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -2168,32 +2218,35 @@ impl<'a> RawLambdaConverter<'a> {
         &self,
         cstr: &crate::types::ConstructorDescription,
         args: &[Expression],
+        fallback_env: EnvRef,
     ) -> TagInfo {
         match &cstr.cstr_tag {
             ConstructorTag::CstrBlock(_)
                 if constructor_has_optional_shape(cstr) =>
             {
                 match args {
-                    [arg]
-                        if self
-                            .type_ctx
-                            .get_typed_env(arg.exp_env)
-                            .map(|env| {
+                    [arg] => {
+                        let arg_env_skip = self.type_ctx.get_typed_env(arg.exp_env).map(|env| {
+                            type_cannot_contain_undefined(self.type_ctx, env.as_ref(), arg.exp_type)
+                        });
+                        let fallback_env_skip =
+                            self.type_ctx.get_typed_env(fallback_env).map(|env| {
                                 type_cannot_contain_undefined(
                                     self.type_ctx,
                                     env.as_ref(),
                                     arg.exp_type,
                                 )
-                            })
-                            .unwrap_or_else(|| {
-                                type_cannot_contain_undefined(
-                                    self.type_ctx,
-                                    self.env,
-                                    arg.exp_type,
-                                )
-                            }) =>
-                    {
-                        TagInfo::SomeNotNested
+                            });
+                        let no_env_skip =
+                            type_cannot_contain_undefined_no_env(self.type_ctx, arg.exp_type);
+                        let can_skip = arg_env_skip
+                            .or(fallback_env_skip)
+                            .unwrap_or(no_env_skip);
+                        if can_skip {
+                            TagInfo::SomeNotNested
+                        } else {
+                            TagInfo::Some
+                        }
                     }
                     _ => TagInfo::Some,
                 }
@@ -2210,6 +2263,7 @@ impl<'a> RawLambdaConverter<'a> {
     fn convert_construct_raw(
         &mut self,
         loc: Location,
+        fallback_env: EnvRef,
         cstr: &crate::types::ConstructorDescription,
         args: &[Expression],
     ) -> RawLambda {
@@ -2232,7 +2286,7 @@ impl<'a> RawLambdaConverter<'a> {
             },
             ConstructorTag::CstrBlock(tag) => {
                 let elems = args.iter().map(|arg| self.convert_expr_raw(arg)).collect();
-                let tag_info = self.raw_constructor_tag_info(cstr, args);
+                let tag_info = self.raw_constructor_tag_info(cstr, args, fallback_env);
                 self.raw_block_or_prim(*tag, tag_info, elems, loc)
             }
             ConstructorTag::CstrExtension(path) => {
@@ -2499,6 +2553,7 @@ impl<'a> RawLambdaConverter<'a> {
         structure: &Structure,
         cc: &ModuleCoercion,
     ) -> RawLambda {
+        self.register_signature_type_paths(None, &structure.str_type);
         let mut fields = Vec::new();
         self.convert_structure_items_raw(
             &mut fields,
@@ -4054,7 +4109,7 @@ impl<'a> RawLambdaConverter<'a> {
                 self.raw_block_or_prim(0, TagInfo::Tuple, elems, self.loc(expr.exp_loc))
             }
             ExpressionDesc::Texp_construct(_, cstr, args) => {
-                self.convert_construct_raw(self.loc(expr.exp_loc), cstr, args)
+                self.convert_construct_raw(self.loc(expr.exp_loc), expr.exp_env, cstr, args)
             }
             ExpressionDesc::Texp_variant(tag, arg) => match arg {
                 None => RawLambda::const_(Constant::Pointer(format!(
@@ -5305,9 +5360,8 @@ impl<'a> RawLambdaConverter<'a> {
                         }
                     })
                     .unwrap_or_else(|| {
-                        if type_cannot_contain_undefined(
+                        if type_cannot_contain_undefined_no_env(
                             self.type_ctx,
-                            self.env,
                             arg_pat.pat_type,
                         ) {
                             Primitive::PvalFromOptionNotNest
@@ -6790,14 +6844,23 @@ impl<'a> RawLambdaConverter<'a> {
             .first()
             .and_then(|(pats, _)| pats.first())
             .map(|p| {
-                let env_ref = self.type_ctx
-                    .get_typed_env(p.pat_env);
-                let env = env_ref.as_ref().map(|e| e.as_ref()).unwrap_or(self.env);
-                if type_cannot_contain_undefined(
-                    self.type_ctx,
-                    env,
-                    p.pat_type,
-                ) {
+                let env_ref = self.type_ctx.get_typed_env(p.pat_env);
+                if env_ref
+                    .as_ref()
+                    .map(|e| {
+                        type_cannot_contain_undefined(
+                            self.type_ctx,
+                            e.as_ref(),
+                            p.pat_type,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        type_cannot_contain_undefined_no_env(
+                            self.type_ctx,
+                            p.pat_type,
+                        )
+                    })
+                {
                     Primitive::PvalFromOptionNotNest
                 } else {
                     Primitive::PvalFromOption

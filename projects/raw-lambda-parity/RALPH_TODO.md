@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 639/657 (97.3%), 18 failures, 33 hunks
+**Status:** 639/657 (97.3%), 18 failures, 31 hunks
 
 ## Goal
 
@@ -16,7 +16,7 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
 - Unoptimized lambda parity: **639/657**
-- Parity hunks: **33**
+- Parity hunks: **31**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 
 ## Working Rules
@@ -31,7 +31,7 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 ## Remaining 18 Failures by Category
 
 ### Matching compiler: remaining inner matching / let-pattern lowering (1 file)
-mario_game(4)
+mario_game(2)
 
 **Root cause confirmed:** `do_split_or` partitioning is IDENTICAL between OCaml and Rust,
 but the recursive split helpers were rebuilding defaults from the OUTER `def` instead of
@@ -54,8 +54,9 @@ like `[10,9,8,7,6,5,4,3]` down to `[10]` in Rust.
 **Next investigation:** The remaining matching failures are no longer caused by collapsed
 default suffixes, the `raw_simple_for_let` shortcut, global-reference false positives
 inside `lower_bind`, missing inline-record label reconstruction for extension paths, or
-cross-shape `may_compat` leakage. Focus next on the specific inner handler/default
-combinations that still diverge in `mario_game`.
+cross-shape `may_compat` leakage, or missing local module type declarations during
+optional-shape checks. Focus next on the specific inner handler/default combinations that
+still diverge in `mario_game`.
 
 ### Module coercion / alias resolution (7 files)
 coercion_module_alias_test(1), Import(1), offset(1), DynamicImportModuleWithAlias(1),
@@ -195,6 +196,26 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (pre-register local module types for optional-shape checks)
+
+`mario_game` still had two `makeblock some` vs `makeblock some_not_nested` mismatches for
+`Actors.dir_1d`, even though OCaml boxes those payloads as non-nested options. Direct
+`-drawlambda` tracing showed the raw-lambda optional-shape path was consulting envs that
+could not yet resolve local qualified module types like `Actors.dir_1d` / `Actors.dir_2d`
+at those sites, even though the same declarations became available later in the compile.
+
+Rust now:
+- pre-registers local module type declarations from `structure.str_type` into `TypeContext`
+  before raw-lambda conversion starts
+- threads the enclosing constructor expression env into raw constructor optional-shape checks
+- uses the existing no-env fast path when a typed env still is not available
+- lets `typeopt` consult `lookup_type_decl_for_path_pub` before falling back to cached/name
+  lookups
+
+**Result:** full raw baseline stays **639/657** with **31** hunks. `mario_game` drops from
+**4** hunks to **2**, removing the local-module optional-boxing mismatches. The remaining
+`mario_game` diff is now only the shared catch/switch handler shape.
 
 ### 2026-04-10/11 (major session)
 
