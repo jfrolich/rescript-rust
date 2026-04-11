@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 626/657 (95.3%), 31 failures, 85 hunks
+**Status:** 628/657 (95.6%), 29 failures, 79 hunks
 
 ## Goal
 
@@ -15,8 +15,8 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **626/657**
-- Parity hunks: **85**
+- Unoptimized lambda parity: **628/657**
+- Parity hunks: **79**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 
 ## Working Rules
@@ -30,26 +30,24 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 ## Remaining 31 Failures by Category
 
-### Matching compiler: split_precompile case partitioning (~15 files, ~50 hunks)
-test_set(13), inline_map2_test(9), set_gen(6), mario_game(5), gpr_1698_test(5),
-exception_raise_test(5), bigint_test(6), more_poly_variant_test(3), gpr_1150(3),
-inline_record_test(1), inline_condition_with_pattern_matching(1), int_poly_var(1),
-UntaggedVariants(1), exception_rebound_err_test(1)
+### Matching compiler: recursive default chaining in split_precompile (~13 files, ~44 hunks)
+test_set(13), inline_map2_test(9), set_gen(6), mario_game(5), exception_raise_test(5),
+bigint_test(6), more_poly_variant_test(3), gpr_1150(3), inline_record_test(1),
+inline_condition_with_pattern_matching(1), int_poly_var(1), UntaggedVariants(1)
 
-**Root cause confirmed:** `do_split_or` partitioning is IDENTICAL between OCaml and Rust.
-The switch case differences come from the INNER compilation after flattening. Specifically,
-`compile_flattened` → `compile_match` → `comp_match_handlers` produces different exit ID
-structures. All unseen constructors map to the SAME exit (defs has 1 entry) because
-`reintroduce_fail` removes explicit cases when 3+ share the same exit.
+**Root cause confirmed:** `do_split_or` partitioning is IDENTICAL between OCaml and Rust,
+but the recursive split helpers were rebuilding defaults from the OUTER `def` instead of
+the recursive branch's `top_default`. That collapsed OCaml's cumulative default suffixes
+like `[10,9,8,7,6,5,4,3]` down to `[10]` in Rust.
 
-**Key finding:** OCaml's `scan_def` produces different exits per unseen constructor because
-it has MULTIPLE default entries. Rust has only 1. But `do_split_or` partitioning (which
-creates defaults via `cons_next_or`) is identical — both produce `no=EMPTY`.
+**Result of fix:** Rust now threads `top_default` through `cons_next_or`, `split_exc`,
+`split_noexc`, `split_ex`, and `split_noex`, matching OCaml's recursive default chaining.
+That fixes `gpr_1698_test`, removes `exception_rebound_err_test`, and drops raw hunks
+from **85** to **79**.
 
-**Next investigation:** The difference must be in `compile_flattened` → `compile_match`
-→ `split_precompile` for the FLATTENED sub-problems. Each flattened arg produces its own
-`split_precompile` call which may create different `nexts` (catch handlers with exit IDs).
-Compare the INNER `split_precompile` calls between OCaml and Rust.
+**Next investigation:** The remaining matching failures are no longer caused by collapsed
+default suffixes. Focus next on the specific inner handler/default combinations that still
+diverge in `test_set`, `set_gen`, and `inline_map2_test`.
 
 ### Module coercion (~5 files, ~11 hunks)
 coercion_module_alias_test(7), Import(1), offset(1), DynamicImportModuleWithAlias(1),
@@ -119,6 +117,22 @@ The Rust port now:
 OCaml-aligned fix that restores full compile coverage under the precise `scan_def` port and
 removes four raw diff hunks, but it does NOT fix the remaining inner-handler mismatch by
 itself.
+
+### recursive split default chaining now matches OCaml
+OCaml's recursive split helpers rebuild each new default entry on top of the recursive
+branch's `top_default`, not on top of the caller's incoming `def`. Rust had the right
+`cons_default` helper, but several recursive sites fed it the wrong environment, which
+collapsed cumulative default suffixes during inner `split_precompile`.
+
+The Rust port now threads recursive `top_default` through:
+- `cons_next_or`
+- `split_exc`
+- `split_noexc`
+- `split_ex`
+- `split_noex`
+
+**Result:** full raw baseline improves to **628/657** with **79** hunks. `gpr_1698_test`
+now reaches full raw parity, and `exception_rebound_err_test` drops out of the failure set.
 
 ### do_for_multiple_match flattening no longer threads TypeContext
 OCaml's flattened multi-match path explicitly calls `split_precompile None pm1`.
@@ -235,6 +249,21 @@ flattened precompile step.
 **Takeaway:** the remaining matching mismatch is not caused by the top-level flattened
 entry context. The next root cause is deeper in the inner split/handler compilation that
 follows flattening.
+
+### 2026-04-11 (recursive default chaining in split_precompile)
+
+Compared env-gated `split_precompile` traces in both compilers on `gpr_1698_test` and
+found the first decisive divergence: OCaml carried cumulative default suffixes such as
+`[10,9,8,7,6,5,4,3]`, while Rust collapsed the same branch to `[10]`.
+
+The bug was not in `cons_default` itself. Several recursive split helpers were calling it
+with the caller's incoming `def` instead of the recursive branch's `top_default`. Updating
+those sites to thread `top_default` exactly like OCaml fixes the default chain.
+
+**Baseline after change:** **626/657 -> 628/657**, **85 -> 79 hunks**.
+
+**Takeaway:** this confirms the remaining matching failures are in later inner compilation
+details, not in the recursive default-env chaining anymore.
 
 ### 2026-04-11 (compile_list recursion)
 

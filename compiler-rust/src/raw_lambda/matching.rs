@@ -2919,8 +2919,13 @@ fn cons_next_or(
             *next_raise += 1;
             *next_raise
         };
-        let new_def = cons_default(info.matrix.clone(), idef, def.clone());
-        let mut new_nexts = vec![(idef, info.me)];
+        let PmHalfCompiledInfo {
+            me: next,
+            matrix,
+            top_default,
+        } = info;
+        let new_def = cons_default(matrix, idef, top_default);
+        let mut new_nexts = vec![(idef, next)];
         new_nexts.extend(nexts);
         precompile_or(argo, yes, yesor, args, new_def, new_nexts, next_raise)
     }
@@ -3001,8 +3006,13 @@ fn split_exc(
                         *next_raise += 1;
                         *next_raise
                     };
-                    let new_def = cons_default(info.matrix.clone(), idef, def);
-                    let mut new_nexts = vec![(idef, info.me)];
+                    let PmHalfCompiledInfo {
+                        me: next,
+                        matrix,
+                        top_default,
+                    } = info;
+                    let new_def = cons_default(matrix, idef, top_default);
+                    let mut new_nexts = vec![(idef, next)];
                     new_nexts.extend(nexts);
                     (
                         PmHalfCompiledInfo {
@@ -3026,8 +3036,13 @@ fn split_exc(
                     *next_raise += 1;
                     *next_raise
                 };
-                let new_def = cons_default(info.matrix.clone(), idef, def);
-                let mut new_nexts = vec![(idef, info.me)];
+                let PmHalfCompiledInfo {
+                    me: next,
+                    matrix,
+                    top_default,
+                } = info;
+                let new_def = cons_default(matrix, idef, top_default);
+                let mut new_nexts = vec![(idef, next)];
                 new_nexts.extend(nexts);
                 (
                     PmHalfCompiledInfo {
@@ -3077,12 +3092,17 @@ fn split_noexc(
                     *next_raise += 1;
                     *next_raise
                 };
+                let PmHalfCompiledInfo {
+                    me: next,
+                    matrix,
+                    top_default,
+                } = info;
                 precompile_var(
                     args,
                     yes,
-                    cons_default(info.matrix.clone(), idef, def),
+                    cons_default(matrix, idef, top_default),
                     {
-                        let mut new_nexts = vec![(idef, info.me)];
+                        let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
                         new_nexts
                     },
@@ -3203,8 +3223,13 @@ fn split_ex(
                             *next_raise += 1;
                             *next_raise
                         };
-                        let new_def = cons_default(info.matrix.clone(), idef, def);
-                        let mut new_nexts = vec![(idef, info.me)];
+                        let PmHalfCompiledInfo {
+                            me: next,
+                            matrix,
+                            top_default,
+                        } = info;
+                        let new_def = cons_default(matrix, idef, top_default);
+                        let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
                         (
                             PmHalfCompiledInfo {
@@ -3269,12 +3294,17 @@ fn split_noex(
                         *next_raise += 1;
                         *next_raise
                     };
+                    let PmHalfCompiledInfo {
+                        me: next,
+                        matrix,
+                        top_default,
+                    } = info;
                     precompile_var(
                         args,
                         yes,
-                        cons_default(info.matrix.clone(), idef, def),
+                        cons_default(matrix, idef, top_default),
                         {
-                            let mut new_nexts = vec![(idef, info.me)];
+                            let mut new_nexts = vec![(idef, next)];
                             new_nexts.extend(nexts);
                             new_nexts
                         },
