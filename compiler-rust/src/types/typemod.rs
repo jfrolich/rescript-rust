@@ -5104,7 +5104,10 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     }
                                 },
                                 type_manifest,
-                                type_variance,
+                                type_variance: typed_type_decls
+                                    .and_then(|typed_decls| typed_decls.get(decl_idx))
+                                    .map(|typed_decl| typed_decl.typ_type.type_variance.clone())
+                                    .unwrap_or(type_variance),
                                 type_newtype_level: None,
                                 type_loc: arena.to_location(decl.ptype_loc),
                                 type_attributes: vec![],
@@ -11162,6 +11165,22 @@ fn transl_sig_type_declarations_with_ids<'a>(
         });
         if let Some(manifest) = decl.type_manifest {
             crate::types::ctype::generalize(ctx, manifest);
+        }
+    }
+
+    let mut variance_env = env.clone();
+    for (type_id, decl) in declared_type_ids.iter().zip(internal_decls_for_generalize.iter()) {
+        variance_env.add_type(type_id.clone(), decl.clone());
+    }
+    let resolved_variances = compute_type_variance_fixpoint(ctx, &variance_env, &declared_type_ids);
+    if resolved_variances.len() == declared_type_ids.len() {
+        for (idx, variance_row) in resolved_variances.iter().enumerate() {
+            if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
+                typed_decl.typ_type.type_variance = variance_row.clone();
+            }
+            if let Some(internal_decl) = internal_decls_for_generalize.get_mut(idx) {
+                internal_decl.type_variance = variance_row.clone();
+            }
         }
     }
 

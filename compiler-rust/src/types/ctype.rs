@@ -4452,13 +4452,28 @@ pub fn compute_variance_decl(
         return vec![];
     }
 
-    // Abstract types with no manifest: keep declared variance
+    // OCaml typedecl.ml: abstract/open types with no manifest derive their
+    // semantic variance from the required declaration variance, not from the
+    // current fixpoint seed. Unannotated params therefore start as FULL.
     if matches!(
         decl.type_kind,
         super::TypeKind::TypeAbstract | super::TypeKind::TypeOpen
     ) && decl.type_manifest.is_none()
     {
-        return decl.type_variance.clone();
+        return decl
+            .type_variance
+            .iter()
+            .map(|variance| {
+                let (may_pos, may_neg) = variance.get_upper();
+                if may_pos && !may_neg {
+                    Variance::covariant()
+                } else if may_neg && !may_pos {
+                    Variance::contravariant()
+                } else {
+                    Variance::full()
+                }
+            })
+            .collect();
     }
 
     // Map from TypeExprRef (repr of param) to accumulated variance

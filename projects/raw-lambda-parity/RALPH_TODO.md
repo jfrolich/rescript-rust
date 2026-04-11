@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 651/657 (99.1%), 3 parity failures + 3 compile issues, 4 hunks
+**Status:** 650/657 (98.9%), 5 parity failures + 2 compile issues, 6 hunks
 
 ## Goal
 
@@ -14,12 +14,12 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 ## Current Baseline
 
 - OCaml compile coverage: **657/657**
-- Rust compile coverage: **654/657** on the 16-way authoritative run
-- Unoptimized lambda parity: **651/657**
-- Parity hunks: **4**
+- Rust compile coverage: **655/657** on the 16-way authoritative run
+- Unoptimized lambda parity: **650/657**
+- Parity hunks: **6**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 - Raw timeouts on the authoritative run: `Import.res`, `global_module_alias_test.res`
-- Raw crashes on the authoritative run: `defunctor_make_test.res`
+- Raw crashes on the authoritative run: none
 - `belt_hashmap_test.res`, `bs_map_set_dict_test.res`, `bs_poly_mutable_map_test.res`,
   `bs_poly_mutable_set_test.res`, `bs_poly_set_test.res`, and the `int_map` cluster now
   compile again after restoring OCaml's strengthened packed-module path behavior.
@@ -33,7 +33,7 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 3 Parity Failures by Category
+## Remaining 5 Parity Failures by Category
 
 ### Dict pattern compilation (2 files)
 json_decorders, stdlib_Stdlib_DictTests
@@ -48,10 +48,16 @@ bs_poly_map_test
 **Issue:** the package/path crash cluster is gone, leaving one collection-specific raw lambda
 parity file outside the Dict path.
 
+### Newly exposed raw-lambda regressions after the variance fix (2 files)
+bs_abstract_test, reactEvent
+
+**Issue:** removing the last module/signature crash changed the raw-lambda frontier again.
+These two files now fail on the clean authoritative run and need a focused diff pass.
+
 ## Additional Raw Compile Issues
 
 - Timeouts: `Import`, `global_module_alias_test`
-- Crashes: `defunctor_make_test`
+- Crashes: none
 
 ## Key Findings from Session 2026-04-10/11
 
@@ -162,6 +168,37 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (signature type declarations now use OCaml variance semantics)
+
+OCaml `typedecl.ml` runs the same variance/immediacy fixpoint for signature type
+declarations that it uses for structure declarations, and abstract signature types with no
+manifest do not keep parser-null variance rows. Rust's signature path was still leaving
+`ptype_params` variances untouched in two places:
+
+- `transl_sig_type_declarations_with_ids` returned typed signature declarations without the
+  OCaml variance fixpoint
+- semantic `Pmty_signature` translation rebuilt `SigType` declarations with parser variances
+  unless a typed hint explicitly supplied the already-computed row
+
+That showed up in `defunctor_make_test`: the explicit `Comparable` module signature still
+carried invariant `comparator<'a>` / `compare<'key, 'id>` parameters semantically, so
+module inclusion failed with `variance mismatch at parameter 0` before raw lambda
+translation even ran.
+
+Rust now:
+- treats abstract/open types with no manifest like OCaml when computing semantic variance
+- recomputes signature type-declaration variances with the same fixpoint helper already used
+  for structure declarations
+- threads those resolved variance rows back into typed signature declarations and reuses them
+  when translating `Pmty_signature` to a semantic `decl::ModuleType`
+
+**Result:** `defunctor_make_test` now compiles and reaches focused raw parity. The clean
+authoritative raw baseline improves compile coverage to **655/657**, removing the final
+crash, but the raw-lambda frontier shifts to **650/657** with **6** hunks: two new parity
+files (`bs_abstract_test`, `reactEvent`) appear alongside the existing
+`bs_poly_map_test`, `json_decorders`, and `stdlib_Stdlib_DictTests`. This is a verified
+OCaml-aligned type-layer fix and must stay.
 
 ### 2026-04-11 (semantic module signatures now simplify duplicate value specs)
 
