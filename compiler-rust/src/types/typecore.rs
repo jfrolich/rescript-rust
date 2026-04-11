@@ -3797,6 +3797,11 @@ fn type_pattern_record(
         });
 
         let label_desc = if let Some(env_label) = disambiguated {
+                let env_label = if has_dict_pattern_attr {
+                    materialize_dict_pattern_label(ctx, &env_label, &field_name)
+                } else {
+                    env_label
+                };
                 let (_poly_vars, ty_arg, ty_res) =
                     crate::types::ctype::instance_label(ctx, false, &env_label);
                 // Best-effort unification to propagate type info
@@ -17491,6 +17496,38 @@ fn lookup_label_by_expected_type<'a>(
         }
     }
     None
+}
+
+fn materialize_dict_pattern_label(
+    ctx: &TypeContext<'_>,
+    base_label: &crate::types::LabelDescription,
+    field_name: &str,
+) -> crate::types::LabelDescription {
+    let mut cached = ctx.get_dict_pattern_labels();
+    if cached.is_empty() {
+        cached.push((
+            DICT_MAGIC_FIELD_NAME.to_string(),
+            0,
+            base_label.lbl_mut,
+            base_label.lbl_repres.clone(),
+            base_label.lbl_attributes.clone(),
+        ));
+    }
+
+    let mut synthetic = base_label.clone();
+    synthetic.lbl_name = field_name.to_string();
+    synthetic.lbl_pos = cached.len() as i32;
+    synthetic.lbl_repres = crate::types::RecordRepresentation::RecordRegular;
+
+    cached.push((
+        synthetic.lbl_name.clone(),
+        synthetic.lbl_pos,
+        synthetic.lbl_mut,
+        synthetic.lbl_repres.clone(),
+        synthetic.lbl_attributes.clone(),
+    ));
+    ctx.set_dict_pattern_labels(cached);
+    synthetic
 }
 
 /// Disambiguate a label by name, considering the record expression's type.

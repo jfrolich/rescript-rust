@@ -481,10 +481,89 @@ fn set_args_erase_mutable(q: &Pattern, r: &[Pattern]) -> Vec<Pattern> {
     do_set_args(true, q, r)
 }
 
+fn untagged_payload_type_cannot_be_undefined(
+    ctx_ref: &TypeContext<'_>,
+    env_ref: EnvRef,
+    ty: TypeExprRef,
+) -> bool {
+    let Some(env) = ctx_ref.get_typed_env(env_ref) else {
+        return false;
+    };
+    let ty = crate::types::ctype::expand_head(ctx_ref, env.as_ref(), ty);
+    match &*ctx_ref.get_desc(ty) {
+        crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
+            path.same(&crate::types::predef::path_string())
+                || path.same(&crate::types::predef::path_int())
+                || path.same(&crate::types::predef::path_float())
+                || path.same(&crate::types::predef::path_bigint())
+                || path.same(&crate::types::predef::path_bool())
+                || matches!(path, crate::types::path::Path::Pident(id) if id.name() == "dict")
+                || matches!(path.name().as_str(), "Js.Dict.t" | "Js_dict.t")
+        }
+        crate::types::type_expr::TypeDesc::Tarrow { .. }
+        | crate::types::type_expr::TypeDesc::Ttuple(_) => true,
+        _ => false,
+    }
+}
+
+fn can_strip_optional_construct_wrapper(
+    ctx_ref: &TypeContext<'_>,
+    pat_env: EnvRef,
+    cstr: &ConstructorDescription,
+) -> bool {
+    if !has_untagged(&cstr.cstr_attributes) {
+        return false;
+    }
+
+    if cstr.cstr_inlined.is_some() {
+        return true;
+    }
+
+    match cstr.cstr_args.as_slice() {
+        [] => false,
+        [arg] => untagged_payload_type_cannot_be_undefined(ctx_ref, pat_env, *arg),
+        [_, _, ..] => true,
+    }
+}
+
 /// Expand record pattern to all fields (filling missing with omega).
 /// OCaml's `all_record_args` uses `lbl_all` to get ALL labels, then fills
 /// missing ones with omega. Since Rust's `lbl_all` is a placeholder, we
 /// resolve via the TypeContext when available.
+fn strip_optional_record_pattern_wrapper(
+    ctx_ref: Option<&TypeContext<'_>>,
+    lbl: &LabelDescription,
+    pat: &Pattern,
+) -> Pattern {
+    if !lbl.lbl_optional || matches!(lbl.lbl_repres, RecordRepresentation::RecordInlined { .. }) {
+        return pat.clone();
+    }
+
+    match &pat.pat_desc {
+        PatternDesc::Tpat_construct(_, cstr, args) if cstr.cstr_name == "Some" && args.len() == 1 => {
+            match &args[0].pat_desc {
+                PatternDesc::Tpat_constant(_) => args[0].clone(),
+                PatternDesc::Tpat_construct(_, inner_cstr, _) => {
+                    match ctx_ref {
+                        Some(ctx_ref)
+                            if can_strip_optional_construct_wrapper(
+                                ctx_ref,
+                                args[0].pat_env,
+                                inner_cstr,
+                            ) =>
+                        {
+                            args[0].clone()
+                        }
+                        _ => pat.clone(),
+                    }
+                }
+                _ => pat.clone(),
+            }
+        }
+        _ => pat.clone(),
+    }
+}
+
 fn all_record_args(
     ctx_ref: Option<&TypeContext<'_>>,
     pat_type: TypeExprRef,
@@ -534,7 +613,13 @@ fn all_record_args(
             // Fill in the actual patterns from the provided fields
             for (id, lbl, pat, opt) in lbls {
                 if (lbl.lbl_pos as usize) < result.len() {
-                    result[lbl.lbl_pos as usize] = (id.clone(), lbl.clone(), pat.clone(), *opt);
+                    let rewritten_pat = strip_optional_record_pattern_wrapper(ctx_ref, lbl, pat);
+                    result[lbl.lbl_pos as usize] = (
+                        id.clone(),
+                        lbl.clone(),
+                        rewritten_pat,
+                        *opt,
+                    );
                 }
             }
             result
@@ -7327,26 +7412,30 @@ fn c_rec(
 
 /// Find a reasonable name for the match variable from the first pattern.
 /// Equivalent to OCaml's `name_pattern`.
-fn name_pattern(default: &str, cases: &[(Vec<Pattern>, RawLambda)]) -> Ident {
+fn name_pattern(
+    ctx_ref: &TypeContext<'_>,
+    default: &str,
+    cases: &[(Vec<Pattern>, RawLambda)],
+) -> Ident {
     for (pats, _) in cases {
         if let Some(pat) = pats.first() {
-            if let Some(id) = id_of_pattern(pat) {
+            if let Some(id) = id_of_pattern(ctx_ref, pat) {
                 return id;
             }
         }
     }
-    Ident::create_local(default)
+    ctx_ref.create_ident(default)
 }
 
 /// Extract an identifier from a pattern (for naming purposes).
 /// Equivalent to OCaml's `Typecore.id_of_pattern`.
-fn id_of_pattern(pat: &Pattern) -> Option<Ident> {
+fn id_of_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Option<Ident> {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, _) => Some(id.clone()),
         PatternDesc::Tpat_alias(_, id, _) => Some(id.clone()),
         PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => match &args[0].pat_desc {
             PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
-                Some(Ident::create_local(id.name()))
+                Some(ctx_ref.rename_ident(id))
             }
             _ => None,
         },
@@ -7356,11 +7445,15 @@ fn id_of_pattern(pat: &Pattern) -> Option<Ident> {
 
 /// Convert arg to a variable (bind if not already a variable).
 /// Equivalent to OCaml's `arg_to_var`.
-fn arg_to_var(arg: &RawLambda, cls: &[(Vec<Pattern>, RawLambda)]) -> (Ident, RawLambda) {
+fn arg_to_var(
+    ctx_ref: &TypeContext<'_>,
+    arg: &RawLambda,
+    cls: &[(Vec<Pattern>, RawLambda)],
+) -> (Ident, RawLambda) {
     match arg {
         RawLambda::Lvar(v) => (v.clone(), arg.clone()),
         _ => {
-            let v = name_pattern("match", cls);
+            let v = name_pattern(ctx_ref, "match", cls);
             (v.clone(), RawLambda::Lvar(v))
         }
     }
@@ -7434,7 +7527,7 @@ fn compile_match(
             }
         }
         (_, [(arg, str_kind), argl @ ..]) => {
-            let (v, newarg) = arg_to_var(arg, &m.cases);
+            let (v, newarg) = arg_to_var(ctx_ref, arg, &m.cases);
             let new_args = {
                 let mut a = vec![(newarg.clone(), LetKind::Alias)];
                 a.extend(argl.iter().cloned());
@@ -7830,6 +7923,30 @@ fn resolve_labels_from_type(
         _ => return None,
     };
     drop(desc);
+
+    if path.same(&crate::types::predef::path_dict()) {
+        let cached = ctx_ref.get_dict_pattern_labels();
+        if !cached.is_empty() {
+            return Some(
+                cached
+                    .into_iter()
+                    .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
+                        lbl_name: name,
+                        lbl_res: TypeExprRef(0),
+                        lbl_arg: TypeExprRef(0),
+                        lbl_mut: mutflag,
+                        lbl_optional: true,
+                        lbl_pos: pos,
+                        lbl_all: crate::types::decl::LabelArrayRef(0),
+                        lbl_repres: repr,
+                        lbl_private: crate::types::asttypes::PrivateFlag::Public,
+                        lbl_loc: crate::location::Location::none(),
+                        lbl_attributes: attrs,
+                    })
+                    .collect(),
+            );
+        }
+    }
 
     // Try env lookup first
     let env = ctx_ref.get_typed_env(env_ref)?;

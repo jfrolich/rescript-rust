@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 644/657 (98.0%), 11 failures, 19 hunks
+**Status:** 648/657 (98.6%), 7 failures, 14 hunks
 
 ## Goal
 
@@ -15,8 +15,8 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **655/657** on the 16-way authoritative run
-- Unoptimized lambda parity: **644/657**
-- Parity hunks: **19**
+- Unoptimized lambda parity: **648/657**
+- Parity hunks: **14**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 - Focused raw runs for `Import.res` and `global_module_alias_test.res` both pass; the
   full 16-way baseline still times those two files out intermittently.
@@ -30,10 +30,10 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 11 Failures by Category
+## Remaining 7 Failures by Category
 
 ### Module coercion / alias resolution (4 files)
-coercion_module_alias_test(1), derive_projector_test(2), pr6726(1), recmodule(2)
+coercion_module_alias_test(7), derive_projector_test(1), pr6726(1), recmodule(1)
 
 **Issues:**
 - `coercion_module_alias_test` is the remaining direct module-coercion diff after fixing
@@ -42,15 +42,15 @@ coercion_module_alias_test(1), derive_projector_test(2), pr6726(1), recmodule(2)
 - `derive_projector_test` still carries extra include/signature structure from deriving
 - `recmodule` still needs the OCaml recursive module init/runtime shape
 
-### Dict pattern compilation (6 files)
-DictInternalRepresentation(1), DictPatternMatchingOptimization(1), json_decorders(1),
-pattern_match_json(1), stdlib_Stdlib_DictTests(2), stdlib_Stdlib_JsonTests(2)
+### Dict pattern compilation (2 files)
+json_decorders(1), stdlib_Stdlib_DictTests(1)
 
-**Issue:** OCaml uses typed field accesses for Dict patterns. Rust still uses option checks
-in the remaining raw-lambda Dict cluster.
+**Issue:** OCaml's Dict path mutates `lbl_all` with synthetic per-field labels and only strips
+`Some(...)` wrappers in the narrow `Parmatch.all_record_args` cases. Rust now matches that
+for the resolved Dict files, but two Dict-focused lambda diffs remain.
 
 ### Other (1 file)
-bs_poly_map_test(3)
+bs_poly_map_test(2)
 
 **Issue:** remaining library-specific lambda shape difference outside the main
 module/Dict clusters
@@ -164,6 +164,33 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (Dict synthetic labels + narrow optional wrapper stripping)
+
+OCaml's Dict patterns do two things that Rust still wasn't matching:
+
+1. `typecore.ml` does not just rename `dictValuesType`; it synthesizes a fresh label for each
+   Dict field lookup, preserving the hidden `dictValuesType/0` slot and growing `lbl_all`
+   with per-field positions (`.../1`, `.../2`, etc.).
+2. `parmatch.ml` only strips `Some(...)` wrappers for optional record labels in narrow cases:
+   `Some(<constant>)`, or `Some(<constructor>)` when the untagged payload block cannot be
+   `undefined`.
+
+Rust now:
+- caches synthetic Dict pattern labels in `TypeContext`, seeded with hidden
+  `dictValuesType/0`
+- materializes those synthetic labels during Dict pattern typing instead of only renaming the
+  magic field
+- resolves Dict record labels from that synthetic cache in raw matching / conversion so
+  `lbl_all`-style expansion matches OCaml's field positions
+- ports the narrow `Parmatch.all_record_args` optional-wrapper stripping rule for Dict fields
+- names match temporaries through the typed-context identifier source in raw matching, aligning
+  the remaining Dict record/constructor binder shapes with OCaml
+
+**Result:** full authoritative raw baseline improves to **648/657** with **14** hunks.
+Resolved Dict files: `DictInternalRepresentation`, `DictPatternMatchingOptimization`,
+`pattern_match_json`, and `stdlib/Stdlib_JsonTests`. The remaining Dict cluster is down to
+`json_decorders` and `stdlib/Stdlib_DictTests`.
 
 ### 2026-04-11 (module type simplification for implicit structure constraints)
 

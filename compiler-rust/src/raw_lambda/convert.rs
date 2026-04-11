@@ -742,6 +742,12 @@ impl<'a> RawLambdaConverter<'a> {
         let desc = self.type_ctx.get_desc(ty);
         match &*desc {
             TypeDesc::Tconstr { path, .. } => {
+                if path.same(&crate::types::predef::path_dict()) {
+                    let labels = self.type_ctx.get_dict_pattern_labels();
+                    if !labels.is_empty() {
+                        return Some(labels);
+                    }
+                }
                 // Try the record labels cache (populated during type checking)
                 // Use Debug format of path for unique key (includes stamps)
                 let cache_key = format!("{:?}", path);

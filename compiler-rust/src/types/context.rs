@@ -233,6 +233,17 @@ pub struct TypeContext<'a> {
     /// Used by raw lambda conversion to bind ALL record fields (matching OCaml's make_record_matching).
     record_labels_cache: RefCell<ahash::AHashMap<String, Vec<(String, i32, super::asttypes::MutableFlag, super::decl::RecordRepresentation, Vec<super::decl::Attribute>)>>>,
 
+    /// Synthetic dict-pattern labels created by type-directed label lookup.
+    /// OCaml mutates `lbl_all` on the predefined dict magic field as each dict
+    /// pattern field is resolved; we model that with an append-only side table.
+    dict_pattern_labels_cache: RefCell<Vec<(
+        String,
+        i32,
+        super::asttypes::MutableFlag,
+        super::decl::RecordRepresentation,
+        Vec<super::decl::Attribute>,
+    )>>,
+
     /// Stored typedtree environment snapshots, keyed by EnvRef.
     typed_envs: RefCell<Vec<Arc<Env>>>,
 
@@ -287,6 +298,7 @@ impl<'a> TypeContext<'a> {
             predef_option_type: Cell::new(None),
             arity_aliases: RefCell::new(ahash::AHashMap::new()),
             record_labels_cache: RefCell::new(ahash::AHashMap::new()),
+            dict_pattern_labels_cache: RefCell::new(Vec::new()),
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(ahash::AHashMap::new()),
         }
@@ -680,6 +692,33 @@ impl<'a> TypeContext<'a> {
         type_path_name: &str,
     ) -> Option<Vec<(String, i32, super::asttypes::MutableFlag, super::decl::RecordRepresentation, Vec<super::decl::Attribute>)>> {
         self.record_labels_cache.borrow().get(type_path_name).cloned()
+    }
+
+    /// Replace the synthetic dict-pattern label cache.
+    pub fn set_dict_pattern_labels(
+        &self,
+        labels: Vec<(
+            String,
+            i32,
+            super::asttypes::MutableFlag,
+            super::decl::RecordRepresentation,
+            Vec<super::decl::Attribute>,
+        )>,
+    ) {
+        *self.dict_pattern_labels_cache.borrow_mut() = labels;
+    }
+
+    /// Snapshot the synthetic dict-pattern labels created so far.
+    pub fn get_dict_pattern_labels(
+        &self,
+    ) -> Vec<(
+        String,
+        i32,
+        super::asttypes::MutableFlag,
+        super::decl::RecordRepresentation,
+        Vec<super::decl::Attribute>,
+    )> {
+        self.dict_pattern_labels_cache.borrow().clone()
     }
 
     // ========================================================================
