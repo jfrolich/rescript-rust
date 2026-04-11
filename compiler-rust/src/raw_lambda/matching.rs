@@ -8535,7 +8535,7 @@ pub fn do_for_multiple_match(
 
     // Try flatten optimization first
     let result = (|| -> Result<RawLambda, CannotFlattenExn> {
-        let (next, nexts) = split_precompile(Some(ctx_ref), &None, &pm1, next_raise_count);
+        let (next, nexts) = split_precompile(None, &None, &pm1, next_raise_count);
 
         let size = paraml.len();
 

@@ -120,6 +120,20 @@ OCaml-aligned fix that restores full compile coverage under the precise `scan_de
 removes four raw diff hunks, but it does NOT fix the remaining inner-handler mismatch by
 itself.
 
+### do_for_multiple_match flattening no longer threads TypeContext
+OCaml's flattened multi-match path explicitly calls `split_precompile None pm1`.
+Rust had been threading `Some(ctx_ref)` into that single call site, which let
+`simplify_cases` see extra type information during flatten precompilation that
+OCaml never supplies there.
+
+Rust now matches the OCaml entry point exactly:
+- `do_for_multiple_match` calls `split_precompile(None, &None, &pm1, ...)`
+
+**Result:** full raw baseline still stays **626/657** with **85** hunks, and the focused
+matching cluster (`gpr_1698_test`, `test_set`, `set_gen`, `inline_map2_test`) is unchanged.
+This keeps the control flow aligned with OCaml and confirms the remaining mismatch is
+deeper than this top-level flattened-entry context.
+
 ### get_mins order now matches OCaml
 Rust `get_mins` was preserving survivors in forward order, while OCaml prepends survivors on
 each pass. The helper now matches OCaml's selection order exactly.
@@ -209,6 +223,18 @@ each selection pass instead of appending them.
 **Takeaway:** the remaining inner-handler mismatch is not explained by `get_mins` ordering
 alone. The next likely root cause is still later context remapping during handler
 compilation (`compile_list`, `compile_orhandlers`, or the downstream `ctx_*` transforms).
+
+### 2026-04-11 (flattened multi-match split_precompile context)
+
+Aligned the flattened multi-match entry point with OCaml: `do_for_multiple_match` now calls
+`split_precompile None pm1` instead of threading the current `TypeContext` into the
+flattened precompile step.
+
+**Baseline after change:** still **626/657** with **85** hunks.
+
+**Takeaway:** the remaining matching mismatch is not caused by the top-level flattened
+entry context. The next root cause is deeper in the inner split/handler compilation that
+follows flattening.
 
 ### 2026-04-11 (compile_list recursion)
 
