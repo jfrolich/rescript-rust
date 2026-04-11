@@ -129,8 +129,10 @@ pub struct LambdaSwitch {
 /// Switch names for untagged variants
 #[derive(Debug, Clone)]
 pub struct SwitchNames {
-    // Placeholder - actual structure from Ast_untagged_variants.switch_names
-    pub names: Vec<String>,
+    /// Nullary constructor names.
+    pub consts: Vec<String>,
+    /// Constructor names for payload-carrying cases.
+    pub blocks: Vec<String>,
 }
 
 /// Lambda function definition

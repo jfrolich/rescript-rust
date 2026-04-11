@@ -27,10 +27,13 @@ use crate::types::asttypes::MutableFlag;
 use crate::types::btype;
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    ConstructorDescription, ConstructorTag, LabelDescription, RecordRepresentation,
+    ConstructorArguments, ConstructorDescription, ConstructorTag, LabelDescription,
+    RecordRepresentation, TypeKind,
 };
+use crate::types::env::Env;
+use crate::types::path::Path;
 use crate::types::type_expr::TypeExprRef;
-use crate::types::type_expr::{RowDesc, RowField};
+use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
 use crate::types::typedtree::Partial;
 use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
 
@@ -8230,9 +8233,48 @@ fn extract_row_from_type(ctx_ref: &TypeContext<'_>, ty: TypeExprRef) -> RowDesc 
 }
 
 /// Placeholder for names_from_construct_pattern.
-/// In OCaml this is set by Lam_compile; for now returns None.
-fn names_from_construct_pattern(_ctx_ref: &TypeContext<'_>, _pat: &Pattern) -> Option<SwitchNames> {
-    None
+/// Matches `compiler/core/matching_polyfill.ml`.
+fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Option<SwitchNames> {
+    fn switch_names_from_variant(cstrs: &[crate::types::decl::ConstructorDeclaration]) -> SwitchNames {
+        let mut consts = Vec::new();
+        let mut blocks = Vec::new();
+        for cstr in cstrs {
+            match &cstr.cd_args {
+                ConstructorArguments::CstrTuple(args) if args.is_empty() => {
+                    consts.push(cstr.cd_id.name().to_string());
+                }
+                ConstructorArguments::CstrTuple(_) | ConstructorArguments::CstrRecord(_) => {
+                    blocks.push(cstr.cd_id.name().to_string());
+                }
+            }
+        }
+        SwitchNames { consts, blocks }
+    }
+
+    fn resolve_type(
+        ctx_ref: &TypeContext<'_>,
+        ty: TypeExprRef,
+        env: &Env,
+    ) -> Option<SwitchNames> {
+        match &*ctx_ref.get_desc(ctx_ref.repr(ty)) {
+            TypeDesc::Tconstr { path, .. } => resolve_path(ctx_ref, path, env),
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => resolve_type(ctx_ref, *next, env),
+            _ => None,
+        }
+    }
+
+    fn resolve_path(ctx_ref: &TypeContext<'_>, path: &Path, env: &Env) -> Option<SwitchNames> {
+        let decl = crate::raw_lambda::typeopt::find_type_decl_pub(ctx_ref, env, path)?;
+        match &decl.type_kind {
+            TypeKind::TypeVariant(cstrs) => Some(switch_names_from_variant(cstrs)),
+            TypeKind::TypeAbstract => decl
+                .type_manifest
+                .and_then(|manifest| resolve_type(ctx_ref, manifest, env)),
+            TypeKind::TypeOpen | TypeKind::TypeRecord(_, _) => None,
+        }
+    }
+
+    resolve_type(ctx_ref, pat.pat_type, &Env::empty())
 }
 
 // ============================================================================

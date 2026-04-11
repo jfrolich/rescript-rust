@@ -12,7 +12,7 @@ use crate::ident::{Ident, IdentFlags};
 use crate::lambda::compat::LetKind;
 use crate::lambda::constant::{ConstructorTag as PointerConstructorTag, PointerInfo, StringDelim};
 use crate::lambda::convert::LambdaConverter;
-use crate::lambda::primitive::{ExternalArgSpec, ExternalFfiSpec, Mutable};
+use crate::lambda::primitive::{ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, Mutable};
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::Constant;
 use crate::lambda::{
@@ -25,7 +25,7 @@ use crate::parser::ast::{Arity, MutableFlag as ParserMutableFlag};
 use crate::raw_lambda::matching as full_matching;
 use crate::raw_lambda::typeopt::{
     constructor_has_optional_shape, type_cannot_contain_undefined,
-    type_cannot_contain_undefined_no_env,
+    type_cannot_contain_undefined_no_env, type_is_builtin_object,
 };
 use crate::raw_lambda::{RawLambda, RawPrimInfo};
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
@@ -603,6 +603,9 @@ pub struct RawLambdaConverter<'a> {
 }
 
 impl<'a> RawLambdaConverter<'a> {
+    const OCAML_MARSHAL_HEADER_LEN: usize = 20;
+    const FFI_OBJ_CREATE_SMALL_BLOCK: u8 = 0x91;
+
     /// Create a new raw-lambda converter.
     pub fn new(
         arena: &'a ParseArena,
@@ -2174,7 +2177,11 @@ impl<'a> RawLambdaConverter<'a> {
                         ExternalArgSpec { label: None };
                         prim.prim_arity.max(0) as usize
                     ],
-                    ffi: ExternalFfiSpec { module_name: None },
+                    ffi: self.ffi_spec_for_primitive(
+                        prim,
+                        self.applied_result_is_builtin_object(ty, prim.prim_arity.max(0) as usize),
+                        self.applied_result_is_unit(ty, prim.prim_arity.max(0) as usize),
+                    ),
                     dynamic_import: false,
                     transformed_jsx: false,
                 });
@@ -2267,11 +2274,85 @@ impl<'a> RawLambdaConverter<'a> {
             Primitive::PjsCall {
                 prim_name: prim_name.to_string(),
                 arg_types: vec![ExternalArgSpec { label: None }; prim.prim_arity.max(0) as usize],
-                ffi: ExternalFfiSpec { module_name: None },
+                ffi: self.ffi_spec_for_primitive(
+                    prim,
+                    self.applied_result_is_builtin_object(ty, args.len()),
+                    self.applied_result_is_unit(ty, args.len()),
+                ),
                 dynamic_import: false,
                 transformed_jsx,
             }
         }
+    }
+
+    fn ffi_spec_for_primitive(
+        &self,
+        prim: &crate::types::PrimitiveDescription,
+        object_result: bool,
+        returns_unit: bool,
+    ) -> ExternalFfiSpec {
+        let kind = if self.primitive_is_obj_create(prim) || object_result {
+            ExternalFfiKind::ObjCreate
+        } else {
+            ExternalFfiKind::Default
+        };
+        ExternalFfiSpec {
+            module_name: None,
+            kind,
+            returns_unit,
+        }
+    }
+
+    fn primitive_is_obj_create(&self, prim: &crate::types::PrimitiveDescription) -> bool {
+        let bytes = prim
+            .prim_native_name
+            .chars()
+            .map(|c| c as u32 as u8)
+            .collect::<Vec<_>>();
+        matches!(
+            bytes.get(Self::OCAML_MARSHAL_HEADER_LEN),
+            Some(&Self::FFI_OBJ_CREATE_SMALL_BLOCK)
+        )
+    }
+
+    fn applied_result_is_builtin_object(&self, ty: TypeExprRef, applied_args: usize) -> bool {
+        let mut current = ty;
+        for _ in 0..applied_args {
+            let expanded = crate::types::ctype::expand_head(self.type_ctx, self.env, current);
+            let repr = self.type_ctx.repr(expanded);
+            let desc = self.type_ctx.get_desc(repr);
+            let next = match &*desc {
+                TypeDesc::Tarrow { ret, .. } => Some(*ret),
+                TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => Some(*next),
+                _ => None,
+            };
+            drop(desc);
+            let Some(next) = next else {
+                return false;
+            };
+            current = next;
+        }
+        type_is_builtin_object(self.type_ctx, self.env, current)
+    }
+
+    fn applied_result_is_unit(&self, ty: TypeExprRef, applied_args: usize) -> bool {
+        let mut current = ty;
+        for _ in 0..applied_args {
+            let expanded = crate::types::ctype::expand_head(self.type_ctx, self.env, current);
+            let repr = self.type_ctx.repr(expanded);
+            let desc = self.type_ctx.get_desc(repr);
+            let next = match &*desc {
+                TypeDesc::Tarrow { ret, .. } => Some(*ret),
+                TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => Some(*next),
+                _ => None,
+            };
+            drop(desc);
+            let Some(next) = next else {
+                return false;
+            };
+            current = next;
+        }
+        self.is_base_type(current, "unit")
     }
 
     fn extract_constant_raw(lam: &RawLambda) -> Option<Constant> {
@@ -9167,7 +9248,11 @@ impl<'a> RawLambdaConverter<'a> {
             Primitive::PjsCall {
                 prim_name: raw_name.to_string(),
                 arg_types: vec![ExternalArgSpec { label: None }; prim.prim_arity.max(0) as usize],
-                ffi: ExternalFfiSpec { module_name: None },
+                ffi: self.ffi_spec_for_primitive(
+                    prim,
+                    self.applied_result_is_builtin_object(ty, prim.prim_arity.max(0) as usize),
+                    self.applied_result_is_unit(ty, prim.prim_arity.max(0) as usize),
+                ),
                 dynamic_import: false,
                 transformed_jsx: false,
             }
@@ -9248,7 +9333,7 @@ impl<'a> RawLambdaConverter<'a> {
             Primitive::PjsCall {
                 prim_name: raw_name.to_string(),
                 arg_types: vec![ExternalArgSpec { label: None }; prim.prim_arity.max(0) as usize],
-                ffi: ExternalFfiSpec { module_name: None },
+                ffi: self.ffi_spec_for_primitive(prim, false, false),
                 dynamic_import: false,
                 transformed_jsx,
             }

@@ -43,6 +43,17 @@ pub struct ExternalArgSpec {
 pub struct ExternalFfiSpec {
     // Placeholder - actual structure from External_ffi_types
     pub module_name: Option<String>,
+    /// Minimal raw-ffi classification kept for optimized-lambda lowering.
+    pub kind: ExternalFfiKind,
+    /// Whether the fully applied call should produce `seq(call, unit)`.
+    pub returns_unit: bool,
+}
+
+/// Raw FFI kind preserved across the raw-lambda boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalFfiKind {
+    Default,
+    ObjCreate,
 }
 
 /// Primitive operations

@@ -400,7 +400,11 @@ impl RawLambda {
                     primitive: Primitive::PjsCall {
                         prim_name: format!("send{name}"),
                         arg_types: vec![crate::lambda::primitive::ExternalArgSpec { label: None }],
-                        ffi: crate::lambda::primitive::ExternalFfiSpec { module_name: None },
+                        ffi: crate::lambda::primitive::ExternalFfiSpec {
+                            module_name: None,
+                            kind: crate::lambda::primitive::ExternalFfiKind::Default,
+                            returns_unit: false,
+                        },
                         dynamic_import: false,
                         transformed_jsx: false,
                     },

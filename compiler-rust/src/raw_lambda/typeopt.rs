@@ -308,7 +308,7 @@ fn has_undefined_literal(attrs: &[Attribute]) -> bool {
     })
 }
 
-fn type_is_builtin_object(ctx: &TypeContext<'_>, env: &Env, ty: TypeExprRef) -> bool {
+pub(crate) fn type_is_builtin_object(ctx: &TypeContext<'_>, env: &Env, ty: TypeExprRef) -> bool {
     let ty = scrape_ty(ctx, env, ty);
     match &*ctx.get_desc(ty) {
         TypeDesc::Tconstr { path, args, .. } => {

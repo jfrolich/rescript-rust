@@ -10,6 +10,7 @@ use crate::ident::Ident;
 use crate::lambda::compat::LetKind;
 use crate::lambda::constant::{Constant, PointerInfo};
 use crate::lambda::free_variables::free_variables;
+use crate::lambda::primitive::ExternalFfiKind;
 use crate::lambda::primitive::Primitive;
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch};
@@ -224,11 +225,36 @@ impl LoweringContext {
             Primitive::PjsCall {
                 prim_name,
                 arg_types,
-                ffi: _,
-                dynamic_import: _,
-                transformed_jsx: _,
-            } if prim_name.is_empty() => {
+                ffi,
+                dynamic_import,
+                transformed_jsx,
+            } if prim_name.is_empty() && ffi.kind == ExternalFfiKind::ObjCreate => {
                 Lambda::prim(Primitive::PjsObjectCreate(arg_types), args, loc)
+            }
+            Primitive::PjsCall {
+                prim_name,
+                arg_types,
+                ffi,
+                dynamic_import,
+                transformed_jsx,
+            } => {
+                let returns_unit = ffi.returns_unit;
+                let call = Lambda::prim(
+                    Primitive::PjsCall {
+                        prim_name,
+                        arg_types,
+                        ffi,
+                        dynamic_import,
+                        transformed_jsx,
+                    },
+                    args,
+                    loc,
+                );
+                if returns_unit {
+                    Lambda::seq(call, Lambda::unit())
+                } else {
+                    call
+                }
             }
             Primitive::Pmakeblock(_, TagInfo::SomeNotNested, _) => {
                 Lambda::prim(Primitive::PsomeNotNest, args, loc)
@@ -799,8 +825,14 @@ mod tests {
         let raw = RawLambda::prim(
             Primitive::PjsCall {
                 prim_name: String::new(),
-                arg_types: vec![],
-                ffi: crate::lambda::primitive::ExternalFfiSpec { module_name: None },
+                arg_types: vec![crate::lambda::primitive::ExternalArgSpec {
+                    label: Some("name".to_string()),
+                }],
+                ffi: crate::lambda::primitive::ExternalFfiSpec {
+                    module_name: None,
+                    kind: ExternalFfiKind::ObjCreate,
+                    returns_unit: false,
+                },
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -813,6 +845,37 @@ mod tests {
             panic!("expected Lprim");
         };
         assert!(matches!(info.primitive, Primitive::PjsObjectCreate(_)));
+    }
+
+    #[test]
+    fn keeps_unlabeled_blank_js_call_as_call() {
+        let raw = RawLambda::prim(
+            Primitive::PjsCall {
+                prim_name: String::new(),
+                arg_types: vec![
+                    crate::lambda::primitive::ExternalArgSpec { label: None },
+                    crate::lambda::primitive::ExternalArgSpec { label: None },
+                ],
+                ffi: crate::lambda::primitive::ExternalFfiSpec {
+                    module_name: None,
+                    kind: ExternalFfiKind::Default,
+                    returns_unit: false,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![RawLambda::unit(), RawLambda::unit()],
+            Location::none(),
+        );
+
+        let lowered = lower_to_lambda(raw);
+        let Lambda::Lprim(info) = lowered else {
+            panic!("expected Lprim");
+        };
+        assert!(matches!(
+            info.primitive,
+            Primitive::PjsCall { ref prim_name, .. } if prim_name.is_empty()
+        ));
     }
 
     #[test]

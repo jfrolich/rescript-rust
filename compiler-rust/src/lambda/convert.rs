@@ -10,7 +10,9 @@ use crate::context::IdGenerator;
 use crate::ident::{Ident, IdentFlags};
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::constant::{Constant, StringDelim};
-use crate::lambda::primitive::{ExternalArgSpec, ExternalFfiSpec, Mutable, Primitive};
+use crate::lambda::primitive::{
+    ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, Mutable, Primitive,
+};
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, DirectionFlag as LamDirection, FunctionAttribute, InlineAttribute,
@@ -1092,7 +1094,11 @@ impl<'a> LambdaConverter<'a> {
         let prim = Primitive::PjsCall {
             prim_name: prim.prim_name.clone(),
             arg_types: vec![ExternalArgSpec { label: None }; prim.prim_arity as usize],
-            ffi: ExternalFfiSpec { module_name: None },
+            ffi: ExternalFfiSpec {
+                module_name: None,
+                kind: ExternalFfiKind::Default,
+                returns_unit: false,
+            },
             dynamic_import: false,
             transformed_jsx: false,
         };
