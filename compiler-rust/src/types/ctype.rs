@@ -4463,26 +4463,34 @@ pub fn compute_variance_decl(
         return vec![];
     }
 
-    // OCaml typedecl.ml: abstract/open types with no manifest derive their
-    // semantic variance from the required declaration variance, not from the
-    // current fixpoint seed. Unannotated params therefore start as FULL.
+    // OCaml typedecl.ml compute_variance_decl:
+    // abstract/open types with no manifest derive their semantic variance from
+    // the required declaration variance via:
+    //   make (not n) (not c) (decl.type_kind <> Type_abstract || i)
+    // For ordinary type parameters `i` is false, so unannotated abstract
+    // params become MAY_INV, not FULL.
     if matches!(
         decl.type_kind,
         super::TypeKind::TypeAbstract | super::TypeKind::TypeOpen
     ) && decl.type_manifest.is_none()
     {
+        let make = |p: bool, n: bool, i: bool| {
+            Variance::null()
+                .set(crate::types::variance::VarianceFlag::MayPos, p)
+                .set(crate::types::variance::VarianceFlag::MayNeg, n)
+                .set(crate::types::variance::VarianceFlag::MayWeak, n)
+                .set(crate::types::variance::VarianceFlag::Inj, i)
+        };
         return decl
             .type_variance
             .iter()
             .map(|variance| {
-                let (may_pos, may_neg) = variance.get_upper();
-                if may_pos && !may_neg {
-                    Variance::covariant()
-                } else if may_neg && !may_pos {
-                    Variance::contravariant()
-                } else {
-                    Variance::full()
-                }
+                let (c, n) = variance.get_upper();
+                make(
+                    !n,
+                    !c,
+                    !matches!(decl.type_kind, super::TypeKind::TypeAbstract),
+                )
             })
             .collect();
     }

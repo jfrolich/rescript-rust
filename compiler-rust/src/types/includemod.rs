@@ -1237,21 +1237,50 @@ fn type_declarations<'a>(
         });
     }
 
-    // Check variance — only for abstract, private, or open types
-    // (matches OCaml's includecore.ml: need_variance = abstr || private || open)
-    let is_abstract = matches!(impl_decl.type_kind, crate::types::decl::TypeKind::TypeAbstract);
-    let is_private = matches!(impl_decl.type_private, crate::types::PrivateFlag::Private);
-    let is_open = matches!(impl_decl.type_kind, crate::types::decl::TypeKind::TypeOpen);
-    let need_variance = is_abstract || is_private || is_open;
+    // Match OCaml's Includecore.type_declarations variance check.
+    let sig_is_abstract =
+        matches!(sig_decl.type_kind, crate::types::decl::TypeKind::TypeAbstract)
+            && sig_decl.type_manifest.is_none();
+    let need_variance = sig_is_abstract
+        || matches!(impl_decl.type_private, crate::types::PrivateFlag::Private)
+        || matches!(impl_decl.type_kind, crate::types::decl::TypeKind::TypeOpen);
     if need_variance && impl_decl.type_variance.len() == sig_decl.type_variance.len() {
-        for (i, (impl_var, sig_var)) in impl_decl
-            .type_variance
+        let abstract_or_private = sig_is_abstract
+            || matches!(sig_decl.type_private, crate::types::PrivateFlag::Private);
+        let open_sig =
+            matches!(sig_decl.type_kind, crate::types::decl::TypeKind::TypeOpen)
+                && sig_decl.type_manifest.is_none();
+
+        for (i, (sig_param, (impl_var, sig_var))) in sig_decl
+            .type_params
             .iter()
-            .zip(sig_decl.type_variance.iter())
+            .zip(impl_decl.type_variance.iter().zip(sig_decl.type_variance.iter()))
             .enumerate()
         {
-            // Implementation variance should be at least as specific as signature variance
-            if !impl_var.subset(sig_var) {
+            let implies = |lhs: bool, rhs: bool| !lhs || rhs;
+            let constrained = !crate::types::btype::is_tvar(type_ctx, *sig_param);
+
+            let (impl_co, impl_cn) = impl_var.get_upper();
+            let (sig_co, sig_cn) = sig_var.get_upper();
+            let upper_ok = if abstract_or_private {
+                implies(impl_co, sig_co) && implies(impl_cn, sig_cn)
+            } else if open_sig || constrained {
+                impl_co == sig_co && impl_cn == sig_cn
+            } else {
+                true
+            };
+
+            let (impl_p, impl_n, impl_i, impl_j) = impl_var.get_lower();
+            let (sig_p, sig_n, sig_i, sig_j) = sig_var.get_lower();
+            let lower_ok = implies(
+                abstract_or_private,
+                implies(sig_p, impl_p)
+                    && implies(sig_n, impl_n)
+                    && implies(sig_i, impl_i)
+                    && implies(sig_j, impl_j),
+            );
+
+            if !(upper_ok && lower_ok) {
                 return Err(IncludeModError::TypeMismatch {
                     name: id,
                     reason: format!("variance mismatch at parameter {}", i),

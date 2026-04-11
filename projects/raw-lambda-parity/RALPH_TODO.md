@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 652/657 (99.2%), 5 parity failures, 6 hunks
+**Status:** 654/657 (99.5%), 3 parity failures, 4 hunks
 
 ## Goal
 
@@ -15,8 +15,8 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657** on the 16-way authoritative run
-- Unoptimized lambda parity: **652/657**
-- Parity hunks: **6**
+- Unoptimized lambda parity: **654/657**
+- Parity hunks: **4**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 - Raw timeouts on the authoritative run: none
 - Raw crashes on the authoritative run: none
@@ -33,7 +33,7 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 5 Parity Failures by Category
+## Remaining 3 Parity Failures by Category
 
 ### Dict pattern compilation (2 files)
 json_decorders, stdlib_Stdlib_DictTests
@@ -47,12 +47,6 @@ bs_poly_map_test
 
 **Issue:** the package/path crash cluster is gone, leaving one collection-specific raw lambda
 parity file outside the Dict path.
-
-### Newly exposed raw-lambda regressions after the variance fix (2 files)
-bs_abstract_test, reactEvent
-
-**Issue:** removing the last module/signature crash changed the raw-lambda frontier again.
-These two files now fail on the clean authoritative run and need a focused diff pass.
 
 ## Key Findings from Session 2026-04-10/11
 
@@ -183,6 +177,31 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (module/interface variance checks now match OCaml)
+
+The last raw export mismatches were not printer issues. `bs_abstract_test` and
+`reactEvent` were both falling back to `Tcoerce_none` because Rust `compunit`
+rejected their interfaces with `variance mismatch` on abstract/private types,
+then exported the whole structure instead of the `.resi`-filtered runtime fields.
+
+Two OCaml-aligned fixes were needed:
+
+- `Includemod.type_declarations` now uses OCaml's real upper/lower variance test
+  from `includecore.ml` instead of the old one-way `impl_var.subset(sig_var)`
+  shortcut.
+- `compute_variance_decl` now matches OCaml's special case for abstract/open
+  types with no manifest. Unannotated abstract parameters become `may_inv`
+  (`make (not n) (not c) ...`) instead of being forced to `full`.
+
+The second fix also restores `defunctor_make_test`, which briefly regressed when
+the stricter inclusion check started enforcing the correct OCaml rule against the
+still-wrong abstract signature variance seed.
+
+**Result:** the clean authoritative raw baseline improves from **652/657** with
+**6** hunks to **654/657** with **4** hunks, while keeping raw compile coverage at
+**657/657**. `bs_abstract_test` and `reactEvent` now reach raw parity, leaving
+only `bs_poly_map_test`, `json_decorders`, and `stdlib/Stdlib_DictTests`.
 
 ### 2026-04-11 (signature type declarations now use OCaml variance semantics)
 
