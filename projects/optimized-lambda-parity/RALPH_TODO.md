@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 426/657 (64.8%), 231 parity failures, 2006 hunks
+**Status:** 460/657 (70.0%), 197 parity failures, 1859 hunks
 
 ## Goal
 
@@ -23,16 +23,16 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **426/657**
-- Stamp-canonicalized parity: **426/657**
-- Exact hunks: **2006**
-- Stamp-canonicalized hunks: **2006**
+- Optimized lambda parity: **460/657**
+- Stamp-canonicalized parity: **460/657**
+- Exact hunks: **1859**
+- Stamp-canonicalized hunks: **1859**
 - Largest current exact diffs:
-  - `big_polyvar_test.res`: **602** hunks
+  - `big_polyvar_test.res`: **601** hunks
   - `stringmatch_test.res`: **284** hunks
   - `bs_queue_test.res`: **81** hunks
   - `coercion_module_alias_test.res`: **40** hunks
-  - `mario_game.res`: **38** hunks
+  - `mario_game.res`: **37** hunks
 
 ## Working Rules
 
@@ -46,7 +46,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-All **231** remaining failures are now real optimized-lambda lowering gaps, not a dump-path mismatch.
+All **197** remaining failures are now real optimized-lambda lowering gaps, not a dump-path mismatch.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -56,10 +56,13 @@ Current frontier characteristics:
   - `DictInternalRepresentation.res`
   - `DictInference.res`
   - `DictPatternMatchingOptimization.res`
+  - `DynamicImportModuleWithAlias.res`
+  - `ExternalExtension.res`
   - `VariantCoercion.res`
   - `minimal_test.res`
 - `js_array_test.res` now also passes exactly as a large-file guard.
-- `big_polyvar_test.res` dropped from **1202** hunks to **602** hunks.
+- `Import.res` is down to **1** hunk and the remaining delta is a `Lam.if_` smart-constructor issue, not an import/raw-JS lowering issue.
+- `big_polyvar_test.res` dropped from **1202** hunks to **601** hunks.
 - Stamp canonicalization still does not reduce the baseline at all.
 
 ## Key Findings from Session 2026-04-12
@@ -163,24 +166,60 @@ This slice confirms the next broad lowering frontier is no longer constructor ru
 The biggest remaining cluster is now the `big_polyvar_test.res` family around `Praw_js_code_exp`
 argument shape and `Lglobal_module`/exception payload construction.
 
+### imported-module and raw-js-code lowering moved the frontier again
+`compiler-rust/src/raw_lambda/lower.rs` now mirrors the `Lam_convert.convert`
+branches that were still missing for:
+
+- `Pimport` argument lowering with OCaml's `~dynamic_import` scoping rules
+- collapsing imported `let global-module = ... in ...` bundles back to a single
+  `Lglobal_module ... true`
+- `Praw_js_code_exp` / `Praw_js_code_stmt` payload recovery from raw string
+  arguments into the primitive payload itself
+
+That slice is covered by new lowerer unit tests for:
+
+- imported field access becoming `Lglobal_module ... true`
+- alias-wrapped module imports staying `false`
+- imported let-bound global-module bundles collapsing correctly
+- raw JS code primitives lowering to zero-arg payload forms
+
+Verified focused checks:
+
+- `DynamicImportModuleWithAlias.res`: **exact parity**
+- `ExternalExtension.res`: **exact parity**
+- `Import.res`: **1 hunk** remaining
+- `big_polyvar_test.res`: **601 hunks** (down from **602**)
+
+Authoritative repo-wide baseline moved from:
+
+- **426/657**, **2006** hunks
+
+to:
+
+- **460/657**, **1859** hunks
+
+This confirms the import/raw-JS slice is now mostly complete. The next visible
+frontier in this area is the missing `Lam.if_` smart-constructor behavior that
+still leaves `Import.res` with a constant-condition branch.
+
 ## Root-Cause Frontiers
 
 1. **Continue porting `Lam_convert.convert`**
    - module export tail shape
    - let-kind selection (`Strict`, `Alias`, `StrictOpt`, `Variable`)
+   - remaining `Lam.if_` smart-constructor behavior
    - remaining JS-call primitive lowering
-   - raw JS code primitive argument shape
-   - `Lglobal_module`/exception payload construction
+   - remaining exception/module lowering forms outside the import/raw-JS slice
    - module/coercion lowering forms
 2. **Use smallest failures for quick structural validation**
-   - `DynamicImportModuleWithAlias.res`
-   - `ExternalExtension.res`
    - `Import.res`
    - `LetUnwrap.res`
+   - `DerivingAccessorsCurried.res`
+   - `DerivingAccessorsUncurried.res`
 3. **Use large files to validate that a rule generalizes**
    - `big_polyvar_test.res`
+   - `js_json_test.res`
    - `caml_compare_test.res`
-   - `js_math_test.res`
    - `js_string_test.res`
    - `stringmatch_test.res`
 4. **Treat later `lam_pass_*` work as out of direct parity scope**
@@ -189,16 +228,16 @@ argument shape and `Lglobal_module`/exception payload construction.
 
 ## Immediate Next Milestone
 
-1. Port the next `Lam_convert.convert` rules around raw JS code shape and `Lglobal_module` exception payloads.
+1. Port the next `Lam.if_` smart-constructor slices that OCaml applies during lowering, starting with constant-condition folding.
 2. Re-test:
-   - `DynamicImportModuleWithAlias.res`
-   - `ExternalExtension.res`
    - `Import.res`
    - `LetUnwrap.res`
+   - `DerivingAccessorsCurried.res`
+   - `DerivingAccessorsUncurried.res`
 3. Validate the same rule on:
    - `big_polyvar_test.res`
+   - `js_json_test.res`
    - `caml_compare_test.res`
-   - `js_math_test.res`
    - `stringmatch_test.res`
 4. Re-run:
 
@@ -209,6 +248,37 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 5. Commit immediately after the next verified OCaml-aligned improvement.
 
 ## Session Log
+
+### 2026-04-12 (dynamic import scoping and raw JS code payload lowering)
+
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests -- --nocapture
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 180 ./scripts/test_lambda_parity.sh -j1 DynamicImportModuleWithAlias
+timeout 180 ./scripts/test_lambda_parity.sh -j1 ExternalExtension
+timeout 180 ./scripts/test_lambda_parity.sh -j1 Import
+timeout 300 ./scripts/test_lambda_parity.sh -j1 big_polyvar_test
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- OCaml compile coverage: **657/657**
+- Rust compile coverage: **657/657**
+- Optimized lambda parity: **460/657**
+- Stamp-canonicalized parity: **460/657**
+- Exact hunks: **1859**
+- Stamp-canonicalized hunks: **1859**
+
+Key checkpoints:
+
+- `DynamicImportModuleWithAlias.res`: passes
+- `ExternalExtension.res`: passes
+- `Import.res`: **1 hunk**
+- `big_polyvar_test.res`: **601 hunks**
+- next visible frontier: `Lam.if_` smart-constructor behavior
 
 ### 2026-04-12 (constructor runtime tags, DNone strings, polyvariant names, integer folding)
 

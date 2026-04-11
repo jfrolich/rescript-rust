@@ -33,10 +33,18 @@ impl LoweringContext {
     }
 
     fn lower_lambda(&mut self, raw: RawLambda) -> Lambda {
+        self.lower_lambda_with_dynamic_import(raw, false)
+    }
+
+    fn lower_lambda_with_dynamic_import(
+        &mut self,
+        raw: RawLambda,
+        dynamic_import: bool,
+    ) -> Lambda {
         match raw {
             RawLambda::Lvar(id) => Lambda::var(self.alias_target(id)),
-            RawLambda::LglobalModule(id, dynamic_import) => {
-                Lambda::global_module(id, dynamic_import)
+            RawLambda::LglobalModule(id, imported) => {
+                Lambda::global_module(id, dynamic_import || imported)
             }
             RawLambda::Lconst(c) => Lambda::const_(lower_constant(c)),
             RawLambda::Lapply(apply) => self.lower_apply(apply),
@@ -46,9 +54,17 @@ impl LoweringContext {
                 self.lower_lambda(*func.body),
                 func.attr,
             ),
+            RawLambda::Llet(kind, id, value, body) if dynamic_import => {
+                if let RawLambda::LglobalModule(global_id, _) = value.as_ref() {
+                    return Lambda::global_module(global_id.clone(), true);
+                }
+                self.lower_let(kind, id, *value, *body)
+            }
             RawLambda::Llet(kind, id, value, body) => self.lower_let(kind, id, *value, *body),
             RawLambda::Lletrec(bindings, body) => self.lower_letrec(bindings, *body),
-            RawLambda::Lprim(info) => self.lower_primitive(info.primitive, info.args, info.loc),
+            RawLambda::Lprim(info) => {
+                self.lower_primitive(info.primitive, info.args, info.loc, dynamic_import)
+            }
             RawLambda::Lswitch(scrutinee, switch, _) => self.lower_switch(*scrutinee, switch),
             RawLambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
                 Box::new(self.lower_lambda(*scrutinee)),
@@ -208,10 +224,30 @@ impl LoweringContext {
         primitive: Primitive,
         args: Vec<RawLambda>,
         loc: Location,
+        dynamic_import: bool,
     ) -> Lambda {
+        if let Primitive::PrawJsCode(info) = &primitive {
+            let mut info = info.clone();
+            match args.as_slice() {
+                [RawLambda::Lconst(Constant::String { s, .. })]
+                | [RawLambda::Lconst(Constant::ImmString(s))] => {
+                    info.code = s.clone();
+                    return Lambda::prim(Primitive::PrawJsCode(info), Vec::new(), loc);
+                }
+                [] => return Lambda::prim(Primitive::PrawJsCode(info), Vec::new(), loc),
+                _ => {}
+            }
+        }
+
+        let arg_dynamic_import = matches!(primitive, Primitive::Pimport).then_some(true);
         let args = args
             .into_iter()
-            .map(|arg| self.lower_lambda(arg))
+            .map(|arg| {
+                self.lower_lambda_with_dynamic_import(
+                    arg,
+                    arg_dynamic_import.unwrap_or(dynamic_import),
+                )
+            })
             .collect::<Vec<_>>();
 
         match primitive {
@@ -825,6 +861,7 @@ mod tests {
     use super::*;
     use crate::lambda::compat::LetKind;
     use crate::lambda::constant::{ConstructorRuntimeTag, ConstructorTag, StringDelim};
+    use crate::lambda::primitive::JsRawInfo;
     use crate::lambda::InlineAttribute;
 
     #[test]
@@ -1111,5 +1148,116 @@ mod tests {
             panic!("expected strict let after letrec");
         };
         assert!(id.same(&fake_z));
+    }
+
+    #[test]
+    fn marks_imported_field_global_module_as_dynamic() {
+        let module_id = Ident::create_local("Belt_List");
+        let raw = RawLambda::prim(
+            Primitive::Pimport,
+            vec![RawLambda::prim(
+                Primitive::Pfield(
+                    36,
+                    crate::lambda::compat::FieldDbgInfo::Module {
+                        name: "forEach".to_string(),
+                    },
+                ),
+                vec![RawLambda::global_module(module_id.clone(), false)],
+                Location::none(),
+            )],
+            Location::none(),
+        );
+
+        let lowered = lower_to_lambda(raw);
+        let Lambda::Lprim(import) = lowered else {
+            panic!("expected import primitive");
+        };
+        let [Lambda::Lprim(field)] = import.args.as_slice() else {
+            panic!("expected field primitive under import");
+        };
+        let [Lambda::LglobalModule(id, true)] = field.args.as_slice() else {
+            panic!("expected dynamic imported global module");
+        };
+        assert!(id.same(&module_id));
+    }
+
+    #[test]
+    fn keeps_module_alias_import_body_non_dynamic() {
+        let alias = Ident::create_local("let");
+        let module_id = Ident::create_local("Belt_List");
+        let raw = RawLambda::prim(
+            Primitive::Pimport,
+            vec![RawLambda::let_(
+                LetKind::Alias,
+                alias,
+                RawLambda::const_(Constant::ModuleAlias),
+                RawLambda::global_module(module_id.clone(), false),
+            )],
+            Location::none(),
+        );
+
+        let lowered = lower_to_lambda(raw);
+        let Lambda::Lprim(import) = lowered else {
+            panic!("expected import primitive");
+        };
+        let [Lambda::Llet(LetKind::Alias, _, value, body)] = import.args.as_slice() else {
+            panic!("expected alias let under import");
+        };
+        assert!(matches!(value.as_ref(), Lambda::Lconst(Constant::ModuleAlias)));
+        let Lambda::LglobalModule(id, false) = body.as_ref() else {
+            panic!("expected non-dynamic imported global module in alias body");
+        };
+        assert!(id.same(&module_id));
+    }
+
+    #[test]
+    fn collapses_imported_global_module_let_to_dynamic_global_module() {
+        let module_id = Ident::create_local("ModuleWithAlias");
+        let raw = RawLambda::prim(
+            Primitive::Pimport,
+            vec![RawLambda::let_(
+                LetKind::Strict,
+                Ident::create_local("let"),
+                RawLambda::global_module(module_id.clone(), false),
+                RawLambda::unit(),
+            )],
+            Location::none(),
+        );
+
+        let lowered = lower_to_lambda(raw);
+        let Lambda::Lprim(import) = lowered else {
+            panic!("expected import primitive");
+        };
+        let [Lambda::LglobalModule(id, true)] = import.args.as_slice() else {
+            panic!("expected collapsed dynamic global module");
+        };
+        assert!(id.same(&module_id));
+    }
+
+    #[test]
+    fn lowers_raw_js_code_to_code_payload_without_args() {
+        let lowered = lower_to_lambda(RawLambda::prim(
+            Primitive::PrawJsCode(JsRawInfo {
+                code: String::new(),
+                is_stmt: false,
+            }),
+            vec![RawLambda::const_(Constant::String {
+                s: "__DEV__".to_string(),
+                delim: Some(StringDelim::Plain),
+            })],
+            Location::none(),
+        ));
+
+        let Lambda::Lprim(info) = lowered else {
+            panic!("expected raw js primitive");
+        };
+        assert!(info.args.is_empty());
+        assert!(matches!(
+            info.primitive,
+            Primitive::PrawJsCode(JsRawInfo {
+                ref code,
+                is_stmt: false,
+            }) if code == "__DEV__"
+        ));
     }
 }
