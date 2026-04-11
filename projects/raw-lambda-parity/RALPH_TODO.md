@@ -101,6 +101,20 @@ When all unseen constructors share the same exit ID, `reintroduce_fail` (thresho
 removes explicit cases and replaces with `default:`. OCaml has different exits per
 constructor (from multiple default entries), so `reintroduce_fail` doesn't trigger.
 
+### scan_def fail-case order now matches OCaml
+Rust `scan_def` was building the positive-fail constructor list in the reverse group order.
+OCaml folds `env` in list order and prepends each group ahead of the accumulator, which
+restores oldest-first constructor groups. The Rust port now matches that constructor-list
+ordering while keeping the current jump-context workaround in place.
+
+**Result:** full raw baseline stays **626/657** with **89** hunks. This is a verified
+OCaml-aligned cleanup, but it does NOT fix the remaining inner-handler mismatch by itself.
+
+**Next investigation:** switching the jump side of `scan_def` from the current outer-context
+workaround back to OCaml's `ctx_lub (list_as_pat pats) ctx` still exposes `ctx_lshift`
+panics in `gpr_1698_test`, `inline_map2_test`, and `test_set`. The remaining bug is in the
+downstream context remapping, not in `do_split_or`.
+
 ## Session Log
 
 ### 2026-04-10/11 (major session)
@@ -130,3 +144,16 @@ Final parity: **626/657** with **89** hunks
 - Use expression's stored env for comparison specialization
 - Same-stamp module skip in includemod to avoid false Tcoerce_structure
 - Recursion depth guard in modtypes_inner for Pmty_functor
+
+### 2026-04-11 (scan_def ordering)
+
+Verified against OCaml that `scan_def` builds its positive-fail constructor list by
+folding `env` in list order and prepending each group's constructors ahead of the
+accumulator. Updated Rust to match that constructor-list ordering.
+
+**Baseline after change:** still **626/657** with **89** hunks.
+
+**Important follow-up:** changing the jump side of `scan_def` to full OCaml semantics
+(`ctx_lub (list_as_pat pats) ctx`) still crashes several focused matching files, so the
+remaining divergence is in later context remapping / handler compilation, not in the
+constructor-list ordering itself.

@@ -5967,17 +5967,16 @@ fn scan_def(
         // Fold env to build (klist, jumps)
         let mut klist: Vec<(ConstructorTag, RawLambda)> = Vec::new();
         let mut jumps = jumps_empty();
-        for (pats, i) in env.iter().rev() {
+        for (pats, i) in &env {
             let action = RawLambda::LstaticRaise(*i, Vec::new());
-            for pat in pats.iter().rev() {
-                klist.insert(0, (get_key_constr(pat), action.clone()));
-            }
-            // OCaml: jumps_add i (ctx_lub (list_as_pat pats) ctx) jumps
-            // Track the exit jump using the outer context.
-            // We use ctx directly rather than ctx_lub to avoid context
-            // shape issues (ctx_lub can produce empty right vectors
-            // when the synthesized patterns don't match the context
-            // structure, leading to panics in lshift).
+            let mut new_klist: Vec<(ConstructorTag, RawLambda)> = pats
+                .iter()
+                .map(|pat| (get_key_constr(pat), action.clone()))
+                .collect();
+            new_klist.extend(klist);
+            klist = new_klist;
+        }
+        for (_pats, i) in env.iter().rev() {
             if !ctx.is_empty() {
                 jumps = jumps_add(*i, ctx.to_vec(), jumps);
             }
