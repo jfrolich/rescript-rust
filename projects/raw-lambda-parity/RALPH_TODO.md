@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 637/657 (97.0%), 20 failures, 35 hunks
+**Status:** 638/657 (97.1%), 19 failures, 34 hunks
 
 ## Goal
 
@@ -15,8 +15,8 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **637/657**
-- Parity hunks: **35**
+- Unoptimized lambda parity: **638/657**
+- Parity hunks: **34**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 
 ## Working Rules
@@ -28,10 +28,10 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 20 Failures by Category
+## Remaining 19 Failures by Category
 
-### Matching compiler: remaining inner matching / let-pattern lowering (3 files)
-mario_game(6), inline_record_test(3), exception_raise_test(2)
+### Matching compiler: remaining inner matching / let-pattern lowering (2 files)
+mario_game(4), exception_raise_test(1)
 
 **Root cause confirmed:** `do_split_or` partitioning is IDENTICAL between OCaml and Rust,
 but the recursive split helpers were rebuilding defaults from the OUTER `def` instead of
@@ -52,9 +52,10 @@ like `[10,9,8,7,6,5,4,3]` down to `[10]` in Rust.
   `bigint_test`
 
 **Next investigation:** The remaining matching failures are no longer caused by collapsed
-default suffixes, the `raw_simple_for_let` shortcut, or global-reference false positives
-inside `lower_bind`. Focus next on the specific inner handler/default combinations that
-still diverge in `mario_game` and the inline-record/exception path.
+default suffixes, the `raw_simple_for_let` shortcut, global-reference false positives
+inside `lower_bind`, or missing inline-record label reconstruction for extension paths.
+Focus next on the specific inner handler/default combinations that still diverge in
+`mario_game` and the residual `exception_raise_test` catch/default chain.
 
 ### Module coercion / alias resolution (7 files)
 coercion_module_alias_test(1), Import(1), offset(1), DynamicImportModuleWithAlias(1),
@@ -351,8 +352,8 @@ handler for already-simple exits.
 **Baseline after change:** **634/657 -> 636/657**, **43 -> 37 hunks**.
 
 **Takeaway:** the remaining matching files no longer include the shared-action `with (...) 0`
-artifact. The next matching work is concentrated in `mario_game`, `inline_record_test`,
-`exception_raise_test`, and the remaining bigint ordering issue.
+artifact. The next matching work is concentrated in `mario_game`,
+`inline_record_test`, `exception_raise_test`, and the remaining bigint ordering issue.
 
 ### 2026-04-11 (bigint constant ordering uses numeric compare)
 
@@ -367,6 +368,23 @@ aligns `sort_lambda_list` and the generated test-sequence order with OCaml.
 
 **Takeaway:** the remaining raw-matching bucket is now just `mario_game`,
 `inline_record_test`, and `exception_raise_test`.
+
+### 2026-04-11 (extension inline-record labels resolve from constructor paths)
+
+Rust `resolve_labels_from_type` only reconstructed inline-record label sets from
+parent-type `Pdot` paths. Exception/extension inline records use the constructor path
+itself (for example `A0`) and keep their full field set in `cstr_inlined`, so Rust was
+falling back to just the explicitly mentioned labels and dropping OCaml's unused field
+binds in raw matching.
+
+Teaching raw matching to recover extension inline-record labels from the matching
+constructor path aligns it with OCaml's `lbl_all`-driven record expansion for
+exception/extension payloads.
+
+**Baseline after change:** **637/657 -> 638/657**, **35 -> 34 hunks**.
+
+**Takeaway:** `inline_record_test` is now clean. The remaining matching bucket is reduced
+to `mario_game` plus the residual `exception_raise_test` inner default/handler shape.
 
 ### 2026-04-11 (compile_list recursion)
 

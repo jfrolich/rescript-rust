@@ -7818,6 +7818,24 @@ fn resolve_labels_from_type(
         }
     }
 
+    // Extension/exception inline records use the constructor path itself
+    // (for example `A0`) rather than a parent-type `Pdot`, so reconstruct
+    // their full label set from the constructor's synthetic inline record.
+    for cstr in env.find_all_constructors(&path.last()).iter().rev() {
+        let matches_inline_record_path = match &cstr.cstr_tag {
+            crate::types::ConstructorTag::CstrExtension(ext_path) => ext_path.same(&path),
+            _ => false,
+        };
+        if !matches_inline_record_path {
+            continue;
+        }
+        if let Some(inlined) = &cstr.cstr_inlined {
+            if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = inlined.type_kind {
+                return Some(build_label_descriptions(labels, repr, inlined.type_private));
+            }
+        }
+    }
+
     // Handle inline records: path is Pdot(parent_type, constructor_name, _)
     // Look up the parent type declaration and find the constructor's inline record
     if let crate::types::Path::Pdot(ref parent_path, ref cstr_name, _) = path {
