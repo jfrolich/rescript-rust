@@ -6,29 +6,33 @@
 
 #![allow(dead_code)]
 
-use std::cell::{Cell as StdCell, RefCell};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use crate::ident::{Ident, IdentFlags};
 use crate::lambda::LetKind;
+use crate::lambda::primitive::Mutable;
+use crate::lambda::{Comparison, FieldDbgInfo, Primitive, SwitchNames, TagInfo};
 use crate::location::Location;
 use crate::parse_arena::LocIdx;
 use crate::parser::ast::Attributes;
-use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch, RawPrimInfo};
 use crate::raw_lambda::print::RawLambdaPrinter;
-use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
-use crate::types::type_expr::TypeExprRef;
-use crate::types::decl::{ConstructorTag, ConstructorDescription, LabelDescription, RecordRepresentation};
+use crate::raw_lambda::typeopt::{
+    constructor_has_optional_shape, has_untagged, type_cannot_contain_undefined,
+    type_cannot_contain_undefined_no_env,
+};
+use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch, RawPrimInfo};
 use crate::types::asttypes::MutableFlag;
-use crate::types::type_expr::{RowDesc, RowField};
 use crate::types::btype;
 use crate::types::context::TypeContext;
+use crate::types::decl::{
+    ConstructorDescription, ConstructorTag, LabelDescription, RecordRepresentation,
+};
+use crate::types::type_expr::TypeExprRef;
+use crate::types::type_expr::{RowDesc, RowField};
 use crate::types::typedtree::Partial;
-use crate::lambda::{Comparison, Primitive, FieldDbgInfo, SwitchNames, TagInfo};
-use crate::lambda::primitive::Mutable;
-use crate::raw_lambda::typeopt::{constructor_has_optional_shape, has_untagged, type_cannot_contain_undefined, type_cannot_contain_undefined_no_env};
+use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
 
 // ============================================================================
 // Omega (wildcard) helpers — ported from parmatch.ml
@@ -79,7 +83,7 @@ fn const_compare(c1: &Constant, c2: &Constant) -> std::cmp::Ordering {
         (Constant::BigInt(s1, b1), Constant::BigInt(s2, b2)) => {
             // Simple comparison: sign first, then digits
             match (s1, s2) {
-                (true, false) => Ordering::Less,    // negative < positive
+                (true, false) => Ordering::Less, // negative < positive
                 (false, true) => Ordering::Greater,
                 _ => b1.cmp(b2),
             }
@@ -102,9 +106,7 @@ fn equal_tag(t1: &ConstructorTag, t2: &ConstructorTag) -> bool {
         (ConstructorTag::CstrConstant(i1), ConstructorTag::CstrConstant(i2)) => i1 == i2,
         (ConstructorTag::CstrBlock(i1), ConstructorTag::CstrBlock(i2)) => i1 == i2,
         (ConstructorTag::CstrUnboxed, ConstructorTag::CstrUnboxed) => true,
-        (ConstructorTag::CstrExtension(p1), ConstructorTag::CstrExtension(p2)) => {
-            p1.same(p2)
-        }
+        (ConstructorTag::CstrExtension(p1), ConstructorTag::CstrExtension(p2)) => p1.same(p2),
         _ => false,
     }
 }
@@ -120,18 +122,16 @@ fn le_pat(p: &Pattern, q: &Pattern) -> bool {
         (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => {
             const_compare(c1, c2) == std::cmp::Ordering::Equal
         }
-        (
-            PatternDesc::Tpat_construct(_, c1, ps),
-            PatternDesc::Tpat_construct(_, c2, qs),
-        ) => equal_tag(&c1.cstr_tag, &c2.cstr_tag) && le_pats(ps, qs),
+        (PatternDesc::Tpat_construct(_, c1, ps), PatternDesc::Tpat_construct(_, c2, qs)) => {
+            equal_tag(&c1.cstr_tag, &c2.cstr_tag) && le_pats(ps, qs)
+        }
         (
             PatternDesc::Tpat_variant(l1, Some(p1), _),
             PatternDesc::Tpat_variant(l2, Some(p2), _),
         ) => l1 == l2 && le_pat(p1, p2),
-        (
-            PatternDesc::Tpat_variant(l1, None, _),
-            PatternDesc::Tpat_variant(l2, None, _),
-        ) => l1 == l2,
+        (PatternDesc::Tpat_variant(l1, None, _), PatternDesc::Tpat_variant(l2, None, _)) => {
+            l1 == l2
+        }
         (PatternDesc::Tpat_variant(..), PatternDesc::Tpat_variant(..)) => false,
         (PatternDesc::Tpat_tuple(ps), PatternDesc::Tpat_tuple(qs)) => le_pats(ps, qs),
         (PatternDesc::Tpat_array(ps), PatternDesc::Tpat_array(qs)) => {
@@ -194,10 +194,9 @@ fn lub(p: &Pattern, q: &Pattern) -> Result<Pattern, Empty> {
             let rs = lubs(ps, qs)?;
             Ok(make_pat(PatternDesc::Tpat_tuple(rs), p.pat_type, p.pat_env))
         }
-        (
-            PatternDesc::Tpat_construct(lid, c1, ps1),
-            PatternDesc::Tpat_construct(_, c2, ps2),
-        ) if equal_tag(&c1.cstr_tag, &c2.cstr_tag) => {
+        (PatternDesc::Tpat_construct(lid, c1, ps1), PatternDesc::Tpat_construct(_, c2, ps2))
+            if equal_tag(&c1.cstr_tag, &c2.cstr_tag) =>
+        {
             let rs = lubs(ps1, ps2)?;
             Ok(make_pat(
                 PatternDesc::Tpat_construct(lid.clone(), c1.clone(), rs),
@@ -216,14 +215,12 @@ fn lub(p: &Pattern, q: &Pattern) -> Result<Pattern, Empty> {
                 p.pat_env,
             ))
         }
-        (
-            PatternDesc::Tpat_variant(l1, None, _),
-            PatternDesc::Tpat_variant(l2, None, _),
-        ) if l1 == l2 => Ok(p.clone()),
-        (
-            PatternDesc::Tpat_record(l1, closed),
-            PatternDesc::Tpat_record(l2, _),
-        ) => {
+        (PatternDesc::Tpat_variant(l1, None, _), PatternDesc::Tpat_variant(l2, None, _))
+            if l1 == l2 =>
+        {
+            Ok(p.clone())
+        }
+        (PatternDesc::Tpat_record(l1, closed), PatternDesc::Tpat_record(l2, _)) => {
             let rs = record_lubs(l1, l2)?;
             Ok(make_pat(
                 PatternDesc::Tpat_record(rs, *closed),
@@ -231,9 +228,7 @@ fn lub(p: &Pattern, q: &Pattern) -> Result<Pattern, Empty> {
                 p.pat_env,
             ))
         }
-        (PatternDesc::Tpat_array(ps), PatternDesc::Tpat_array(qs))
-            if ps.len() == qs.len() =>
-        {
+        (PatternDesc::Tpat_array(ps), PatternDesc::Tpat_array(qs)) if ps.len() == qs.len() => {
             let rs = lubs(ps, qs)?;
             Ok(make_pat(PatternDesc::Tpat_array(rs), p.pat_type, p.pat_env))
         }
@@ -256,10 +251,33 @@ fn orlub(p1: &Pattern, p2: &Pattern, q: &Pattern) -> Result<Pattern, Empty> {
 
 /// Record field lub.
 fn record_lubs(
-    l1: &[(crate::parse_arena::Located<crate::parse_arena::LidentIdx>, crate::types::LabelDescription, Pattern, bool)],
-    l2: &[(crate::parse_arena::Located<crate::parse_arena::LidentIdx>, crate::types::LabelDescription, Pattern, bool)],
-) -> Result<Vec<(crate::parse_arena::Located<crate::parse_arena::LidentIdx>, crate::types::LabelDescription, Pattern, bool)>, Empty> {
-    type RecordField = (crate::parse_arena::Located<crate::parse_arena::LidentIdx>, crate::types::LabelDescription, Pattern, bool);
+    l1: &[(
+        crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
+        crate::types::LabelDescription,
+        Pattern,
+        bool,
+    )],
+    l2: &[(
+        crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
+        crate::types::LabelDescription,
+        Pattern,
+        bool,
+    )],
+) -> Result<
+    Vec<(
+        crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
+        crate::types::LabelDescription,
+        Pattern,
+        bool,
+    )>,
+    Empty,
+> {
+    type RecordField = (
+        crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
+        crate::types::LabelDescription,
+        Pattern,
+        bool,
+    );
 
     fn lub_rec(l1: &[RecordField], l2: &[RecordField]) -> Result<Vec<RecordField>, Empty> {
         match (l1.split_first(), l2.split_first()) {
@@ -319,11 +337,7 @@ fn normalize_pat(q: &Pattern) -> Pattern {
             q.pat_env,
         ),
         PatternDesc::Tpat_variant(l, arg, row) => make_pat(
-            PatternDesc::Tpat_variant(
-                l.clone(),
-                arg.as_ref().map(|_| Box::new(omega())),
-                *row,
-            ),
+            PatternDesc::Tpat_variant(l.clone(), arg.as_ref().map(|_| Box::new(omega())), *row),
             q.pat_type,
             q.pat_env,
         ),
@@ -354,10 +368,7 @@ fn read_args<T: Clone>(xs: &[T], r: &[Pattern]) -> (Vec<Pattern>, Vec<Pattern>) 
     if xs.is_empty() {
         return (Vec::new(), r.to_vec());
     }
-    assert!(
-        !r.is_empty(),
-        "Parmatch.read_args: not enough arguments"
-    );
+    assert!(!r.is_empty(), "Parmatch.read_args: not enough arguments");
     let (mut args, rest) = read_args(&xs[1..], &r[1..]);
     args.insert(0, r[0].clone());
     (args, rest)
@@ -459,8 +470,18 @@ fn all_record_args(
     ctx_ref: Option<&TypeContext<'_>>,
     pat_type: TypeExprRef,
     pat_env: EnvRef,
-    lbls: &[(crate::parse_arena::Located<crate::parse_arena::LidentIdx>, crate::types::LabelDescription, Pattern, bool)],
-) -> Vec<(crate::parse_arena::Located<crate::parse_arena::LidentIdx>, crate::types::LabelDescription, Pattern, bool)> {
+    lbls: &[(
+        crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
+        crate::types::LabelDescription,
+        Pattern,
+        bool,
+    )],
+) -> Vec<(
+    crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
+    crate::types::LabelDescription,
+    Pattern,
+    bool,
+)> {
     if lbls.is_empty() {
         return Vec::new();
     }
@@ -480,9 +501,17 @@ fn all_record_args(
                 txt: crate::parse_arena::LidentIdx(0),
                 loc: LocIdx::none(),
             };
-            let mut result: Vec<_> = all_labels.iter().map(|lbl| {
-                (dummy_loc.clone(), lbl.clone(), omega(), first_lbl.lbl_optional)
-            }).collect();
+            let mut result: Vec<_> = all_labels
+                .iter()
+                .map(|lbl| {
+                    (
+                        dummy_loc.clone(),
+                        lbl.clone(),
+                        omega(),
+                        first_lbl.lbl_optional,
+                    )
+                })
+                .collect();
             // Fill in the actual patterns from the provided fields
             for (id, lbl, pat, opt) in lbls {
                 if (lbl.lbl_pos as usize) < result.len() {
@@ -521,17 +550,13 @@ fn may_compat(p: &Pattern, q: &Pattern) -> bool {
         (_, PatternDesc::Tpat_alias(q, _, _)) => may_compat(p, q),
         (PatternDesc::Tpat_or(p1, p2, _), _) => may_compat(p1, q) || may_compat(p2, q),
         (_, PatternDesc::Tpat_or(q1, q2, _)) => may_compat(p, q1) || may_compat(p, q2),
-        (
-            PatternDesc::Tpat_construct(_, c1, ps1),
-            PatternDesc::Tpat_construct(_, c2, ps2),
-        ) => may_equal_constr(c1, c2) && may_compats(ps1, ps2),
+        (PatternDesc::Tpat_construct(_, c1, ps1), PatternDesc::Tpat_construct(_, c2, ps2)) => {
+            may_equal_constr(c1, c2) && may_compats(ps1, ps2)
+        }
         (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => {
             const_compare(c1, c2) == std::cmp::Ordering::Equal
         }
-        (
-            PatternDesc::Tpat_variant(l1, op1, _),
-            PatternDesc::Tpat_variant(l2, op2, _),
-        ) => {
+        (PatternDesc::Tpat_variant(l1, op1, _), PatternDesc::Tpat_variant(l2, op2, _)) => {
             l1 == l2
                 && match (op1, op2) {
                     (Some(p1), Some(p2)) => may_compat(p1, p2),
@@ -556,8 +581,18 @@ fn may_compats(ps: &[Pattern], qs: &[Pattern]) -> bool {
 }
 
 fn may_compats_record(
-    l1: &[(crate::parse_arena::Located<crate::parse_arena::LidentIdx>, crate::types::LabelDescription, Pattern, bool)],
-    l2: &[(crate::parse_arena::Located<crate::parse_arena::LidentIdx>, crate::types::LabelDescription, Pattern, bool)],
+    l1: &[(
+        crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
+        crate::types::LabelDescription,
+        Pattern,
+        bool,
+    )],
+    l2: &[(
+        crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
+        crate::types::LabelDescription,
+        Pattern,
+        bool,
+    )],
 ) -> bool {
     // For each field present in both, check compatibility
     for (_, lbl1, p1, _) in l1 {
@@ -841,9 +876,7 @@ pub fn make_default(
                 let filtered = filter_matrix(matcher, pss);
                 if filtered.is_empty() {
                     rest
-                } else if !filtered.is_empty()
-                    && filtered.iter().any(|row| row.is_empty())
-                {
+                } else if !filtered.is_empty() && filtered.iter().any(|row| row.is_empty()) {
                     let mut result = vec![(vec![Vec::new()], *i)];
                     result.extend(rest);
                     result
@@ -877,9 +910,7 @@ pub fn ctx_matcher(
             let omegas_vec = pats.clone();
             let p = p.clone();
             Box::new(move |q: &Pattern, rem: &[Pattern]| match &q.pat_desc {
-                PatternDesc::Tpat_construct(_, cstr2, args)
-                    if may_equal_constr(&cstr, cstr2) =>
-                {
+                PatternDesc::Tpat_construct(_, cstr2, args) if may_equal_constr(&cstr, cstr2) => {
                     let mut result = args.clone();
                     result.extend(rem.iter().cloned());
                     Ok((p.clone(), result))
@@ -976,18 +1007,14 @@ pub fn ctx_matcher(
             Box::new(move |q: &Pattern, rem: &[Pattern]| match &q.pat_desc {
                 PatternDesc::Tpat_record(fields2, _) if !fields2.is_empty() => {
                     let expanded = all_record_args(None, q.pat_type, q.pat_env, fields2);
-                    let mut result: Vec<Pattern> = expanded
-                        .iter()
-                        .map(|(_, _, p, _)| p.clone())
-                        .collect();
+                    let mut result: Vec<Pattern> =
+                        expanded.iter().map(|(_, _, p, _)| p.clone()).collect();
                     result.extend(rem.iter().cloned());
                     Ok((p.clone(), result))
                 }
                 PatternDesc::Tpat_any => {
-                    let mut result: Vec<Pattern> = fields
-                        .iter()
-                        .map(|(_, _, p, _)| p.clone())
-                        .collect();
+                    let mut result: Vec<Pattern> =
+                        fields.iter().map(|(_, _, p, _)| p.clone()).collect();
                     result.extend(rem.iter().cloned());
                     Ok((p.clone(), result))
                 }
@@ -1013,72 +1040,70 @@ pub fn filter_ctx(q: &Pattern, ctx: &[Ctx]) -> Vec<Ctx> {
     ) -> Vec<Ctx> {
         match ctx.split_first() {
             None => Vec::new(),
-            Some((l, rem)) => {
-                match l.right.split_first() {
-                    None => panic!("Matching.filter_ctx: empty right"),
-                    Some((p, ps)) => match &p.pat_desc {
-                        PatternDesc::Tpat_or(p1, p2, _) => {
-                            let ctx1 = Ctx {
-                                left: l.left.clone(),
-                                right: {
-                                    let mut r = vec![(**p1).clone()];
-                                    r.extend(ps.iter().cloned());
-                                    r
-                                },
-                            };
-                            let ctx2 = Ctx {
-                                left: l.left.clone(),
-                                right: {
-                                    let mut r = vec![(**p2).clone()];
-                                    r.extend(ps.iter().cloned());
-                                    r
-                                },
-                            };
-                            let mut expanded = vec![ctx1, ctx2];
-                            expanded.extend(rem.iter().cloned());
-                            filter_rec(matcher, &expanded)
-                        }
-                        PatternDesc::Tpat_alias(p_inner, _, _) => {
-                            let ctx_new = Ctx {
-                                left: l.left.clone(),
-                                right: {
-                                    let mut r = vec![(**p_inner).clone()];
-                                    r.extend(ps.iter().cloned());
-                                    r
-                                },
-                            };
-                            let mut expanded = vec![ctx_new];
-                            expanded.extend(rem.iter().cloned());
-                            filter_rec(matcher, &expanded)
-                        }
-                        PatternDesc::Tpat_var(..) => {
-                            let ctx_new = Ctx {
-                                left: l.left.clone(),
-                                right: {
-                                    let mut r = vec![omega()];
-                                    r.extend(ps.iter().cloned());
-                                    r
-                                },
-                            };
-                            let mut expanded = vec![ctx_new];
-                            expanded.extend(rem.iter().cloned());
-                            filter_rec(matcher, &expanded)
-                        }
-                        _ => {
-                            let mut rest = filter_rec(matcher, rem);
-                            match matcher(p, ps) {
-                                Ok((to_left, right)) => {
-                                    let mut left = vec![to_left];
-                                    left.extend(l.left.iter().cloned());
-                                    rest.insert(0, Ctx { left, right });
-                                    rest
-                                }
-                                Err(_) => rest,
+            Some((l, rem)) => match l.right.split_first() {
+                None => panic!("Matching.filter_ctx: empty right"),
+                Some((p, ps)) => match &p.pat_desc {
+                    PatternDesc::Tpat_or(p1, p2, _) => {
+                        let ctx1 = Ctx {
+                            left: l.left.clone(),
+                            right: {
+                                let mut r = vec![(**p1).clone()];
+                                r.extend(ps.iter().cloned());
+                                r
+                            },
+                        };
+                        let ctx2 = Ctx {
+                            left: l.left.clone(),
+                            right: {
+                                let mut r = vec![(**p2).clone()];
+                                r.extend(ps.iter().cloned());
+                                r
+                            },
+                        };
+                        let mut expanded = vec![ctx1, ctx2];
+                        expanded.extend(rem.iter().cloned());
+                        filter_rec(matcher, &expanded)
+                    }
+                    PatternDesc::Tpat_alias(p_inner, _, _) => {
+                        let ctx_new = Ctx {
+                            left: l.left.clone(),
+                            right: {
+                                let mut r = vec![(**p_inner).clone()];
+                                r.extend(ps.iter().cloned());
+                                r
+                            },
+                        };
+                        let mut expanded = vec![ctx_new];
+                        expanded.extend(rem.iter().cloned());
+                        filter_rec(matcher, &expanded)
+                    }
+                    PatternDesc::Tpat_var(..) => {
+                        let ctx_new = Ctx {
+                            left: l.left.clone(),
+                            right: {
+                                let mut r = vec![omega()];
+                                r.extend(ps.iter().cloned());
+                                r
+                            },
+                        };
+                        let mut expanded = vec![ctx_new];
+                        expanded.extend(rem.iter().cloned());
+                        filter_rec(matcher, &expanded)
+                    }
+                    _ => {
+                        let mut rest = filter_rec(matcher, rem);
+                        match matcher(p, ps) {
+                            Ok((to_left, right)) => {
+                                let mut left = vec![to_left];
+                                left.extend(l.left.iter().cloned());
+                                rest.insert(0, Ctx { left, right });
+                                rest
                             }
+                            Err(_) => rest,
                         }
-                    },
-                }
-            }
+                    }
+                },
+            },
         }
     }
 
@@ -1143,10 +1168,8 @@ pub fn ctx_lub(p: &Pattern, ctx: &[Ctx]) -> Vec<Ctx> {
 /// Check if any context's right side may be compatible with any row in pss.
 /// Equivalent to OCaml's `ctx_match`.
 pub fn ctx_match(ctx: &[Ctx], pss: &Matrix) -> bool {
-    ctx.iter().any(|c| {
-        pss.iter()
-            .any(|ps| may_compats(&c.right, ps))
-    })
+    ctx.iter()
+        .any(|c| pss.iter().any(|ps| may_compats(&c.right, ps)))
 }
 
 // ============================================================================
@@ -1297,9 +1320,7 @@ pub fn jumps_unions(envs: Vec<Jumps>) -> Jumps {
 
 /// Map a function over the context lists in a jump table.
 pub fn jumps_map(f: impl Fn(Vec<Ctx>) -> Vec<Ctx>, env: &Jumps) -> Jumps {
-    env.iter()
-        .map(|(i, pss)| (*i, f(pss.clone())))
-        .collect()
+    env.iter().map(|(i, pss)| (*i, f(pss.clone()))).collect()
 }
 
 // ============================================================================
@@ -1442,7 +1463,12 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                 let mut new_env = env.clone();
                 new_env.insert(x.clone(), RawLambda::Lvar(y.clone()));
                 let body_norm = tr_rec(&new_env, body, count, next_id)?;
-                Some(RawLambda::Llet(*kind, y, Box::new(ex_norm), Box::new(body_norm)))
+                Some(RawLambda::Llet(
+                    *kind,
+                    y,
+                    Box::new(ex_norm),
+                    Box::new(body_norm),
+                ))
             }
             RawLambda::Lprim(info) => {
                 let args = tr_recs(env, &info.args, count, next_id)?;
@@ -1513,11 +1539,17 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
             }
             RawLambda::Lsend(m, e1, _loc) => {
                 let e1_norm = tr_rec(env, e1, count, next_id)?;
-                Some(RawLambda::Lsend(m.clone(), Box::new(e1_norm), Location::none()))
+                Some(RawLambda::Lsend(
+                    m.clone(),
+                    Box::new(e1_norm),
+                    Location::none(),
+                ))
             }
             // Functions, letrec, loops are not simple
-            RawLambda::Lletrec(..) | RawLambda::Lfunction(..)
-            | RawLambda::Lfor(..) | RawLambda::Lwhile(..) => None,
+            RawLambda::Lletrec(..)
+            | RawLambda::Lfunction(..)
+            | RawLambda::Lfor(..)
+            | RawLambda::Lwhile(..) => None,
         }
     }
 
@@ -1714,11 +1746,7 @@ pub fn make_catch(
         _ => {
             *next_raise_count += 1;
             let e = *next_raise_count;
-            RawLambda::LstaticCatch(
-                Box::new(k(make_exit(e))),
-                (e, Vec::new()),
-                Box::new(d),
-            )
+            RawLambda::LstaticCatch(Box::new(k(make_exit(e))), (e, Vec::new()), Box::new(d))
         }
     }
 }
@@ -1763,11 +1791,9 @@ pub fn make_catch_delayed(
                 i,
                 Box::new(move |body: RawLambda| match &body {
                     RawLambda::LstaticRaise(j, _) if *j == i => handler,
-                    _ => RawLambda::LstaticCatch(
-                        Box::new(body),
-                        (i, Vec::new()),
-                        Box::new(handler),
-                    ),
+                    _ => {
+                        RawLambda::LstaticCatch(Box::new(body), (i, Vec::new()), Box::new(handler))
+                    }
                 }),
             )
         }
@@ -1857,9 +1883,8 @@ fn up_ok_action(act1: &RawLambda, act2: &RawLambda) -> bool {
 ///
 /// Equivalent to OCaml's `up_ok`.
 fn up_ok(ps: &[Pattern], act_p: &RawLambda, l: &[(Vec<Pattern>, RawLambda)]) -> bool {
-    l.iter().all(|(qs, act_q)| {
-        up_ok_action(act_p, act_q) || !may_compats(ps, qs)
-    })
+    l.iter()
+        .all(|(qs, act_q)| up_ok_action(act_p, act_q) || !may_compats(ps, qs))
 }
 
 // ============================================================================
@@ -1880,46 +1905,30 @@ enum VarPat {
 fn simplify_or(ctx_ref: Option<&TypeContext<'_>>, p: &Pattern) -> Pattern {
     fn simpl_rec(ctx_ref: Option<&TypeContext<'_>>, p: &Pattern) -> Result<Pattern, VarPat> {
         match &p.pat_desc {
-            PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) => {
-                Err(VarPat::Var(p.clone()))
-            }
-            PatternDesc::Tpat_alias(q, id, s) => {
-                match simpl_rec(ctx_ref, q) {
-                    Ok(q_simplified) => Ok(Pattern {
-                        pat_desc: PatternDesc::Tpat_alias(
-                            Box::new(q_simplified),
-                            id.clone(),
-                            s.clone(),
-                        ),
-                        ..p.clone()
-                    }),
-                    Err(VarPat::Var(q_var)) => Err(VarPat::Var(Pattern {
-                        pat_desc: PatternDesc::Tpat_alias(
-                            Box::new(q_var),
-                            id.clone(),
-                            s.clone(),
-                        ),
-                        ..p.clone()
-                    })),
-                }
-            }
+            PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) => Err(VarPat::Var(p.clone())),
+            PatternDesc::Tpat_alias(q, id, s) => match simpl_rec(ctx_ref, q) {
+                Ok(q_simplified) => Ok(Pattern {
+                    pat_desc: PatternDesc::Tpat_alias(
+                        Box::new(q_simplified),
+                        id.clone(),
+                        s.clone(),
+                    ),
+                    ..p.clone()
+                }),
+                Err(VarPat::Var(q_var)) => Err(VarPat::Var(Pattern {
+                    pat_desc: PatternDesc::Tpat_alias(Box::new(q_var), id.clone(), s.clone()),
+                    ..p.clone()
+                })),
+            },
             PatternDesc::Tpat_or(p1, p2, o) => {
                 let q1 = simpl_rec(ctx_ref, p1)?; // propagates Var if p1 is variable
                 match simpl_rec(ctx_ref, p2) {
                     Ok(q2) => Ok(Pattern {
-                        pat_desc: PatternDesc::Tpat_or(
-                            Box::new(q1),
-                            Box::new(q2),
-                            o.clone(),
-                        ),
+                        pat_desc: PatternDesc::Tpat_or(Box::new(q1), Box::new(q2), o.clone()),
                         ..p.clone()
                     }),
                     Err(VarPat::Var(q2)) => Err(VarPat::Var(Pattern {
-                        pat_desc: PatternDesc::Tpat_or(
-                            Box::new(q1),
-                            Box::new(q2),
-                            o.clone(),
-                        ),
+                        pat_desc: PatternDesc::Tpat_or(Box::new(q1), Box::new(q2), o.clone()),
                         ..p.clone()
                     })),
                 }
@@ -2070,7 +2079,9 @@ pub fn what_is_cases(cases: &[(Vec<Pattern>, RawLambda)]) -> Pattern {
             assert!(!pats.is_empty(), "what_is_cases: empty pattern row");
             match &pats[0].pat_desc {
                 PatternDesc::Tpat_any => what_is_cases(rem),
-                PatternDesc::Tpat_var(..) | PatternDesc::Tpat_or(..) | PatternDesc::Tpat_alias(..) => {
+                PatternDesc::Tpat_var(..)
+                | PatternDesc::Tpat_or(..)
+                | PatternDesc::Tpat_alias(..) => {
                     panic!("what_is_cases: applies to simplified matchings only")
                 }
                 _ => pats[0].clone(),
@@ -2109,26 +2120,22 @@ pub fn cons_default(matrix: Matrix, raise_num: i32, default: DefaultEnv) -> Defa
 ///
 /// Equivalent to OCaml's `default_compat`.
 pub fn default_compat(p: &Pattern, def: &DefaultEnv) -> DefaultEnv {
-    def.iter()
-        .rev()
-        .fold(Vec::new(), |r, (pss, i)| {
-            let qss: Vec<Vec<Pattern>> = pss
-                .iter()
-                .filter_map(|qs| {
-                    match qs.split_first() {
-                        Some((q, rem)) if may_compat(p, q) => Some(rem.to_vec()),
-                        _ => None,
-                    }
-                })
-                .collect();
-            if qss.is_empty() {
-                r
-            } else {
-                let mut result = vec![(qss, *i)];
-                result.extend(r);
-                result
-            }
-        })
+    def.iter().rev().fold(Vec::new(), |r, (pss, i)| {
+        let qss: Vec<Vec<Pattern>> = pss
+            .iter()
+            .filter_map(|qs| match qs.split_first() {
+                Some((q, rem)) if may_compat(p, q) => Some(rem.to_vec()),
+                _ => None,
+            })
+            .collect();
+        if qss.is_empty() {
+            r
+        } else {
+            let mut result = vec![(qss, *i)];
+            result.extend(r);
+            result
+        }
+    })
 }
 
 // ============================================================================
@@ -2153,18 +2160,12 @@ pub fn extract_vars(r: IdentSet, p: &Pattern) -> IdentSet {
             r.insert(id.clone());
             extract_vars(r, p)
         }
-        PatternDesc::Tpat_tuple(pats) => {
-            pats.iter().fold(r, |r, p| extract_vars(r, p))
-        }
+        PatternDesc::Tpat_tuple(pats) => pats.iter().fold(r, |r, p| extract_vars(r, p)),
         PatternDesc::Tpat_record(lpats, _) => {
             lpats.iter().fold(r, |r, (_, _, p, _)| extract_vars(r, p))
         }
-        PatternDesc::Tpat_construct(_, _, pats) => {
-            pats.iter().fold(r, |r, p| extract_vars(r, p))
-        }
-        PatternDesc::Tpat_array(pats) => {
-            pats.iter().fold(r, |r, p| extract_vars(r, p))
-        }
+        PatternDesc::Tpat_construct(_, _, pats) => pats.iter().fold(r, |r, p| extract_vars(r, p)),
+        PatternDesc::Tpat_array(pats) => pats.iter().fold(r, |r, p| extract_vars(r, p)),
         PatternDesc::Tpat_variant(_, Some(p), _) => extract_vars(r, p),
         PatternDesc::Tpat_or(p, _, _) => extract_vars(r, p),
         PatternDesc::Tpat_constant(_)
@@ -2354,11 +2355,14 @@ where
 pub fn pm_free_variables(pm: &PatternMatching) -> IdentSet {
     // OCaml uses IdentSet.union (free_variables act) r folded right over cases.
     // We use raw_free_variables (HashSet-based) and convert to BTreeSet.
-    pm.cases.iter().rev().fold(BTreeSet::new(), |mut r, (_, act)| {
-        let fv = raw_lambda_free_variables(act);
-        r.extend(fv);
-        r
-    })
+    pm.cases
+        .iter()
+        .rev()
+        .fold(BTreeSet::new(), |mut r, (_, act)| {
+            let fv = raw_lambda_free_variables(act);
+            r.extend(fv);
+            r
+        })
 }
 
 /// Compute free variables of a RawLambda expression.
@@ -2539,13 +2543,19 @@ fn group_var(p: &Pattern) -> bool {
 /// Group predicate for tuple patterns (including wildcard).
 /// Equivalent to OCaml's `group_tuple`.
 fn group_tuple(p: &Pattern) -> bool {
-    matches!(&p.pat_desc, PatternDesc::Tpat_tuple(_) | PatternDesc::Tpat_any)
+    matches!(
+        &p.pat_desc,
+        PatternDesc::Tpat_tuple(_) | PatternDesc::Tpat_any
+    )
 }
 
 /// Group predicate for record patterns (including wildcard).
 /// Equivalent to OCaml's `group_record`.
 fn group_record(p: &Pattern) -> bool {
-    matches!(&p.pat_desc, PatternDesc::Tpat_record(_, _) | PatternDesc::Tpat_any)
+    matches!(
+        &p.pat_desc,
+        PatternDesc::Tpat_record(_, _) | PatternDesc::Tpat_any
+    )
 }
 
 /// Group predicate for array patterns.
@@ -2595,11 +2605,9 @@ fn condb(act: &RawLambda, ps: &[Pattern], qs: &[Pattern]) -> bool {
 /// surrounding patterns ps.
 /// Equivalent to OCaml's `or_ok`.
 fn or_ok(p: &Pattern, ps: &[Pattern], l: &[(Vec<Pattern>, RawLambda)]) -> bool {
-    l.iter().all(|(row, act)| {
-        match row.split_first() {
-            Some((q, qs)) if is_or(q) => conda(p, q) || condb(act, ps, qs),
-            _ => true,
-        }
+    l.iter().all(|(row, act)| match row.split_first() {
+        Some((q, qs)) if is_or(q) => conda(p, q) || condb(act, ps, qs),
+        _ => true,
     })
 }
 
@@ -2615,18 +2623,19 @@ fn equiv_pat(p: &Pattern, q: &Pattern) -> bool {
 fn get_equiv(
     p: &Pattern,
     l: &[(Vec<Pattern>, RawLambda)],
-) -> (Vec<(Vec<Pattern>, RawLambda)>, Vec<(Vec<Pattern>, RawLambda)>) {
+) -> (
+    Vec<(Vec<Pattern>, RawLambda)>,
+    Vec<(Vec<Pattern>, RawLambda)>,
+) {
     match l.split_first() {
-        Some((cl, rem)) => {
-            match cl.0.first() {
-                Some(q) if equiv_pat(p, q) => {
-                    let (mut others, rem) = get_equiv(p, rem);
-                    others.insert(0, cl.clone());
-                    (others, rem)
-                }
-                _ => (Vec::new(), l.to_vec()),
+        Some((cl, rem)) => match cl.0.first() {
+            Some(q) if equiv_pat(p, q) => {
+                let (mut others, rem) = get_equiv(p, rem);
+                others.insert(0, cl.clone());
+                (others, rem)
             }
-        }
+            _ => (Vec::new(), l.to_vec()),
+        },
         None => (Vec::new(), Vec::new()),
     }
 }
@@ -2640,7 +2649,10 @@ fn insert_or_append(
     act: &RawLambda,
     ors: Vec<(Vec<Pattern>, RawLambda)>,
     no: Vec<(Vec<Pattern>, RawLambda)>,
-) -> (Vec<(Vec<Pattern>, RawLambda)>, Vec<(Vec<Pattern>, RawLambda)>) {
+) -> (
+    Vec<(Vec<Pattern>, RawLambda)>,
+    Vec<(Vec<Pattern>, RawLambda)>,
+) {
     fn attempt(
         seen: Vec<(Vec<Pattern>, RawLambda)>,
         rest: &[(Vec<Pattern>, RawLambda)],
@@ -2649,7 +2661,10 @@ fn insert_or_append(
         act: &RawLambda,
         ors: &[(Vec<Pattern>, RawLambda)],
         no: &[(Vec<Pattern>, RawLambda)],
-    ) -> (Vec<(Vec<Pattern>, RawLambda)>, Vec<(Vec<Pattern>, RawLambda)>) {
+    ) -> (
+        Vec<(Vec<Pattern>, RawLambda)>,
+        Vec<(Vec<Pattern>, RawLambda)>,
+    ) {
         match rest.split_first() {
             Some((cl, rem)) => {
                 let (q_head, qs) = match cl.0.split_first() {
@@ -2666,11 +2681,9 @@ fn insert_or_append(
                             // attempt insert, for equivalent orpats with no variables
                             let (_, not_e) = get_equiv(q_head, rem);
                             if or_ok(p, ps, &not_e)
-                                && seen.iter().all(|seen_cl| {
-                                    match seen_cl.0.first() {
-                                        Some(q) => !may_compat(p, q),
-                                        None => panic!("insert_or_append: empty seen row"),
-                                    }
+                                && seen.iter().all(|seen_cl| match seen_cl.0.first() {
+                                    Some(q) => !may_compat(p, q),
+                                    None => panic!("insert_or_append: empty seen row"),
                                 })
                             {
                                 // insert
@@ -2788,10 +2801,16 @@ fn rebuild_nexts(
 ) -> Vec<(i32, PmHalfCompiled)> {
     // List.fold_right (\(e, pm) k -> (e, PmVar {inside = pm; var_arg = arg}) :: k) nexts k
     nexts.into_iter().rev().fold(k, |mut acc, (e, pm)| {
-        acc.insert(0, (e, PmHalfCompiled::PmVar(PmVarCompiled {
-            inside: Box::new(pm),
-            var_arg: arg.clone(),
-        })));
+        acc.insert(
+            0,
+            (
+                e,
+                PmHalfCompiled::PmVar(PmVarCompiled {
+                    inside: Box::new(pm),
+                    var_arg: arg.clone(),
+                }),
+            ),
+        );
         acc
     })
 }
@@ -2812,7 +2831,16 @@ fn split_or(
 ) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
     let cls = simplify_cases(ctx_ref, args, cls);
 
-    do_split_or(argo, Vec::new(), Vec::new(), Vec::new(), &cls, args, &def, next_raise)
+    do_split_or(
+        argo,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        &cls,
+        args,
+        &def,
+        next_raise,
+    )
 }
 
 /// Inner do_split for split_or.
@@ -2833,36 +2861,34 @@ fn do_split_or(
             let no = rev_vec(no);
             cons_next_or(argo, before, ors, &no, args, def, next_raise)
         }
-        Some((cl, rem)) => {
-            match cl.0.split_first() {
-                Some((p, ps)) => {
-                    let act = &cl.1;
-                    if up_ok(&cl.0, act, &no) {
-                        if is_or(p) {
-                            let (new_ors, new_no) = insert_or_append(p, ps, act, ors, no);
-                            do_split_or(argo, before, new_ors, new_no, rem, args, def, next_raise)
-                        } else if up_ok(&cl.0, act, &ors) {
-                            let mut new_before = before;
-                            new_before.insert(0, cl.clone());
-                            do_split_or(argo, new_before, ors, no, rem, args, def, next_raise)
-                        } else if or_ok(p, ps, &ors) {
-                            let mut new_ors = ors;
-                            new_ors.insert(0, cl.clone());
-                            do_split_or(argo, before, new_ors, no, rem, args, def, next_raise)
-                        } else {
-                            let mut new_no = no;
-                            new_no.insert(0, cl.clone());
-                            do_split_or(argo, before, ors, new_no, rem, args, def, next_raise)
-                        }
+        Some((cl, rem)) => match cl.0.split_first() {
+            Some((p, ps)) => {
+                let act = &cl.1;
+                if up_ok(&cl.0, act, &no) {
+                    if is_or(p) {
+                        let (new_ors, new_no) = insert_or_append(p, ps, act, ors, no);
+                        do_split_or(argo, before, new_ors, new_no, rem, args, def, next_raise)
+                    } else if up_ok(&cl.0, act, &ors) {
+                        let mut new_before = before;
+                        new_before.insert(0, cl.clone());
+                        do_split_or(argo, new_before, ors, no, rem, args, def, next_raise)
+                    } else if or_ok(p, ps, &ors) {
+                        let mut new_ors = ors;
+                        new_ors.insert(0, cl.clone());
+                        do_split_or(argo, before, new_ors, no, rem, args, def, next_raise)
                     } else {
                         let mut new_no = no;
                         new_no.insert(0, cl.clone());
                         do_split_or(argo, before, ors, new_no, rem, args, def, next_raise)
                     }
+                } else {
+                    let mut new_no = no;
+                    new_no.insert(0, cl.clone());
+                    do_split_or(argo, before, ors, new_no, rem, args, def, next_raise)
                 }
-                None => panic!("split_or: empty pattern row"),
             }
-        }
+            None => panic!("split_or: empty pattern row"),
+        },
     }
 }
 
@@ -2911,17 +2937,19 @@ fn split_naive(
 ) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
     match cls.split_first() {
         None => panic!("split_naive: empty cases"),
-        Some((cl, rem)) => {
-            match cl.0.first() {
-                Some(p) if group_constructor(p) => {
-                    split_exc(pat_as_constr(p), vec![cl.clone()], rem, args, def, k, next_raise)
-                }
-                Some(_) => {
-                    split_noexc(vec![cl.clone()], rem, args, def, k, next_raise)
-                }
-                None => panic!("split_naive: empty pattern row"),
-            }
-        }
+        Some((cl, rem)) => match cl.0.first() {
+            Some(p) if group_constructor(p) => split_exc(
+                pat_as_constr(p),
+                vec![cl.clone()],
+                rem,
+                args,
+                def,
+                k,
+                next_raise,
+            ),
+            Some(_) => split_noexc(vec![cl.clone()], rem, args, def, k, next_raise),
+            None => panic!("split_naive: empty pattern row"),
+        },
     }
 }
 
@@ -2951,41 +2979,24 @@ fn split_exc(
                 k,
             )
         }
-        Some((cl, rem)) => {
-            match cl.0.first() {
-                Some(p) if group_constructor(p) => {
-                    let cstr = pat_as_constr(p);
-                    if equal_tag(&cstr.cstr_tag, &cstr0.cstr_tag) {
-                        let mut new_yes = yes;
-                        new_yes.insert(0, cl.clone());
-                        split_exc(cstr0, new_yes, rem, args, def, k, next_raise)
-                    } else {
-                        let yes = rev_vec(yes);
-                        let (info, nexts) = split_exc(cstr, vec![cl.clone()], rem, args, def.clone(), k, next_raise);
-                        let idef = {
-                            *next_raise += 1;
-                            *next_raise
-                        };
-                        let new_def = cons_default(info.matrix.clone(), idef, def);
-                        let mut new_nexts = vec![(idef, info.me)];
-                        new_nexts.extend(nexts);
-                        (
-                            PmHalfCompiledInfo {
-                                me: PmHalfCompiled::Pm(PatternMatching {
-                                    cases: yes.clone(),
-                                    args: args.to_vec(),
-                                    default: new_def.clone(),
-                                }),
-                                matrix: as_matrix(&yes),
-                                top_default: new_def,
-                            },
-                            new_nexts,
-                        )
-                    }
-                }
-                Some(_) => {
+        Some((cl, rem)) => match cl.0.first() {
+            Some(p) if group_constructor(p) => {
+                let cstr = pat_as_constr(p);
+                if equal_tag(&cstr.cstr_tag, &cstr0.cstr_tag) {
+                    let mut new_yes = yes;
+                    new_yes.insert(0, cl.clone());
+                    split_exc(cstr0, new_yes, rem, args, def, k, next_raise)
+                } else {
                     let yes = rev_vec(yes);
-                    let (info, nexts) = split_noexc(vec![cl.clone()], rem, args, def.clone(), k, next_raise);
+                    let (info, nexts) = split_exc(
+                        cstr,
+                        vec![cl.clone()],
+                        rem,
+                        args,
+                        def.clone(),
+                        k,
+                        next_raise,
+                    );
                     let idef = {
                         *next_raise += 1;
                         *next_raise
@@ -3006,9 +3017,33 @@ fn split_exc(
                         new_nexts,
                     )
                 }
-                None => panic!("split_exc: empty pattern row"),
             }
-        }
+            Some(_) => {
+                let yes = rev_vec(yes);
+                let (info, nexts) =
+                    split_noexc(vec![cl.clone()], rem, args, def.clone(), k, next_raise);
+                let idef = {
+                    *next_raise += 1;
+                    *next_raise
+                };
+                let new_def = cons_default(info.matrix.clone(), idef, def);
+                let mut new_nexts = vec![(idef, info.me)];
+                new_nexts.extend(nexts);
+                (
+                    PmHalfCompiledInfo {
+                        me: PmHalfCompiled::Pm(PatternMatching {
+                            cases: yes.clone(),
+                            args: args.to_vec(),
+                            default: new_def.clone(),
+                        }),
+                        matrix: as_matrix(&yes),
+                        top_default: new_def,
+                    },
+                    new_nexts,
+                )
+            }
+            None => panic!("split_exc: empty pattern row"),
+        },
     }
 }
 
@@ -3026,43 +3061,41 @@ fn split_noexc(
             let yes = rev_vec(yes);
             precompile_var(args, yes, def, k, next_raise)
         }
-        Some((cl, rem)) => {
-            match cl.0.first() {
-                Some(p) if group_constructor(p) => {
-                    let yes = rev_vec(yes);
-                    let (info, nexts) = split_exc(
-                        pat_as_constr(p),
-                        vec![cl.clone()],
-                        rem,
-                        args,
-                        def.clone(),
-                        k,
-                        next_raise,
-                    );
-                    let idef = {
-                        *next_raise += 1;
-                        *next_raise
-                    };
-                    precompile_var(
-                        args,
-                        yes,
-                        cons_default(info.matrix.clone(), idef, def),
-                        {
-                            let mut new_nexts = vec![(idef, info.me)];
-                            new_nexts.extend(nexts);
-                            new_nexts
-                        },
-                        next_raise,
-                    )
-                }
-                Some(_) => {
-                    let mut new_yes = yes;
-                    new_yes.insert(0, cl.clone());
-                    split_noexc(new_yes, rem, args, def, k, next_raise)
-                }
-                None => panic!("split_noexc: empty pattern row"),
+        Some((cl, rem)) => match cl.0.first() {
+            Some(p) if group_constructor(p) => {
+                let yes = rev_vec(yes);
+                let (info, nexts) = split_exc(
+                    pat_as_constr(p),
+                    vec![cl.clone()],
+                    rem,
+                    args,
+                    def.clone(),
+                    k,
+                    next_raise,
+                );
+                let idef = {
+                    *next_raise += 1;
+                    *next_raise
+                };
+                precompile_var(
+                    args,
+                    yes,
+                    cons_default(info.matrix.clone(), idef, def),
+                    {
+                        let mut new_nexts = vec![(idef, info.me)];
+                        new_nexts.extend(nexts);
+                        new_nexts
+                    },
+                    next_raise,
+                )
             }
-        }
+            Some(_) => {
+                let mut new_yes = yes;
+                new_yes.insert(0, cl.clone());
+                split_noexc(new_yes, rem, args, def, k, next_raise)
+            }
+            None => panic!("split_noexc: empty pattern row"),
+        },
     }
 }
 
@@ -3077,9 +3110,7 @@ fn split_constr(
 ) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
     let ex_pat = what_is_cases(cls);
     match &ex_pat.pat_desc {
-        PatternDesc::Tpat_any => {
-            precompile_var(args, cls.to_vec(), def, k, next_raise)
-        }
+        PatternDesc::Tpat_any => precompile_var(args, cls.to_vec(), def, k, next_raise),
         PatternDesc::Tpat_construct(_, cstr, _)
             if matches!(&cstr.cstr_tag, ConstructorTag::CstrExtension(_)) =>
         {
@@ -3088,16 +3119,28 @@ fn split_constr(
         _ => {
             let group = get_group(&ex_pat);
             match cls.split_first() {
-                Some((cl, rem)) => {
-                    match cl.0.first() {
-                        Some(p) if group(p) => {
-                            split_ex(group, vec![cl.clone()], Vec::new(), rem, args, def, k, next_raise)
-                        }
-                        _ => {
-                            split_noex(group, vec![cl.clone()], Vec::new(), rem, args, def, k, next_raise)
-                        }
-                    }
-                }
+                Some((cl, rem)) => match cl.0.first() {
+                    Some(p) if group(p) => split_ex(
+                        group,
+                        vec![cl.clone()],
+                        Vec::new(),
+                        rem,
+                        args,
+                        def,
+                        k,
+                        next_raise,
+                    ),
+                    _ => split_noex(
+                        group,
+                        vec![cl.clone()],
+                        Vec::new(),
+                        rem,
+                        args,
+                        def,
+                        k,
+                        next_raise,
+                    ),
+                },
                 None => panic!("split_constr: empty cases"),
             }
         }
@@ -3120,24 +3163,31 @@ fn split_ex(
             let yes = rev_vec(yes);
             let no = rev_vec(no);
             match no.split_first() {
-                None => {
-                    (
-                        PmHalfCompiledInfo {
-                            me: PmHalfCompiled::Pm(PatternMatching {
-                                cases: yes.clone(),
-                                args: args.to_vec(),
-                                default: def.clone(),
-                            }),
-                            matrix: as_matrix(&yes),
-                            top_default: def,
-                        },
-                        k,
-                    )
-                }
+                None => (
+                    PmHalfCompiledInfo {
+                        me: PmHalfCompiled::Pm(PatternMatching {
+                            cases: yes.clone(),
+                            args: args.to_vec(),
+                            default: def.clone(),
+                        }),
+                        matrix: as_matrix(&yes),
+                        top_default: def,
+                    },
+                    k,
+                ),
                 Some((no_cl, no_rem)) => {
                     if yes.is_empty() {
                         // Could not succeed in raising up a constr matching up
-                        split_noex(group, vec![no_cl.clone()], Vec::new(), no_rem, args, def, k, next_raise)
+                        split_noex(
+                            group,
+                            vec![no_cl.clone()],
+                            Vec::new(),
+                            no_rem,
+                            args,
+                            def,
+                            k,
+                            next_raise,
+                        )
                     } else {
                         let (info, nexts) = split_noex(
                             group,
@@ -3172,20 +3222,18 @@ fn split_ex(
                 }
             }
         }
-        Some((cl, rem)) => {
-            match cl.0.first() {
-                Some(p) if group(p) && up_ok(&cl.0, &cl.1, &no) => {
-                    let mut new_yes = yes;
-                    new_yes.insert(0, cl.clone());
-                    split_ex(group, new_yes, no, rem, args, def, k, next_raise)
-                }
-                _ => {
-                    let mut new_no = no;
-                    new_no.insert(0, cl.clone());
-                    split_ex(group, yes, new_no, rem, args, def, k, next_raise)
-                }
+        Some((cl, rem)) => match cl.0.first() {
+            Some(p) if group(p) && up_ok(&cl.0, &cl.1, &no) => {
+                let mut new_yes = yes;
+                new_yes.insert(0, cl.clone());
+                split_ex(group, new_yes, no, rem, args, def, k, next_raise)
             }
-        }
+            _ => {
+                let mut new_no = no;
+                new_no.insert(0, cl.clone());
+                split_ex(group, yes, new_no, rem, args, def, k, next_raise)
+            }
+        },
     }
 }
 
@@ -3205,9 +3253,7 @@ fn split_noex(
             let yes = rev_vec(yes);
             let no = rev_vec(no);
             match no.split_first() {
-                None => {
-                    precompile_var(args, yes, def, k, next_raise)
-                }
+                None => precompile_var(args, yes, def, k, next_raise),
                 Some((no_cl, no_rem)) => {
                     let (info, nexts) = split_ex(
                         group,
@@ -3263,20 +3309,18 @@ fn split_noex(
                 }
             }
         }
-        Some((cl, rem)) => {
-            match cl.0.first() {
-                Some(p) if !group(p) && up_ok(&cl.0, &cl.1, &no) => {
-                    let mut new_yes = yes;
-                    new_yes.insert(0, cl.clone());
-                    split_noex(group, new_yes, no, rem, args, def, k, next_raise)
-                }
-                _ => {
-                    let mut new_no = no;
-                    new_no.insert(0, cl.clone());
-                    split_noex(group, yes, new_no, rem, args, def, k, next_raise)
-                }
+        Some((cl, rem)) => match cl.0.first() {
+            Some(p) if !group(p) && up_ok(&cl.0, &cl.1, &no) => {
+                let mut new_yes = yes;
+                new_yes.insert(0, cl.clone());
+                split_noex(group, new_yes, no, rem, args, def, k, next_raise)
             }
-        }
+            _ => {
+                let mut new_no = no;
+                new_no.insert(0, cl.clone());
+                split_noex(group, yes, new_no, rem, args, def, k, next_raise)
+            }
+        },
     }
 }
 
@@ -3303,17 +3347,13 @@ fn precompile_var(
                         // Precompile: strip first pattern from each case
                         let var_cls: Vec<(Vec<Pattern>, RawLambda)> = cls
                             .iter()
-                            .map(|(ps, act)| {
-                                match ps.split_first() {
-                                    Some((_, rest)) => (rest.to_vec(), act.clone()),
-                                    None => panic!("precompile_var: empty pattern row"),
-                                }
+                            .map(|(ps, act)| match ps.split_first() {
+                                Some((_, rest)) => (rest.to_vec(), act.clone()),
+                                None => panic!("precompile_var: empty pattern row"),
                             })
                             .collect();
-                        let var_def = make_default(
-                            &|_p: &Pattern, rem: &[Pattern]| Ok(rem.to_vec()),
-                            &def,
-                        );
+                        let var_def =
+                            make_default(&|_p: &Pattern, rem: &[Pattern]| Ok(rem.to_vec()), &def);
                         let av = arg_rest[0].0.clone();
                         let (first_info, nexts) = split_or(
                             None, // TypeContext not available in do_split_or
@@ -3417,7 +3457,10 @@ fn do_cases_or(
     args: &[(RawLambda, LetKind)],
     def: &DefaultEnv,
     next_raise: &mut i32,
-) -> (Vec<(Vec<Pattern>, RawLambda)>, Vec<(Matrix, i32, Vec<Ident>, PatternMatching)>) {
+) -> (
+    Vec<(Vec<Pattern>, RawLambda)>,
+    Vec<(Matrix, i32, Vec<Ident>, PatternMatching)>,
+) {
     match ors.split_first() {
         None => (Vec::new(), Vec::new()),
         Some((cl, rem)) => {
@@ -3430,11 +3473,9 @@ fn do_cases_or(
 
                     let orpm_cases = {
                         let mut cases = vec![(patl.to_vec(), action.clone())];
-                        cases.extend(others.iter().map(|(ps, act)| {
-                            match ps.split_first() {
-                                Some((_, rest)) => (rest.to_vec(), act.clone()),
-                                None => panic!("do_cases_or: empty pattern row"),
-                            }
+                        cases.extend(others.iter().map(|(ps, act)| match ps.split_first() {
+                            Some((_, rest)) => (rest.to_vec(), act.clone()),
+                            None => panic!("do_cases_or: empty pattern row"),
                         }));
                         cases
                     };
@@ -3508,7 +3549,14 @@ pub fn split_precompile(
     pm: &PatternMatching,
     next_raise: &mut i32,
 ) -> (PmHalfCompiled, Vec<(i32, PmHalfCompiled)>) {
-    let (info, nexts) = split_or(ctx_ref, argo, pm.cases.clone(), &pm.args, pm.default.clone(), next_raise);
+    let (info, nexts) = split_or(
+        ctx_ref,
+        argo,
+        pm.cases.clone(),
+        &pm.args,
+        pm.default.clone(),
+        next_raise,
+    );
     (info.me, nexts)
 }
 
@@ -3528,10 +3576,7 @@ fn rev_vec<T>(mut v: Vec<T>) -> Vec<T> {
 
 /// Add a case to a pattern matching.
 /// Equivalent to OCaml's `add_line`.
-fn add_line(
-    patl_action: (Vec<Pattern>, RawLambda),
-    mut pm: PatternMatching,
-) -> PatternMatching {
+fn add_line(patl_action: (Vec<Pattern>, RawLambda), mut pm: PatternMatching) -> PatternMatching {
     pm.cases.insert(0, patl_action);
     pm
 }
@@ -3590,7 +3635,8 @@ fn divide<K>(
             Some(((patl, action), rem)) => {
                 match patl.split_first() {
                     Some((p, rest_patl)) => {
-                        let this_match = divide_rec(rem, make, eq_key, get_key, get_args, default, ctx, args);
+                        let this_match =
+                            divide_rec(rem, make, eq_key, get_key, get_args, default, ctx, args);
                         let key = get_key(p);
                         let mut new_patl = get_args(p, rest_patl);
                         // get_args returns args @ rest_patl, which is the new pattern list
@@ -3640,16 +3686,14 @@ fn divide_line(
         args: &[(RawLambda, LetKind)],
     ) -> PatternMatching {
         match cases.split_first() {
-            Some(((patl, action), rem)) => {
-                match patl.split_first() {
-                    Some((p, rest_patl)) => {
-                        let this_match = divide_rec(rem, get_args, make, default, args);
-                        let new_patl = get_args(p, rest_patl);
-                        add_line((new_patl, action.clone()), this_match)
-                    }
-                    None => make(default, args),
+            Some(((patl, action), rem)) => match patl.split_first() {
+                Some((p, rest_patl)) => {
+                    let this_match = divide_rec(rem, get_args, make, default, args);
+                    let new_patl = get_args(p, rest_patl);
+                    add_line((new_patl, action.clone()), this_match)
                 }
-            }
+                None => make(default, args),
+            },
             None => make(default, args),
         }
     }
@@ -3669,22 +3713,14 @@ fn divide_line(
 
 /// Matcher for constant patterns.
 /// Equivalent to OCaml's `matcher_const`.
-fn matcher_const(
-    cst: &Constant,
-    p: &Pattern,
-    rem: &[Pattern],
-) -> Result<Vec<Pattern>, MatchError> {
+fn matcher_const(cst: &Constant, p: &Pattern, rem: &[Pattern]) -> Result<Vec<Pattern>, MatchError> {
     match &p.pat_desc {
-        PatternDesc::Tpat_or(p1, p2, _) => {
-            match matcher_const(cst, p1, rem) {
-                Ok(r) => Ok(r),
-                Err(MatchError::NoMatch) => matcher_const(cst, p2, rem),
-                Err(e) => Err(e),
-            }
-        }
-        PatternDesc::Tpat_constant(c1)
-            if const_compare(c1, cst) == std::cmp::Ordering::Equal =>
-        {
+        PatternDesc::Tpat_or(p1, p2, _) => match matcher_const(cst, p1, rem) {
+            Ok(r) => Ok(r),
+            Err(MatchError::NoMatch) => matcher_const(cst, p2, rem),
+            Err(e) => Err(e),
+        },
+        PatternDesc::Tpat_constant(c1) if const_compare(c1, cst) == std::cmp::Ordering::Equal => {
             Ok(rem.to_vec())
         }
         PatternDesc::Tpat_any => Ok(rem.to_vec()),
@@ -3723,10 +3759,7 @@ fn make_constant_matching(
         None => panic!("Matching.make_constant_matching"),
         Some((_, argl)) => {
             let key = get_key_constant("make", p);
-            let def = make_default(
-                &|p2, rem| matcher_const(&key, p2, rem),
-                def,
-            );
+            let def = make_default(&|p2, rem| matcher_const(&key, p2, rem), def);
             let ctx = filter_ctx(p, ctx);
             MatchCell {
                 pm: PatternMatching {
@@ -3830,13 +3863,11 @@ fn matcher_constr_arity0(
     rem: &[Pattern],
 ) -> Result<Vec<Pattern>, MatchError> {
     match &q.pat_desc {
-        PatternDesc::Tpat_or(p1, p2, _) => {
-            match matcher_constr_arity0(cstr, p1, rem) {
-                Ok(r) => Ok(r),
-                Err(MatchError::NoMatch) => matcher_constr_arity0(cstr, p2, rem),
-                Err(e) => Err(e),
-            }
-        }
+        PatternDesc::Tpat_or(p1, p2, _) => match matcher_constr_arity0(cstr, p1, rem) {
+            Ok(r) => Ok(r),
+            Err(MatchError::NoMatch) => matcher_constr_arity0(cstr, p2, rem),
+            Err(e) => Err(e),
+        },
         PatternDesc::Tpat_construct(_, cstr2, args)
             if args.is_empty() && may_equal_constr(cstr, cstr2) =>
         {
@@ -3861,28 +3892,26 @@ fn matcher_constr_arity1(
                 (None, None) => Err(MatchError::NoMatch),
                 (Some(r1), None) => Ok(r1),
                 (None, Some(r2)) => Ok(r2),
-                (Some(r1), Some(r2)) => {
-                    match (r1.first(), r2.first()) {
-                        (Some(a1), Some(a2)) => {
-                            let or_pat = Pattern {
-                                pat_desc: PatternDesc::Tpat_or(
-                                    Box::new(a1.clone()),
-                                    Box::new(a2.clone()),
-                                    None,
-                                ),
-                                pat_loc: LocIdx::none(),
-                                pat_extra: Vec::new(),
-                                pat_type: a1.pat_type,
-                                pat_env: a1.pat_env,
-                                pat_attributes: Attributes::new(),
-                            };
-                            let mut result = vec![or_pat];
-                            result.extend(rem.iter().cloned());
-                            Ok(result)
-                        }
-                        _ => panic!("matcher_constr_arity1: unexpected empty result"),
+                (Some(r1), Some(r2)) => match (r1.first(), r2.first()) {
+                    (Some(a1), Some(a2)) => {
+                        let or_pat = Pattern {
+                            pat_desc: PatternDesc::Tpat_or(
+                                Box::new(a1.clone()),
+                                Box::new(a2.clone()),
+                                None,
+                            ),
+                            pat_loc: LocIdx::none(),
+                            pat_extra: Vec::new(),
+                            pat_type: a1.pat_type,
+                            pat_env: a1.pat_env,
+                            pat_attributes: Attributes::new(),
+                        };
+                        let mut result = vec![or_pat];
+                        result.extend(rem.iter().cloned());
+                        Ok(result)
                     }
-                }
+                    _ => panic!("matcher_constr_arity1: unexpected empty result"),
+                },
             }
         }
         PatternDesc::Tpat_construct(_, cstr2, args)
@@ -3909,9 +3938,7 @@ fn matcher_constr_arityN(
 ) -> Result<Vec<Pattern>, MatchError> {
     match &q.pat_desc {
         PatternDesc::Tpat_or(_, _, _) => Err(MatchError::OrPat),
-        PatternDesc::Tpat_construct(_, cstr2, args)
-            if may_equal_constr(cstr, cstr2) =>
-        {
+        PatternDesc::Tpat_construct(_, cstr2, args) if may_equal_constr(cstr, cstr2) => {
             let mut result = args.clone();
             result.extend(rem.iter().cloned());
             Ok(result)
@@ -3976,8 +4003,7 @@ fn make_constr_matching(
         Some(((arg, _mut), argl)) => {
             let cstr = pat_as_constr(p);
             let untagged = has_untagged(&cstr.cstr_attributes);
-            let newargs = if cstr.cstr_inlined.is_some()
-                || (untagged && !cstr.cstr_args.is_empty())
+            let newargs = if cstr.cstr_inlined.is_some() || (untagged && !cstr.cstr_args.is_empty())
             {
                 let mut result = vec![(arg.clone(), LetKind::Alias)];
                 result.extend(argl.iter().cloned());
@@ -3986,7 +4012,10 @@ fn make_constr_matching(
                 match &cstr.cstr_tag {
                     ConstructorTag::CstrBlock(_)
                         if constructor_has_optional_shape(cstr)
-                            || (cstr.cstr_name == "Some" && cstr.cstr_consts == 1 && cstr.cstr_nonconsts == 1 && cstr.cstr_arity == 1) =>
+                            || (cstr.cstr_name == "Some"
+                                && cstr.cstr_consts == 1
+                                && cstr.cstr_nonconsts == 1
+                                && cstr.cstr_arity == 1) =>
                     {
                         let from_option = match &p.pat_desc {
                             PatternDesc::Tpat_construct(_, _, args_inner)
@@ -4007,9 +4036,7 @@ fn make_constr_matching(
                                         // Fast path: check type descriptor directly
                                         // (works for Ttuple, Tarrow, Tvariant, Tpackage
                                         // which always return true)
-                                        type_cannot_contain_undefined_no_env(
-                                            ctx_ref, pat.pat_type,
-                                        )
+                                        type_cannot_contain_undefined_no_env(ctx_ref, pat.pat_type)
                                     });
                                 if can_skip {
                                     Primitive::PvalFromOptionNotNest
@@ -4051,17 +4078,15 @@ fn make_constr_matching(
                         result.extend(argl.iter().cloned());
                         result
                     }
-                    ConstructorTag::CstrExtension(_) => {
-                        make_field_args(
-                            FieldDbgInfo::Extension,
-                            Location::none(),
-                            LetKind::Alias,
-                            arg,
-                            1,
-                            cstr.cstr_arity,
-                            argl,
-                        )
-                    }
+                    ConstructorTag::CstrExtension(_) => make_field_args(
+                        FieldDbgInfo::Extension,
+                        Location::none(),
+                        LetKind::Alias,
+                        arg,
+                        1,
+                        cstr.cstr_arity,
+                        argl,
+                    ),
                 }
             };
             let cstr_clone = cstr.clone();
@@ -4069,10 +4094,7 @@ fn make_constr_matching(
                 pm: PatternMatching {
                     cases: Vec::new(),
                     args: newargs,
-                    default: make_default(
-                        &|p2, rem| matcher_constr(&cstr_clone, p2, rem),
-                        def,
-                    ),
+                    default: make_default(&|p2, rem| matcher_constr(&cstr_clone, p2, rem), def),
                 },
                 ctx: filter_ctx(p, ctx),
                 pat: normalize_pat(p),
@@ -4108,13 +4130,11 @@ fn matcher_variant_const(
     rem: &[Pattern],
 ) -> Result<Vec<Pattern>, MatchError> {
     match &p.pat_desc {
-        PatternDesc::Tpat_or(p1, p2, _) => {
-            match matcher_variant_const(lab, p1, rem) {
-                Ok(r) => Ok(r),
-                Err(MatchError::NoMatch) => matcher_variant_const(lab, p2, rem),
-                Err(e) => Err(e),
-            }
-        }
+        PatternDesc::Tpat_or(p1, p2, _) => match matcher_variant_const(lab, p1, rem) {
+            Ok(r) => Ok(r),
+            Err(MatchError::NoMatch) => matcher_variant_const(lab, p2, rem),
+            Err(e) => Err(e),
+        },
         PatternDesc::Tpat_variant(lab1, _, _) if lab1 == lab => Ok(rem.to_vec()),
         PatternDesc::Tpat_any => Ok(rem.to_vec()),
         _ => Err(MatchError::NoMatch),
@@ -4134,10 +4154,7 @@ fn make_variant_matching_constant(
         None => panic!("Matching.make_variant_matching_constant"),
         Some((_, argl)) => {
             let lab_owned = lab.to_string();
-            let def = make_default(
-                &|p2, rem| matcher_variant_const(&lab_owned, p2, rem),
-                def,
-            );
+            let def = make_default(&|p2, rem| matcher_variant_const(&lab_owned, p2, rem), def);
             let ctx = filter_ctx(p, ctx);
             MatchCell {
                 pm: PatternMatching {
@@ -4266,14 +4283,9 @@ fn divide_variant(
 
                                 match pato {
                                     None => {
-                                        let key =
-                                            (lab.clone(), ConstructorTag::CstrConstant(tag));
+                                        let key = (lab.clone(), ConstructorTag::CstrConstant(tag));
                                         add(
-                                            |a| {
-                                                make_variant_matching_constant(
-                                                    p, lab, def, ctx, a,
-                                                )
-                                            },
+                                            |a| make_variant_matching_constant(p, lab, def, ctx, a),
                                             variants,
                                             eq_key,
                                             key,
@@ -4282,17 +4294,11 @@ fn divide_variant(
                                         )
                                     }
                                     Some(pat_inner) => {
-                                        let key =
-                                            (lab.clone(), ConstructorTag::CstrBlock(tag));
-                                        let mut new_patl =
-                                            vec![(**pat_inner).clone()];
+                                        let key = (lab.clone(), ConstructorTag::CstrBlock(tag));
+                                        let mut new_patl = vec![(**pat_inner).clone()];
                                         new_patl.extend(rest_patl.iter().cloned());
                                         add(
-                                            |a| {
-                                                make_variant_matching_nonconst(
-                                                    p, lab, def, ctx, a,
-                                                )
-                                            },
+                                            |a| make_variant_matching_nonconst(p, lab, def, ctx, a),
                                             variants,
                                             eq_key,
                                             key,
@@ -4324,10 +4330,7 @@ fn get_args_var(_p: &Pattern, rem: &[Pattern]) -> Vec<Pattern> {
 }
 
 /// Matcher version of get_args_var for make_default.
-fn matcher_get_args_var(
-    _p: &Pattern,
-    rem: &[Pattern],
-) -> Result<Vec<Pattern>, MatchError> {
+fn matcher_get_args_var(_p: &Pattern, rem: &[Pattern]) -> Result<Vec<Pattern>, MatchError> {
     Ok(rem.to_vec())
 }
 
@@ -4347,7 +4350,14 @@ fn make_var_matching(def: &DefaultEnv, args: &[(RawLambda, LetKind)]) -> Pattern
 /// Divide a pattern matching by variable.
 /// Equivalent to OCaml's `divide_var`.
 fn divide_var(ctx: &[Ctx], pm: &PatternMatching) -> MatchCell {
-    divide_line(ctx_lshift, make_var_matching, get_args_var, omega(), ctx, pm)
+    divide_line(
+        ctx_lshift,
+        make_var_matching,
+        get_args_var,
+        omega(),
+        ctx,
+        pm,
+    )
 }
 
 // --- Tuples (lines 1382-1413) ---
@@ -4372,11 +4382,7 @@ fn get_args_tuple(arity: usize, p: &Pattern, rem: &[Pattern]) -> Vec<Pattern> {
 
 /// Matcher for tuple patterns.
 /// Equivalent to OCaml's `matcher_tuple`.
-fn matcher_tuple(
-    arity: usize,
-    p: &Pattern,
-    rem: &[Pattern],
-) -> Result<Vec<Pattern>, MatchError> {
+fn matcher_tuple(arity: usize, p: &Pattern, rem: &[Pattern]) -> Result<Vec<Pattern>, MatchError> {
     match &p.pat_desc {
         PatternDesc::Tpat_or(_, _, _) => Err(MatchError::OrPat),
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) => {
@@ -4419,10 +4425,7 @@ fn make_tuple_matching(
             PatternMatching {
                 cases: Vec::new(),
                 args: new_args,
-                default: make_default(
-                    &|p2, rem| matcher_tuple(arity, p2, rem),
-                    def,
-                ),
+                default: make_default(&|p2, rem| matcher_tuple(arity, p2, rem), def),
             }
         }
     }
@@ -4460,10 +4463,19 @@ fn record_matching_line(
 /// This version takes the typed record fields directly.
 fn record_matching_line_from_fields(
     num_fields: usize,
-    fields: &[(crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>, LabelDescription, Pattern, bool)],
+    fields: &[(
+        crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
+        LabelDescription,
+        Pattern,
+        bool,
+    )],
 ) -> Vec<Pattern> {
     // Determine the actual size needed: max of num_fields and any label position + 1.
-    let max_pos = fields.iter().map(|(_, lbl, _, _)| lbl.lbl_pos as usize + 1).max().unwrap_or(0);
+    let max_pos = fields
+        .iter()
+        .map(|(_, lbl, _, _)| lbl.lbl_pos as usize + 1)
+        .max()
+        .unwrap_or(0);
     let size = std::cmp::max(num_fields, max_pos);
     let mut patv: Vec<Pattern> = (0..size).map(|_| omega()).collect();
     for (_, lbl, pat, _) in fields {
@@ -4542,37 +4554,22 @@ fn make_record_matching(
                     RecordRepresentation::RecordFloatUnused => {
                         panic!("Record_float_unused")
                     }
-                    RecordRepresentation::RecordRegular => {
-                        RawLambda::Lprim(RawPrimInfo {
-                            primitive: Primitive::Pfield(
-                                lbl.lbl_pos,
-                                fld_record(lbl),
-                            ),
-                            args: vec![arg.clone()],
-                            loc: loc.clone(),
-                        })
-                    }
-                    RecordRepresentation::RecordInlined { .. } => {
-                        RawLambda::Lprim(RawPrimInfo {
-                            primitive: Primitive::Pfield(
-                                lbl.lbl_pos,
-                                fld_record_inline(lbl),
-                            ),
-                            args: vec![arg.clone()],
-                            loc: loc.clone(),
-                        })
-                    }
+                    RecordRepresentation::RecordRegular => RawLambda::Lprim(RawPrimInfo {
+                        primitive: Primitive::Pfield(lbl.lbl_pos, fld_record(lbl)),
+                        args: vec![arg.clone()],
+                        loc: loc.clone(),
+                    }),
+                    RecordRepresentation::RecordInlined { .. } => RawLambda::Lprim(RawPrimInfo {
+                        primitive: Primitive::Pfield(lbl.lbl_pos, fld_record_inline(lbl)),
+                        args: vec![arg.clone()],
+                        loc: loc.clone(),
+                    }),
                     RecordRepresentation::RecordUnboxed(_) => arg.clone(),
-                    RecordRepresentation::RecordExtension => {
-                        RawLambda::Lprim(RawPrimInfo {
-                            primitive: Primitive::Pfield(
-                                lbl.lbl_pos + 1,
-                                fld_record_extension(lbl),
-                            ),
-                            args: vec![arg.clone()],
-                            loc: loc.clone(),
-                        })
-                    }
+                    RecordRepresentation::RecordExtension => RawLambda::Lprim(RawPrimInfo {
+                        primitive: Primitive::Pfield(lbl.lbl_pos + 1, fld_record_extension(lbl)),
+                        args: vec![arg.clone()],
+                        loc: loc.clone(),
+                    }),
                 };
                 let str_kind = match lbl.lbl_mut {
                     MutableFlag::Immutable => LetKind::Alias,
@@ -4582,10 +4579,7 @@ fn make_record_matching(
             }
             new_args.extend(argl.iter().cloned());
             let nfields = all_labels.len();
-            let def = make_default(
-                &|p2, rem| matcher_record(nfields, p2, rem),
-                def,
-            );
+            let def = make_default(&|p2, rem| matcher_record(nfields, p2, rem), def);
             PatternMatching {
                 cases: Vec::new(),
                 args: new_args,
@@ -4640,11 +4634,7 @@ fn get_args_array(p: &Pattern, rem: &[Pattern]) -> Vec<Pattern> {
 
 /// Matcher for array patterns.
 /// Equivalent to OCaml's `matcher_array`.
-fn matcher_array(
-    len: usize,
-    p: &Pattern,
-    rem: &[Pattern],
-) -> Result<Vec<Pattern>, MatchError> {
+fn matcher_array(len: usize, p: &Pattern, rem: &[Pattern]) -> Result<Vec<Pattern>, MatchError> {
     match &p.pat_desc {
         PatternDesc::Tpat_or(_, _, _) => Err(MatchError::OrPat),
         PatternDesc::Tpat_array(args) if args.len() == len => {
@@ -4691,10 +4681,7 @@ fn make_array_matching(
                 ));
             }
             new_args.extend(argl.iter().cloned());
-            let def = make_default(
-                &|p2, rem| matcher_array(len, p2, rem),
-                def,
-            );
+            let def = make_default(&|p2, rem| matcher_array(len, p2, rem), def);
             let ctx = filter_ctx(p, ctx);
             MatchCell {
                 pm: PatternMatching {
@@ -4808,7 +4795,13 @@ fn zero_lam() -> RawLambda {
 
 /// Three-way test on an integer value (less than, equal, greater than zero).
 /// Equivalent to OCaml's `tree_way_test`.
-fn tree_way_test(loc: Location, arg: RawLambda, lt: RawLambda, eq: RawLambda, gt: RawLambda) -> RawLambda {
+fn tree_way_test(
+    loc: Location,
+    arg: RawLambda,
+    lt: RawLambda,
+    eq: RawLambda,
+    gt: RawLambda,
+) -> RawLambda {
     RawLambda::LifThenElse(
         Box::new(RawLambda::Lprim(RawPrimInfo {
             primitive: Primitive::Pintcomp(Comparison::Lt),
@@ -4875,9 +4868,7 @@ pub fn expand_stringswitch(
     next_raise_count: &mut i32,
 ) -> RawLambda {
     match d {
-        None => bind_sw(arg, |arg| {
-            do_make_string_test_tree(loc, arg, sw, 0, None)
-        }),
+        None => bind_sw(arg, |arg| do_make_string_test_tree(loc, arg, sw, 0, None)),
         Some(e) => bind_sw(arg, |arg| {
             make_catch(e, next_raise_count, |d| {
                 do_make_string_test_tree(loc, arg, sw, 1, Some(d))
@@ -4899,7 +4890,11 @@ fn share_actions_tree(
     sw: Vec<(Constant, RawLambda)>,
     d: Option<RawLambda>,
     next_raise_count: &mut i32,
-) -> (Vec<(i32, RawLambda)>, Vec<(Constant, RawLambda)>, Option<RawLambda>) {
+) -> (
+    Vec<(i32, RawLambda)>,
+    Vec<(Constant, RawLambda)>,
+    Option<RawLambda>,
+) {
     let mut store = StoreExp::mk_store();
 
     // Default action is always shared
@@ -5151,7 +5146,13 @@ fn make_test_sequence(
         } else {
             match fail {
                 None => do_tests_nofail(loc.clone(), tst.clone(), arg.clone(), const_lambda_list),
-                Some(fail) => do_tests_fail(loc.clone(), fail.clone(), tst.clone(), arg.clone(), const_lambda_list),
+                Some(fail) => do_tests_fail(
+                    loc.clone(),
+                    fail.clone(),
+                    tst.clone(),
+                    arg.clone(),
+                    const_lambda_list,
+                ),
             }
         }
     }
@@ -5506,10 +5507,7 @@ fn as_interval_canfail(
                 r.extend(fail_rec(cur_high + 1, cur_high + 1, rest, high, store));
                 r
             } else {
-                let mut r = vec![
-                    (cur_low, cur_high, cur_act),
-                    (cur_high + 1, i - 1, 0),
-                ];
+                let mut r = vec![(cur_low, cur_high, cur_act), (cur_high + 1, i - 1, 0)];
                 r.extend(nofail_rec(i, i, act_index, &rest[1..], high, store));
                 r
             }
@@ -5649,23 +5647,20 @@ pub fn call_switcher(
     let mut action_store = crate::raw_lambda::switch::ActionStore::new();
     for act in acts {
         match act {
-            SharedAction::Single(a) => { action_store.act_store(a); }
-            SharedAction::Shared(a) => { action_store.act_store_shared(a); }
+            SharedAction::Single(a) => {
+                action_store.act_store(a);
+            }
+            SharedAction::Shared(a) => {
+                action_store.act_store_shared(a);
+            }
         }
     }
 
     // Call the switch compiler — it handles shared actions internally via abstract_shared
-    crate::raw_lambda::switch::zyva(
-        edges,
-        arg,
-        &cases,
-        &action_store,
-        sw_names,
-        &mut || {
-            *next_raise_count += 1;
-            *next_raise_count
-        },
-    )
+    crate::raw_lambda::switch::zyva(edges, arg, &cases, &action_store, sw_names, &mut || {
+        *next_raise_count += 1;
+        *next_raise_count
+    })
 }
 
 // ============================================================================
@@ -5695,10 +5690,7 @@ fn list_as_pat(pats: &[Pattern]) -> Pattern {
 ///
 /// This requires environment lookups to get all constructors of a type.
 /// We use a simplified approach: extract constructor info from the first pattern.
-fn complete_pats_constrs(
-    ctx_ref: &TypeContext<'_>,
-    pats: &[Pattern],
-) -> Vec<Pattern> {
+fn complete_pats_constrs(ctx_ref: &TypeContext<'_>, pats: &[Pattern]) -> Vec<Pattern> {
     match pats.first() {
         None => panic!("complete_pats_constrs: empty list"),
         Some(p) => {
@@ -5830,79 +5822,180 @@ fn pat_of_constr(ex_pat: &Pattern, cstr: &ConstructorDescription) -> Pattern {
 }
 
 /// Get variant constructors from the environment for a given result type.
-/// Simplified version of OCaml's `get_variant_constructors`.
+/// Equivalent to OCaml's `Parmatch.get_variant_constructors`.
 fn get_variant_constructors_from_env(
     ctx_ref: &TypeContext<'_>,
-    _env: &crate::types::env::Env,
+    env: &crate::types::env::Env,
     result_type: TypeExprRef,
 ) -> Vec<ConstructorDescription> {
+    use crate::types::ctype;
+    use crate::types::decl::{ConstructorArguments, ConstructorDeclaration, TypeKind};
     use crate::types::type_expr::TypeDesc;
 
-    // Expand the type to find the constructor path
-    let ty = ctx_ref.repr(result_type);
-    let desc = ctx_ref.get_desc(ty);
-    match &*desc {
-        TypeDesc::Tconstr { path, .. } => {
-            let path_name = path.name();
-            // Look up the type declaration
-            if let Some(decl) = ctx_ref.find_type_decl_by_path(&path_name) {
-                match &decl.type_kind {
-                    crate::types::decl::TypeKind::TypeVariant(cds) => {
-                        // Build constructor descriptions from the variant
-                        let cstr_arity = |args: &crate::types::decl::ConstructorArguments| -> i32 {
-                            match args {
-                                crate::types::decl::ConstructorArguments::CstrTuple(v) => v.len() as i32,
-                                crate::types::decl::ConstructorArguments::CstrRecord(v) => v.len() as i32,
-                            }
-                        };
-                        let nconsts = cds.iter().filter(|cd| cstr_arity(&cd.cd_args) == 0).count() as i32;
-                        let nnonconsts = cds.len() as i32 - nconsts;
-                        let mut const_idx = 0i32;
-                        let mut nonconst_idx = 0i32;
-                        cds.iter()
-                            .map(|cd| {
-                                let arity = cstr_arity(&cd.cd_args);
-                                let tag = if arity == 0 {
-                                    let t = ConstructorTag::CstrConstant(const_idx);
-                                    const_idx += 1;
-                                    t
-                                } else {
-                                    let t = ConstructorTag::CstrBlock(nonconst_idx);
-                                    nonconst_idx += 1;
-                                    t
-                                };
-                                let args_vec = match &cd.cd_args {
-                                    crate::types::decl::ConstructorArguments::CstrTuple(v) => v.clone(),
-                                    crate::types::decl::ConstructorArguments::CstrRecord(v) => {
-                                        v.iter().map(|ld| ld.ld_type).collect()
-                                    }
-                                };
-                                ConstructorDescription {
-                                    cstr_name: cd.cd_id.name().to_string(),
-                                    cstr_res: result_type,
-                                    cstr_existentials: Vec::new(),
-                                    cstr_args: args_vec,
-                                    cstr_arity: arity,
-                                    cstr_tag: tag,
-                                    cstr_consts: nconsts,
-                                    cstr_nonconsts: nnonconsts,
-                                    cstr_generalized: false,
-                                    cstr_private: crate::types::asttypes::PrivateFlag::Public,
-                                    cstr_loc: Location::none(),
-                                    cstr_attributes: Vec::new(),
-                                    cstr_inlined: None,
-                                }
-                            })
-                            .collect()
-                    }
-                    _ => Vec::new(),
+    fn cstr_arity(args: &ConstructorArguments) -> i32 {
+        match args {
+            ConstructorArguments::CstrTuple(v) => v.len() as i32,
+            ConstructorArguments::CstrRecord(v) => v.len() as i32,
+        }
+    }
+
+    fn build_descriptions(
+        cds: &[ConstructorDeclaration],
+        result_type: TypeExprRef,
+    ) -> Vec<ConstructorDescription> {
+        let nconsts = cds.iter().filter(|cd| cstr_arity(&cd.cd_args) == 0).count() as i32;
+        let nnonconsts = cds.len() as i32 - nconsts;
+        let mut const_idx = 0i32;
+        let mut nonconst_idx = 0i32;
+        cds.iter()
+            .map(|cd| {
+                let arity = cstr_arity(&cd.cd_args);
+                let tag = if arity == 0 {
+                    let t = ConstructorTag::CstrConstant(const_idx);
+                    const_idx += 1;
+                    t
+                } else {
+                    let t = ConstructorTag::CstrBlock(nonconst_idx);
+                    nonconst_idx += 1;
+                    t
+                };
+                let args_vec = match &cd.cd_args {
+                    ConstructorArguments::CstrTuple(v) => v.clone(),
+                    ConstructorArguments::CstrRecord(v) => v.iter().map(|ld| ld.ld_type).collect(),
+                };
+                ConstructorDescription {
+                    cstr_name: cd.cd_id.name().to_string(),
+                    cstr_res: result_type,
+                    cstr_existentials: Vec::new(),
+                    cstr_args: args_vec,
+                    cstr_arity: arity,
+                    cstr_tag: tag,
+                    cstr_consts: nconsts,
+                    cstr_nonconsts: nnonconsts,
+                    cstr_generalized: false,
+                    cstr_private: crate::types::asttypes::PrivateFlag::Public,
+                    cstr_loc: Location::none(),
+                    cstr_attributes: Vec::new(),
+                    cstr_inlined: None,
                 }
-            } else {
-                Vec::new()
+            })
+            .collect()
+    }
+
+    let mut ty = ctx_ref.repr(result_type);
+    for _ in 0..16 {
+        let desc = ctx_ref.get_desc(ty);
+        let TypeDesc::Tconstr { path, .. } = &*desc else {
+            return Vec::new();
+        };
+        let exact_lookup = |decl: &crate::types::decl::TypeDeclaration| match path {
+            crate::types::Path::Pident(_) => true,
+            _ => decl
+                .type_path
+                .as_ref()
+                .is_some_and(|decl_path| decl_path.same(path) || decl_path.name() == path.name()),
+        };
+
+        let env_decl = match env.lookup_type(path) {
+            Ok(decl) if exact_lookup(decl) => Some(decl),
+            _ => None,
+        };
+        let fallback_decl =
+            ctype::lookup_type_decl_for_path_pub(ctx_ref, env, path).filter(&exact_lookup);
+
+        if let Some(decl) = env_decl {
+            match &decl.type_kind {
+                TypeKind::TypeVariant(cds) => return build_descriptions(cds, result_type),
+                TypeKind::TypeAbstract => {
+                    if let Some(manifest) = decl.type_manifest {
+                        let manifest = ctx_ref.repr(manifest);
+                        if manifest != ty {
+                            ty = manifest;
+                            continue;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else if let Some(decl) = fallback_decl {
+            match &decl.type_kind {
+                TypeKind::TypeVariant(cds) => return build_descriptions(cds, result_type),
+                TypeKind::TypeAbstract => {
+                    if let Some(manifest) = decl.type_manifest {
+                        let manifest = ctx_ref.repr(manifest);
+                        if manifest != ty {
+                            ty = manifest;
+                            continue;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
-        _ => Vec::new(),
+
+        if let crate::types::Path::Pdot(parent, type_name, _) = path {
+            fn find_type_in_module_type(
+                ctx_ref: &TypeContext<'_>,
+                env: &crate::types::env::Env,
+                mty: &crate::types::decl::ModuleType,
+                type_name: &str,
+            ) -> Option<crate::types::decl::TypeDeclaration> {
+                match mty {
+                    crate::types::decl::ModuleType::MtySignature(sig) => {
+                        sig.iter().find_map(|item| match item {
+                            crate::types::decl::SignatureItem::SigType(id, decl, _)
+                                if id.name() == type_name =>
+                            {
+                                Some(decl.clone())
+                            }
+                            _ => None,
+                        })
+                    }
+                    crate::types::decl::ModuleType::MtyAlias(_, path)
+                    | crate::types::decl::ModuleType::MtyIdent(path) => {
+                        let resolved = crate::types::ctype::resolve_module_type_through_env(
+                            ctx_ref, env, path,
+                        )?;
+                        find_type_in_module_type(ctx_ref, env, &resolved, type_name)
+                    }
+                    _ => None,
+                }
+            }
+
+            if let Some(module_type) =
+                crate::types::ctype::resolve_module_type_through_env(ctx_ref, env, parent)
+            {
+                if let Some(decl) =
+                    find_type_in_module_type(ctx_ref, env, &module_type, type_name.as_str())
+                {
+                    match &decl.type_kind {
+                        TypeKind::TypeVariant(cds) => return build_descriptions(cds, result_type),
+                        TypeKind::TypeAbstract => {
+                            if let Some(manifest) = decl.type_manifest {
+                                let manifest = ctx_ref.repr(manifest);
+                                if manifest != ty {
+                                    ty = manifest;
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if let Some(expanded) = ctype::expand_head_once(ctx_ref, env, ty) {
+            let expanded = ctx_ref.repr(expanded);
+            if expanded != ty {
+                ty = expanded;
+                continue;
+            }
+        }
+        return Vec::new();
     }
+
+    Vec::new()
 }
 
 /// Compute negative fail action (jump to default).
@@ -5976,9 +6069,10 @@ fn scan_def(
             new_klist.extend(klist);
             klist = new_klist;
         }
-        for (_pats, i) in env.iter().rev() {
+        for (pats, i) in env.iter().rev() {
             if !ctx.is_empty() {
-                jumps = jumps_add(*i, ctx.to_vec(), jumps);
+                let jump_ctx = ctx_lub(&list_as_pat(pats), ctx);
+                jumps = jumps_add(*i, jump_ctx, jumps);
             }
         }
         (klist, jumps)
@@ -6073,9 +6167,7 @@ fn share_actions_tree_string(
     // Build composed wrapper function
     let hs: Box<dyn FnOnce(RawLambda) -> RawLambda> = handlers.into_iter().fold(
         Box::new(|x: RawLambda| x) as Box<dyn FnOnce(RawLambda) -> RawLambda>,
-        |ohs, (_, h)| {
-            Box::new(move |act: RawLambda| h(ohs(act)))
-        },
+        |ohs, (_, h)| Box::new(move |act: RawLambda| h(ohs(act))),
     );
 
     (hs, sw, d)
@@ -6247,10 +6339,7 @@ fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
             }
         }
         Path::Pdot(p, s, pos) => RawLambda::Lprim(RawPrimInfo {
-            primitive: Primitive::Pfield(
-                *pos,
-                FieldDbgInfo::Module { name: s.clone() },
-            ),
+            primitive: Primitive::Pfield(*pos, FieldDbgInfo::Module { name: s.clone() }),
             args: vec![transl_normal_path(p)],
             loc: Location::none(),
         }),
@@ -6285,8 +6374,8 @@ fn normalize_path_via_ctx(
     ctx_ref: &TypeContext<'_>,
     path: &crate::types::path::Path,
 ) -> crate::types::path::Path {
-    use crate::types::path::Path;
     use crate::types::decl::{ModuleType, SignatureItem};
+    use crate::types::path::Path;
 
     match path {
         Path::Pdot(prefix, name, pos) => {
@@ -6307,8 +6396,8 @@ fn normalize_module_path_via_ctx(
     ctx_ref: &TypeContext<'_>,
     path: &crate::types::path::Path,
 ) -> crate::types::path::Path {
-    use crate::types::path::Path;
     use crate::types::decl::{ModuleType, SignatureItem};
+    use crate::types::path::Path;
 
     // First normalize prefix recursively for Pdot
     let path = match path {
@@ -6328,9 +6417,16 @@ fn normalize_module_path_via_ctx(
         Path::Pdot(prefix, name, _) => {
             // Try to find the parent module's signature from multiple caches
             let prefix_name = prefix.name();
-            let sig_opt = ctx_ref.find_resolved_module_sig(&prefix_name)
+            let sig_opt = ctx_ref
+                .find_resolved_module_sig(&prefix_name)
                 .map(|(_, sig)| sig)
-                .or_else(|| ctx_ref.renamed_module_sigs.borrow().get(&prefix_name).cloned());
+                .or_else(|| {
+                    ctx_ref
+                        .renamed_module_sigs
+                        .borrow()
+                        .get(&prefix_name)
+                        .cloned()
+                });
             if let Some(sig) = sig_opt {
                 for item in &sig {
                     if let SignatureItem::SigModule(id, md, _) = item {
@@ -6381,24 +6477,22 @@ fn combine_constructor(
                 default
             } else {
                 let tag = Ident::create_local("tag");
-                let tests = extension_cases.iter().rev().fold(default, |rem, (path, act)| {
-                    let ext = transl_extension_path(ctx_ref, ex_pat.pat_env, path);
-                    RawLambda::LifThenElse(
-                        Box::new(RawLambda::Lprim(RawPrimInfo {
-                            primitive: Primitive::PextensionSlotEq,
-                            args: vec![RawLambda::Lvar(tag.clone()), ext],
-                            loc: loc.clone(),
-                        })),
-                        Box::new(act.clone()),
-                        Box::new(rem),
-                    )
-                });
-                RawLambda::Llet(
-                    LetKind::Alias,
-                    tag,
-                    Box::new(arg),
-                    Box::new(tests),
-                )
+                let tests = extension_cases
+                    .iter()
+                    .rev()
+                    .fold(default, |rem, (path, act)| {
+                        let ext = transl_extension_path(ctx_ref, ex_pat.pat_env, path);
+                        RawLambda::LifThenElse(
+                            Box::new(RawLambda::Lprim(RawPrimInfo {
+                                primitive: Primitive::PextensionSlotEq,
+                                args: vec![RawLambda::Lvar(tag.clone()), ext],
+                                loc: loc.clone(),
+                            })),
+                            Box::new(act.clone()),
+                            Box::new(rem),
+                        )
+                    });
+                RawLambda::Llet(LetKind::Alias, tag, Box::new(arg), Box::new(tests))
             }
         };
         (lambda1, jumps_union(&local_jumps, &total1))
@@ -6433,11 +6527,15 @@ fn combine_constructor(
                         if cstr.cstr_name == "::"
                             || cstr.cstr_name == "[]"
                             || constructor_has_optional_shape(cstr)
-                            || ((cstr.cstr_name == "Some" || cstr.cstr_name == "None") && cstr.cstr_consts == 1 && cstr.cstr_nonconsts == 1) =>
+                            || ((cstr.cstr_name == "Some" || cstr.cstr_name == "None")
+                                && cstr.cstr_consts == 1
+                                && cstr.cstr_nonconsts == 1) =>
                     {
                         // Typically, match on lists or options
                         let is_option = constructor_has_optional_shape(cstr)
-                            || ((cstr.cstr_name == "Some" || cstr.cstr_name == "None") && cstr.cstr_consts == 1 && cstr.cstr_nonconsts == 1);
+                            || ((cstr.cstr_name == "Some" || cstr.cstr_name == "None")
+                                && cstr.cstr_consts == 1
+                                && cstr.cstr_nonconsts == 1);
                         let test_arg = if is_option {
                             RawLambda::Lprim(RawPrimInfo {
                                 primitive: Primitive::PisNotNone,
@@ -6532,11 +6630,9 @@ fn convert_polyvar_list(xs: &[(i32, (String, RawLambda))]) -> Vec<(Vec<(i32, Str
         // Use debug format as a key for structural comparison
         let key = format!("{:?}", act);
         // Try to find an existing entry with the same action key
-        let found_idx = entries.iter().position(|e| {
-            match (&e.key, &key) {
-                (Some(k1), k2) => k1 == k2,
-                _ => false,
-            }
+        let found_idx = entries.iter().position(|e| match (&e.key, &key) {
+            (Some(k1), k2) => k1 == k2,
+            _ => false,
         });
         if let Some(idx) = found_idx {
             entries[idx].hash_names.push((*hash, name.clone()));
@@ -6551,11 +6647,14 @@ fn convert_polyvar_list(xs: &[(i32, (String, RawLambda))]) -> Vec<(Vec<(i32, Str
     }
 
     entries.sort_by_key(|e| e.stamp);
-    entries.into_iter().map(|mut e| {
-        // Sort hashes descending within each group to match OCaml's Switcher.test_sequence ordering
-        e.hash_names.sort_by(|a, b| b.0.cmp(&a.0));
-        (e.hash_names, e.act)
-    }).collect()
+    entries
+        .into_iter()
+        .map(|mut e| {
+            // Sort hashes descending within each group to match OCaml's Switcher.test_sequence ordering
+            e.hash_names.sort_by(|a, b| b.0.cmp(&a.0));
+            (e.hash_names, e.act)
+        })
+        .collect()
 }
 
 /// Create a disjunction of equality tests for polyvar hash values.
@@ -6566,7 +6665,10 @@ fn or_list_polyvar(arg: &RawLambda, hash_names: &[(i32, String)]) -> RawLambda {
         primitive: Primitive::Pintcomp(Comparison::Eq),
         args: vec![
             arg.clone(),
-            RawLambda::Lconst(crate::lambda::constant::Constant::Pointer(format!("{}a", first_hash))),
+            RawLambda::Lconst(crate::lambda::constant::Constant::Pointer(format!(
+                "{}a",
+                first_hash
+            ))),
         ],
         loc: Location::none(),
     });
@@ -6579,7 +6681,10 @@ fn or_list_polyvar(arg: &RawLambda, hash_names: &[(i32, String)]) -> RawLambda {
                     primitive: Primitive::Pintcomp(Comparison::Eq),
                     args: vec![
                         arg.clone(),
-                        RawLambda::Lconst(crate::lambda::constant::Constant::Pointer(format!("{}a", hash))),
+                        RawLambda::Lconst(crate::lambda::constant::Constant::Pointer(format!(
+                            "{}a",
+                            hash
+                        ))),
                     ],
                     loc: Location::none(),
                 }),
@@ -6600,17 +6705,30 @@ fn polyvar_if_chain(
     match (converted.split_first(), &fail) {
         (Some(((_, default_act), rest)), &None) => {
             // No fail: first action is default, rest are if-then-else
-            rest.iter().rev().fold(default_act.clone(), |acc, (hash_names, act)| {
-                let predicate = or_list_polyvar(arg, hash_names);
-                RawLambda::LifThenElse(Box::new(predicate), Box::new(act.clone()), Box::new(acc))
-            })
+            rest.iter()
+                .rev()
+                .fold(default_act.clone(), |acc, (hash_names, act)| {
+                    let predicate = or_list_polyvar(arg, hash_names);
+                    RawLambda::LifThenElse(
+                        Box::new(predicate),
+                        Box::new(act.clone()),
+                        Box::new(acc),
+                    )
+                })
         }
         (_, &Some(ref fail_act)) => {
             // With fail: fail is default, all entries are if-then-else
-            converted.iter().rev().fold(fail_act.clone(), |acc, (hash_names, act)| {
-                let predicate = or_list_polyvar(arg, hash_names);
-                RawLambda::LifThenElse(Box::new(predicate), Box::new(act.clone()), Box::new(acc))
-            })
+            converted
+                .iter()
+                .rev()
+                .fold(fail_act.clone(), |acc, (hash_names, act)| {
+                    let predicate = or_list_polyvar(arg, hash_names);
+                    RawLambda::LifThenElse(
+                        Box::new(predicate),
+                        Box::new(act.clone()),
+                        Box::new(acc),
+                    )
+                })
         }
         (None, &None) => panic!("polyvar_if_chain: empty list with no fail"),
     }
@@ -6681,7 +6799,11 @@ fn combine_variant(
     partial: &Partial,
     ctx: &[Ctx],
     def: &DefaultEnv,
-    c_div: (Vec<((String, ConstructorTag), RawLambda)>, Jumps, Vec<Pattern>),
+    c_div: (
+        Vec<((String, ConstructorTag), RawLambda)>,
+        Jumps,
+        Vec<Pattern>,
+    ),
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps) {
     let (tag_lambda_list, total1, _pats) = c_div;
@@ -6691,7 +6813,11 @@ fn combine_variant(
         for (_, f) in &row.row_fields {
             match btype::row_field_repr(ctx_ref, f) {
                 RowField::Rabsent => {}
-                RowField::Reither { constant: true, ref types, .. } if !types.is_empty() => {}
+                RowField::Reither {
+                    constant: true,
+                    ref types,
+                    ..
+                } if !types.is_empty() => {}
                 _ => num_constr += 1,
             }
         }
@@ -6714,9 +6840,7 @@ fn combine_variant(
     let sig_complete = tag_lambda_list.len() == num_constr;
     let one_action = same_actions_tagged(&tag_lambda_list);
 
-    let (fail, local_jumps) = if sig_complete
-        || matches!(partial, Partial::Total)
-    {
+    let (fail, local_jumps) = if sig_complete || matches!(partial, Partial::Total) {
         (None, jumps_empty())
     } else {
         mk_failaction_neg(partial, ctx, def)
@@ -6731,12 +6855,7 @@ fn combine_variant(
             }
             (_, []) => {
                 // One can compare integers and pointers
-                make_test_sequence_variant_constant(
-                    fail,
-                    arg,
-                    &consts,
-                    next_raise_count,
-                )
+                make_test_sequence_variant_constant(fail, arg, &consts, next_raise_count)
             }
             ([], _) => {
                 let lam = call_switcher_variant_constr(
@@ -6852,7 +6971,8 @@ fn compile_list<K: Clone>(
                     Ok((lambda1, total1)) => {
                         let mut next_totals = vec![jumps_map(|c| ctx_combine(&c), &total1)];
                         next_totals.extend(totals);
-                        let (mut c_rem, total, mut new_pats) = c_rec(compile_fun, next_totals, rem)?;
+                        let (mut c_rem, total, mut new_pats) =
+                            c_rec(compile_fun, next_totals, rem)?;
                         c_rem.insert(0, (key.clone(), lambda1));
                         new_pats.insert(0, cell.pat.clone());
                         Ok((c_rem, total, new_pats))
@@ -6943,7 +7063,11 @@ fn compile_test<K: Clone>(
     compile_fun: &mut dyn FnMut(&[Ctx], &PatternMatching) -> Result<(RawLambda, Jumps), Unused>,
     partial: &Partial,
     divide_fn: &dyn Fn(&[Ctx], &PatternMatching) -> Vec<(K, MatchCell)>,
-    combine_fn: &mut dyn FnMut(&[Ctx], &DefaultEnv, (Vec<(K, RawLambda)>, Jumps, Vec<Pattern>)) -> (RawLambda, Jumps),
+    combine_fn: &mut dyn FnMut(
+        &[Ctx],
+        &DefaultEnv,
+        (Vec<(K, RawLambda)>, Jumps, Vec<Pattern>),
+    ) -> (RawLambda, Jumps),
     ctx: &[Ctx],
     to_match: &PatternMatching,
 ) -> Result<(RawLambda, Jumps), Unused> {
@@ -6998,7 +7122,9 @@ fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
                 _ => bind(LetKind::Alias, v, arg, lam),
             }
         }
-        RawLambda::Lswitch(ls, sw) if sw.sw_consts.len() == 1 && sw.sw_blocks.is_empty() && !approx_present(v, ls) => {
+        RawLambda::Lswitch(ls, sw)
+            if sw.sw_consts.len() == 1 && sw.sw_blocks.is_empty() && !approx_present(v, ls) =>
+        {
             let (i, act) = &sw.sw_consts[0];
             let new_act = lower_bind(v, arg, act.clone());
             RawLambda::Lswitch(
@@ -7009,7 +7135,9 @@ fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
                 },
             )
         }
-        RawLambda::Lswitch(ls, sw) if sw.sw_consts.is_empty() && sw.sw_blocks.len() == 1 && !approx_present(v, ls) => {
+        RawLambda::Lswitch(ls, sw)
+            if sw.sw_consts.is_empty() && sw.sw_blocks.len() == 1 && !approx_present(v, ls) =>
+        {
             let (i, act) = &sw.sw_blocks[0];
             let new_act = lower_bind(v, arg, act.clone());
             RawLambda::Lswitch(
@@ -7064,7 +7192,12 @@ fn comp_exit(ctx: &[Ctx], m: &PatternMatching) -> Result<(RawLambda, Jumps), Unu
 /// Compile a match with multiple handlers (for split results).
 /// Equivalent to OCaml's `comp_match_handlers`.
 fn comp_match_handlers(
-    comp_fun: &mut dyn FnMut(&Partial, &[Ctx], &RawLambda, &PmHalfCompiled) -> Result<(RawLambda, Jumps), Unused>,
+    comp_fun: &mut dyn FnMut(
+        &Partial,
+        &[Ctx],
+        &RawLambda,
+        &PmHalfCompiled,
+    ) -> Result<(RawLambda, Jumps), Unused>,
     partial: &Partial,
     ctx: &[Ctx],
     arg: &RawLambda,
@@ -7079,20 +7212,23 @@ fn comp_match_handlers(
         Ok((first_lam, total)) => {
             c_rec(comp_fun, partial, ctx, arg, first_lam, total, &next_matchs)
         }
-        Err(Unused) => {
-            match next_matchs.split_first() {
-                None => Err(Unused),
-                Some(((_, x), xs)) => {
-                    comp_match_handlers(comp_fun, partial, ctx, arg, x.clone(), xs.to_vec())
-                }
+        Err(Unused) => match next_matchs.split_first() {
+            None => Err(Unused),
+            Some(((_, x), xs)) => {
+                comp_match_handlers(comp_fun, partial, ctx, arg, x.clone(), xs.to_vec())
             }
-        }
+        },
     }
 }
 
 /// Inner recursive function for comp_match_handlers.
 fn c_rec(
-    comp_fun: &mut dyn FnMut(&Partial, &[Ctx], &RawLambda, &PmHalfCompiled) -> Result<(RawLambda, Jumps), Unused>,
+    comp_fun: &mut dyn FnMut(
+        &Partial,
+        &[Ctx],
+        &RawLambda,
+        &PmHalfCompiled,
+    ) -> Result<(RawLambda, Jumps), Unused>,
     partial: &Partial,
     ctx: &[Ctx],
     arg: &RawLambda,
@@ -7107,18 +7243,18 @@ fn c_rec(
             if ctx_i.is_empty() {
                 c_rec(comp_fun, partial, ctx, arg, body, total_body, rem)
             } else {
-                let this_partial = if rem.is_empty() { partial.clone() } else { Partial::Partial };
+                let this_partial = if rem.is_empty() {
+                    partial.clone()
+                } else {
+                    Partial::Partial
+                };
                 match comp_fun(&this_partial, &ctx_i, arg, pm) {
                     Ok((li, total_i)) => c_rec(
                         comp_fun,
                         partial,
                         ctx,
                         arg,
-                        RawLambda::LstaticCatch(
-                            Box::new(body),
-                            (*i, Vec::new()),
-                            Box::new(li),
-                        ),
+                        RawLambda::LstaticCatch(Box::new(body), (*i, Vec::new()), Box::new(li)),
                         jumps_union(&total_i, &total_rem),
                         rem,
                     ),
@@ -7160,14 +7296,12 @@ fn id_of_pattern(pat: &Pattern) -> Option<Ident> {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, _) => Some(id.clone()),
         PatternDesc::Tpat_alias(_, id, _) => Some(id.clone()),
-        PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => {
-            match &args[0].pat_desc {
-                PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
-                    Some(Ident::create_local(id.name()))
-                }
-                _ => None,
+        PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => match &args[0].pat_desc {
+            PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
+                Some(Ident::create_local(id.name()))
             }
-        }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -7194,14 +7328,12 @@ fn lambda_unit() -> RawLambda {
 /// Equivalent to OCaml's `Lambda.patch_guarded`.
 fn patch_guarded(patch: RawLambda, lam: &RawLambda) -> RawLambda {
     match lam {
-        RawLambda::LifThenElse(cond, body, else_br) => {
-            match else_br.as_ref() {
-                RawLambda::LstaticRaise(0, args) if args.is_empty() => {
-                    RawLambda::LifThenElse(cond.clone(), body.clone(), Box::new(patch))
-                }
-                _ => panic!("patch_guarded: unexpected else branch"),
+        RawLambda::LifThenElse(cond, body, else_br) => match else_br.as_ref() {
+            RawLambda::LstaticRaise(0, args) if args.is_empty() => {
+                RawLambda::LifThenElse(cond.clone(), body.clone(), Box::new(patch))
             }
-        }
+            _ => panic!("patch_guarded: unexpected else branch"),
+        },
         RawLambda::Llet(kind, id, lam_inner, body) => RawLambda::Llet(
             *kind,
             id.clone(),
@@ -7238,7 +7370,8 @@ fn compile_match(
                     args: m.args.clone(),
                     default: m.default.clone(),
                 };
-                let (lambda, total) = compile_match(ctx_ref, None, partial, ctx, &remaining, next_raise_count)?;
+                let (lambda, total) =
+                    compile_match(ctx_ref, None, partial, ctx, &remaining, next_raise_count)?;
                 Ok((patch_guarded(lambda, action), total))
             } else {
                 Ok((action.clone(), jumps_empty()))
@@ -7256,20 +7389,19 @@ fn compile_match(
                 args: new_args,
                 default: m.default.clone(),
             };
-            let (first_match, rem) = split_precompile(Some(ctx_ref), &Some(v.clone()), &new_pm, next_raise_count);
+            let (first_match, rem) =
+                split_precompile(Some(ctx_ref), &Some(v.clone()), &new_pm, next_raise_count);
 
-            let mut comp_fn = |partial: &Partial, ctx: &[Ctx], arg: &RawLambda, pmh: &PmHalfCompiled| -> Result<(RawLambda, Jumps), Unused> {
+            let mut comp_fn = |partial: &Partial,
+                               ctx: &[Ctx],
+                               arg: &RawLambda,
+                               pmh: &PmHalfCompiled|
+             -> Result<(RawLambda, Jumps), Unused> {
                 do_compile_matching(ctx_ref, partial, ctx, arg, pmh, next_raise_count)
             };
 
-            let (lam, total) = comp_match_handlers(
-                &mut comp_fn,
-                partial,
-                ctx,
-                &newarg,
-                first_match,
-                rem,
-            )?;
+            let (lam, total) =
+                comp_match_handlers(&mut comp_fn, partial, ctx, &newarg, first_match, rem)?;
             Ok((bind_check(*str_kind, &v, arg, lam), total))
         }
         (cases, []) if !cases.is_empty() => {
@@ -7300,17 +7432,15 @@ fn do_compile_matching(
         PmHalfCompiled::Pm(pm) => {
             let pat = what_is_cases(&pm.cases);
             match &pat.pat_desc {
-                PatternDesc::Tpat_any => {
-                    compile_no_test(
-                        ctx_ref,
-                        &|ctx, pm| divide_var(ctx, pm),
-                        &|ctx| ctx_rshift(ctx),
-                        partial,
-                        ctx,
-                        pm,
-                        next_raise_count,
-                    )
-                }
+                PatternDesc::Tpat_any => compile_no_test(
+                    ctx_ref,
+                    &|ctx, pm| divide_var(ctx, pm),
+                    &|ctx| ctx_rshift(ctx),
+                    partial,
+                    ctx,
+                    pm,
+                    next_raise_count,
+                ),
                 PatternDesc::Tpat_tuple(patl) => {
                     let arity = patl.len();
                     let norm_pat = normalize_pat(&pat);
@@ -7423,7 +7553,8 @@ fn do_compile_matching(
                     let names: Option<SwitchNames> = None;
                     let loc = Location::none();
                     let arg_clone = arg.clone();
-                    let row_desc = extract_row_from_type_with_env(ctx_ref, pat.pat_type, pat.pat_env);
+                    let row_desc =
+                        extract_row_from_type_with_env(ctx_ref, pat.pat_type, pat.pat_env);
                     let row_desc2 = row_desc.clone();
                     compile_test_wrapper(
                         ctx_ref,
@@ -7464,10 +7595,17 @@ fn do_compile_matching(
         }
         PmHalfCompiled::PmOr(PmOrCompiled { body, handlers, .. }) => {
             let (lam, total) = compile_match(ctx_ref, None, partial, ctx, body, next_raise_count)?;
-            let mut compile_fn = |ctx: &[Ctx], pm: &PatternMatching| -> Result<(RawLambda, Jumps), Unused> {
-                compile_match(ctx_ref, None, partial, ctx, pm, next_raise_count)
-            };
-            Ok(compile_orhandlers(&mut compile_fn, lam, total, ctx, handlers.clone()))
+            let mut compile_fn =
+                |ctx: &[Ctx], pm: &PatternMatching| -> Result<(RawLambda, Jumps), Unused> {
+                    compile_match(ctx_ref, None, partial, ctx, pm, next_raise_count)
+                };
+            Ok(compile_orhandlers(
+                &mut compile_fn,
+                lam,
+                total,
+                ctx,
+                handlers.clone(),
+            ))
         }
     }
 }
@@ -7484,7 +7622,14 @@ fn compile_no_test(
     next_raise_count: &mut i32,
 ) -> Result<(RawLambda, Jumps), Unused> {
     let cell = divide_fn(ctx, to_match);
-    let (lambda, total) = compile_match(ctx_ref, None, partial, &cell.ctx, &cell.pm, next_raise_count)?;
+    let (lambda, total) = compile_match(
+        ctx_ref,
+        None,
+        partial,
+        &cell.ctx,
+        &cell.pm,
+        next_raise_count,
+    )?;
     Ok((lambda, jumps_map(|c| up_ctx(&c), &total)))
 }
 
@@ -7516,7 +7661,12 @@ fn compile_test_wrapper<K: Clone>(
     ctx_ref: &TypeContext<'_>,
     partial: &Partial,
     divide_fn: &dyn Fn(&[Ctx], &PatternMatching) -> Vec<(K, MatchCell)>,
-    combine_fn: &dyn Fn(&[Ctx], &DefaultEnv, (Vec<(K, RawLambda)>, Jumps, Vec<Pattern>), &mut i32) -> (RawLambda, Jumps),
+    combine_fn: &dyn Fn(
+        &[Ctx],
+        &DefaultEnv,
+        (Vec<(K, RawLambda)>, Jumps, Vec<Pattern>),
+        &mut i32,
+    ) -> (RawLambda, Jumps),
     ctx: &[Ctx],
     pm: &PatternMatching,
     next_raise_count: &mut i32,
@@ -7530,20 +7680,19 @@ fn compile_test_wrapper<K: Clone>(
 
     // Step 2: compile_list
     let c_div = {
-        let mut compile_fn = |ctx: &[Ctx], pm: &PatternMatching| -> Result<(RawLambda, Jumps), Unused> {
-            compile_match(ctx_ref, None, partial, ctx, pm, rc.get_mut())
-        };
+        let mut compile_fn =
+            |ctx: &[Ctx], pm: &PatternMatching| -> Result<(RawLambda, Jumps), Unused> {
+                compile_match(ctx_ref, None, partial, ctx, pm, rc.get_mut())
+            };
         compile_list(&mut compile_fn, division)?
     };
 
     // Step 3: combine
     match &c_div {
-        (list, _, _) if list.is_empty() => {
-            match mk_failaction_neg(partial, ctx, &pm.default) {
-                (None, _) => Err(Unused),
-                (Some(l), total) => Ok((l, total)),
-            }
-        }
+        (list, _, _) if list.is_empty() => match mk_failaction_neg(partial, ctx, &pm.default) {
+            (None, _) => Err(Unused),
+            (Some(l), total) => Ok((l, total)),
+        },
         _ => Ok(combine_fn(ctx, &pm.default, c_div, rc.get_mut())),
     }
 }
@@ -7551,9 +7700,15 @@ fn compile_test_wrapper<K: Clone>(
 /// Extract all record label descriptions from a Tpat_record pattern's fields.
 /// Sorted by field position (lbl_pos).
 fn get_all_labels_from_record_fields(
-    fields: &[(crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>, LabelDescription, Pattern, bool)],
+    fields: &[(
+        crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
+        LabelDescription,
+        Pattern,
+        bool,
+    )],
 ) -> Vec<LabelDescription> {
-    let mut labels: Vec<LabelDescription> = fields.iter().map(|(_, lbl, _, _)| lbl.clone()).collect();
+    let mut labels: Vec<LabelDescription> =
+        fields.iter().map(|(_, lbl, _, _)| lbl.clone()).collect();
     labels.sort_by_key(|l| l.lbl_pos);
     labels
 }
@@ -7564,7 +7719,12 @@ fn get_all_labels_from_record_fields(
 fn resolve_all_record_labels(
     ctx_ref: &TypeContext<'_>,
     pat: &Pattern,
-    fields: &[(crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>, LabelDescription, Pattern, bool)],
+    fields: &[(
+        crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
+        LabelDescription,
+        Pattern,
+        bool,
+    )],
 ) -> Vec<LabelDescription> {
     if fields.is_empty() {
         return Vec::new();
@@ -7637,13 +7797,26 @@ fn resolve_labels_from_type(
     // Look up the parent type declaration and find the constructor's inline record
     if let crate::types::Path::Pdot(ref parent_path, ref cstr_name, _) = path {
         // Try to find the parent type declaration
-        let parent_decl = env.lookup_type(parent_path).ok().cloned()
-            .or_else(|| ctx_ref.find_type_decl_by_path(&parent_path.name()).map(|d| d.clone()))
-            .or_else(|| ctx_ref.find_type_decl(&parent_path.last()).map(|d| d.clone()))
+        let parent_decl = env
+            .lookup_type(parent_path)
+            .ok()
+            .cloned()
+            .or_else(|| {
+                ctx_ref
+                    .find_type_decl_by_path(&parent_path.name())
+                    .map(|d| d.clone())
+            })
+            .or_else(|| {
+                ctx_ref
+                    .find_type_decl(&parent_path.last())
+                    .map(|d| d.clone())
+            })
             .or_else(|| {
                 if let crate::types::Path::Pident(ref id) = **parent_path {
                     if id.stamp() != 0 {
-                        ctx_ref.find_type_decl_by_stamp(id.stamp()).map(|d| d.clone())
+                        ctx_ref
+                            .find_type_decl_by_stamp(id.stamp())
+                            .map(|d| d.clone())
                     } else {
                         None
                     }
@@ -7655,7 +7828,9 @@ fn resolve_labels_from_type(
             if let crate::types::TypeKind::TypeVariant(ref constrs) = parent_decl.type_kind {
                 for cd in constrs {
                     if cd.cd_id.name() == cstr_name.as_str() {
-                        if let crate::types::ConstructorArguments::CstrRecord(ref labels) = cd.cd_args {
+                        if let crate::types::ConstructorArguments::CstrRecord(ref labels) =
+                            cd.cd_args
+                        {
                             // Determine the block tag for this constructor
                             let mut block_tag = 0i32;
                             let num_nonconsts = constrs.iter().filter(|c| {
@@ -7679,7 +7854,11 @@ fn resolve_labels_from_type(
                                 num_nonconsts,
                                 attrs: cd.cd_attributes.clone(),
                             };
-                            return Some(build_label_descriptions(labels, &repr, parent_decl.type_private));
+                            return Some(build_label_descriptions(
+                                labels,
+                                &repr,
+                                parent_decl.type_private,
+                            ));
                         }
                     }
                 }
@@ -7695,21 +7874,25 @@ fn build_label_descriptions(
     repr: &RecordRepresentation,
     private: crate::types::asttypes::PrivateFlag,
 ) -> Vec<LabelDescription> {
-    labels.iter().enumerate().map(|(pos, ld)| {
-        LabelDescription {
-            lbl_name: ld.ld_id.name().to_string(),
-            lbl_res: TypeExprRef(0), // Not used by matching
-            lbl_arg: ld.ld_type,
-            lbl_mut: ld.ld_mutable,
-            lbl_optional: ld.ld_optional,
-            lbl_pos: pos as i32,
-            lbl_all: crate::types::decl::LabelArrayRef(0),
-            lbl_repres: repr.clone(),
-            lbl_private: private,
-            lbl_loc: ld.ld_loc.clone(),
-            lbl_attributes: ld.ld_attributes.clone(),
-        }
-    }).collect()
+    labels
+        .iter()
+        .enumerate()
+        .map(|(pos, ld)| {
+            LabelDescription {
+                lbl_name: ld.ld_id.name().to_string(),
+                lbl_res: TypeExprRef(0), // Not used by matching
+                lbl_arg: ld.ld_type,
+                lbl_mut: ld.ld_mutable,
+                lbl_optional: ld.ld_optional,
+                lbl_pos: pos as i32,
+                lbl_all: crate::types::decl::LabelArrayRef(0),
+                lbl_repres: repr.clone(),
+                lbl_private: private,
+                lbl_loc: ld.ld_loc.clone(),
+                lbl_attributes: ld.ld_attributes.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Extract a RowDesc from a type expression (for variant matching).
@@ -7720,8 +7903,8 @@ fn extract_row_from_type_with_env(
     ty: TypeExprRef,
     env_ref: crate::types::typedtree::EnvRef,
 ) -> RowDesc {
-    use crate::types::type_expr::TypeDesc;
     use crate::types::btype;
+    use crate::types::type_expr::TypeDesc;
 
     // First try expanding with the environment
     if let Some(env) = ctx_ref.get_typed_env(env_ref) {
@@ -7737,8 +7920,8 @@ fn extract_row_from_type_with_env(
 }
 
 fn extract_row_from_type(ctx_ref: &TypeContext<'_>, ty: TypeExprRef) -> RowDesc {
-    use crate::types::type_expr::TypeDesc;
     use crate::types::btype;
+    use crate::types::type_expr::TypeDesc;
 
     // Expand through links, Tconstr, and row_more to find the variant row
     let mut current = ctx_ref.repr(ty);
@@ -7802,10 +7985,7 @@ fn extract_row_from_type(ctx_ref: &TypeContext<'_>, ty: TypeExprRef) -> RowDesc 
 
 /// Placeholder for names_from_construct_pattern.
 /// In OCaml this is set by Lam_compile; for now returns None.
-fn names_from_construct_pattern(
-    _ctx_ref: &TypeContext<'_>,
-    _pat: &Pattern,
-) -> Option<SwitchNames> {
+fn names_from_construct_pattern(_ctx_ref: &TypeContext<'_>, _pat: &Pattern) -> Option<SwitchNames> {
     None
 }
 
@@ -7823,12 +8003,10 @@ fn find_in_pat(pred: &dyn Fn(&PatternDesc) -> bool, p: &Pattern) -> bool {
         PatternDesc::Tpat_alias(p, _, _) | PatternDesc::Tpat_variant(_, Some(p), _) => {
             find_in_pat(pred, p)
         }
-        PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_construct(_, _, ps) | PatternDesc::Tpat_array(ps) => {
-            ps.iter().any(|p| find_in_pat(pred, p))
-        }
-        PatternDesc::Tpat_record(lpats, _) => {
-            lpats.iter().any(|(_, _, p, _)| find_in_pat(pred, p))
-        }
+        PatternDesc::Tpat_tuple(ps)
+        | PatternDesc::Tpat_construct(_, _, ps)
+        | PatternDesc::Tpat_array(ps) => ps.iter().any(|p| find_in_pat(pred, p)),
+        PatternDesc::Tpat_record(lpats, _) => lpats.iter().any(|(_, _, p, _)| find_in_pat(pred, p)),
         PatternDesc::Tpat_or(p, q, _) => find_in_pat(pred, p) || find_in_pat(pred, q),
         PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_var(_, _)
@@ -7841,9 +8019,9 @@ fn find_in_pat(pred: &dyn Fn(&PatternDesc) -> bool, p: &Pattern) -> bool {
 /// Equivalent to OCaml's `have_mutable_field`.
 fn have_mutable_field(p: &PatternDesc) -> bool {
     match p {
-        PatternDesc::Tpat_record(lps, _) => lps.iter().any(|(_, lbl, _, _)| {
-            matches!(lbl.lbl_mut, MutableFlag::Mutable)
-        }),
+        PatternDesc::Tpat_record(lps, _) => lps
+            .iter()
+            .any(|(_, lbl, _, _)| matches!(lbl.lbl_mut, MutableFlag::Mutable)),
         _ => false,
     }
 }
@@ -7856,10 +8034,7 @@ fn is_mutable(p: &Pattern) -> bool {
 
 /// Downgrade Total to Partial when needed.
 /// Equivalent to OCaml's `check_partial` (single pattern version).
-fn check_partial_single(
-    pat_act_list: &[(Pattern, RawLambda)],
-    partial: Partial,
-) -> Partial {
+fn check_partial_single(pat_act_list: &[(Pattern, RawLambda)], partial: Partial) -> Partial {
     match partial {
         Partial::Partial => Partial::Partial,
         Partial::Total => {
@@ -7878,17 +8053,14 @@ fn check_partial_single(
 
 /// Downgrade Total to Partial when needed (list of patterns version).
 /// Equivalent to OCaml's `check_partial_list`.
-fn check_partial_list(
-    pat_act_list: &[(Vec<Pattern>, RawLambda)],
-    partial: Partial,
-) -> Partial {
+fn check_partial_list(pat_act_list: &[(Vec<Pattern>, RawLambda)], partial: Partial) -> Partial {
     match partial {
         Partial::Partial => Partial::Partial,
         Partial::Total => {
             if pat_act_list.is_empty()
-                || pat_act_list.iter().any(|(pats, lam)| {
-                    pats.iter().any(|p| is_mutable(p)) && is_guarded(lam)
-                })
+                || pat_act_list
+                    .iter()
+                    .any(|(pats, lam)| pats.iter().any(|p| is_mutable(p)) && is_guarded(lam))
             {
                 Partial::Partial
             } else {
@@ -7918,11 +8090,7 @@ fn check_total(
     if jumps_is_empty(total) {
         lambda
     } else {
-        RawLambda::LstaticCatch(
-            Box::new(lambda),
-            (i, Vec::new()),
-            Box::new(handler_fun()),
-        )
+        RawLambda::LstaticCatch(Box::new(lambda), (i, Vec::new()), Box::new(handler_fun()))
     }
 }
 
@@ -7949,7 +8117,14 @@ pub fn compile_matching(
                 args: vec![(arg, LetKind::Strict)],
                 default: vec![(vec![vec![omega()]], raise_num)],
             };
-            match compile_match(ctx_ref, None, &partial, &start_ctx(1), &pm, next_raise_count) {
+            match compile_match(
+                ctx_ref,
+                None,
+                &partial,
+                &start_ctx(1),
+                &pm,
+                next_raise_count,
+            ) {
                 Ok((lambda, total)) => check_total(&total, lambda, raise_num, handler_fun),
                 Err(Unused) => panic!("compile_matching: Unused"),
             }
@@ -7963,7 +8138,14 @@ pub fn compile_matching(
                 args: vec![(arg, LetKind::Strict)],
                 default: Vec::new(),
             };
-            match compile_match(ctx_ref, None, &partial, &start_ctx(1), &pm, next_raise_count) {
+            match compile_match(
+                ctx_ref,
+                None,
+                &partial,
+                &start_ctx(1),
+                &pm,
+                next_raise_count,
+            ) {
                 Ok((lambda, total)) => {
                     assert!(jumps_is_empty(&total));
                     lambda
@@ -8047,11 +8229,13 @@ pub fn for_trywith(
     let param_clone = param.clone();
     compile_matching(
         ctx_ref,
-        || RawLambda::Lprim(RawPrimInfo {
-            primitive: Primitive::Praise,
-            args: vec![param_clone],
-            loc: Location::none(),
-        }),
+        || {
+            RawLambda::Lprim(RawPrimInfo {
+                primitive: Primitive::Praise,
+                args: vec![param_clone],
+                loc: Location::none(),
+            })
+        },
         param,
         pat_act_list,
         Partial::Partial,
@@ -8201,10 +8385,12 @@ fn flatten_cases(
 /// Flatten a matrix.
 /// Equivalent to OCaml's `flatten_matrix`.
 fn flatten_matrix(size: usize, pss: &Matrix) -> Result<Matrix, CannotFlattenExn> {
-    pss.iter().rev().try_fold(Vec::new(), |r, ps| match ps.as_slice() {
-        [p] => flatten_pat_line(size, p, r),
-        _ => Err(CannotFlattenExn),
-    })
+    pss.iter()
+        .rev()
+        .try_fold(Vec::new(), |r, ps| match ps.as_slice() {
+            [p] => flatten_pat_line(size, p, r),
+            _ => Err(CannotFlattenExn),
+        })
 }
 
 /// Flatten default environment.
@@ -8274,16 +8460,20 @@ fn compile_flattened(
     next_raise_count: &mut i32,
 ) -> Result<(RawLambda, Jumps), Unused> {
     match pmh {
-        PmHalfCompiled::Pm(pm) => {
-            compile_match(ctx_ref, None, partial, ctx, pm, next_raise_count)
-        }
+        PmHalfCompiled::Pm(pm) => compile_match(ctx_ref, None, partial, ctx, pm, next_raise_count),
         PmHalfCompiled::PmOr(PmOrCompiled { body, handlers, .. }) => {
-            let (lam, total) =
-                compile_match(ctx_ref, None, partial, ctx, body, next_raise_count)?;
-            let mut compile_fn = |ctx: &[Ctx], pm: &PatternMatching| -> Result<(RawLambda, Jumps), Unused> {
-                compile_match(ctx_ref, None, partial, ctx, pm, next_raise_count)
-            };
-            Ok(compile_orhandlers(&mut compile_fn, lam, total, ctx, handlers.clone()))
+            let (lam, total) = compile_match(ctx_ref, None, partial, ctx, body, next_raise_count)?;
+            let mut compile_fn =
+                |ctx: &[Ctx], pm: &PatternMatching| -> Result<(RawLambda, Jumps), Unused> {
+                    compile_match(ctx_ref, None, partial, ctx, pm, next_raise_count)
+                };
+            Ok(compile_orhandlers(
+                &mut compile_fn,
+                lam,
+                total,
+                ctx,
+                handlers.clone(),
+            ))
         }
         PmHalfCompiled::PmVar(_) => panic!("compile_flattened: PmVar"),
     }
@@ -8313,11 +8503,7 @@ pub fn do_for_multiple_match(
                         .collect(),
                     args: vec![(
                         RawLambda::Lprim(RawPrimInfo {
-                            primitive: Primitive::Pmakeblock(
-                                0,
-                                TagInfo::Tuple,
-                                Mutable::Immutable,
-                            ),
+                            primitive: Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
                             args: paraml.clone(),
                             loc: loc.clone(),
                         }),
@@ -8336,11 +8522,7 @@ pub fn do_for_multiple_match(
                     .collect(),
                 args: vec![(
                     RawLambda::Lprim(RawPrimInfo {
-                        primitive: Primitive::Pmakeblock(
-                            0,
-                            TagInfo::Tuple,
-                            Mutable::Immutable,
-                        ),
+                        primitive: Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
                         args: paraml.clone(),
                         loc: loc.clone(),
                     }),
@@ -8358,7 +8540,10 @@ pub fn do_for_multiple_match(
         let size = paraml.len();
 
         // Debug: print what split_precompile produced
-        let idl: Vec<Ident> = paraml.iter().map(|_| Ident::create_local("match")).collect();
+        let idl: Vec<Ident> = paraml
+            .iter()
+            .map(|_| Ident::create_local("match"))
+            .collect();
         let args: Vec<(RawLambda, LetKind)> = idl
             .iter()
             .map(|id| (RawLambda::Lvar(id.clone()), LetKind::Alias))
@@ -8373,7 +8558,11 @@ pub fn do_for_multiple_match(
             })
             .collect::<Result<_, CannotFlattenExn>>()?;
 
-        let mut compile_fn = |partial: &Partial, ctx: &[Ctx], arg: &RawLambda, pmh: &PmHalfCompiled| -> Result<(RawLambda, Jumps), Unused> {
+        let mut compile_fn = |partial: &Partial,
+                              ctx: &[Ctx],
+                              arg: &RawLambda,
+                              pmh: &PmHalfCompiled|
+         -> Result<(RawLambda, Jumps), Unused> {
             compile_flattened(ctx_ref, partial, ctx, arg, pmh, next_raise_count)
         };
 
@@ -8410,7 +8599,14 @@ pub fn do_for_multiple_match(
         Ok(lam) => lam,
         Err(CannotFlattenExn) => {
             // Fallback: compile without flattening
-            match compile_match(ctx_ref, None, &partial, &start_ctx(1), &pm1, next_raise_count) {
+            match compile_match(
+                ctx_ref,
+                None,
+                &partial,
+                &start_ctx(1),
+                &pm1,
+                next_raise_count,
+            ) {
                 Ok((lambda, total)) => match &partial {
                     Partial::Partial => {
                         let loc_clone = loc.clone();
@@ -8458,7 +8654,20 @@ pub fn for_multiple_match(
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let v_paraml: Vec<(Ident, Option<RawLambda>)> = paraml.iter().map(param_to_var).collect();
-    let new_paraml: Vec<RawLambda> = v_paraml.iter().map(|(v, _)| RawLambda::Lvar(v.clone())).collect();
-    let inner = do_for_multiple_match(ctx_ref, loc, new_paraml, pat_act_list, partial, next_raise_count);
-    v_paraml.into_iter().rev().fold(inner, |body, v_eo| bind_opt(v_eo, body))
+    let new_paraml: Vec<RawLambda> = v_paraml
+        .iter()
+        .map(|(v, _)| RawLambda::Lvar(v.clone()))
+        .collect();
+    let inner = do_for_multiple_match(
+        ctx_ref,
+        loc,
+        new_paraml,
+        pat_act_list,
+        partial,
+        next_raise_count,
+    );
+    v_paraml
+        .into_iter()
+        .rev()
+        .fold(inner, |body, v_eo| bind_opt(v_eo, body))
 }

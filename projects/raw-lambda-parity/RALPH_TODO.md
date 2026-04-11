@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 626/657 (95.3%), 31 failures, 89 hunks
+**Status:** 626/657 (95.3%), 31 failures, 85 hunks
 
 ## Goal
 
@@ -16,7 +16,7 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
 - Unoptimized lambda parity: **626/657**
-- Parity hunks: **89**
+- Parity hunks: **85**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 
 ## Working Rules
@@ -101,19 +101,24 @@ When all unseen constructors share the same exit ID, `reintroduce_fail` (thresho
 removes explicit cases and replaces with `default:`. OCaml has different exits per
 constructor (from multiple default entries), so `reintroduce_fail` doesn't trigger.
 
-### scan_def fail-case order now matches OCaml
-Rust `scan_def` was building the positive-fail constructor list in the reverse group order.
-OCaml folds `env` in list order and prepends each group ahead of the accumulator, which
-restores oldest-first constructor groups. The Rust port now matches that constructor-list
-ordering while keeping the current jump-context workaround in place.
+### scan_def jump contexts now match OCaml
+Rust `scan_def` now uses OCaml's real jump context again:
+`ctx_lub (list_as_pat pats) ctx`. The crash on `gpr_1698_test`, `inline_map2_test`,
+`test_set`, and `string_set` was not in `scan_def` itself. The real bug was in
+`get_variant_constructors`: qualified `Pdot` result types like `Set_gen.t` were hitting
+`Env.lookup_type` leaf fallback and resolving to the local alias `type t = Set_gen.t<elt>`
+instead of the parent module's actual variant declaration. That forced `complete_pats_constrs`
+to synthesize a fake one-arg unseen constructor and poisoned the downstream contexts.
 
-**Result:** full raw baseline stays **626/657** with **89** hunks. This is a verified
-OCaml-aligned cleanup, but it does NOT fix the remaining inner-handler mismatch by itself.
+The Rust port now:
+- requires exact-path matches for `env.lookup_type` / `lookup_type_decl_for_path_pub`
+- resolves `Pdot(parent, name)` through the parent module signature when the direct type
+  lookup is abstract or alias-backed
 
-**Next investigation:** switching the jump side of `scan_def` from the current outer-context
-workaround back to OCaml's `ctx_lub (list_as_pat pats) ctx` still exposes `ctx_lshift`
-panics in `gpr_1698_test`, `inline_map2_test`, and `test_set`. The remaining bug is in the
-downstream context remapping, not in `do_split_or`.
+**Result:** full raw baseline stays **626/657** with **85** hunks. This is a verified
+OCaml-aligned fix that restores full compile coverage under the precise `scan_def` port and
+removes four raw diff hunks, but it does NOT fix the remaining inner-handler mismatch by
+itself.
 
 ### get_mins order now matches OCaml
 Rust `get_mins` was preserving survivors in forward order, while OCaml prepends survivors on
@@ -170,18 +175,29 @@ Final parity: **626/657** with **89** hunks
 - Same-stamp module skip in includemod to avoid false Tcoerce_structure
 - Recursion depth guard in modtypes_inner for Pmty_functor
 
-### 2026-04-11 (scan_def ordering)
+### 2026-04-11 (scan_def jump contexts + qualified variant lookup)
 
-Verified against OCaml that `scan_def` builds its positive-fail constructor list by
-folding `env` in list order and prepending each group's constructors ahead of the
-accumulator. Updated Rust to match that constructor-list ordering.
+Restored OCaml's real `scan_def` jump context:
+`ctx_lub (list_as_pat pats) ctx`.
 
-**Baseline after change:** still **626/657** with **89** hunks.
+The follow-up crash came from qualified variant lookup, not from `scan_def`. For
+`Set_gen.t` and similar `Pdot` result types, Rust `get_variant_constructors` was accepting
+`Env.lookup_type` leaf fallback and retrieving the local alias declaration instead of the
+parent module's real variant declaration. That made `complete_pats_constrs` synthesize a
+fake unseen non-constant constructor with arity 1, which later broke `ctx_lshift`.
 
-**Important follow-up:** changing the jump side of `scan_def` to full OCaml semantics
-(`ctx_lub (list_as_pat pats) ctx`) still crashes several focused matching files, so the
-remaining divergence is in later context remapping / handler compilation, not in the
-constructor-list ordering itself.
+Updated Rust raw matching to:
+- require exact-path matches before trusting `env.lookup_type`
+- fall back to exact qualified-type resolution via `lookup_type_decl_for_path_pub`
+- resolve `Pdot(parent, name)` through `resolve_module_type_through_env` and scan the
+  parent signature for the real `SigType`
+
+**Baseline after change:** still **626/657**, but parity hunks improve **89 -> 85** with
+compile coverage held at **657/657**.
+
+**Takeaway:** the remaining matching failures are still in inner handler/default
+compilation, but the `scan_def` context path is now back on the OCaml control flow and the
+qualified-constructor alias bug is removed.
 
 ### 2026-04-11 (get_mins ordering)
 
