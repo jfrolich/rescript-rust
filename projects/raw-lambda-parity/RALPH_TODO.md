@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 648/657 (98.6%), 5 parity failures + 4 compile issues, 13 hunks
+**Status:** 649/657 (98.8%), 4 parity failures + 4 compile issues, 12 hunks
 
 ## Goal
 
@@ -15,8 +15,8 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **653/657** on the 16-way authoritative run
-- Unoptimized lambda parity: **648/657**
-- Parity hunks: **13**
+- Unoptimized lambda parity: **649/657**
+- Parity hunks: **12**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 - Raw timeouts on the authoritative run: `Import.res`, `global_module_alias_test.res`
 - Raw crashes on the authoritative run: `defunctor_make_test.res`, `derive_projector_test.res`
@@ -33,15 +33,14 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 5 Parity Failures by Category
+## Remaining 4 Parity Failures by Category
 
-### Module coercion / alias lowering (2 parity files)
-coercion_module_alias_test, recmodule
+### Module coercion / alias lowering (1 parity file)
+coercion_module_alias_test
 
 **Issue:** preserving child aliases in extracted structure signatures is now correct, but the
-remaining raw lowering still diverges from OCaml for downstream module coercions / includes /
-recursive-module runtime shapes. `derive_projector_test` still crashes in the same broader
-module/signature-comparison area.
+remaining raw lowering still diverges from OCaml for downstream module coercions / includes.
+`derive_projector_test` still crashes in the same broader module/signature-comparison area.
 
 ### Dict pattern compilation (2 files)
 json_decorders, stdlib_Stdlib_DictTests
@@ -169,6 +168,26 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (module expressions now keep typing envs for raw recmodule shapes)
+
+OCaml `typemod.ml` stores the current typing environment on every `module_expr` it builds,
+and `check_recmodule_inclusion` wraps recursive-module bodies in `Tmod_constraint` nodes with
+that environment intact. Rust was still zeroing `mod_env` on several module-expression forms
+(`Pmod_structure`, `Pmod_functor`, `Pmod_apply`, `Pmod_unpack`) and on the special
+`Pstr_recmodule` constraint wrapper, so `Transl_recmodule.init_shape` could not scrape
+qualified module-type constraints like `Infra.Layer` / `Adapter.Layer`.
+
+Rust now:
+- stores `store_typed_env(env)` on the affected module-expression constructors instead of
+  `EnvRef(0)`
+- stores the recursive typing environment on the recmodule `Tmod_constraint` wrapper
+- keeps `lookup_modtype` on dotted paths exact instead of falling back to the leaf modtype name
+
+**Result:** the authoritative raw baseline improves to **649/657** with **12** hunks, and
+`recmodule` drops out of the parity failure set. The remaining failures are now
+`bs_poly_map_test`, `coercion_module_alias_test`, `json_decorders`, and
+`stdlib_Stdlib_DictTests`.
 
 ### 2026-04-11 (constrained alias modules keep Mta_absent for wrap_constraint)
 

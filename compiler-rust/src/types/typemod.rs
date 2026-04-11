@@ -7027,6 +7027,7 @@ fn type_module_expr_with_alias<'a>(
         ParsedModuleExprDesc::Pmod_structure(items) => {
             // Module structure: { ... }
             let (structure, _new_env) = type_structure(tctx, env, arena, items)?;
+            let env_ref = tctx.type_ctx.store_typed_env(env);
 
             // Like OCaml: if simplify_signature would shrink the signature
             // (duplicate value names), wrap in Tmod_constraint implicit
@@ -7036,7 +7037,7 @@ fn type_module_expr_with_alias<'a>(
                 mod_desc: ModuleExprDesc::Tmod_structure(structure),
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
-                mod_env: EnvRef(0),
+                mod_env: env_ref,
                 mod_attributes: Attributes::new(),
             };
 
@@ -7050,7 +7051,7 @@ fn type_module_expr_with_alias<'a>(
                     ),
                     mod_loc: loc,
                     mod_type: ModuleType::placeholder(),
-                    mod_env: EnvRef(0),
+                    mod_env: env_ref,
                     mod_attributes: mod_expr.pmod_attributes.clone(),
                 })
             } else {
@@ -7058,7 +7059,7 @@ fn type_module_expr_with_alias<'a>(
                     mod_desc: md.mod_desc,
                     mod_loc: loc,
                     mod_type: ModuleType::placeholder(),
-                    mod_env: EnvRef(0),
+                    mod_env: env_ref,
                     mod_attributes: mod_expr.pmod_attributes.clone(),
                 })
             }
@@ -7096,6 +7097,7 @@ fn type_module_expr_with_alias<'a>(
             // typing functor bodies.
             let ctx = tctx.type_ctx;
             ctx.init_def(ctx.current_stamp());
+            let env_ref = tctx.type_ctx.store_typed_env(env);
 
             // Type check the functor body with the extended environment
             let body = arena.get_mod_expr(*body_idx);
@@ -7113,7 +7115,7 @@ fn type_module_expr_with_alias<'a>(
                 ),
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
-                mod_env: EnvRef(0),
+                mod_env: env_ref,
                 mod_attributes: mod_expr.pmod_attributes.clone(),
             })
         }
@@ -7154,6 +7156,7 @@ fn type_module_expr_with_alias<'a>(
                 tctx.type_ctx,
             )
             .unwrap_or(functor_mty);
+            let env_ref = tctx.type_ctx.store_typed_env(env);
             let coercion = match functor_mty {
                 crate::types::decl::ModuleType::MtyFunctor { param_type, .. } => {
                     let param_mty = param_type.map(|inner| *inner).unwrap_or_else(|| {
@@ -7181,7 +7184,7 @@ fn type_module_expr_with_alias<'a>(
                 ),
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
-                mod_env: EnvRef(0),
+                mod_env: env_ref,
                 mod_attributes: mod_expr.pmod_attributes.clone(),
             };
             if let Some(semantic_mty) =
@@ -7268,12 +7271,13 @@ fn type_module_expr_with_alias<'a>(
                     )));
                 }
             };
+            let env_ref = tctx.type_ctx.store_typed_env(env);
 
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_unpack(typed_expr, unpack_mty.clone()),
                 mod_loc: loc,
                 mod_type: unpack_mty,
-                mod_env: EnvRef(0),
+                mod_env: env_ref,
                 mod_attributes: mod_expr.pmod_attributes.clone(),
             })
         }
@@ -10109,6 +10113,7 @@ fn type_structure_item<'a>(
             // Match OCaml: for Pmod_constraint(expr, typ), type-check only expr (inner body),
             // then wrap in Tmod_constraint with mod_loc from the inner module (not the
             // constraint wrapper). OCaml does this in check_recmodule_inclusion.
+            let rec_env_ref = tctx.type_ctx.store_typed_env(&rec_env);
             let mut typed_bindings = Vec::new();
             let mut binding_mod_types = Vec::new();
             let mut new_env = env.clone();
@@ -10156,7 +10161,7 @@ fn type_structure_item<'a>(
                             ),
                             mod_loc: inner_loc,
                             mod_type: ModuleType::placeholder(),
-                            mod_env: EnvRef(0),
+                            mod_env: rec_env_ref,
                             mod_attributes: Attributes::new(),
                         }
                     }

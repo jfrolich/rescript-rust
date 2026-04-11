@@ -948,8 +948,7 @@ impl Env {
                         }
                     }
                 }
-                // Fallback to name-based lookup
-                self.find_modtype(name)
+                Err(EnvError::ModuleNotFound(name.clone()))
             }
             Path::Papply(_, _) => Err(EnvError::ModuleNotFound(
                 "(functor application)".to_string(),
