@@ -13574,16 +13574,9 @@ fn type_pack(
         env,
         tctx.arena,
         module_expr,
-        true,
+        false,
     )
     .map_err(|e| TypeCoreError::Other(format!("pack: {e:?}")))?;
-
-    // Match OCaml type_module_aux: wrap Tmod_ident for alias modules in
-    // Tmod_constraint implicit. This happens when alias=false in OCaml
-    // (type_package calls type_module with alias=false). We use alias=true
-    // to avoid breaking pack type checking, then add the wrapping post-hoc.
-    // Handles both top-level Tmod_ident and nested Tmod_constraint(Tmod_ident).
-    let typed_module = wrap_alias_ident_in_constraint(typed_module, env, &mut tctx.persistent_env, tctx.type_ctx);
 
 
     fn mkpath_from_pack_lid(

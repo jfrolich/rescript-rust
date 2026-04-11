@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 640/657 (97.4%), 13 parity failures + 4 compile issues, 29 hunks
+**Status:** 644/657 (98.0%), 2 parity failures + 11 compile issues, 2 hunks
 
 ## Goal
 
@@ -14,15 +14,19 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 ## Current Baseline
 
 - OCaml compile coverage: **657/657**
-- Rust compile coverage: **653/657** on the 16-way authoritative run
-- Unoptimized lambda parity: **640/657**
-- Parity hunks: **29**
+- Rust compile coverage: **646/657** on the 16-way authoritative run
+- Unoptimized lambda parity: **644/657**
+- Parity hunks: **2**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 - Raw timeouts on the authoritative run: `Import.res`, `global_module_alias_test.res`
-- Raw crashes on the authoritative run: `defunctor_make_test.res`, `derive_projector_test.res`
-- `coercion_module_alias_test.res` now reaches focused raw parity, but the
-  authoritative run regresses in the broader alias/module-path cluster after
-  preserving local functor-result aliases for coercion.
+- Raw crashes on the authoritative run: `belt_hashmap_test.res`,
+  `bs_map_set_dict_test.res`, `bs_poly_map_test.res`,
+  `bs_poly_mutable_map_test.res`, `bs_poly_mutable_set_test.res`,
+  `bs_poly_set_test.res`, `defunctor_make_test.res`,
+  `derive_projector_test.res`, `int_map.res`
+- `coercion_module_alias_test.res`, `DynamicImportModuleWithAlias.res`,
+  `import_side_effect.res`, and `test_non_export.res` now reach focused raw parity
+  after restoring OCaml's real `type_package` entry path.
 
 ## Working Rules
 
@@ -33,28 +37,14 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 13 Parity Failures by Category
-
-### Alias / module-path lowering reopened by functor-result local aliases (8 files)
-DynamicImportModuleWithAlias, import_side_effect, test_non_export,
-belt_hashmap_test, bs_map_set_dict_test, bs_poly_mutable_map_test,
-bs_poly_mutable_set_test, int_map
-
-**Issue:** OCaml keeps sibling aliases in functor-result signatures as local `Pident`s so
-`wrap_id_pos_list` can bind them from the applied result. Rust now matches that for
-`coercion_module_alias_test`, but the authoritative run shows more downstream places still
-assuming owner-qualified alias paths.
-
-### Collection/library raw shape differences (3 files)
-bs_poly_map_test, bs_poly_set_test, test_js_ffi
-
-**Issue:** remaining library-focused raw lambda mismatches outside the Dict-specific paths.
+## Remaining 2 Parity Failures by Category
 
 ### Dict pattern compilation (2 files)
 json_decorders, stdlib_Stdlib_DictTests
 
 **Issue:** Dict synthetic labels / narrow optional-wrapper stripping fixed the earlier
-cluster, but two Dict-focused raw diffs remain.
+cluster, and the alias/module-path regressions are gone again. Only the two Dict-focused
+raw diffs still remain on the parity side.
 
 ## Additional Raw Compile Issues
 
@@ -170,6 +160,29 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (type_package now uses OCaml's real alias=false module typing)
+
+OCaml `typemod.ml` `type_package` calls `type_module env m` with the default
+`alias=false`. Rust was still calling `type_module_expr_with_alias_mode(..., true)` and then
+trying to reconstruct the OCaml alias-wrapper shape afterward. That divergence was exactly
+what reintroduced the extra `let ... =a 0a` wrappers in `DynamicImportModuleWithAlias`,
+`import_side_effect`, and `test_non_export`.
+
+Rust now:
+- types first-class modules / packs with `alias=false`, matching OCaml's real entry point
+- stops post-hoc rewrapping pack aliases in `wrap_alias_ident_in_constraint`
+- keeps the existing pack-path extraction / `mkpath mp name` rebuild logic on top of the
+  OCaml-aligned typed module expression
+
+**Result:** the clean authoritative raw baseline improves to **644/657** with **2** hunks.
+All reopened alias/module-path parity regressions disappear, leaving only
+`json_decorders` and `stdlib_Stdlib_DictTests` as parity failures. The remaining gap is now
+mostly raw compile stability: compile coverage drops to **646/657** because several
+collection/module files move from parity diffs into crashes (`belt_hashmap_test`,
+`bs_map_set_dict_test`, `bs_poly_map_test`, `bs_poly_mutable_map_test`,
+`bs_poly_mutable_set_test`, `bs_poly_set_test`, `int_map`, plus the existing
+`defunctor_make_test` / `derive_projector_test`).
 
 ### 2026-04-11 (functor-result alias coercions now preserve local sibling paths)
 
