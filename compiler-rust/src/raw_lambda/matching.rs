@@ -7118,7 +7118,7 @@ fn compile_test<K: Clone>(
 /// Equivalent to OCaml's `approx_present`.
 fn approx_present(v: &Ident, lam: &RawLambda) -> bool {
     match lam {
-        RawLambda::Lconst(_) => false,
+        RawLambda::Lconst(_) | RawLambda::LglobalModule(_, _) => false,
         RawLambda::LstaticRaise(_, args) => args.iter().any(|a| approx_present(v, a)),
         RawLambda::Lprim(info) => info.args.iter().any(|a| approx_present(v, a)),
         RawLambda::Llet(LetKind::Alias, _, l1, l2) => {

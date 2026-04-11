@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 629/657 (95.7%), 28 failures, 69 hunks
+**Status:** 632/657 (96.2%), 25 failures, 47 hunks
 
 ## Goal
 
@@ -15,8 +15,8 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **629/657**
-- Parity hunks: **69**
+- Unoptimized lambda parity: **632/657**
+- Parity hunks: **47**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 
 ## Working Rules
@@ -28,12 +28,12 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 28 Failures by Category
+## Remaining 25 Failures by Category
 
-### Matching compiler: remaining inner matching / let-pattern lowering (~11 files, ~35 hunks)
-test_set(13), set_gen(6), mario_game(5), exception_raise_test(5), bigint_test(6),
-more_poly_variant_test(3), gpr_1150(3), inline_record_test(1),
-inline_condition_with_pattern_matching(1), int_poly_var(1), UntaggedVariants(1)
+### Matching compiler: remaining inner matching / let-pattern lowering (8 files)
+mario_game(6), UntaggedVariants(5), more_poly_variant_test(4), inline_record_test(3),
+exception_raise_test(2), bigint_test(1), inline_condition_with_pattern_matching(1),
+int_poly_var(1)
 
 **Root cause confirmed:** `do_split_or` partitioning is IDENTICAL between OCaml and Rust,
 but the recursive split helpers were rebuilding defaults from the OUTER `def` instead of
@@ -44,14 +44,17 @@ like `[10,9,8,7,6,5,4,3]` down to `[10]` in Rust.
 - recursive `top_default` threading now matches OCaml and fixed `gpr_1698_test`
 - nonrecursive irrefutable lets now route through `Matching.for_let`, fixing
   `inline_map2_test`
+- `approx_present` now treats Rust `LglobalModule` like OCaml `Pgetglobal`, which
+  fixed `test_set`, `set_gen`, and `gpr_1150`
 
 **Next investigation:** The remaining matching failures are no longer caused by collapsed
-default suffixes or the `raw_simple_for_let` shortcut. Focus next on the specific inner
-handler/default combinations that still diverge in `test_set` and `set_gen`.
+default suffixes, the `raw_simple_for_let` shortcut, or global-reference false positives
+inside `lower_bind`. Focus next on the specific inner handler/default combinations that
+still diverge in `mario_game`, `UntaggedVariants`, and `more_poly_variant_test`.
 
-### Module coercion (~5 files, ~11 hunks)
-coercion_module_alias_test(7), Import(1), offset(1), DynamicImportModuleWithAlias(1),
-derive_projector_test(1)
+### Module coercion / alias resolution (7 files)
+coercion_module_alias_test(1), Import(1), offset(1), DynamicImportModuleWithAlias(1),
+derive_projector_test(2), pr6726(1), recmodule(2)
 
 **Issues:**
 - `strengthen_module_type_for_inclusion_path` creates mismatches for modules with value shadowing
@@ -59,23 +62,24 @@ derive_projector_test(1)
 - Include signatures have extra entries from @deriving PPX
 - Recursive module init shapes wrong (components_of_module_maker not implemented)
 
-### JSX PPX field positions (~3 files, ~7 hunks)
-jsx_preserve_test(5), jsx_optional_props_test(1), async_jsx(1)
+### JSX PPX field positions (3 files)
+jsx_preserve_test(19), jsx_optional_props_test(1), async_jsx(3)
 
 **Root cause:** `@react.component` generates TWO `let make` bindings (original + wrapper).
 `signature_runtime_value` returns position of LAST occurrence (1), but module block
 deduplication keeps LAST value at position 0. OCaml's env stores simplified signatures.
 
-### Dict pattern compilation (~5 files, ~7 hunks)
-DictInternalRepresentation(1), DictPatternMatchingOptimization(1), stdlib_Stdlib_DictTests(1),
-pattern_match_json(1), json_decorders(2)
+### Dict pattern compilation (5 files)
+DictInternalRepresentation(1), DictPatternMatchingOptimization(1), stdlib_Stdlib_DictTests(2),
+pattern_match_json(1), json_decorders(1)
 
 **Issue:** OCaml uses typed field accesses for Dict patterns. Rust uses option checks.
 
-### Other (~6 files, ~7 hunks)
-bs_poly_map_test(2), stdlib_Stdlib_JsonTests(1), recmodule(1), pr6726(1)
+### Other (2 files)
+bs_poly_map_test(3), stdlib_Stdlib_JsonTests(2)
 
-**Issues:** some_not_nested type expansion, stamp differences, module aliases, recursive module shapes
+**Issues:** remaining library-specific lambda shape differences outside the main
+matching/module/JSX/Dict clusters
 
 ## Key Findings from Session 2026-04-10/11
 
@@ -291,6 +295,25 @@ placement for that path.
 
 **Takeaway:** one more non-matching shortcut has been removed. The remaining cluster is
 now concentrated in deeper inner matching differences plus the module/dict/JSX buckets.
+
+### 2026-04-11 (approx_present globals no longer block lower_bind)
+
+The remaining `test_set` raw diff showed Rust still hoisting tuple-field aliases out of
+branches where OCaml keeps them local. Tracing `lower_bind` on `test_set` showed the
+unexpected blocker: Rust `approx_present` treated `LglobalModule` as `_ -> true`, so a
+branch like `raise (makeblock ext (global Assert_failure) ...)` looked as if it used the
+bound variable. OCaml represents that same global reference as `Lprim (Pgetglobal ...)`,
+which `approx_present` naturally treats as argument-free and therefore absent.
+
+Updating Rust `approx_present` to treat `LglobalModule` like OCaml's `Pgetglobal` restores
+the expected `(false, true, false)` / `(false, false, true)` lowering behavior.
+
+**Baseline after change:** **629/657 -> 632/657**, **69 -> 47 hunks**.
+
+**Takeaway:** the `lower_bind` placement logic now matches OCaml for global-reference
+branches too. This clears `test_set`, `set_gen`, and `gpr_1150`, and leaves a smaller
+inner-matching cluster centered on the remaining polymorphic-variant and branch-shape
+cases.
 
 ### 2026-04-11 (compile_list recursion)
 
