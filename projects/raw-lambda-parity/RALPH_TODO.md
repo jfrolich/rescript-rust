@@ -131,6 +131,15 @@ cells. The Rust helper now follows the OCaml recursion directly.
 the remaining inner-matching failures, but it removes another ordering difference from the
 matching runtime.
 
+### compile_orhandlers recursion now matches OCaml
+Rust `compile_orhandlers` used an imperative loop, while OCaml recursively threads `r` and
+`total_r` through the handler list. The Rust helper now follows the OCaml recursion
+directly.
+
+**Result:** full raw baseline still stays **626/657** with **89** hunks. The remaining
+inner-matching failures survive this port too, so the root cause is narrower than the
+high-level handler traversal shape.
+
 ## Session Log
 
 ### 2026-04-10/11 (major session)
@@ -195,3 +204,14 @@ iterative accumulation.
 **Takeaway:** the remaining mismatch survives even after aligning `compile_list`, so the
 next likely root cause is narrower inside the later handler/context remapping path
 (`compile_orhandlers` or a downstream `ctx_*` transform).
+
+### 2026-04-11 (compile_orhandlers recursion)
+
+Aligned Rust `compile_orhandlers` with OCaml's recursive control flow instead of the prior
+imperative loop.
+
+**Baseline after change:** still **626/657** with **89** hunks.
+
+**Takeaway:** the remaining mismatch survives even after aligning both `compile_list` and
+`compile_orhandlers`, so the next root cause is likely inside the downstream context
+transforms or the specific handler payloads rather than the outer traversal order.

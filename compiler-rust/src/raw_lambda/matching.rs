@@ -6874,55 +6874,67 @@ fn compile_orhandlers(
     ctx: &[Ctx],
     to_catch: Vec<(Matrix, i32, Vec<Ident>, PatternMatching)>,
 ) -> (RawLambda, Jumps) {
-    let mut r = lambda1;
-    let mut total_r = total1;
-
-    for (mat, i, vars, pm) in to_catch {
-        let ctx_i = select_columns(&mat, ctx);
-        match compile_fun(&ctx_i, &pm) {
-            Ok((handler_i, total_i)) => {
-                match &raw_action(&r) {
-                    RawLambda::LstaticRaise(j, args) if *j == i => {
-                        // Direct substitution
-                        r = vars
-                            .iter()
-                            .zip(args.iter())
-                            .rev()
-                            .fold(handler_i, |body, (var, arg)| {
-                                bind(LetKind::Alias, var, arg, body)
-                            });
-                        total_r = jumps_map(
-                            |c| ctx_rshift_num(ncols(&mat), &c),
-                            &total_i,
-                        );
-                    }
-                    _ => {
-                        r = RawLambda::LstaticCatch(
-                            Box::new(r),
-                            (i, vars),
-                            Box::new(handler_i),
-                        );
-                        total_r = jumps_union(
-                            &jumps_remove(i, &total_r),
-                            &jumps_map(
-                                |c| ctx_rshift_num(ncols(&mat), &c),
-                                &total_i,
+    fn do_rec(
+        compile_fun: &mut dyn FnMut(&[Ctx], &PatternMatching) -> Result<(RawLambda, Jumps), Unused>,
+        r: RawLambda,
+        total_r: Jumps,
+        ctx: &[Ctx],
+        to_catch: &[(Matrix, i32, Vec<Ident>, PatternMatching)],
+    ) -> (RawLambda, Jumps) {
+        match to_catch.split_first() {
+            None => (r, total_r),
+            Some(((mat, i, vars, pm), rem)) => {
+                let ctx_i = select_columns(mat, ctx);
+                match compile_fun(&ctx_i, pm) {
+                    Ok((handler_i, total_i)) => match raw_action(&r) {
+                        RawLambda::LstaticRaise(j, args) if j == *i => {
+                            let body = vars
+                                .iter()
+                                .zip(args.iter())
+                                .rev()
+                                .fold(handler_i, |body, (var, arg)| {
+                                    bind(LetKind::Alias, var, arg, body)
+                                });
+                            do_rec(
+                                compile_fun,
+                                body,
+                                jumps_map(|c| ctx_rshift_num(ncols(mat), &c), &total_i),
+                                ctx,
+                                rem,
+                            )
+                        }
+                        _ => do_rec(
+                            compile_fun,
+                            RawLambda::LstaticCatch(
+                                Box::new(r),
+                                (*i, vars.clone()),
+                                Box::new(handler_i),
                             ),
-                        );
-                    }
+                            jumps_union(
+                                &jumps_remove(*i, &total_r),
+                                &jumps_map(|c| ctx_rshift_num(ncols(mat), &c), &total_i),
+                            ),
+                            ctx,
+                            rem,
+                        ),
+                    },
+                    Err(Unused) => do_rec(
+                        compile_fun,
+                        RawLambda::LstaticCatch(
+                            Box::new(r),
+                            (*i, vars.clone()),
+                            Box::new(lambda_unit()),
+                        ),
+                        total_r,
+                        ctx,
+                        rem,
+                    ),
                 }
-            }
-            Err(Unused) => {
-                r = RawLambda::LstaticCatch(
-                    Box::new(r),
-                    (i, vars),
-                    Box::new(lambda_unit()),
-                );
             }
         }
     }
 
-    (r, total_r)
+    do_rec(compile_fun, lambda1, total1, ctx, &to_catch)
 }
 
 /// Compile a test (divide + combine pattern).
