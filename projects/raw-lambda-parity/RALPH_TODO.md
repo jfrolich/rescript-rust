@@ -122,6 +122,15 @@ each pass. The helper now matches OCaml's selection order exactly.
 **Result:** full raw baseline still stays **626/657** with **89** hunks. This confirms the
 remaining raw-lambda mismatch is not just a context-order artifact inside `get_mins`.
 
+### compile_list recursion now matches OCaml
+Rust `compile_list` used an iterative accumulator, while OCaml prepends the current
+`jumps_map ctx_combine total1` result and only then recurses into the remaining division
+cells. The Rust helper now follows the OCaml recursion directly.
+
+**Result:** full raw baseline still stays **626/657** with **89** hunks. This does not move
+the remaining inner-matching failures, but it removes another ordering difference from the
+matching runtime.
+
 ## Session Log
 
 ### 2026-04-10/11 (major session)
@@ -175,3 +184,14 @@ each selection pass instead of appending them.
 **Takeaway:** the remaining inner-handler mismatch is not explained by `get_mins` ordering
 alone. The next likely root cause is still later context remapping during handler
 compilation (`compile_list`, `compile_orhandlers`, or the downstream `ctx_*` transforms).
+
+### 2026-04-11 (compile_list recursion)
+
+Aligned Rust `compile_list` with OCaml's recursive control flow instead of the previous
+iterative accumulation.
+
+**Baseline after change:** still **626/657** with **89** hunks.
+
+**Takeaway:** the remaining mismatch survives even after aligning `compile_list`, so the
+next likely root cause is narrower inside the later handler/context remapping path
+(`compile_orhandlers` or a downstream `ctx_*` transform).

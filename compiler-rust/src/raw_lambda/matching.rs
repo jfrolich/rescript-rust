@@ -6837,28 +6837,32 @@ fn compile_list<K: Clone>(
     compile_fun: &mut dyn FnMut(&[Ctx], &PatternMatching) -> Result<(RawLambda, Jumps), Unused>,
     division: Vec<(K, MatchCell)>,
 ) -> Result<(Vec<(K, RawLambda)>, Jumps, Vec<Pattern>), Unused> {
-    let mut result_list: Vec<(K, RawLambda)> = Vec::new();
-    let mut totals: Vec<Jumps> = Vec::new();
-    let mut new_pats: Vec<Pattern> = Vec::new();
-
-    for (key, cell) in division {
-        if cell.ctx.is_empty() {
-            continue;
-        }
-        match compile_fun(&cell.ctx, &cell.pm) {
-            Ok((lambda1, total1)) => {
-                result_list.push((key, lambda1));
-                totals.push(jumps_map(|c| ctx_combine(&c), &total1));
-                new_pats.push(cell.pat);
-            }
-            Err(Unused) => {
-                // Skip unused cases
+    fn c_rec<K: Clone>(
+        compile_fun: &mut dyn FnMut(&[Ctx], &PatternMatching) -> Result<(RawLambda, Jumps), Unused>,
+        totals: Vec<Jumps>,
+        division: &[(K, MatchCell)],
+    ) -> Result<(Vec<(K, RawLambda)>, Jumps, Vec<Pattern>), Unused> {
+        match division.split_first() {
+            None => Ok((Vec::new(), jumps_unions(totals), Vec::new())),
+            Some(((key, cell), rem)) => {
+                if cell.ctx.is_empty() {
+                    return c_rec(compile_fun, totals, rem);
+                }
+                match compile_fun(&cell.ctx, &cell.pm) {
+                    Ok((lambda1, total1)) => {
+                        let mut next_totals = vec![jumps_map(|c| ctx_combine(&c), &total1)];
+                        next_totals.extend(totals);
+                        let (mut c_rem, total, mut new_pats) = c_rec(compile_fun, next_totals, rem)?;
+                        c_rem.insert(0, (key.clone(), lambda1));
+                        new_pats.insert(0, cell.pat.clone());
+                        Ok((c_rem, total, new_pats))
+                    }
+                    Err(Unused) => c_rec(compile_fun, totals, rem),
+                }
             }
         }
     }
-
-    let total = jumps_unions(totals);
-    Ok((result_list, total, new_pats))
+    c_rec(compile_fun, Vec::new(), &division)
 }
 
 /// Compile or-pattern handlers.
