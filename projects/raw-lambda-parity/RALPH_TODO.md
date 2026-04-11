@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 628/657 (95.6%), 29 failures, 79 hunks
+**Status:** 629/657 (95.7%), 28 failures, 69 hunks
 
 ## Goal
 
@@ -15,8 +15,8 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **628/657**
-- Parity hunks: **79**
+- Unoptimized lambda parity: **629/657**
+- Parity hunks: **69**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 
 ## Working Rules
@@ -28,11 +28,11 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 31 Failures by Category
+## Remaining 28 Failures by Category
 
-### Matching compiler: recursive default chaining in split_precompile (~13 files, ~44 hunks)
-test_set(13), inline_map2_test(9), set_gen(6), mario_game(5), exception_raise_test(5),
-bigint_test(6), more_poly_variant_test(3), gpr_1150(3), inline_record_test(1),
+### Matching compiler: remaining inner matching / let-pattern lowering (~11 files, ~35 hunks)
+test_set(13), set_gen(6), mario_game(5), exception_raise_test(5), bigint_test(6),
+more_poly_variant_test(3), gpr_1150(3), inline_record_test(1),
 inline_condition_with_pattern_matching(1), int_poly_var(1), UntaggedVariants(1)
 
 **Root cause confirmed:** `do_split_or` partitioning is IDENTICAL between OCaml and Rust,
@@ -40,14 +40,14 @@ but the recursive split helpers were rebuilding defaults from the OUTER `def` in
 the recursive branch's `top_default`. That collapsed OCaml's cumulative default suffixes
 like `[10,9,8,7,6,5,4,3]` down to `[10]` in Rust.
 
-**Result of fix:** Rust now threads `top_default` through `cons_next_or`, `split_exc`,
-`split_noexc`, `split_ex`, and `split_noex`, matching OCaml's recursive default chaining.
-That fixes `gpr_1698_test`, removes `exception_rebound_err_test`, and drops raw hunks
-from **85** to **79**.
+**Recent fixes in this cluster:**
+- recursive `top_default` threading now matches OCaml and fixed `gpr_1698_test`
+- nonrecursive irrefutable lets now route through `Matching.for_let`, fixing
+  `inline_map2_test`
 
 **Next investigation:** The remaining matching failures are no longer caused by collapsed
-default suffixes. Focus next on the specific inner handler/default combinations that still
-diverge in `test_set`, `set_gen`, and `inline_map2_test`.
+default suffixes or the `raw_simple_for_let` shortcut. Focus next on the specific inner
+handler/default combinations that still diverge in `test_set` and `set_gen`.
 
 ### Module coercion (~5 files, ~11 hunks)
 coercion_module_alias_test(7), Import(1), offset(1), DynamicImportModuleWithAlias(1),
@@ -133,6 +133,18 @@ The Rust port now threads recursive `top_default` through:
 
 **Result:** full raw baseline improves to **628/657** with **79** hunks. `gpr_1698_test`
 now reaches full raw parity, and `exception_rebound_err_test` drops out of the failure set.
+
+### nonrecursive irrefutable lets now use Matching.for_let
+OCaml's `transl_let` always routes non-simple nonrecursive bindings through
+`Matching.for_let`, even when the pattern is irrefutable. Rust was still sending
+irrefutable tuple/record patterns through `raw_simple_for_let`, which eagerly bound fields
+instead of letting the matching compiler/lower_bind path place them where OCaml does.
+
+The Rust converter now uses `full_matching::for_let` for those irrefutable non-simple
+bindings too.
+
+**Result:** full raw baseline improves to **629/657** with **69** hunks. `inline_map2_test`
+now reaches full raw parity.
 
 ### do_for_multiple_match flattening no longer threads TypeContext
 OCaml's flattened multi-match path explicitly calls `split_precompile None pm1`.
@@ -264,6 +276,21 @@ those sites to thread `top_default` exactly like OCaml fixes the default chain.
 
 **Takeaway:** this confirms the remaining matching failures are in later inner compilation
 details, not in the recursive default-env chaining anymore.
+
+### 2026-04-11 (irrefutable let patterns through Matching.for_let)
+
+The remaining `test_set` normalized diff showed Rust eagerly binding tuple fields that OCaml
+delayed until they were actually needed. The cause was in `convert_let_with_body_raw`:
+Rust still used `raw_simple_for_let` for irrefutable non-simple bindings, while OCaml's
+`transl_let` always calls `Matching.for_let` for every non-simple nonrecursive binding.
+
+Routing those irrefutable bindings through `full_matching::for_let` fixes the lower-bind
+placement for that path.
+
+**Baseline after change:** **628/657 -> 629/657**, **79 -> 69 hunks**.
+
+**Takeaway:** one more non-matching shortcut has been removed. The remaining cluster is
+now concentrated in deeper inner matching differences plus the module/dict/JSX buckets.
 
 ### 2026-04-11 (compile_list recursion)
 

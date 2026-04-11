@@ -8100,7 +8100,14 @@ impl<'a> RawLambdaConverter<'a> {
                         };
                         acc = RawLambda::let_(kind, id, value, acc);
                     } else if Self::is_irrefutable_pattern(&binding.vb_pat) {
-                        acc = self.raw_simple_for_let(&binding.vb_pat, value, acc);
+                        acc = full_matching::for_let(
+                            self.type_ctx,
+                            self.loc(binding.vb_pat.pat_loc),
+                            value,
+                            &binding.vb_pat,
+                            acc,
+                            &mut self.next_static_raise,
+                        );
                     }
                 }
                 acc
