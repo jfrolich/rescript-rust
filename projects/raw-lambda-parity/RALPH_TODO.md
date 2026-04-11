@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 638/657 (97.1%), 19 failures, 34 hunks
+**Status:** 639/657 (97.3%), 18 failures, 33 hunks
 
 ## Goal
 
@@ -15,8 +15,8 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **638/657**
-- Parity hunks: **34**
+- Unoptimized lambda parity: **639/657**
+- Parity hunks: **33**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 
 ## Working Rules
@@ -28,10 +28,10 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 19 Failures by Category
+## Remaining 18 Failures by Category
 
-### Matching compiler: remaining inner matching / let-pattern lowering (2 files)
-mario_game(4), exception_raise_test(1)
+### Matching compiler: remaining inner matching / let-pattern lowering (1 file)
+mario_game(4)
 
 **Root cause confirmed:** `do_split_or` partitioning is IDENTICAL between OCaml and Rust,
 but the recursive split helpers were rebuilding defaults from the OUTER `def` instead of
@@ -53,9 +53,9 @@ like `[10,9,8,7,6,5,4,3]` down to `[10]` in Rust.
 
 **Next investigation:** The remaining matching failures are no longer caused by collapsed
 default suffixes, the `raw_simple_for_let` shortcut, global-reference false positives
-inside `lower_bind`, or missing inline-record label reconstruction for extension paths.
-Focus next on the specific inner handler/default combinations that still diverge in
-`mario_game` and the residual `exception_raise_test` catch/default chain.
+inside `lower_bind`, missing inline-record label reconstruction for extension paths, or
+cross-shape `may_compat` leakage. Focus next on the specific inner handler/default
+combinations that still diverge in `mario_game`.
 
 ### Module coercion / alias resolution (7 files)
 coercion_module_alias_test(1), Import(1), offset(1), DynamicImportModuleWithAlias(1),
@@ -385,6 +385,21 @@ exception/extension payloads.
 
 **Takeaway:** `inline_record_test` is now clean. The remaining matching bucket is reduced
 to `mario_game` plus the residual `exception_raise_test` inner default/handler shape.
+
+### 2026-04-11 (cross-shape may_compat now matches OCaml)
+
+Rust `may_compat` had a catch-all `_ => true` branch, so constructor-vs-tuple,
+constructor-vs-record, tuple-vs-array, and other cross-shape pairs were treated as
+potentially compatible. OCaml's `Parmatch.Compat.compat` returns `false` for those
+unhandled shape combinations.
+
+Switching Rust to the OCaml behavior removes impossible default-chain leakage between
+different pattern shapes. In practice that cleaned the residual `exception_raise_test`
+catch/default mismatch without widening the remaining raw-lambda baseline.
+
+**Baseline after change:** **638/657 -> 639/657**, **34 -> 33 hunks**.
+
+**Takeaway:** the matching bucket is now down to `mario_game` only.
 
 ### 2026-04-11 (compile_list recursion)
 

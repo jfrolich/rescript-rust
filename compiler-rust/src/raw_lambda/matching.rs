@@ -591,7 +591,8 @@ fn may_compat(p: &Pattern, q: &Pattern) -> bool {
             // Check compatible fields only
             may_compats_record(l1, l2)
         }
-        _ => true,
+        // OCaml's Parmatch.Compat.compat rejects cross-shape pairs here.
+        _ => false,
     }
 }
 
