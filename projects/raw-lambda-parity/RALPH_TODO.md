@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 649/657 (98.8%), 6 failures, 14 hunks
+**Status:** 648/657 (98.6%), 5 parity failures + 4 compile issues, 13 hunks
 
 ## Goal
 
@@ -14,14 +14,14 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 ## Current Baseline
 
 - OCaml compile coverage: **657/657**
-- Rust compile coverage: **655/657** on the 16-way authoritative run
-- Unoptimized lambda parity: **649/657**
-- Parity hunks: **14**
+- Rust compile coverage: **653/657** on the 16-way authoritative run
+- Unoptimized lambda parity: **648/657**
+- Parity hunks: **13**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
-- Focused raw runs for `Import.res` and `global_module_alias_test.res` both pass; the
-  full 16-way baseline still times those two files out intermittently.
+- Raw timeouts on the authoritative run: `Import.res`, `global_module_alias_test.res`
+- Raw crashes on the authoritative run: `defunctor_make_test.res`, `derive_projector_test.res`
 - `pr6726.res`, `DynamicImportModuleWithAlias.res`, `module_alias_test.res`, and
-  `test_include.res` now reach focused raw parity after restoring OCaml's
+  `test_include.res` still reach focused raw parity after restoring OCaml's
   alias-only path normalization behavior.
 
 ## Working Rules
@@ -33,14 +33,15 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 6 Failures by Category
+## Remaining 5 Parity Failures by Category
 
-### Module coercion / alias lowering (3 files)
-coercion_module_alias_test, derive_projector_test, recmodule
+### Module coercion / alias lowering (2 parity files)
+coercion_module_alias_test, recmodule
 
 **Issue:** preserving child aliases in extracted structure signatures is now correct, but the
 remaining raw lowering still diverges from OCaml for downstream module coercions / includes /
-recursive-module runtime shapes.
+recursive-module runtime shapes. `derive_projector_test` still crashes in the same broader
+module/signature-comparison area.
 
 ### Dict pattern compilation (2 files)
 json_decorders, stdlib_Stdlib_DictTests
@@ -53,6 +54,11 @@ bs_poly_map_test
 
 **Issue:** remaining library-specific raw lambda shape difference outside the main
 module/Dict clusters.
+
+## Additional Raw Compile Issues
+
+- Timeouts: `Import`, `global_module_alias_test`
+- Crashes: `defunctor_make_test`, `derive_projector_test`
 
 ## Key Findings from Session 2026-04-10/11
 
@@ -163,6 +169,26 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (constrained alias modules keep Mta_absent for wrap_constraint)
+
+OCaml `typemod.ml` feeds `Mty_alias (Mta_absent, path)` into `wrap_constraint` when a
+constrained module expression is just an alias (`module C': module type of Char = C`).
+Rust was converting alias-mode `Tmod_ident` arguments back to `MtaPresent` before
+`includemod::modtypes`, which suppressed the expected `Tcoerce_alias` and collapsed the
+first constrained-alias layer back to a bare `0a` in raw lambda.
+
+Rust now:
+- treats alias-mode `Tmod_ident` arguments as `MtyAlias(MtaAbsent, path)` in
+  `decl_module_type_from_typed_module_expr_for_constraint_arg`
+- lets `wrap_constraint_with_decl_mty` reach the same `Tcoerce_alias` path OCaml uses for
+  constrained alias modules
+
+**Result:** the focused `coercion_module_alias_test` raw diff now restores OCaml's
+`C'` / `C'''` alias-coercion shape (`let ... 0a ... global Char!`), but the full
+authoritative raw baseline stays **648/657** with **13** hunks. The remaining
+module-coercion drift is now deeper in included child-alias path preservation
+(`M'.N` vs `M2.N`) and recursive-module init shapes.
 
 ### 2026-04-11 (raw normalize_path follows aliases, not ident/module-type names)
 

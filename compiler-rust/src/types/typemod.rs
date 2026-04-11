@@ -2715,6 +2715,41 @@ fn decl_module_type_from_typed_module_expr_for_sig(
     }
 }
 
+fn decl_module_type_from_typed_module_expr_for_constraint_arg(
+    mod_expr: &ModuleExpr,
+) -> Option<crate::types::decl::ModuleType> {
+    use crate::types::decl::AliasPresence;
+    use crate::types::decl::ModuleType as DeclMty;
+    use crate::types::typedtree::ModuleTypeDesc;
+
+    match &mod_expr.mod_desc {
+        ModuleExprDesc::Tmod_ident(path, _)
+            if matches!(mod_expr.mod_type.mty_desc, ModuleTypeDesc::Tmty_alias(_, _)) =>
+        {
+            // OCaml feeds Mty_alias(Mta_absent, path) into wrap_constraint for
+            // constrained alias modules. Keeping the alias absent here lets
+            // includemod emit the required Tcoerce_alias instead of collapsing
+            // the constrained alias back to a bare module-alias constant.
+            Some(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path.clone()))
+        }
+        ModuleExprDesc::Tmod_structure(structure) => Some(
+            DeclMty::MtySignature(structure.str_type.clone()),
+        ),
+        ModuleExprDesc::Tmod_constraint(
+            inner,
+            _,
+            crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
+            _,
+        ) => match &inner.mod_desc {
+            ModuleExprDesc::Tmod_structure(structure) => {
+                Some(DeclMty::MtySignature(structure.str_type.clone()))
+            }
+            _ => decl_module_type_from_typed(&mod_expr.mod_type),
+        },
+        _ => decl_module_type_from_typed(&mod_expr.mod_type),
+    }
+}
+
 fn simplified_structure_signature(
     structure: &Structure,
 ) -> Option<crate::types::decl::Signature> {
