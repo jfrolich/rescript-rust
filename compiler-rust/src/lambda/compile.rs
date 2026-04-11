@@ -561,7 +561,10 @@ impl LambdaCompiler {
             Constant::String { s, delim } => {
                 let delim = match delim {
                     Some(StringDelim::Backtick) => Delim::BackQuotes,
-                    Some(StringDelim::StarJ) | Some(StringDelim::NoQuotes) | None => Delim::None,
+                    Some(StringDelim::Plain)
+                    | Some(StringDelim::StarJ)
+                    | Some(StringDelim::NoQuotes)
+                    | None => Delim::None,
                 };
                 Expression::new(ExpressionDesc::Str {
                     delim,

@@ -9,6 +9,8 @@ use super::tag_info::TagInfo;
 /// String delimiter information for template literals
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StringDelim {
+    /// Standard quoted string (`DNone` in OCaml lambda)
+    Plain,
     /// Escaped JS string delimiter (`*j` / `js`)
     StarJ,
     /// No quotes (standard string)
@@ -26,8 +28,10 @@ pub enum PointerInfo {
     Constructor(ConstructorTag),
     /// Assert false (for exhaustiveness)
     AssertFalse,
-    /// Named variant
+    /// Named pointer payload
     Some(String),
+    /// Polymorphic variant tag name
+    PolyVariant(String),
 }
 
 /// Constructor tag information
@@ -39,6 +43,20 @@ pub struct ConstructorTag {
     pub const_: i32,
     /// Number of non-constant constructors
     pub non_const: i32,
+    /// Optional runtime tag payload from @as(...)
+    pub runtime_tag: Option<ConstructorRuntimeTag>,
+}
+
+/// Runtime representation selected for an untagged variant constructor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstructorRuntimeTag {
+    Int(i32),
+    String(String),
+    Float(String),
+    BigInt(String),
+    Bool(bool),
+    Null,
+    Undefined,
 }
 
 /// Lambda constant values

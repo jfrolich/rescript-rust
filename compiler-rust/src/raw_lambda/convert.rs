@@ -10,7 +10,9 @@ use std::sync::{Mutex, OnceLock};
 use crate::context::IdGenerator;
 use crate::ident::{Ident, IdentFlags};
 use crate::lambda::compat::LetKind;
-use crate::lambda::constant::{ConstructorTag as PointerConstructorTag, PointerInfo, StringDelim};
+use crate::lambda::constant::{
+    ConstructorRuntimeTag, ConstructorTag as PointerConstructorTag, PointerInfo, StringDelim,
+};
 use crate::lambda::convert::LambdaConverter;
 use crate::lambda::primitive::{ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, Mutable};
 use crate::lambda::tag_info::TagInfo;
@@ -356,6 +358,47 @@ fn label_runtime_name(lbl: &LabelDescription) -> String {
         }
     }
     lbl.lbl_name.clone()
+}
+
+fn constructor_runtime_tag(
+    attrs: &[crate::types::decl::Attribute],
+) -> Option<ConstructorRuntimeTag> {
+    attrs.iter().find_map(|attr| {
+        if attr.attr_name.txt != "as" {
+            return None;
+        }
+        match &attr.attr_payload {
+            crate::types::decl::AttributePayload::Int(value) => {
+                Some(ConstructorRuntimeTag::Int(*value))
+            }
+            crate::types::decl::AttributePayload::Str(value) => {
+                Some(ConstructorRuntimeTag::String(value.clone()))
+            }
+            crate::types::decl::AttributePayload::Float(value) => {
+                Some(ConstructorRuntimeTag::Float(value.clone()))
+            }
+            crate::types::decl::AttributePayload::BigInt(value) => {
+                Some(ConstructorRuntimeTag::BigInt(value.clone()))
+            }
+            crate::types::decl::AttributePayload::Bool(value) => {
+                Some(ConstructorRuntimeTag::Bool(*value))
+            }
+            crate::types::decl::AttributePayload::Ident(value) if value == "null" => {
+                Some(ConstructorRuntimeTag::Null)
+            }
+            crate::types::decl::AttributePayload::Ident(value) if value == "undefined" => {
+                Some(ConstructorRuntimeTag::Undefined)
+            }
+            _ => None,
+        }
+    })
+}
+
+fn raw_polyvariant_const(tag: &str) -> RawLambda {
+    RawLambda::const_(Constant::Int {
+        i: crate::types::btype::hash_variant(tag),
+        comment: Some(PointerInfo::PolyVariant(tag.to_string())),
+    })
 }
 
 fn raw_record_field_access(lbl: &LabelDescription) -> Option<(i32, FieldDbgInfo)> {
@@ -2447,6 +2490,7 @@ impl<'a> RawLambdaConverter<'a> {
                         name: cstr.cstr_name.clone(),
                         const_: cstr.cstr_consts,
                         non_const: cstr.cstr_nonconsts,
+                        runtime_tag: constructor_runtime_tag(&cstr.cstr_attributes),
                     })),
                 }),
             },
@@ -4347,10 +4391,7 @@ impl<'a> RawLambdaConverter<'a> {
                 self.convert_construct_raw(self.loc(expr.exp_loc), expr.exp_env, cstr, args)
             }
             ExpressionDesc::Texp_variant(tag, arg) => match arg {
-                None => RawLambda::const_(Constant::Pointer(format!(
-                    "{}a",
-                    crate::types::btype::hash_variant(tag)
-                ))),
+                None => raw_polyvariant_const(tag),
                 Some(arg) => {
                     let arg_lam = self.convert_expr_raw(arg);
                     self.raw_block_or_prim(
@@ -4684,12 +4725,13 @@ impl<'a> RawLambdaConverter<'a> {
             TConstant::String(s, delim) => Constant::String {
                 s: s.clone(),
                 delim: delim.as_ref().and_then(|d| match d.as_str() {
+                    "" => Some(StringDelim::Plain),
                     "*j" | "js" | "j" => Some(StringDelim::StarJ),
                     "json" => Some(StringDelim::NoQuotes),
                     "bq" => Some(StringDelim::Backtick),
                     "`" => Some(StringDelim::Backtick),
                     _ => None,
-                }),
+                }).or_else(|| delim.is_none().then_some(StringDelim::Plain)),
             },
             TConstant::Float(f) => Constant::Float(f.clone()),
             TConstant::BigInt(positive, v) => Constant::BigInt {
@@ -5722,11 +5764,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                     const_cases.push((
                         tag,
-                        wrap_aliases_raw(
-                            &aliases,
-                            RawLambda::const_(Constant::Pointer(format!("{tag}a"))),
-                            body,
-                        ),
+                        wrap_aliases_raw(&aliases, raw_polyvariant_const(label), body),
                     ));
                 }
                 PatternDesc::Tpat_any => {

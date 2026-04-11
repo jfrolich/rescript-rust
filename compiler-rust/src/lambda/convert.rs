@@ -297,12 +297,13 @@ impl<'a> LambdaConverter<'a> {
             TConstant::String(s, delim) => Constant::String {
                 s: s.clone(),
                 delim: delim.as_ref().and_then(|d| match d.as_str() {
+                    "" => Some(StringDelim::Plain),
                     "*j" | "js" | "j" => Some(StringDelim::StarJ),
                     "json" => Some(StringDelim::NoQuotes),
                     "bq" => Some(StringDelim::Backtick),
                     "`" => Some(StringDelim::Backtick),
                     _ => None,
-                }),
+                }).or_else(|| delim.is_none().then_some(StringDelim::Plain)),
             },
             TConstant::Float(f) => Constant::Float(f.clone()),
             TConstant::BigInt(neg, v) => Constant::BigInt {

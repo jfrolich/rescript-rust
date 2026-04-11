@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::ident::Ident;
 use crate::lambda::compat::LetKind;
-use crate::lambda::constant::{Constant, PointerInfo};
+use crate::lambda::constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 use crate::lambda::free_variables::free_variables;
 use crate::lambda::primitive::ExternalFfiKind;
 use crate::lambda::primitive::Primitive;
@@ -282,26 +282,9 @@ impl LoweringContext {
             },
             primitive @ Primitive::PupdateMod => match args.as_slice() {
                 [shape, _, _] if is_empty_module_shape_constant(shape) => Lambda::unit(),
-                _ => Lambda::prim(primitive, args, loc),
+                _ => lower_primitive_default(primitive, args, loc),
             },
-            Primitive::PjsCall {
-                prim_name,
-                arg_types,
-                ffi,
-                dynamic_import,
-                transformed_jsx,
-            } => Lambda::prim(
-                Primitive::PjsCall {
-                    prim_name,
-                    arg_types,
-                    ffi,
-                    dynamic_import,
-                    transformed_jsx,
-                },
-                args,
-                loc,
-            ),
-            other => Lambda::prim(other, args, loc),
+            other => lower_primitive_default(other, args, loc),
         }
     }
 
@@ -343,9 +326,17 @@ impl LoweringContext {
         Lambda::Lswitch(
             Box::new(lowered_scrutinee),
             LambdaSwitch {
-                sw_consts_full: switch.sw_consts_full,
+                sw_consts_full: switch.sw_consts_full
+                    || switch
+                        .sw_names
+                        .as_ref()
+                        .is_some_and(|names| names.consts.len() == lowered_consts.len()),
                 sw_consts: lowered_consts,
-                sw_blocks_full: switch.sw_blocks_full,
+                sw_blocks_full: switch.sw_blocks_full
+                    || switch
+                        .sw_names
+                        .as_ref()
+                        .is_some_and(|names| names.blocks.len() == lowered_blocks.len()),
                 sw_blocks: lowered_blocks,
                 sw_failaction: lowered_failaction,
                 sw_names: switch.sw_names,
@@ -380,18 +371,31 @@ fn lower_constant(constant: Constant) -> Constant {
         Constant::Int {
             i,
             comment: Some(PointerInfo::Constructor(tag)),
-        } => match tag.name.as_str() {
-            "()" if tag.const_ == 1 && tag.non_const == 0 => {
-                Constant::JsUndefined { is_unit: true }
+        } => {
+            let i = match tag.runtime_tag.as_ref() {
+                Some(ConstructorRuntimeTag::Int(runtime_int)) => *runtime_int,
+                _ => i,
+            };
+            match tag.name.as_str() {
+                "()" if tag.const_ == 1 && tag.non_const == 0 => {
+                    Constant::JsUndefined { is_unit: true }
+                }
+                "None" if tag.const_ == 1 && tag.non_const == 1 => {
+                    Constant::JsUndefined { is_unit: false }
+                }
+                _ => Constant::Int {
+                    i,
+                    comment: Some(PointerInfo::Constructor(tag)),
+                },
             }
-            "None" if tag.const_ == 1 && tag.non_const == 1 => {
-                Constant::JsUndefined { is_unit: false }
-            }
-            _ => Constant::Int {
-                i,
-                comment: Some(PointerInfo::Constructor(tag)),
-            },
-        },
+        }
+        Constant::Int {
+            i,
+            comment: Some(PointerInfo::PolyVariant(name)),
+        } => name
+            .parse::<i32>()
+            .map(|i| Constant::Int { i, comment: None })
+            .unwrap_or_else(|_| Constant::Pointer(name)),
         Constant::String { s, delim } => Constant::String { s, delim },
         Constant::ImmString(s) => Constant::String { s, delim: None },
         Constant::Pointer(name) => match name.strip_suffix('a') {
@@ -420,6 +424,48 @@ fn lower_constant(constant: Constant) -> Constant {
         }
         Constant::Some(inner) => Constant::Some(Box::new(lower_constant(*inner))),
         other => other,
+    }
+}
+
+fn int_const_value_any(lam: &Lambda) -> Option<i32> {
+    match lam {
+        Lambda::Lconst(Constant::Int { i, .. }) => Some(*i),
+        _ => None,
+    }
+}
+
+fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Location) -> Lambda {
+    match args.as_slice() {
+        [lhs, rhs] => {
+            let Some(lhs) = int_const_value_any(lhs) else {
+                return Lambda::prim(primitive, args, loc);
+            };
+            let Some(rhs) = int_const_value_any(rhs) else {
+                return Lambda::prim(primitive, args, loc);
+            };
+            let folded = match primitive {
+                Primitive::Paddint => Some(lhs.wrapping_add(rhs)),
+                Primitive::Psubint => Some(lhs.wrapping_sub(rhs)),
+                Primitive::Pmulint => Some(lhs.wrapping_mul(rhs)),
+                Primitive::Pdivint => (rhs != 0).then(|| lhs.wrapping_div(rhs)),
+                Primitive::Pmodint => (rhs != 0).then(|| lhs.wrapping_rem(rhs)),
+                Primitive::Pandint => Some(lhs & rhs),
+                Primitive::Porint => Some(lhs | rhs),
+                Primitive::Pxorint => Some(lhs ^ rhs),
+                Primitive::Plslint => Some(lhs.wrapping_shl((rhs & 31) as u32)),
+                Primitive::Plsrint => Some(((lhs as u32) >> ((rhs & 31) as u32)) as i32),
+                Primitive::Pasrint => Some(lhs.wrapping_shr((rhs & 31) as u32)),
+                _ => None,
+            };
+            if let Some(value) = folded {
+                return Lambda::const_(Constant::Int {
+                    i: value,
+                    comment: None,
+                });
+            }
+            Lambda::prim(primitive, args, loc)
+        }
+        _ => Lambda::prim(primitive, args, loc),
     }
 }
 
@@ -778,7 +824,7 @@ pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
 mod tests {
     use super::*;
     use crate::lambda::compat::LetKind;
-    use crate::lambda::constant::ConstructorTag;
+    use crate::lambda::constant::{ConstructorRuntimeTag, ConstructorTag, StringDelim};
     use crate::lambda::InlineAttribute;
 
     #[test]
@@ -789,6 +835,7 @@ mod tests {
                 name: "()".to_string(),
                 const_: 1,
                 non_const: 0,
+                runtime_tag: None,
             })),
         });
 
@@ -886,6 +933,7 @@ mod tests {
                 name: "None".to_string(),
                 const_: 1,
                 non_const: 1,
+                runtime_tag: None,
             })),
         });
 
@@ -911,6 +959,112 @@ mod tests {
             panic!("expected alias to collapse");
         };
         assert!(id.same(&source));
+    }
+
+    #[test]
+    fn lowers_plain_string_delim_for_typed_constants() {
+        let lowered = lower_to_lambda(RawLambda::const_(Constant::String {
+            s: "hello".to_string(),
+            delim: Some(StringDelim::Plain),
+        }));
+
+        assert!(matches!(
+            lowered,
+            Lambda::Lconst(Constant::String {
+                s,
+                delim: Some(StringDelim::Plain)
+            }) if s == "hello"
+        ));
+    }
+
+    #[test]
+    fn lowers_polyvariant_hash_to_pointer_name() {
+        let lowered = lower_to_lambda(RawLambda::const_(Constant::Int {
+            i: crate::types::btype::hash_variant("One"),
+            comment: Some(PointerInfo::PolyVariant("One".to_string())),
+        }));
+
+        assert!(matches!(
+            lowered,
+            Lambda::Lconst(Constant::Pointer(name)) if name == "One"
+        ));
+    }
+
+    #[test]
+    fn lowers_constructor_runtime_int_tag() {
+        let lowered = lower_to_lambda(RawLambda::const_(Constant::Int {
+            i: 0,
+            comment: Some(PointerInfo::Constructor(ConstructorTag {
+                name: "One1".to_string(),
+                const_: 3,
+                non_const: 0,
+                runtime_tag: Some(ConstructorRuntimeTag::Int(1)),
+            })),
+        }));
+
+        assert!(matches!(
+            lowered,
+            Lambda::Lconst(Constant::Int {
+                i: 1,
+                comment: Some(PointerInfo::Constructor(_)),
+            })
+        ));
+    }
+
+    #[test]
+    fn folds_orint_over_lowered_constructor_ints() {
+        let lowered = lower_to_lambda(RawLambda::prim(
+            Primitive::Porint,
+            vec![
+                RawLambda::const_(Constant::Int {
+                    i: 0,
+                    comment: None,
+                }),
+                RawLambda::const_(Constant::Int {
+                    i: 1,
+                    comment: Some(PointerInfo::Constructor(ConstructorTag {
+                        name: "B".to_string(),
+                        const_: 2,
+                        non_const: 0,
+                        runtime_tag: Some(ConstructorRuntimeTag::Int(2)),
+                    })),
+                }),
+            ],
+            Location::none(),
+        ));
+
+        assert!(matches!(
+            lowered,
+            Lambda::Lconst(Constant::Int {
+                i: 2,
+                comment: None,
+            })
+        ));
+    }
+
+    #[test]
+    fn marks_switch_full_when_names_cover_all_cases() {
+        let lowered = lower_to_lambda(RawLambda::Lswitch(
+            Box::new(RawLambda::var(Ident::create_local("v"))),
+            RawLambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![(0, RawLambda::const_(Constant::int(0)))],
+                sw_blocks_full: false,
+                sw_blocks: Vec::new(),
+                sw_failaction: None,
+                sw_names: Some(crate::lambda::SwitchNames {
+                    consts: vec!["A".to_string()],
+                    blocks: Vec::new(),
+                }),
+            },
+            Location::none(),
+        ));
+
+        let Lambda::Lswitch(_, switch) = lowered else {
+            panic!("expected switch");
+        };
+        assert!(switch.sw_consts_full);
+        assert!(switch.sw_blocks_full);
     }
 
     #[test]

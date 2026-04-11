@@ -259,7 +259,9 @@ fn pointer_info(info: &Option<PointerInfo>) -> Sexp {
             int(tag.non_const),
         ]),
         Some(PointerInfo::AssertFalse) => Sexp::atom("Pt_assertfalse"),
-        Some(PointerInfo::Some(s)) => Sexp::list(vec![Sexp::atom("Some"), string(s)]),
+        Some(PointerInfo::Some(s)) | Some(PointerInfo::PolyVariant(s)) => {
+            Sexp::list(vec![Sexp::atom("Some"), string(s)])
+        }
     }
 }
 
@@ -267,6 +269,7 @@ fn pointer_info(info: &Option<PointerInfo>) -> Sexp {
 fn string_delim(delim: &Option<StringDelim>) -> Sexp {
     match delim {
         None => Sexp::atom("None"),
+        Some(StringDelim::Plain) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("DNone")]),
         Some(StringDelim::StarJ) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("DStarJ")]),
         Some(StringDelim::NoQuotes) => {
             Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("DNoQuotes")])
@@ -306,7 +309,7 @@ fn constant(c: &Constant) -> Sexp {
         Constant::Float(f) => Sexp::list(vec![Sexp::atom("Const_float"), string(f)]),
         Constant::BigInt { negative, value } => Sexp::list(vec![
             Sexp::atom("Const_bigint"),
-            bool_sexp(*negative),
+            bool_sexp(!negative),
             string(value),
         ]),
         Constant::Pointer(s) => Sexp::list(vec![Sexp::atom("Const_pointer"), string(s)]),
@@ -712,7 +715,8 @@ fn switch_names_sexp(names: &Option<crate::lambda::SwitchNames>) -> Sexp {
 
 #[cfg(test)]
 mod tests {
-    use super::switch_names_sexp;
+    use super::{constant, switch_names_sexp};
+    use crate::lambda::constant::{Constant, StringDelim};
     use crate::lambda::SwitchNames;
 
     #[test]
@@ -728,6 +732,28 @@ mod tests {
         assert!(printed.contains("(blocks"));
         assert!(printed.contains("\"Boolean\""));
         assert!(printed.contains("\"String\""));
+    }
+
+    #[test]
+    fn prints_plain_string_delim_as_dnone() {
+        let printed = constant(&Constant::String {
+            s: "hello".to_string(),
+            delim: Some(StringDelim::Plain),
+        })
+        .to_string();
+
+        assert!(printed.contains("DNone"));
+    }
+
+    #[test]
+    fn prints_bigint_sign_as_ocaml_positive_flag() {
+        let printed = constant(&Constant::BigInt {
+            negative: false,
+            value: "100".to_string(),
+        })
+        .to_string();
+
+        assert!(printed.contains("true"));
     }
 }
 

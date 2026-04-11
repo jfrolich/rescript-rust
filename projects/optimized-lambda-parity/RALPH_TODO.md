@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 377/657 (57.4%), 280 parity failures, 3723 hunks
+**Status:** 426/657 (64.8%), 231 parity failures, 2006 hunks
 
 ## Goal
 
@@ -23,16 +23,16 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **377/657**
-- Stamp-canonicalized parity: **377/657**
-- Exact hunks: **3723**
-- Stamp-canonicalized hunks: **3723**
+- Optimized lambda parity: **426/657**
+- Stamp-canonicalized parity: **426/657**
+- Exact hunks: **2006**
+- Stamp-canonicalized hunks: **2006**
 - Largest current exact diffs:
-  - `big_polyvar_test.res`: **1202** hunks
+  - `big_polyvar_test.res`: **602** hunks
   - `stringmatch_test.res`: **284** hunks
-  - `mario_game.res`: **122** hunks
-  - `rbset.res`: **101** hunks
-  - `inline_map2_test.res`: **90** hunks
+  - `bs_queue_test.res`: **81** hunks
+  - `coercion_module_alias_test.res`: **40** hunks
+  - `mario_game.res`: **38** hunks
 
 ## Working Rules
 
@@ -46,17 +46,20 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-All **280** remaining failures are now real optimized-lambda lowering gaps, not a dump-path mismatch.
+All **231** remaining failures are now real optimized-lambda lowering gaps, not a dump-path mismatch.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
 - `raw_lambda/lower.rs` is no longer an identity shim.
 - Small structural sanity checks now pass exactly:
   - `AsInUncurriedExternals.res`
+  - `DictInternalRepresentation.res`
   - `DictInference.res`
   - `DictPatternMatchingOptimization.res`
+  - `VariantCoercion.res`
   - `minimal_test.res`
 - `js_array_test.res` now also passes exactly as a large-file guard.
+- `big_polyvar_test.res` dropped from **1202** hunks to **602** hunks.
 - Stamp canonicalization still does not reduce the baseline at all.
 
 ## Key Findings from Session 2026-04-12
@@ -121,24 +124,64 @@ This drop confirms the next `Lam_convert.convert` slice is landing in the right 
 constructor-name preservation plus JS-call result-kind lowering removed both small-file
 structural mismatches and one of the major large-file guards.
 
+### constructor runtime metadata now survives lowering
+The next slice had to preserve more raw-stage detail without breaking `-drawlambda` parity:
+
+- typed string constants now keep OCaml's plain-string delimiter as `DNone`
+- constructor `@as(...)` payloads now survive typing and raw conversion for int/string/float/bigint/bool/null/undefined cases
+- constant polymorphic variants now keep their source tag names alongside the hashed raw representation
+- optimized lowering now uses that metadata to recover OCaml-aligned pointer, constructor, and switch shapes
+
+This is what made `DictInternalRepresentation.res` and `VariantCoercion.res` drop out while
+cutting `big_polyvar_test.res` roughly in half.
+
+### primitive folding needs to match OCaml, but must stay crash-free
+`raw_lambda/lower.rs` now folds the small set of binary integer primitives that OCaml's
+`Lam_convert.convert` folds after constructor runtime tags have been resolved.
+
+That slice initially introduced a divide-by-zero crash because `then_some(...)` eagerly
+evaluated `wrapping_div` / `wrapping_rem`. The authoritative rerun is only valid after
+switching those guards to lazy `then(|| ...)`, which restored Rust compile coverage to
+**657/657**.
+
+### the repo-wide baseline moved materially again
+Verified focused checks:
+
+- `DictInternalRepresentation.res`: **exact parity**
+- `VariantCoercion.res`: **exact parity**
+- `big_polyvar_test.res`: **602 hunks** (down from **1202**)
+
+Authoritative repo-wide baseline moved from:
+
+- **377/657**, **3723** hunks
+
+to:
+
+- **426/657**, **2006** hunks
+
+This slice confirms the next broad lowering frontier is no longer constructor runtime tags.
+The biggest remaining cluster is now the `big_polyvar_test.res` family around `Praw_js_code_exp`
+argument shape and `Lglobal_module`/exception payload construction.
+
 ## Root-Cause Frontiers
 
 1. **Continue porting `Lam_convert.convert`**
    - module export tail shape
    - let-kind selection (`Strict`, `Alias`, `StrictOpt`, `Variable`)
    - remaining JS-call primitive lowering
-   - constant/block/pointer representation
+   - raw JS code primitive argument shape
+   - `Lglobal_module`/exception payload construction
    - module/coercion lowering forms
 2. **Use smallest failures for quick structural validation**
-   - `Coercion.res`
-   - `DictInternalRepresentation.res`
    - `DynamicImportModuleWithAlias.res`
-   - `DisambiguateOptionalFields.res`
+   - `ExternalExtension.res`
+   - `Import.res`
+   - `LetUnwrap.res`
 3. **Use large files to validate that a rule generalizes**
+   - `big_polyvar_test.res`
    - `caml_compare_test.res`
    - `js_math_test.res`
    - `js_string_test.res`
-   - `js_float_test.res`
    - `stringmatch_test.res`
 4. **Treat later `lam_pass_*` work as out of direct parity scope**
    - only touch those passes if a shared infrastructure change requires it
@@ -146,13 +189,14 @@ structural mismatches and one of the major large-file guards.
 
 ## Immediate Next Milestone
 
-1. Port the next `Lam_convert.convert` rules around module export tails and let-kind selection.
+1. Port the next `Lam_convert.convert` rules around raw JS code shape and `Lglobal_module` exception payloads.
 2. Re-test:
-   - `Coercion.res`
-   - `DictInternalRepresentation.res`
    - `DynamicImportModuleWithAlias.res`
-   - `VariantCoercion.res`
+   - `ExternalExtension.res`
+   - `Import.res`
+   - `LetUnwrap.res`
 3. Validate the same rule on:
+   - `big_polyvar_test.res`
    - `caml_compare_test.res`
    - `js_math_test.res`
    - `stringmatch_test.res`
@@ -165,6 +209,40 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 5. Commit immediately after the next verified OCaml-aligned improvement.
 
 ## Session Log
+
+### 2026-04-12 (constructor runtime tags, DNone strings, polyvariant names, integer folding)
+
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml lambda::sexp_lambda::tests -- --nocapture
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests -- --nocapture
+timeout 180 ./scripts/test_lambda_parity.sh -j1 DictInternalRepresentation
+timeout 180 ./scripts/test_lambda_parity.sh -j1 VariantCoercion
+timeout 180 ./scripts/test_lambda_parity.sh -j1 big_polyvar_test
+timeout 180 ./scripts/test_lambda_parity.sh -j1 div_by_zero_test
+timeout 180 ./scripts/test_lambda_parity.sh -j1 gpr_1760_test
+timeout 180 ./scripts/test_lambda_parity.sh -j1 jsoo_400_test
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- OCaml compile coverage: **657/657**
+- Rust compile coverage: **657/657**
+- Optimized lambda parity: **426/657**
+- Stamp-canonicalized parity: **426/657**
+- Exact hunks: **2006**
+- Stamp-canonicalized hunks: **2006**
+
+Key checkpoints:
+
+- `DictInternalRepresentation.res`: passes
+- `VariantCoercion.res`: passes
+- `big_polyvar_test.res`: **602 hunks** (down from **1202**)
+- `div_by_zero_test.res`: passes after the lazy divide/mod guard fix
+- `gpr_1760_test.res`: passes after the lazy divide/mod guard fix
+- `jsoo_400_test.res`: passes after the lazy divide/mod guard fix
 
 ### 2026-04-12 (switch names and JS FFI result kinds)
 

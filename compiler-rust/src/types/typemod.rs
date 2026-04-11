@@ -105,15 +105,43 @@ fn parser_attr_to_decl_attr(
                     let (expr_idx, _attrs) = eval_box.as_ref();
                     let expr = arena.get_expr(*expr_idx);
                     if let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = expr.pexp_desc.as_ref() {
-                        if let crate::parser::ast::Constant::String(value, _) = c.as_ref() {
-                            crate::types::decl::AttributePayload::Str(value.to_string())
-                        } else {
-                            crate::types::decl::AttributePayload::Structure(vec![])
+                        match c.as_ref() {
+                            crate::parser::ast::Constant::String(value, _) => {
+                                crate::types::decl::AttributePayload::Str(value.to_string())
+                            }
+                            crate::parser::ast::Constant::Integer(value, suffix) => match suffix {
+                                Some('n') => {
+                                    crate::types::decl::AttributePayload::BigInt(value.to_string())
+                                }
+                                Some(_) => crate::types::decl::AttributePayload::Structure(vec![]),
+                                None => value
+                                    .parse::<i32>()
+                                    .map(crate::types::decl::AttributePayload::Int)
+                                    .unwrap_or_else(|_| {
+                                        crate::types::decl::AttributePayload::Structure(vec![])
+                                    }),
+                            },
+                            crate::parser::ast::Constant::Float(value, _) => {
+                                crate::types::decl::AttributePayload::Float(value.to_string())
+                            }
+                            _ => crate::types::decl::AttributePayload::Structure(vec![]),
                         }
                     } else if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = expr.pexp_desc.as_ref() {
                         // @as(undefined), @as(null) — identifier payloads
                         let name = arena.lident_last(lid.txt);
-                        crate::types::decl::AttributePayload::Ident(name.to_string())
+                        match name {
+                            "true" => crate::types::decl::AttributePayload::Bool(true),
+                            "false" => crate::types::decl::AttributePayload::Bool(false),
+                            _ => crate::types::decl::AttributePayload::Ident(name.to_string()),
+                        }
+                    } else if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) =
+                        expr.pexp_desc.as_ref()
+                    {
+                        match arena.lident_last(lid.txt) {
+                            "true" => crate::types::decl::AttributePayload::Bool(true),
+                            "false" => crate::types::decl::AttributePayload::Bool(false),
+                            _ => crate::types::decl::AttributePayload::Structure(vec![]),
+                        }
                     } else {
                         crate::types::decl::AttributePayload::Structure(vec![])
                     }

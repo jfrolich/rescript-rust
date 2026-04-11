@@ -545,6 +545,14 @@ pub enum AttributePayload {
     Empty,
     /// String payload
     Str(String),
+    /// Integer payload
+    Int(i32),
+    /// Float payload
+    Float(String),
+    /// BigInt payload
+    BigInt(String),
+    /// Boolean payload
+    Bool(bool),
     /// Identifier payload
     Ident(String),
     /// Structure payload (list of string pairs)
