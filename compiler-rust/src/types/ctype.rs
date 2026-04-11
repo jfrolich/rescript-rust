@@ -865,6 +865,13 @@ fn resolve_module_signature_through_cmi<'a>(
     use crate::cmi::{cmi_format, sig_reader::SigReadContext};
     use crate::types::decl::{ModuleType, SignatureItem};
 
+    let cache_key = module_path.name();
+    if let Some((cached_path, cached_sig)) = ctx.find_resolved_module_sig(&cache_key) {
+        if cached_path.same(module_path) {
+            return Some(cached_sig);
+        }
+    }
+
     // Keep visited module paths for the full resolution walk. Removing entries
     // re-opens alias cycles (`A -> B -> A`) and can recurse until stack overflow.
     if !visiting.insert(module_path.clone()) {
@@ -927,6 +934,10 @@ fn resolve_module_signature_through_cmi<'a>(
         }
         Path::Papply(_, _) => None,
     };
+
+    if let Some(sig) = result.as_ref() {
+        ctx.register_resolved_module_sig(&cache_key, module_path.clone(), sig.clone());
+    }
 
     result
 }

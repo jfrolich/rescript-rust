@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 650/657 (98.9%), 5 parity failures + 2 compile issues, 6 hunks
+**Status:** 652/657 (99.2%), 5 parity failures, 6 hunks
 
 ## Goal
 
@@ -14,11 +14,11 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 ## Current Baseline
 
 - OCaml compile coverage: **657/657**
-- Rust compile coverage: **655/657** on the 16-way authoritative run
-- Unoptimized lambda parity: **650/657**
+- Rust compile coverage: **657/657** on the 16-way authoritative run
+- Unoptimized lambda parity: **652/657**
 - Parity hunks: **6**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
-- Raw timeouts on the authoritative run: `Import.res`, `global_module_alias_test.res`
+- Raw timeouts on the authoritative run: none
 - Raw crashes on the authoritative run: none
 - `belt_hashmap_test.res`, `bs_map_set_dict_test.res`, `bs_poly_mutable_map_test.res`,
   `bs_poly_mutable_set_test.res`, `bs_poly_set_test.res`, and the `int_map` cluster now
@@ -54,12 +54,27 @@ bs_abstract_test, reactEvent
 **Issue:** removing the last module/signature crash changed the raw-lambda frontier again.
 These two files now fail on the clean authoritative run and need a focused diff pass.
 
-## Additional Raw Compile Issues
-
-- Timeouts: `Import`, `global_module_alias_test`
-- Crashes: none
-
 ## Key Findings from Session 2026-04-10/11
+
+### ctype CMI resolution now reuses cached persistent signatures
+The remaining raw compile failures were not in raw-lambda conversion itself. A direct
+sample of `Import.res` showed the hot path running through
+`typemod::type_module_expr_with_alias` into `includemod`, where `ctype` kept calling
+`resolve_module_signature_through_cmi` and re-reading `.cmi` files during module-type
+expansion. OCaml's `Env.find_module` uses cached persistent structures/components instead
+of decoding the same CMI repeatedly.
+
+Rust already had a per-`TypeContext` resolved-module-signature cache, but
+`resolve_module_signature_through_cmi` was bypassing it entirely. It now:
+
+- checks the existing `resolved_module_sig_cache` before loading a persistent module path
+- stores the substituted result back into that cache after the first successful resolution
+
+**Result:** the isolated raw `Import.res` compile drops from roughly **8.05s** to
+**0.56s**, `global_module_alias_test.res` drops to **0.99s**, and the clean authoritative
+raw baseline restores full compile coverage at **657/657**. Raw parity improves from
+**650/657** to **652/657** with the same **6** hunks, removing the last timeout cluster
+without changing the remaining raw-lambda diff frontier.
 
 ### do_split_or is identical
 Added logging to BOTH OCaml (`Printf.eprintf`) and Rust (`eprintln!`) for `do_split_or`.
