@@ -298,7 +298,16 @@ impl Lambda {
 
     /// Create an if-then-else
     pub fn if_(cond: Lambda, then_: Lambda, else_: Lambda) -> Self {
-        Lambda::LifThenElse(Box::new(cond), Box::new(then_), Box::new(else_))
+        match cond {
+            Lambda::Lconst(constant) => {
+                if constant.eval_as_bool() {
+                    then_
+                } else {
+                    else_
+                }
+            }
+            cond => Lambda::LifThenElse(Box::new(cond), Box::new(then_), Box::new(else_)),
+        }
     }
 
     /// Create a while loop
@@ -419,7 +428,7 @@ mod tests {
 
     #[test]
     fn test_if_then_else() {
-        let cond = Lambda::true_();
+        let cond = Lambda::var(Ident::create_local("cond"));
         let then_ = Lambda::const_(Constant::Int {
             i: 1,
             comment: None,
@@ -435,6 +444,33 @@ mod tests {
             Lambda::LifThenElse(_, _, _) => {}
             _ => panic!("Expected LifThenElse"),
         }
+    }
+
+    #[test]
+    fn test_if_then_else_constant_fold() {
+        let then_ = Lambda::const_(Constant::Int {
+            i: 1,
+            comment: None,
+        });
+        let else_ = Lambda::const_(Constant::Int {
+            i: 0,
+            comment: None,
+        });
+
+        let if_expr = Lambda::if_(Lambda::true_(), then_.clone(), else_);
+        match if_expr {
+            Lambda::Lconst(Constant::Int {
+                i: 1,
+                comment: None,
+            }) => {}
+            _ => panic!("Expected folded then-branch"),
+        }
+
+        let if_expr = Lambda::if_(Lambda::false_(), then_, Lambda::unit());
+        assert!(matches!(
+            if_expr,
+            Lambda::Lconst(Constant::JsUndefined { is_unit: true })
+        ));
     }
 
     #[test]

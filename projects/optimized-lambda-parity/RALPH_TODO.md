@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 460/657 (70.0%), 197 parity failures, 1859 hunks
+**Status:** 461/657 (70.2%), 196 parity failures, 1855 hunks
 
 ## Goal
 
@@ -23,10 +23,10 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **460/657**
-- Stamp-canonicalized parity: **460/657**
-- Exact hunks: **1859**
-- Stamp-canonicalized hunks: **1859**
+- Optimized lambda parity: **461/657**
+- Stamp-canonicalized parity: **461/657**
+- Exact hunks: **1855**
+- Stamp-canonicalized hunks: **1855**
 - Largest current exact diffs:
   - `big_polyvar_test.res`: **601** hunks
   - `stringmatch_test.res`: **284** hunks
@@ -46,7 +46,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-All **197** remaining failures are now real optimized-lambda lowering gaps, not a dump-path mismatch.
+All **196** remaining failures are now real optimized-lambda lowering gaps, not a dump-path mismatch.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -58,10 +58,11 @@ Current frontier characteristics:
   - `DictPatternMatchingOptimization.res`
   - `DynamicImportModuleWithAlias.res`
   - `ExternalExtension.res`
+  - `Import.res`
   - `VariantCoercion.res`
   - `minimal_test.res`
 - `js_array_test.res` now also passes exactly as a large-file guard.
-- `Import.res` is down to **1** hunk and the remaining delta is a `Lam.if_` smart-constructor issue, not an import/raw-JS lowering issue.
+- constant-condition folding in `Lam.if_` is now landed; the remaining `Lam.if_` frontier is the non-constant smart-constructor behavior still visible in `LetUnwrap.res`.
 - `big_polyvar_test.res` dropped from **1202** hunks to **601** hunks.
 - Stamp canonicalization still does not reduce the baseline at all.
 
@@ -202,17 +203,46 @@ This confirms the import/raw-JS slice is now mostly complete. The next visible
 frontier in this area is the missing `Lam.if_` smart-constructor behavior that
 still leaves `Import.res` with a constant-condition branch.
 
+### constant-condition folding in `Lam.if_` moved the baseline again
+`compiler-rust/src/lambda/mod.rs` now matches the first OCaml `Lam.if_` branch:
+when the condition is a constant, the smart constructor returns the selected
+branch instead of preserving `Lifthenelse`.
+
+That is deliberately limited to the constant-condition case. The remaining
+`Lam.if_` parity work is still in the smarter non-constant rewrites from
+`compiler/core/lam.ml`.
+
+Verified focused checks:
+
+- `Import.res`: **exact parity**
+- `LetUnwrap.res`: **19 hunks**
+- `DerivingAccessorsCurried.res`: **1 hunk**
+- `DerivingAccessorsUncurried.res`: **1 hunk**
+- `big_polyvar_test.res`: **601 hunks**
+
+Authoritative repo-wide baseline moved from:
+
+- **460/657**, **1859** hunks
+
+to:
+
+- **461/657**, **1855** hunks
+
+This confirms the constant-condition branch was the last blocker for
+`Import.res`. The next structural frontier is the remaining `Lam.if_`
+smart-constructor rewrites plus the alias/module-export shape still showing up
+in the accessor files.
+
 ## Root-Cause Frontiers
 
 1. **Continue porting `Lam_convert.convert`**
    - module export tail shape
    - let-kind selection (`Strict`, `Alias`, `StrictOpt`, `Variable`)
-   - remaining `Lam.if_` smart-constructor behavior
+   - remaining non-constant `Lam.if_` smart-constructor behavior
    - remaining JS-call primitive lowering
    - remaining exception/module lowering forms outside the import/raw-JS slice
    - module/coercion lowering forms
 2. **Use smallest failures for quick structural validation**
-   - `Import.res`
    - `LetUnwrap.res`
    - `DerivingAccessorsCurried.res`
    - `DerivingAccessorsUncurried.res`
@@ -228,9 +258,8 @@ still leaves `Import.res` with a constant-condition branch.
 
 ## Immediate Next Milestone
 
-1. Port the next `Lam.if_` smart-constructor slices that OCaml applies during lowering, starting with constant-condition folding.
+1. Port the next `Lam.if_` smart-constructor slices that OCaml applies during lowering after constant-condition folding.
 2. Re-test:
-   - `Import.res`
    - `LetUnwrap.res`
    - `DerivingAccessorsCurried.res`
    - `DerivingAccessorsUncurried.res`
@@ -248,6 +277,36 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 5. Commit immediately after the next verified OCaml-aligned improvement.
 
 ## Session Log
+
+### 2026-04-12 (constant-condition folding in `Lam.if_`)
+
+Ran:
+
+```bash
+cargo test --manifest-path compiler-rust/Cargo.toml test_if_then_else_constant_fold
+cargo test --manifest-path compiler-rust/Cargo.toml test_print_if
+cargo build --release --manifest-path compiler-rust/Cargo.toml
+timeout 600 ./scripts/test_lambda_parity.sh -j1 'Import.res|LetUnwrap.res|DerivingAccessorsCurried.res|DerivingAccessorsUncurried.res|big_polyvar_test.res'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- OCaml compile coverage: **657/657**
+- Rust compile coverage: **657/657**
+- Optimized lambda parity: **461/657**
+- Stamp-canonicalized parity: **461/657**
+- Exact hunks: **1855**
+- Stamp-canonicalized hunks: **1855**
+
+Key checkpoints:
+
+- `Import.res`: passes
+- `LetUnwrap.res`: **19 hunks**
+- `DerivingAccessorsCurried.res`: **1 hunk**
+- `DerivingAccessorsUncurried.res`: **1 hunk**
+- `big_polyvar_test.res`: **601 hunks**
+- next visible frontier: non-constant `Lam.if_` rewrites and the accessor alias/module-export shape
 
 ### 2026-04-12 (dynamic import scoping and raw JS code payload lowering)
 

@@ -1053,13 +1053,13 @@ mod tests {
 
     #[test]
     fn test_print_if() {
-        let cond = Lambda::true_();
+        let cond = Lambda::var(Ident::create_local("cond"));
         let then_ = Lambda::const_(Constant::int(1));
         let else_ = Lambda::const_(Constant::int(0));
         let if_expr = Lambda::if_(cond, then_, else_);
         let s = lambda_to_string(&if_expr);
         assert!(s.contains("if"));
-        assert!(s.contains("#true"));
+        assert!(s.contains("cond"));
         assert!(s.contains("1"));
         assert!(s.contains("0"));
     }
