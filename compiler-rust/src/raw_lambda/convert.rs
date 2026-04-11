@@ -2708,16 +2708,15 @@ impl<'a> RawLambdaConverter<'a> {
                 Box::new(self.normalize_module_path_in_env(env, left)),
                 Box::new(self.normalize_module_path_in_env(env, right)),
             ),
-            _ => path.clone(),
+            crate::types::Path::Pident(_) => path.clone(),
         };
 
-        if let Some(alias_target) = crate::types::typecore::alias_target_for_module_path(
+        if let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
             &path,
             env,
             &mut self.persistent_env,
             self.type_ctx,
-        )
-        {
+        ) {
             if !alias_target.same(&path) {
                 return self.normalize_module_path_in_env(env, &alias_target);
             }

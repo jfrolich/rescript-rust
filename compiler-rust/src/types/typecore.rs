@@ -19016,6 +19016,43 @@ pub(crate) fn alias_target_for_module_path<'a>(
     }
 }
 
+pub(crate) fn module_alias_target_for_path<'a>(
+    module_path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<Path> {
+    match module_path {
+        Path::Pident(id) => {
+            let md = env
+                .lookup_module(module_path)
+                .or_else(|_| env.find_module(id.name()))
+                .ok()?;
+            match &md.md_type {
+                crate::types::decl::ModuleType::MtyAlias(_, target) => Some(target.clone()),
+                _ => None,
+            }
+        }
+        Path::Pdot(parent, module_name, _) => {
+            let (_, parent_sig) = resolve_module_signature_for_path(parent, env, pers_env, ctx)?;
+            for item in &parent_sig {
+                if let crate::types::decl::SignatureItem::SigModule(id, md, _) = item {
+                    if id.name() == module_name.as_str() {
+                        return match &md.md_type {
+                            crate::types::decl::ModuleType::MtyAlias(_, target) => {
+                                Some(target.clone())
+                            }
+                            _ => None,
+                        };
+                    }
+                }
+            }
+            None
+        }
+        Path::Papply(_, _) => None,
+    }
+}
+
 /// Look up a type declaration for a given path.
 /// Tries env first, then the global type stores.
 fn lookup_type_decl_for_path<'a>(

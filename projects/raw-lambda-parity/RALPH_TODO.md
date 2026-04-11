@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 634/657 (96.5%), 21 failures, 70 hunks
+**Status:** 649/657 (98.8%), 6 failures, 14 hunks
 
 ## Goal
 
@@ -15,14 +15,14 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **655/657** on the 16-way authoritative run
-- Unoptimized lambda parity: **634/657**
-- Parity hunks: **70**
+- Unoptimized lambda parity: **649/657**
+- Parity hunks: **14**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 - Focused raw runs for `Import.res` and `global_module_alias_test.res` both pass; the
   full 16-way baseline still times those two files out intermittently.
-- `pr6726.res` now reaches focused raw parity after preserving alias children in
-  extracted structure signatures; the remaining failures are a broader alias/module
-  lowering cluster exposed by that OCaml-aligned change.
+- `pr6726.res`, `DynamicImportModuleWithAlias.res`, `module_alias_test.res`, and
+  `test_include.res` now reach focused raw parity after restoring OCaml's
+  alias-only path normalization behavior.
 
 ## Working Rules
 
@@ -33,17 +33,14 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 21 Failures by Category
+## Remaining 6 Failures by Category
 
-### Alias / module lowering after preserving child aliases (17 files)
-DynamicImportModuleWithAlias, a, alias_default_value_test, async_await, coercion_module_alias_test,
-derive_projector_test, functors, gpr_3865_bar, gpr_3897_test, gpr_4274_test, inner_call,
-module_alias_test, recmodule, recursive_module_test, test_include, test_non_export, test_set
+### Module coercion / alias lowering (3 files)
+coercion_module_alias_test, derive_projector_test, recmodule
 
-**Issue:** extracted structure signatures now preserve `Tmod_ident` children as aliases
-instead of eagerly resolving them to signatures. That fixes `pr6726`, but it exposes the
-remaining raw-lambda mismatch in downstream alias/coercion lowering, especially around
-module exports, include/module-type-of coercions, and recursive-module init/update shapes.
+**Issue:** preserving child aliases in extracted structure signatures is now correct, but the
+remaining raw lowering still diverges from OCaml for downstream module coercions / includes /
+recursive-module runtime shapes.
 
 ### Dict pattern compilation (2 files)
 json_decorders, stdlib_Stdlib_DictTests
@@ -51,11 +48,11 @@ json_decorders, stdlib_Stdlib_DictTests
 **Issue:** Dict synthetic labels / narrow optional-wrapper stripping fixed the earlier
 cluster, but two Dict-focused raw diffs remain.
 
-### Other (2 files)
-bs_poly_map_test, inline_map2_test
+### Other (1 file)
+bs_poly_map_test
 
-**Issue:** remaining library-specific raw lambda shape differences outside the main alias
-cluster.
+**Issue:** remaining library-specific raw lambda shape difference outside the main
+module/Dict clusters.
 
 ## Key Findings from Session 2026-04-10/11
 
@@ -166,6 +163,24 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (raw normalize_path follows aliases, not ident/module-type names)
+
+The first alias-preservation follow-up over-normalized local module binders by chasing both
+`MtyAlias` and `MtyIdent` paths during raw module-path translation. OCaml's
+`Env.normalize_path` only follows `Mty_alias`; it does NOT rewrite functor parameters,
+unpacked modules, or other local `Mty_ident` access paths to their module-type names.
+
+Rust now:
+- preserves the earlier env-threaded raw path translation / alias-child extraction changes
+- normalizes raw module paths through `MtyAlias` targets only
+- keeps local `Pident` access paths such as functor params / unpacked modules / dynamic-import
+  binders intact instead of rewriting them through `MtyIdent`
+
+**Result:** the alias-heavy regression cluster collapses back down. The clean authoritative raw
+baseline improves to **649/657** with **14** hunks, resolving
+`pr6726`, `DynamicImportModuleWithAlias`, `module_alias_test`, `test_include`, and the other
+small alias-path regressions exposed by the previous OCaml-aligned change.
 
 ### 2026-04-11 (preserve alias children when extracting structure signatures)
 
