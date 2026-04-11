@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 632/657 (96.2%), 25 failures, 47 hunks
+**Status:** 634/657 (96.5%), 23 failures, 43 hunks
 
 ## Goal
 
@@ -15,8 +15,8 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **632/657**
-- Parity hunks: **47**
+- Unoptimized lambda parity: **634/657**
+- Parity hunks: **43**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 
 ## Working Rules
@@ -28,12 +28,11 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 25 Failures by Category
+## Remaining 23 Failures by Category
 
-### Matching compiler: remaining inner matching / let-pattern lowering (8 files)
-mario_game(6), UntaggedVariants(5), more_poly_variant_test(4), inline_record_test(3),
-exception_raise_test(2), bigint_test(1), inline_condition_with_pattern_matching(1),
-int_poly_var(1)
+### Matching compiler: remaining inner matching / let-pattern lowering (6 files)
+mario_game(6), UntaggedVariants(5), inline_record_test(3), exception_raise_test(2),
+bigint_test(1), inline_condition_with_pattern_matching(1)
 
 **Root cause confirmed:** `do_split_or` partitioning is IDENTICAL between OCaml and Rust,
 but the recursive split helpers were rebuilding defaults from the OUTER `def` instead of
@@ -46,11 +45,13 @@ like `[10,9,8,7,6,5,4,3]` down to `[10]` in Rust.
   `inline_map2_test`
 - `approx_present` now treats Rust `LglobalModule` like OCaml `Pgetglobal`, which
   fixed `test_set`, `set_gen`, and `gpr_1150`
+- polyvariant action grouping now uses `make_key` normalization, fixing
+  `more_poly_variant_test` and `int_poly_var`
 
 **Next investigation:** The remaining matching failures are no longer caused by collapsed
 default suffixes, the `raw_simple_for_let` shortcut, or global-reference false positives
 inside `lower_bind`. Focus next on the specific inner handler/default combinations that
-still diverge in `mario_game`, `UntaggedVariants`, and `more_poly_variant_test`.
+still diverge in `mario_game`, `UntaggedVariants`, and the inline-record/exception path.
 
 ### Module coercion / alias resolution (7 files)
 coercion_module_alias_test(1), Import(1), offset(1), DynamicImportModuleWithAlias(1),
@@ -314,6 +315,23 @@ the expected `(false, true, false)` / `(false, false, true)` lowering behavior.
 branches too. This clears `test_set`, `set_gen`, and `gpr_1150`, and leaves a smaller
 inner-matching cluster centered on the remaining polymorphic-variant and branch-shape
 cases.
+
+### 2026-04-11 (polyvariant action grouping uses make_key normalization)
+
+Rust's polyvariant helper `convert_polyvar_list` was grouping actions with
+`format!("{:?}", act)` instead of the same `make_key`-normalized comparison OCaml gets
+through `Switcher.test_sequence` / `as_interval`. That prevented alpha-equivalent actions
+with different local ids from being merged, which forced extra tag tests for
+`#...myvariant`-style matches.
+
+Switching the grouping key to `make_key_string` aligns the helper with OCaml's normalized
+action equality.
+
+**Baseline after change:** **632/657 -> 634/657**, **47 -> 43 hunks**.
+
+**Takeaway:** the remaining matching files are no longer in the polyvariant action-sharing
+bucket. The next matching work should stay focused on the remaining branch/catch shaping in
+`mario_game`, `UntaggedVariants`, and inline-record-related paths.
 
 ### 2026-04-11 (compile_list recursion)
 

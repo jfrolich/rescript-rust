@@ -6645,7 +6645,7 @@ fn combine_constructor(
 /// Groups entries that have the same lambda action together, producing a list
 /// of `(hash_names, action)` pairs sorted by first occurrence (stamp).
 fn convert_polyvar_list(xs: &[(i32, (String, RawLambda))]) -> Vec<(Vec<(i32, String)>, RawLambda)> {
-    // Group by action equality using string-based comparison (like OCaml's make_key).
+    // Group by normalized action equality, matching OCaml's make_key-based sharing.
     // Each entry gets a stamp (its original index) for stable sorting.
     struct Entry {
         stamp: usize,
@@ -6657,12 +6657,11 @@ fn convert_polyvar_list(xs: &[(i32, (String, RawLambda))]) -> Vec<(Vec<(i32, Str
     let mut entries: Vec<Entry> = Vec::new();
 
     for (i, (hash, (name, act))) in xs.iter().enumerate() {
-        // Use debug format as a key for structural comparison
-        let key = format!("{:?}", act);
-        // Try to find an existing entry with the same action key
-        let found_idx = entries.iter().position(|e| match (&e.key, &key) {
-            (Some(k1), k2) => k1 == k2,
-            _ => false,
+        let key = make_key_string(act);
+        let found_idx = key.as_ref().and_then(|key| {
+            entries
+                .iter()
+                .position(|e| e.key.as_ref().is_some_and(|existing| existing == key))
         });
         if let Some(idx) = found_idx {
             entries[idx].hash_names.push((*hash, name.clone()));
@@ -6671,7 +6670,7 @@ fn convert_polyvar_list(xs: &[(i32, (String, RawLambda))]) -> Vec<(Vec<(i32, Str
                 stamp: i,
                 hash_names: vec![(*hash, name.clone())],
                 act: act.clone(),
-                key: Some(key),
+                key,
             });
         }
     }
