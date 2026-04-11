@@ -4966,36 +4966,13 @@ fn share_actions_tree(
         .map(|(cst, j)| (cst, resolved_acts[j].clone()))
         .collect();
 
-    // Build the handler wrappers as (exit_id, handler_body) pairs
-    // OCaml composes: hs := fun act -> h(ohs(act))
-    // This means the FIRST handler added is the INNERMOST catch.
-    // We collect (i, h) pairs where h is the catch wrapper.
+    // Extract only the actual catch handlers. When the wrapper is identity
+    // (the shared action is already a simple exit), there is no handler to reapply.
     let handler_pairs: Vec<(i32, RawLambda)> = handlers
         .into_iter()
-        .map(|(i, h)| {
-            // h is a FnOnce that wraps body in LstaticCatch if needed.
-            // We need to extract the handler body from it.
-            // Actually, make_catch_delayed returns (i, wrapper).
-            // To get the handler body, we can call h with a static raise as body
-            // and it will wrap with LstaticCatch(body, (i, []), handler_body).
-            // But that's roundabout. Let's rethink.
-
-            // Actually, we need to store the wrapper functions and apply them
-            // to the final result. Let's return them directly.
-            // The caller will apply them in order.
-
-            // For now, call the wrapper with a dummy to extract the handler.
-            // h(Lstaticraise(i, [])) returns handler directly.
-            // h(anything_else) returns LstaticCatch(anything_else, (i, []), handler).
-            let dummy = RawLambda::Lconst(crate::lambda::Constant::int(0));
-            let wrapped = h(dummy);
-            match wrapped {
-                RawLambda::LstaticCatch(_, (exit_id, _), handler) => (exit_id, *handler),
-                // If h was identity (handler was already a simple exit), this won't be reached
-                // because make_catch_delayed returns identity for simple exits, so the action
-                // would have been the exit itself, not going through Shared path.
-                other => (i, other),
-            }
+        .filter_map(|(i, h)| match h(make_exit(i)) {
+            RawLambda::LstaticRaise(j, args) if j == i && args.is_empty() => None,
+            handler => Some((i, handler)),
         })
         .collect();
 

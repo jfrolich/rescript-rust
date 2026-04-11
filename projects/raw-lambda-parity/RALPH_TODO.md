@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 634/657 (96.5%), 23 failures, 43 hunks
+**Status:** 636/657 (96.8%), 21 failures, 37 hunks
 
 ## Goal
 
@@ -15,8 +15,8 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **634/657**
-- Parity hunks: **43**
+- Unoptimized lambda parity: **636/657**
+- Parity hunks: **37**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 
 ## Working Rules
@@ -28,11 +28,10 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 23 Failures by Category
+## Remaining 21 Failures by Category
 
-### Matching compiler: remaining inner matching / let-pattern lowering (6 files)
-mario_game(6), UntaggedVariants(5), inline_record_test(3), exception_raise_test(2),
-bigint_test(1), inline_condition_with_pattern_matching(1)
+### Matching compiler: remaining inner matching / let-pattern lowering (4 files)
+mario_game(6), inline_record_test(3), exception_raise_test(2), bigint_test(1)
 
 **Root cause confirmed:** `do_split_or` partitioning is IDENTICAL between OCaml and Rust,
 but the recursive split helpers were rebuilding defaults from the OUTER `def` instead of
@@ -47,11 +46,13 @@ like `[10,9,8,7,6,5,4,3]` down to `[10]` in Rust.
   fixed `test_set`, `set_gen`, and `gpr_1150`
 - polyvariant action grouping now uses `make_key` normalization, fixing
   `more_poly_variant_test` and `int_poly_var`
+- shared-action handler extraction now skips identity wrappers, fixing
+  `UntaggedVariants` and `inline_condition_with_pattern_matching`
 
 **Next investigation:** The remaining matching failures are no longer caused by collapsed
 default suffixes, the `raw_simple_for_let` shortcut, or global-reference false positives
 inside `lower_bind`. Focus next on the specific inner handler/default combinations that
-still diverge in `mario_game`, `UntaggedVariants`, and the inline-record/exception path.
+still diverge in `mario_game` and the inline-record/exception/bigint path.
 
 ### Module coercion / alias resolution (7 files)
 coercion_module_alias_test(1), Import(1), offset(1), DynamicImportModuleWithAlias(1),
@@ -332,6 +333,24 @@ action equality.
 **Takeaway:** the remaining matching files are no longer in the polyvariant action-sharing
 bucket. The next matching work should stay focused on the remaining branch/catch shaping in
 `mario_game`, `UntaggedVariants`, and inline-record-related paths.
+
+### 2026-04-11 (shared-action handler extraction skips identity wrappers)
+
+Rust `share_actions_tree` was reconstructing handler bodies by applying each delayed wrapper
+to a dummy `0` lambda. When the wrapper was actually the identity function
+(`make_catch_delayed` on an action that was already a simple exit), that dummy became a real
+handler body, producing bogus inner catches like `with (1) 0`, `with (1) 0n`, or
+`with (1) 0a`.
+
+The fix is to probe wrappers with `make_exit(i)` instead and skip them entirely when the
+wrapper is identity. That matches OCaml's `handle_shared`, which never materializes a fake
+handler for already-simple exits.
+
+**Baseline after change:** **634/657 -> 636/657**, **43 -> 37 hunks**.
+
+**Takeaway:** the remaining matching files no longer include the shared-action `with (...) 0`
+artifact. The next matching work is concentrated in `mario_game`, `inline_record_test`,
+`exception_raise_test`, and the remaining bigint ordering issue.
 
 ### 2026-04-11 (compile_list recursion)
 
