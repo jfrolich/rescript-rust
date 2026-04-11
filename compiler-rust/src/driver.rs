@@ -551,6 +551,10 @@ pub fn compile_source_to_js_with_options(
     let lambda_start_stamp = type_ctx.current_stamp();
 
     if options.dump_lambda {
+        let raw_trace = std::env::var_os("RUST_DRAWLAMBDA_STAGE_TRACE").is_some();
+        if raw_trace {
+            eprintln!("[drawlambda-stage] start");
+        }
         let unit_name = options
             .source_filename
             .as_deref()
@@ -569,9 +573,31 @@ pub fn compile_source_to_js_with_options(
         if let Some(persistent_env) = tctx.persistent_env.clone() {
             raw_converter.set_persistent_env(persistent_env);
         }
+        if raw_trace {
+            eprintln!("[drawlambda-stage] before-convert");
+        }
         let raw_lambda =
             raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
-        eprintln!("{}", crate::raw_lambda::print::RawLambdaPrinter::new(&raw_lambda));
+        if raw_trace {
+            eprintln!("[drawlambda-stage] after-convert");
+            eprintln!("[drawlambda-stage] before-print");
+        }
+        use std::io::Write;
+        let mut stderr = std::io::stderr();
+        let mut raw_buf = Vec::new();
+        crate::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut raw_buf);
+        raw_buf.push(b'\n');
+        let _ = stderr.write_all(&raw_buf);
+        if raw_trace {
+            eprintln!("[drawlambda-stage] after-print");
+        }
+        let raw_only = std::env::var_os("RUST_RAWLAMBDA_ONLY").is_some();
+        if !raw_only {
+            let _ = stderr.flush();
+        }
+        if raw_only {
+            std::process::exit(0);
+        }
     }
 
     // Keep the lowered JS path on the existing Lambda converter while the
