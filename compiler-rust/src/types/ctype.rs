@@ -1071,6 +1071,8 @@ fn resolve_module_type_through_env_path<'a>(
                             let child_target_path = Path::pdot(target_parent_path.clone(), name);
                             strengthen_signature_for_module_access_path(
                                 ctx,
+                                env,
+                                true,
                                 &child_target_path,
                                 &copied_sig,
                                 0,
@@ -1092,6 +1094,8 @@ fn resolve_module_type_through_env_path<'a>(
                             let child_target_path = Path::pdot(target_parent_path.clone(), name);
                             Some(strengthen_module_type_for_module_access_path(
                                 ctx,
+                                env,
+                                true,
                                 &child_target_path,
                                 &child_mty,
                             ))
@@ -1187,6 +1191,8 @@ fn strengthen_type_decl_for_module_access_path<'a>(
 
 fn strengthen_module_type_for_module_access_path<'a>(
     ctx: &'a TypeContext<'a>,
+    env: &super::env::Env,
+    aliasable: bool,
     module_access_path: &Path,
     mty: &super::decl::ModuleType,
 ) -> super::decl::ModuleType {
@@ -1194,46 +1200,75 @@ fn strengthen_module_type_for_module_access_path<'a>(
 
     match mty {
         ModuleType::MtySignature(sig) => ModuleType::MtySignature(
-            strengthen_signature_for_module_access_path(ctx, module_access_path, sig, 0),
+            strengthen_signature_for_module_access_path(
+                ctx,
+                env,
+                aliasable,
+                module_access_path,
+                sig,
+                0,
+            ),
         ),
         ModuleType::MtyAlias(..) | ModuleType::MtyIdent(..) => mty.clone(),
         ModuleType::MtyFunctor {
             param,
             param_type,
             result,
-        } => ModuleType::MtyFunctor {
+        } if param.name() != "*" => ModuleType::MtyFunctor {
             param: param.clone(),
             param_type: param_type.clone(),
             result: Box::new(strengthen_module_type_for_module_access_path(
                 ctx,
-                module_access_path,
+                env,
+                false,
+                &Path::Papply(
+                    Box::new(module_access_path.clone()),
+                    Box::new(Path::pident(param.clone())),
+                ),
                 result,
             )),
         },
+        ModuleType::MtyFunctor { .. } => mty.clone(),
     }
 }
 
 pub fn strengthen_module_type_for_inclusion_path<'a>(
     ctx: &'a TypeContext<'a>,
+    env: &super::env::Env,
     module_access_path: &Path,
     mty: &super::decl::ModuleType,
 ) -> super::decl::ModuleType {
-    strengthen_module_type_for_module_access_path(ctx, module_access_path, mty)
+    strengthen_module_type_for_module_access_path(ctx, env, true, module_access_path, mty)
 }
 
 fn strengthen_module_decl_for_module_access_path<'a>(
     ctx: &'a TypeContext<'a>,
+    env: &super::env::Env,
+    aliasable: bool,
     module_access_path: &Path,
     md: &super::decl::ModuleDeclaration,
 ) -> super::decl::ModuleDeclaration {
+    use super::decl::{AliasPresence, ModuleType};
+
     let mut strengthened = md.clone();
-    strengthened.md_type =
-        strengthen_module_type_for_module_access_path(ctx, module_access_path, &md.md_type);
+    strengthened.md_type = match &md.md_type {
+        ModuleType::MtyAlias(..) => md.md_type.clone(),
+        _ if aliasable => ModuleType::MtyAlias(AliasPresence::MtaPresent, module_access_path.clone()),
+        _ => strengthen_module_type_for_module_access_path(
+            ctx,
+            env,
+            aliasable,
+            module_access_path,
+            &md.md_type,
+        ),
+    };
     strengthened
 }
 
 fn strengthen_signature_for_module_access_path<'a>(
     ctx: &'a TypeContext<'a>,
+    env: &super::env::Env,
+    aliasable: bool,
     module_access_path: &Path,
     sig: &[super::decl::SignatureItem],
     mut pos: i32,
@@ -1241,6 +1276,7 @@ fn strengthen_signature_for_module_access_path<'a>(
     use super::decl::{SignatureItem, ValueKind};
 
     let mut strengthened = Vec::with_capacity(sig.len());
+    let mut env = env.clone();
     for item in sig {
         let new_item = match item {
             SignatureItem::SigValue(id, desc) => {
@@ -1265,21 +1301,30 @@ fn strengthen_signature_for_module_access_path<'a>(
                     pos,
                 );
                 pos += 1;
-                SignatureItem::SigModule(
+                let strengthened_md = strengthen_module_decl_for_module_access_path(
+                    ctx,
+                    &env,
+                    aliasable,
+                    &child_path,
+                    md,
+                );
+                let new_item = SignatureItem::SigModule(
                     id.clone(),
-                    strengthen_module_decl_for_module_access_path(ctx, &child_path, md),
+                    strengthened_md,
                     *rec_status,
-                )
+                );
+                env.add_module(id.clone(), md.clone());
+                new_item
             }
             SignatureItem::SigModtype(id, mtd) => {
                 let mut strengthened_mtd = mtd.clone();
-                if let Some(mty) = &mtd.mtd_type {
+                if mtd.mtd_type.is_none() {
                     let modtype_path = Path::pdot(module_access_path.clone(), id.name());
-                    strengthened_mtd.mtd_type = Some(
-                        strengthen_module_type_for_module_access_path(ctx, &modtype_path, mty),
-                    );
+                    strengthened_mtd.mtd_type = Some(super::decl::ModuleType::MtyIdent(modtype_path));
                 }
-                SignatureItem::SigModtype(id.clone(), strengthened_mtd)
+                let new_item = SignatureItem::SigModtype(id.clone(), strengthened_mtd);
+                env.add_modtype(id.clone(), mtd.clone());
+                new_item
             }
             SignatureItem::SigClass => SignatureItem::SigClass,
             SignatureItem::SigClassType => SignatureItem::SigClassType,

@@ -5431,6 +5431,14 @@ fn anchor_local_module_aliases_to_owner(
         }
     }
 
+    fn path_contains_apply(path: &Path) -> bool {
+        match path {
+            Path::Pident(_) => false,
+            Path::Pdot(prefix, _, _) => path_contains_apply(prefix),
+            Path::Papply(_, _) => true,
+        }
+    }
+
     fn qualify_local_module_type_paths(
         mty: &mut crate::types::decl::ModuleType,
         maps: &LocalModuleTypePathMaps,
@@ -5468,16 +5476,21 @@ fn anchor_local_module_aliases_to_owner(
     match mty {
         DeclMty::MtySignature(sig) => {
             let local_maps = build_local_module_type_path_maps(sig, owner_path);
+            let qualify_local_paths = !path_contains_apply(owner_path);
 
             for item in sig {
                 if let SigItem::SigModule(id, md, _) = item {
                     let child_owner_path = Path::pdot(owner_path.clone(), id.name());
                     md.md_path = Some(child_owner_path.clone());
-                    qualify_local_module_type_paths(&mut md.md_type, &local_maps);
+                    if qualify_local_paths {
+                        qualify_local_module_type_paths(&mut md.md_type, &local_maps);
+                    }
                     anchor_local_module_aliases_to_owner(&mut md.md_type, &child_owner_path);
                 } else if let SigItem::SigModtype(id, mtd) = item {
                     if let Some(mty) = mtd.mtd_type.as_mut() {
-                        qualify_local_module_type_paths(mty, &local_maps);
+                        if qualify_local_paths {
+                            qualify_local_module_type_paths(mty, &local_maps);
+                        }
                         let modtype_owner_path = Path::pdot(owner_path.clone(), id.name());
                         anchor_local_module_aliases_to_owner(mty, &modtype_owner_path);
                     }
@@ -5485,12 +5498,22 @@ fn anchor_local_module_aliases_to_owner(
             }
         }
         DeclMty::MtyFunctor {
-            param_type, result, ..
+            param,
+            param_type,
+            result,
         } => {
             if let Some(param_type) = param_type.as_mut() {
                 anchor_local_module_aliases_to_owner(param_type, owner_path);
             }
-            anchor_local_module_aliases_to_owner(result, owner_path);
+            let result_owner_path = if param.name() != "*" {
+                Path::Papply(
+                    Box::new(owner_path.clone()),
+                    Box::new(Path::pident(param.clone())),
+                )
+            } else {
+                owner_path.clone()
+            };
+            anchor_local_module_aliases_to_owner(result, &result_owner_path);
         }
         DeclMty::MtyIdent(_) | DeclMty::MtyAlias(_, _) => {}
     }
@@ -5540,18 +5563,7 @@ pub(crate) fn decl_module_type_from_typed(
     match &mty.mty_desc {
         ModuleTypeDesc::Tmty_ident(path, _) => Some(DeclMty::MtyIdent(path.clone())),
         ModuleTypeDesc::Tmty_alias(path, _) => {
-            // Use MtaPresent instead of MtaAbsent to prevent includemod::modtypes
-            // from wrapping the coercion in Tcoerce_alias. In OCaml, type_package
-            // calls type_module with alias=false, so the module type is never
-            // Mty_alias when reaching includemod. In Rust, type_pack uses alias=true
-            // which produces Tmty_alias, so we need MtaPresent to avoid spurious
-            // Tcoerce_alias wrapping that causes incorrect lambda generation
-            // (extra 0a wrapper in dynamic imports).
-            //
-            // The Tcoerce_alias for actual module aliases (like `include Belt.List`)
-            // is produced directly in type_module_expr_with_alias (line 7349) and
-            // does NOT go through this function, so this change is safe.
-            Some(DeclMty::MtyAlias(AliasPresence::MtaPresent, path.clone()))
+            Some(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path.clone()))
         }
         ModuleTypeDesc::Tmty_signature(sig) => {
             let mut out = Vec::new();
@@ -7201,49 +7213,26 @@ fn type_module_expr_with_alias<'a>(
             let mod_expr_inner = arena.get_mod_expr(*mod_expr_inner_idx);
             let typed_mod = type_module_expr_with_alias(tctx, env, arena, mod_expr_inner, alias)?;
             let typed_mty = transl_modtype(tctx, env, arena, arena.get_mod_type(*mod_type_idx))?;
-            // Compute the actual coercion via wrap_constraint (which calls
-            // includemod::modtypes). Only safe for explicit signature
-            // constraints (Pmty_signature), not `module type of` which can
-            // cause infinite recursion in module type expansion.
             let parsed_mty = arena.get_mod_type(*mod_type_idx);
-            let is_simple_sig = matches!(
-                &*parsed_mty.pmty_desc,
-                crate::parser::ast::ModuleTypeDesc::Pmty_signature(_)
-                    | crate::parser::ast::ModuleTypeDesc::Pmty_ident(_)
-                    | crate::parser::ast::ModuleTypeDesc::Pmty_functor(_)
-            );
-            let coercion = if is_simple_sig {
-                match wrap_constraint(
-                    tctx,
-                    env,
-                    typed_mod.clone(),
-                    typed_mty.clone(),
-                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(
-                        typed_mty.clone(),
-                    )),
-                    loc,
-                    mod_expr.pmod_attributes.clone(),
-                ) {
-                    Ok(result) => return Ok(result),
-                    Err(_) => ModuleCoercion::Tcoerce_none,
-                }
-            } else {
-                ModuleCoercion::Tcoerce_none
-            };
-            Ok(ModuleExpr {
-                mod_desc: ModuleExprDesc::Tmod_constraint(
-                    Box::new(typed_mod),
-                    typed_mty.clone(),
-                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(
-                        Box::new(typed_mty),
-                    ),
-                    coercion,
-                ),
-                mod_loc: loc,
-                mod_type: ModuleType::placeholder(),
-                mod_env: EnvRef(0),
-                mod_attributes: mod_expr.pmod_attributes.clone(),
-            })
+            let decl_mty = translate_module_type_to_decl_with_typed_hint(
+                tctx,
+                env,
+                arena,
+                parsed_mty,
+                Some(&typed_mty),
+            )?;
+            wrap_constraint_with_decl_mty(
+                tctx,
+                env,
+                typed_mod,
+                typed_mty.clone(),
+                decl_mty,
+                crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(
+                    typed_mty,
+                )),
+                loc,
+                mod_expr.pmod_attributes.clone(),
+            )
         }
 
         ParsedModuleExprDesc::Pmod_unpack(expr_idx) => {
@@ -7309,13 +7298,64 @@ fn wrap_constraint<'a>(
     mod_loc: LocIdx,
     mod_attributes: Attributes,
 ) -> TypeModResult<ModuleExpr> {
-    let arg_mty = extract_module_type_from_mod_expr_with_ctx(&arg, Some(env), tctx.type_ctx)
-        .or_else(|| decl_module_type_from_typed(&arg.mod_type))
-        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
     let decl_mty =
         decl_module_type_from_typed(&mty).unwrap_or(crate::types::decl::ModuleType::MtySignature(
             vec![],
         ));
+    let arg_mty = extract_module_type_from_mod_expr_with_ctx(&arg, Some(env), tctx.type_ctx)
+        .or_else(|| decl_module_type_from_typed(&arg.mod_type))
+        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+    wrap_constraint_with_decl_and_arg_mty(
+        tctx,
+        env,
+        arg,
+        mty,
+        arg_mty,
+        decl_mty,
+        explicit,
+        mod_loc,
+        mod_attributes,
+    )
+}
+
+fn wrap_constraint_with_decl_mty<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arg: ModuleExpr,
+    mty: ModuleType,
+    decl_mty: crate::types::decl::ModuleType,
+    explicit: crate::types::typedtree::ModuleTypeConstraint,
+    mod_loc: LocIdx,
+    mod_attributes: Attributes,
+) -> TypeModResult<ModuleExpr> {
+    let arg_mty = decl_module_type_from_typed_module_expr_for_constraint_arg(&arg)
+        .or_else(|| extract_module_type_from_mod_expr_with_ctx(&arg, Some(env), tctx.type_ctx))
+        .or_else(|| decl_module_type_from_typed(&arg.mod_type))
+        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+    wrap_constraint_with_decl_and_arg_mty(
+        tctx,
+        env,
+        arg,
+        mty,
+        arg_mty,
+        decl_mty,
+        explicit,
+        mod_loc,
+        mod_attributes,
+    )
+}
+
+fn wrap_constraint_with_decl_and_arg_mty<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arg: ModuleExpr,
+    mty: ModuleType,
+    arg_mty: crate::types::decl::ModuleType,
+    decl_mty: crate::types::decl::ModuleType,
+    explicit: crate::types::typedtree::ModuleTypeConstraint,
+    mod_loc: LocIdx,
+    mod_attributes: Attributes,
+) -> TypeModResult<ModuleExpr> {
     let coercion =
         crate::types::includemod::modtypes(tctx.type_ctx, env, &arg_mty, &decl_mty).map_err(
             |err| TypeModError::SignatureMismatch {
@@ -7323,12 +7363,13 @@ fn wrap_constraint<'a>(
                 found: format!("{err:?}"),
             },
         )?;
+    let env_ref = tctx.type_ctx.store_typed_env(env);
 
     Ok(ModuleExpr {
         mod_desc: ModuleExprDesc::Tmod_constraint(Box::new(arg), mty.clone(), explicit, coercion),
         mod_loc,
         mod_type: mty,
-        mod_env: EnvRef(0),
+        mod_env: env_ref,
         mod_attributes,
     })
 }
@@ -10442,7 +10483,7 @@ fn type_structure_item<'a>(
                 &mut resolve_ident_sig,
             );
             let final_include_sig = include_sig.or_else(|| {
-                extracted_include_mty.and_then(|mty| {
+                extracted_include_mty.clone().and_then(|mty| {
                     resolve_mod_type_to_sig(
                         &mty,
                         Some(env),
@@ -10487,19 +10528,6 @@ fn type_structure_item<'a>(
                         _ => None,
                     })
                     .collect();
-                if include_root_path.is_some() || include_flat_name.is_some() {
-                    let mut visited = HashSet::new();
-                    rewrite_included_signature_paths_to_local(
-                        tctx.type_ctx,
-                        &mut sig,
-                        include_root_path.as_ref(),
-                        include_flat_name.as_deref(),
-                        &local_include_types,
-                        &local_include_modules,
-                        &local_include_modtypes,
-                        &mut visited,
-                    );
-                }
                 sig
             });
             let mut new_env = env.clone();

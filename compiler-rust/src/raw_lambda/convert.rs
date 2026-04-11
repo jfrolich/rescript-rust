@@ -2809,6 +2809,45 @@ impl<'a> RawLambdaConverter<'a> {
             (ModuleCoercion::Tcoerce_none, other) => other.clone(),
             (other, ModuleCoercion::Tcoerce_none) => other.clone(),
             (
+                ModuleCoercion::Tcoerce_structure(left_positions, left_ids, left_runtime_fields),
+                ModuleCoercion::Tcoerce_structure(right_positions, right_ids, _right_runtime_fields),
+            ) => {
+                let composed_ids = left_ids
+                    .iter()
+                    .filter_map(|(id, left_pos, left_cc)| {
+                        right_positions.get(*left_pos).map(|(right_pos, right_cc)| {
+                            (
+                                id.clone(),
+                                *right_pos,
+                                Self::compose_coercions_raw(left_cc, right_cc),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                let composed_positions = left_positions
+                    .iter()
+                    .filter_map(|(left_pos, left_cc)| match left_cc {
+                        ModuleCoercion::Tcoerce_primitive(_) => Some((*left_pos, left_cc.clone())),
+                        _ => right_positions.get(*left_pos).map(|(right_pos, right_cc)| {
+                            (
+                                *right_pos,
+                                Self::compose_coercions_raw(left_cc, right_cc),
+                            )
+                        }),
+                    })
+                    .collect::<Vec<_>>();
+
+                ModuleCoercion::Tcoerce_structure(
+                    composed_positions,
+                    composed_ids
+                        .into_iter()
+                        .chain(right_ids.iter().cloned())
+                        .collect(),
+                    left_runtime_fields.clone(),
+                )
+            }
+            (
                 ModuleCoercion::Tcoerce_functor(left_arg, left_res),
                 ModuleCoercion::Tcoerce_functor(right_arg, right_res),
             ) => ModuleCoercion::Tcoerce_functor(
@@ -3169,12 +3208,10 @@ impl<'a> RawLambdaConverter<'a> {
                     self.loc(module_expr.mod_loc),
                 )
             }
-            ModuleExprDesc::Tmod_constraint(inner, _, _, inner_cc) => self
-                .convert_module_expr_raw_with_coercion(
-                    inner,
-                    rootpath,
-                    &Self::compose_coercions_raw(cc, inner_cc),
-                ),
+            ModuleExprDesc::Tmod_constraint(inner, _, _, inner_cc) => {
+                let composed = Self::compose_coercions_raw(cc, inner_cc);
+                self.convert_module_expr_raw_with_coercion(inner, rootpath, &composed)
+            }
             ModuleExprDesc::Tmod_ident(path, _) => {
                 let loc = self.loc(module_expr.mod_loc);
                 let arg = if let Some(env) = self.env_for_module_expr(module_expr) {

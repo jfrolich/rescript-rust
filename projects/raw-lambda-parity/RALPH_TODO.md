@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 649/657 (98.8%), 4 parity failures + 4 compile issues, 12 hunks
+**Status:** 640/657 (97.4%), 13 parity failures + 4 compile issues, 29 hunks
 
 ## Goal
 
@@ -15,14 +15,14 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **653/657** on the 16-way authoritative run
-- Unoptimized lambda parity: **649/657**
-- Parity hunks: **12**
+- Unoptimized lambda parity: **640/657**
+- Parity hunks: **29**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 - Raw timeouts on the authoritative run: `Import.res`, `global_module_alias_test.res`
 - Raw crashes on the authoritative run: `defunctor_make_test.res`, `derive_projector_test.res`
-- `pr6726.res`, `DynamicImportModuleWithAlias.res`, `module_alias_test.res`, and
-  `test_include.res` still reach focused raw parity after restoring OCaml's
-  alias-only path normalization behavior.
+- `coercion_module_alias_test.res` now reaches focused raw parity, but the
+  authoritative run regresses in the broader alias/module-path cluster after
+  preserving local functor-result aliases for coercion.
 
 ## Working Rules
 
@@ -33,26 +33,28 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 4 Parity Failures by Category
+## Remaining 13 Parity Failures by Category
 
-### Module coercion / alias lowering (1 parity file)
-coercion_module_alias_test
+### Alias / module-path lowering reopened by functor-result local aliases (8 files)
+DynamicImportModuleWithAlias, import_side_effect, test_non_export,
+belt_hashmap_test, bs_map_set_dict_test, bs_poly_mutable_map_test,
+bs_poly_mutable_set_test, int_map
 
-**Issue:** preserving child aliases in extracted structure signatures is now correct, but the
-remaining raw lowering still diverges from OCaml for downstream module coercions / includes.
-`derive_projector_test` still crashes in the same broader module/signature-comparison area.
+**Issue:** OCaml keeps sibling aliases in functor-result signatures as local `Pident`s so
+`wrap_id_pos_list` can bind them from the applied result. Rust now matches that for
+`coercion_module_alias_test`, but the authoritative run shows more downstream places still
+assuming owner-qualified alias paths.
+
+### Collection/library raw shape differences (3 files)
+bs_poly_map_test, bs_poly_set_test, test_js_ffi
+
+**Issue:** remaining library-focused raw lambda mismatches outside the Dict-specific paths.
 
 ### Dict pattern compilation (2 files)
 json_decorders, stdlib_Stdlib_DictTests
 
 **Issue:** Dict synthetic labels / narrow optional-wrapper stripping fixed the earlier
 cluster, but two Dict-focused raw diffs remain.
-
-### Other (1 file)
-bs_poly_map_test
-
-**Issue:** remaining library-specific raw lambda shape difference outside the main
-module/Dict clusters.
 
 ## Additional Raw Compile Issues
 
@@ -168,6 +170,28 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (functor-result alias coercions now preserve local sibling paths)
+
+OCaml `lambda.ml` rejects `Papply` in `transl_normal_path`, so the alias path carried by a
+functor-result coercion must stay a local sibling path (`Pident N`), not an owner-qualified
+`Pdot(Papply(F, X), "N", ...)`. Rust's extracted decl module types were still qualifying local
+aliases inside functor-result signatures, which made `G0` in `coercion_module_alias_test`
+generate nested `Tcoerce_alias` wrappers and lower `N'` through `field:N/-1 0a` instead of
+binding `N` from the applied result.
+
+Rust now:
+- keeps local alias paths unqualified when anchoring signature items under an owner path that
+  already contains `Papply`
+- still records `md_path` for those children so applied-result modules keep their owner path
+- composes nested structure coercions in raw lambda and preserves the earlier
+  `Mta_absent` / include-signature fixes that were needed to reach the final `G0` shape
+
+**Result:** `coercion_module_alias_test` now reaches focused raw parity, but the clean
+authoritative raw baseline regresses to **640/657** with **29** hunks. The new failures are
+all in the wider alias/module-path cluster plus the existing Dict/library files, so the next
+loop needs to port the remaining owner-path assumptions instead of reverting the verified
+OCaml-aligned local-alias fix.
 
 ### 2026-04-11 (module expressions now keep typing envs for raw recmodule shapes)
 
