@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 636/657 (96.8%), 21 failures, 37 hunks
+**Status:** 637/657 (97.0%), 20 failures, 35 hunks
 
 ## Goal
 
@@ -15,8 +15,8 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **636/657**
-- Parity hunks: **37**
+- Unoptimized lambda parity: **637/657**
+- Parity hunks: **35**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 
 ## Working Rules
@@ -28,10 +28,10 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 21 Failures by Category
+## Remaining 20 Failures by Category
 
-### Matching compiler: remaining inner matching / let-pattern lowering (4 files)
-mario_game(6), inline_record_test(3), exception_raise_test(2), bigint_test(1)
+### Matching compiler: remaining inner matching / let-pattern lowering (3 files)
+mario_game(6), inline_record_test(3), exception_raise_test(2)
 
 **Root cause confirmed:** `do_split_or` partitioning is IDENTICAL between OCaml and Rust,
 but the recursive split helpers were rebuilding defaults from the OUTER `def` instead of
@@ -48,11 +48,13 @@ like `[10,9,8,7,6,5,4,3]` down to `[10]` in Rust.
   `more_poly_variant_test` and `int_poly_var`
 - shared-action handler extraction now skips identity wrappers, fixing
   `UntaggedVariants` and `inline_condition_with_pattern_matching`
+- bigint constant ordering now uses numeric bigint comparison, fixing
+  `bigint_test`
 
 **Next investigation:** The remaining matching failures are no longer caused by collapsed
 default suffixes, the `raw_simple_for_let` shortcut, or global-reference false positives
 inside `lower_bind`. Focus next on the specific inner handler/default combinations that
-still diverge in `mario_game` and the inline-record/exception/bigint path.
+still diverge in `mario_game` and the inline-record/exception path.
 
 ### Module coercion / alias resolution (7 files)
 coercion_module_alias_test(1), Import(1), offset(1), DynamicImportModuleWithAlias(1),
@@ -351,6 +353,20 @@ handler for already-simple exits.
 **Takeaway:** the remaining matching files no longer include the shared-action `with (...) 0`
 artifact. The next matching work is concentrated in `mario_game`, `inline_record_test`,
 `exception_raise_test`, and the remaining bigint ordering issue.
+
+### 2026-04-11 (bigint constant ordering uses numeric compare)
+
+Rust `const_compare` was ordering bigint constants by sign plus raw digit-string
+lexicographic comparison. OCaml calls `Bigint_utils.compare`, so negative values like
+`-2n` and `-1n` sort by numeric magnitude, not by plain string order.
+
+Switching Rust bigint constant ordering to a numeric sign/length/lexicographic compare
+aligns `sort_lambda_list` and the generated test-sequence order with OCaml.
+
+**Baseline after change:** **636/657 -> 637/657**, **37 -> 35 hunks**.
+
+**Takeaway:** the remaining raw-matching bucket is now just `mario_game`,
+`inline_record_test`, and `exception_raise_test`.
 
 ### 2026-04-11 (compile_list recursion)
 

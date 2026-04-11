@@ -74,6 +74,30 @@ fn make_pat(desc: PatternDesc, ty: TypeExprRef, env: EnvRef) -> Pattern {
 /// Equivalent to OCaml's `const_compare`.
 fn const_compare(c1: &Constant, c2: &Constant) -> std::cmp::Ordering {
     use std::cmp::Ordering;
+    fn normalize_bigint_digits(digits: &str) -> &str {
+        let trimmed = digits.trim_start_matches('0');
+        if trimmed.is_empty() { "0" } else { trimmed }
+    }
+
+    fn compare_bigint(positive1: bool, digits1: &str, positive2: bool, digits2: &str) -> Ordering {
+        if positive1 != positive2 {
+            return if positive1 {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            };
+        }
+
+        let digits1 = normalize_bigint_digits(digits1);
+        let digits2 = normalize_bigint_digits(digits2);
+        let abs_cmp = digits1.len().cmp(&digits2.len()).then_with(|| digits1.cmp(digits2));
+        if positive1 {
+            abs_cmp
+        } else {
+            abs_cmp.reverse()
+        }
+    }
+
     match (c1, c2) {
         (Constant::Float(f1), Constant::Float(f2)) => {
             let v1: f64 = f1.parse().unwrap_or(0.0);
@@ -81,12 +105,7 @@ fn const_compare(c1: &Constant, c2: &Constant) -> std::cmp::Ordering {
             v1.partial_cmp(&v2).unwrap_or(Ordering::Equal)
         }
         (Constant::BigInt(s1, b1), Constant::BigInt(s2, b2)) => {
-            // Simple comparison: sign first, then digits
-            match (s1, s2) {
-                (true, false) => Ordering::Less, // negative < positive
-                (false, true) => Ordering::Greater,
-                _ => b1.cmp(b2),
-            }
+            compare_bigint(*s1, b1, *s2, b2)
         }
         (Constant::String(s1, _), Constant::String(s2, _)) => s1.cmp(s2),
         (Constant::Int(i1), Constant::Int(i2)) => i1.cmp(i2),
