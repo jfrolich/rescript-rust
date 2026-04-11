@@ -2,12 +2,12 @@
 
 You are working on achieving **100% unoptimized lambda parity** between the Rust compiler and the OCaml reference implementation using `-drawlambda`.
 
-## Current Baseline (2026-03-29)
+## Current Baseline (2026-04-11)
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **171/657**
-- Parity hunks: **1028**
+- Unoptimized lambda parity: **626/657**
+- Parity hunks: **89**
 
 This project is about the **real OCaml raw lambda stage**, not printer normalization.
 The Rust implementation must match the OCaml reference pipeline and control flow.
@@ -68,18 +68,20 @@ Always use timeouts for compiler invocations.
 # Build Rust compiler
 timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release
 
-# Authoritative baseline
-./scripts/test_lambda_parity.sh --unoptimized -j1
+# Build OCaml compiler (for adding debug logging)
+eval "$(opam env)" && dune build --root . && make artifacts
+
+# Authoritative baseline (with canonical stamp normalization)
+rm -rf .parity-cache/ && CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 # Focused single-file / pattern run
-./scripts/test_lambda_parity.sh --unoptimized tests/tests/src/VariantPatternMatchingSpreads.res
-./scripts/test_lambda_parity.sh --unoptimized "VariantPatternMatching"
+CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw gpr_1698_test
 
-# Optimized lambda guard (must not regress accidentally)
-./scripts/test_lambda_parity.sh -j1
+# Direct compiler invocation for debug logging
+timeout 10 compiler-rust/target/release/bsc -drawlambda tests/tests/src/FILE.res 2>&1
 
-# Typedtree guard when raw-lambda changes touch typing-facing code
-./scripts/test_typedtree_parity.sh
+# OCaml direct invocation (from tests/tests/lib/bs)
+cd tests/tests/lib/bs && timeout 10 ../../../../packages/@rescript/darwin-arm64/bin/bsc.exe -drawlambda -I ../ocaml -runtime-path ../../../../node_modules/@rescript/runtime -bs-package-name rescript-tests src/FILE.ast 2>&1
 ```
 
 ## Raw Fallback Debugging
@@ -100,15 +102,21 @@ Use those trace keys to map the failure back to the OCaml raw-matching code path
 
 ## Prioritization
 
-1. **Port missing OCaml raw stage structure first**
-   - eliminate places where `RawLambda` still behaves as a thin wrapper over lowered lambda
-2. **Port `matching.ml` grouped constructor/or/alias compilation**
-   - especially grouped `switch`/`catch` control flow
-3. **Port module/raw coercion paths from `translmod.ml`**
-   - especially alias/module-pack handling
-4. **Fix printer only after the raw IR shape is correct**
+1. **Fix matching compiler inner compilation differences**
+   - The outer `do_split_or` partitioning is identical between OCaml and Rust
+   - The difference is in `compile_flattened` → `compile_match` → inner `split_precompile`
+   - Compare inner compilation by adding logging to BOTH OCaml and Rust
+   - Key files: `compiler-rust/src/raw_lambda/matching.rs`, `compiler/ml/matching.ml`
+2. **Fix module coercion / alias resolution**
+   - Thread expression env through translate_normal_path_raw for Pdot resolution
+   - Fix strengthen_module_type for same-source modules with value shadowing
+3. **Fix JSX PPX duplicate make positions**
+   - Either fix at PPX level or in signature_runtime_value
+4. **Implement Dict pattern compilation matching OCaml**
+   - Use typed field accesses instead of option checks
 
-Do not chase “easy files.” The remaining failures are root-cause problems.
+All remaining 31 failures are in the lambda conversion stage (typed trees are identical).
+Log in BOTH compilers to compare behavior at specific code points.
 
 ## Commit Rules
 
