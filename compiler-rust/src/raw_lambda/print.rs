@@ -462,7 +462,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lswitch(arg, sw) => {
+        RawLambda::Lswitch(arg, sw, _) => {
             f.open_box(BoxKind::Box, 1);
             if sw.sw_failaction.is_some() {
                 f.string("(switch");

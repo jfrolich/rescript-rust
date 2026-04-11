@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 639/657 (97.3%), 18 failures, 31 hunks
+**Status:** 640/657 (97.4%), 17 failures, 29 hunks
 
 ## Goal
 
@@ -15,8 +15,8 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **639/657**
-- Parity hunks: **31**
+- Unoptimized lambda parity: **640/657**
+- Parity hunks: **29**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 
 ## Working Rules
@@ -28,35 +28,7 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 18 Failures by Category
-
-### Matching compiler: remaining inner matching / let-pattern lowering (1 file)
-mario_game(2)
-
-**Root cause confirmed:** `do_split_or` partitioning is IDENTICAL between OCaml and Rust,
-but the recursive split helpers were rebuilding defaults from the OUTER `def` instead of
-the recursive branch's `top_default`. That collapsed OCaml's cumulative default suffixes
-like `[10,9,8,7,6,5,4,3]` down to `[10]` in Rust.
-
-**Recent fixes in this cluster:**
-- recursive `top_default` threading now matches OCaml and fixed `gpr_1698_test`
-- nonrecursive irrefutable lets now route through `Matching.for_let`, fixing
-  `inline_map2_test`
-- `approx_present` now treats Rust `LglobalModule` like OCaml `Pgetglobal`, which
-  fixed `test_set`, `set_gen`, and `gpr_1150`
-- polyvariant action grouping now uses `make_key` normalization, fixing
-  `more_poly_variant_test` and `int_poly_var`
-- shared-action handler extraction now skips identity wrappers, fixing
-  `UntaggedVariants` and `inline_condition_with_pattern_matching`
-- bigint constant ordering now uses numeric bigint comparison, fixing
-  `bigint_test`
-
-**Next investigation:** The remaining matching failures are no longer caused by collapsed
-default suffixes, the `raw_simple_for_let` shortcut, global-reference false positives
-inside `lower_bind`, missing inline-record label reconstruction for extension paths, or
-cross-shape `may_compat` leakage, or missing local module type declarations during
-optional-shape checks. Focus next on the specific inner handler/default combinations that
-still diverge in `mario_game`.
+## Remaining 17 Failures by Category
 
 ### Module coercion / alias resolution (7 files)
 coercion_module_alias_test(1), Import(1), offset(1), DynamicImportModuleWithAlias(1),
@@ -196,6 +168,26 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (thread real pattern locations through raw matching)
+
+OCaml's `do_compile_matching` and tuple/record divider helpers thread `pat.pat_loc`
+through the raw matcher (`combine_constant`, `combine_constructor`, `combine_array`,
+`combine_variant`, `make_tuple_matching`, `make_record_matching`). Rust was still using
+`Location::none()` in those paths, and `call_switcher` / clustered `Lswitch` building was
+dropping the caller location too. That made `Lambda.make_key` collapse branch-local switch
+actions that OCaml keeps distinct by location, which is why `mario_game` still shared the
+wrong nested catch/switch handler even after the optional-shape fixes.
+
+Rust now:
+- threads `ParseArena` through the raw matching compiler so pattern-driven switch builders
+  use `arena.to_location(pat.pat_loc)` where OCaml uses `pat.pat_loc`
+- uses real pattern locations for tuple and record projection helpers instead of ghost locs
+- carries `Lswitch` locations in raw lambda, preserves them in `make_key`, and threads the
+  switcher API/builders with the caller location instead of hardcoding `Location::none()`
+
+**Result:** full raw baseline improves to **640/657** with **29** hunks. `mario_game`
+now reaches full parity, removing the final failure from the inner matching cluster.
 
 ### 2026-04-11 (pre-register local module types for optional-shape checks)
 

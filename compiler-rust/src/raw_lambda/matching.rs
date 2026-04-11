@@ -15,7 +15,7 @@ use crate::lambda::LetKind;
 use crate::lambda::primitive::Mutable;
 use crate::lambda::{Comparison, FieldDbgInfo, Primitive, SwitchNames, TagInfo};
 use crate::location::Location;
-use crate::parse_arena::LocIdx;
+use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::Attributes;
 use crate::raw_lambda::print::RawLambdaPrinter;
 use crate::raw_lambda::typeopt::{
@@ -1456,7 +1456,11 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                 Some(RawLambda::Lapply(RawApply {
                     ap_func: Box::new(func),
                     ap_args: args,
-                    ..ap.clone()
+                    ap_info: crate::lambda::ApInfo {
+                        loc: Location::none(),
+                        ..ap.ap_info.clone()
+                    },
+                    ap_transformed_jsx: ap.ap_transformed_jsx,
                 }))
             }
             RawLambda::Llet(LetKind::Alias, x, ex, body) => {
@@ -1498,10 +1502,10 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                     loc: Location::none(),
                 }))
             }
-            RawLambda::Lswitch(scrut, sw) => {
+            RawLambda::Lswitch(scrut, sw, loc) => {
                 let scrut_norm = tr_rec(env, scrut, count, next_id)?;
                 let sw_norm = tr_sw(env, sw, count, next_id)?;
-                Some(RawLambda::Lswitch(Box::new(scrut_norm), sw_norm))
+                Some(RawLambda::Lswitch(Box::new(scrut_norm), sw_norm, loc.clone()))
             }
             RawLambda::LstringSwitch(scrut, cases, default) => {
                 let scrut_norm = tr_rec(env, scrut, count, next_id)?;
@@ -1626,7 +1630,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
 /// Convert a RawLambda to a string key for comparison purposes.
 /// Returns None if the lambda cannot be normalized.
 fn make_key_string(e: &RawLambda) -> Option<String> {
-    make_key(e).map(|k| format!("{}", RawLambdaPrinter::new(&k)))
+    make_key(e).map(|k| format!("{k:?}"))
 }
 
 // ============================================================================
@@ -2426,7 +2430,7 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
                     collect(arg, fv);
                 }
             }
-            RawLambda::Lswitch(arg, sw) => {
+            RawLambda::Lswitch(arg, sw, _) => {
                 collect(arg, fv);
                 for (_, lam) in &sw.sw_consts {
                     collect(lam, fv);
@@ -4483,10 +4487,16 @@ fn make_tuple_matching(
 
 /// Divide a pattern matching by tuple.
 /// Equivalent to OCaml's `divide_tuple`.
-fn divide_tuple(arity: usize, p: &Pattern, ctx: &[Ctx], pm: &PatternMatching) -> MatchCell {
+fn divide_tuple(
+    arena: &ParseArena,
+    arity: usize,
+    p: &Pattern,
+    ctx: &[Ctx],
+    pm: &PatternMatching,
+) -> MatchCell {
     divide_line(
         |c| filter_ctx(p, c),
-        |def, args| make_tuple_matching(Location::none(), arity, def, args),
+        |def, args| make_tuple_matching(arena.to_location(p.pat_loc), arity, def, args),
         |pat, rem| get_args_tuple(arity, pat, rem),
         p.clone(),
         ctx,
@@ -4642,6 +4652,7 @@ fn make_record_matching(
 /// Divide a pattern matching by record fields.
 /// Equivalent to OCaml's `divide_record`.
 fn divide_record(
+    arena: &ParseArena,
     all_labels: &[LabelDescription],
     p: &Pattern,
     ctx: &[Ctx],
@@ -4650,7 +4661,7 @@ fn divide_record(
     let num_fields = all_labels.len();
     divide_line(
         |c| filter_ctx(p, c),
-        |def, args| make_record_matching(Location::none(), all_labels, def, args),
+        |def, args| make_record_matching(arena.to_location(p.pat_loc), all_labels, def, args),
         |pat, rem| get_args_record(num_fields, pat, rem),
         p.clone(),
         ctx,
@@ -5319,6 +5330,7 @@ fn sarg_make_switch(
             sw_failaction: None,
             sw_names,
         },
+        _loc,
     )
 }
 
@@ -5684,10 +5696,18 @@ pub fn call_switcher(
     }
 
     // Call the switch compiler — it handles shared actions internally via abstract_shared
-    crate::raw_lambda::switch::zyva(edges, arg, &cases, &action_store, sw_names, &mut || {
+    crate::raw_lambda::switch::zyva(
+        loc,
+        edges,
+        arg,
+        &cases,
+        &action_store,
+        sw_names,
+        &mut || {
         *next_raise_count += 1;
         *next_raise_count
-    })
+        },
+    )
 }
 
 // ============================================================================
@@ -6626,7 +6646,7 @@ fn combine_constructor(
                         };
                         let (handlers, sw) = share_actions_sw(sw, next_raise_count);
                         let sw = reintroduce_fail(sw);
-                        let result = RawLambda::Lswitch(Box::new(arg), sw);
+                        let result = RawLambda::Lswitch(Box::new(arg), sw, loc.clone());
                         apply_handlers(result, handlers)
                     }
                 }
@@ -7148,7 +7168,7 @@ fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
                 _ => bind(LetKind::Alias, v, arg, lam),
             }
         }
-        RawLambda::Lswitch(ls, sw)
+        RawLambda::Lswitch(ls, sw, loc)
             if sw.sw_consts.len() == 1 && sw.sw_blocks.is_empty() && !approx_present(v, ls) =>
         {
             let (i, act) = &sw.sw_consts[0];
@@ -7159,9 +7179,10 @@ fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
                     sw_consts: vec![(*i, new_act)],
                     ..(*sw).clone()
                 },
+                loc.clone(),
             )
         }
-        RawLambda::Lswitch(ls, sw)
+        RawLambda::Lswitch(ls, sw, loc)
             if sw.sw_consts.is_empty() && sw.sw_blocks.len() == 1 && !approx_present(v, ls) =>
         {
             let (i, act) = &sw.sw_blocks[0];
@@ -7172,6 +7193,7 @@ fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
                     sw_blocks: vec![(*i, new_act)],
                     ..(*sw).clone()
                 },
+                loc.clone(),
             )
         }
         RawLambda::Llet(LetKind::Alias, vv, lv, l) => {
@@ -7381,6 +7403,7 @@ fn patch_guarded(patch: RawLambda, lam: &RawLambda) -> RawLambda {
 /// Equivalent to OCaml's `compile_match`.
 fn compile_match(
     ctx_ref: &TypeContext<'_>,
+    arena: &ParseArena,
     _repr: Option<()>,
     partial: &Partial,
     ctx: &[Ctx],
@@ -7396,8 +7419,15 @@ fn compile_match(
                     args: m.args.clone(),
                     default: m.default.clone(),
                 };
-                let (lambda, total) =
-                    compile_match(ctx_ref, None, partial, ctx, &remaining, next_raise_count)?;
+                let (lambda, total) = compile_match(
+                    ctx_ref,
+                    arena,
+                    None,
+                    partial,
+                    ctx,
+                    &remaining,
+                    next_raise_count,
+                )?;
                 Ok((patch_guarded(lambda, action), total))
             } else {
                 Ok((action.clone(), jumps_empty()))
@@ -7423,7 +7453,7 @@ fn compile_match(
                                arg: &RawLambda,
                                pmh: &PmHalfCompiled|
              -> Result<(RawLambda, Jumps), Unused> {
-                do_compile_matching(ctx_ref, partial, ctx, arg, pmh, next_raise_count)
+                do_compile_matching(ctx_ref, arena, partial, ctx, arg, pmh, next_raise_count)
             };
 
             let (lam, total) =
@@ -7448,6 +7478,7 @@ fn compile_match(
 /// Equivalent to OCaml's `do_compile_matching`.
 fn do_compile_matching(
     ctx_ref: &TypeContext<'_>,
+    arena: &ParseArena,
     partial: &Partial,
     ctx: &[Ctx],
     arg: &RawLambda,
@@ -7460,6 +7491,7 @@ fn do_compile_matching(
             match &pat.pat_desc {
                 PatternDesc::Tpat_any => compile_no_test(
                     ctx_ref,
+                    arena,
                     &|ctx, pm| divide_var(ctx, pm),
                     &|ctx| ctx_rshift(ctx),
                     partial,
@@ -7472,7 +7504,8 @@ fn do_compile_matching(
                     let norm_pat = normalize_pat(&pat);
                     compile_no_test(
                         ctx_ref,
-                        &move |ctx, pm| divide_tuple(arity, &norm_pat, ctx, pm),
+                        arena,
+                        &move |ctx, pm| divide_tuple(arena, arity, &norm_pat, ctx, pm),
                         &|ctx| ctx_combine(ctx),
                         partial,
                         ctx,
@@ -7485,7 +7518,8 @@ fn do_compile_matching(
                     let norm_pat = normalize_pat(&pat);
                     compile_no_test(
                         ctx_ref,
-                        &move |ctx, pm| divide_record(&all_labels, &norm_pat, ctx, pm),
+                        arena,
+                        &move |ctx, pm| divide_record(arena, &all_labels, &norm_pat, ctx, pm),
                         &|ctx| ctx_combine(ctx),
                         partial,
                         ctx,
@@ -7495,11 +7529,12 @@ fn do_compile_matching(
                 }
                 PatternDesc::Tpat_constant(cst) => {
                     let names: Option<SwitchNames> = None;
-                    let loc = Location::none();
+                    let loc = arena.to_location(pat.pat_loc);
                     let arg_clone = arg.clone();
                     let cst_clone = cst.clone();
                     compile_test_wrapper(
                         ctx_ref,
+                        arena,
                         partial,
                         &|ctx, pm| divide_constant(ctx, pm),
                         &|ctx, def, c_div, nrc| {
@@ -7522,12 +7557,13 @@ fn do_compile_matching(
                 }
                 PatternDesc::Tpat_construct(_, cstr, _) => {
                     let sw_names = names_from_construct_pattern(ctx_ref, &pat);
-                    let loc = Location::none();
+                    let loc = arena.to_location(pat.pat_loc);
                     let arg_clone = arg.clone();
                     let ex_pat = pat.clone();
                     let cstr_clone = cstr.clone();
                     compile_test_wrapper(
                         ctx_ref,
+                        arena,
                         partial,
                         &|ctx, pm| divide_constructor(ctx_ref, ctx, pm),
                         &|ctx, def, c_div, nrc| {
@@ -7552,10 +7588,11 @@ fn do_compile_matching(
                 }
                 PatternDesc::Tpat_array(_) => {
                     let names: Option<SwitchNames> = None;
-                    let loc = Location::none();
+                    let loc = arena.to_location(pat.pat_loc);
                     let arg_clone = arg.clone();
                     compile_test_wrapper(
                         ctx_ref,
+                        arena,
                         partial,
                         &|ctx, pm| divide_array(ctx, pm),
                         &|ctx, def, c_div, nrc| {
@@ -7577,13 +7614,14 @@ fn do_compile_matching(
                 }
                 PatternDesc::Tpat_variant(_, _, _row_ref) => {
                     let names: Option<SwitchNames> = None;
-                    let loc = Location::none();
+                    let loc = arena.to_location(pat.pat_loc);
                     let arg_clone = arg.clone();
                     let row_desc =
                         extract_row_from_type_with_env(ctx_ref, pat.pat_type, pat.pat_env);
                     let row_desc2 = row_desc.clone();
                     compile_test_wrapper(
                         ctx_ref,
+                        arena,
                         partial,
                         &move |ctx, pm| divide_variant(ctx_ref, &row_desc, ctx, pm),
                         &|ctx, def, c_div, nrc| {
@@ -7611,6 +7649,7 @@ fn do_compile_matching(
         PmHalfCompiled::PmVar(PmVarCompiled { inside, var_arg }) => {
             let (lam, total) = do_compile_matching(
                 ctx_ref,
+                arena,
                 partial,
                 &ctx_lshift(ctx),
                 var_arg,
@@ -7620,10 +7659,11 @@ fn do_compile_matching(
             Ok((lam, jumps_map(|c| ctx_rshift(&c), &total)))
         }
         PmHalfCompiled::PmOr(PmOrCompiled { body, handlers, .. }) => {
-            let (lam, total) = compile_match(ctx_ref, None, partial, ctx, body, next_raise_count)?;
+            let (lam, total) =
+                compile_match(ctx_ref, arena, None, partial, ctx, body, next_raise_count)?;
             let mut compile_fn =
                 |ctx: &[Ctx], pm: &PatternMatching| -> Result<(RawLambda, Jumps), Unused> {
-                    compile_match(ctx_ref, None, partial, ctx, pm, next_raise_count)
+                    compile_match(ctx_ref, arena, None, partial, ctx, pm, next_raise_count)
                 };
             Ok(compile_orhandlers(
                 &mut compile_fn,
@@ -7640,6 +7680,7 @@ fn do_compile_matching(
 /// Equivalent to OCaml's `compile_no_test`.
 fn compile_no_test(
     ctx_ref: &TypeContext<'_>,
+    arena: &ParseArena,
     divide_fn: &dyn Fn(&[Ctx], &PatternMatching) -> MatchCell,
     up_ctx: &dyn Fn(&[Ctx]) -> Vec<Ctx>,
     partial: &Partial,
@@ -7650,6 +7691,7 @@ fn compile_no_test(
     let cell = divide_fn(ctx, to_match);
     let (lambda, total) = compile_match(
         ctx_ref,
+        arena,
         None,
         partial,
         &cell.ctx,
@@ -7685,6 +7727,7 @@ unsafe impl Sync for RaiseCounter {}
 /// being captured by both compile_fn and combine_fn closures.
 fn compile_test_wrapper<K: Clone>(
     ctx_ref: &TypeContext<'_>,
+    arena: &ParseArena,
     partial: &Partial,
     divide_fn: &dyn Fn(&[Ctx], &PatternMatching) -> Vec<(K, MatchCell)>,
     combine_fn: &dyn Fn(
@@ -7708,7 +7751,7 @@ fn compile_test_wrapper<K: Clone>(
     let c_div = {
         let mut compile_fn =
             |ctx: &[Ctx], pm: &PatternMatching| -> Result<(RawLambda, Jumps), Unused> {
-                compile_match(ctx_ref, None, partial, ctx, pm, rc.get_mut())
+                compile_match(ctx_ref, arena, None, partial, ctx, pm, rc.get_mut())
             };
         compile_list(&mut compile_fn, division)?
     };
@@ -8142,6 +8185,7 @@ fn check_total(
 /// Equivalent to OCaml's `compile_matching`.
 pub fn compile_matching(
     ctx_ref: &TypeContext<'_>,
+    arena: &ParseArena,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
     pat_act_list: Vec<(Pattern, RawLambda)>,
@@ -8163,6 +8207,7 @@ pub fn compile_matching(
             };
             match compile_match(
                 ctx_ref,
+                arena,
                 None,
                 &partial,
                 &start_ctx(1),
@@ -8184,6 +8229,7 @@ pub fn compile_matching(
             };
             match compile_match(
                 ctx_ref,
+                arena,
                 None,
                 &partial,
                 &start_ctx(1),
@@ -8245,6 +8291,7 @@ pub fn partial_function(_ctx_ref: &TypeContext<'_>, loc: Location) -> RawLambda 
 /// Equivalent to OCaml's `for_function`.
 pub fn for_function(
     ctx_ref: &TypeContext<'_>,
+    arena: &ParseArena,
     loc: Location,
     param: RawLambda,
     pat_act_list: Vec<(Pattern, RawLambda)>,
@@ -8254,6 +8301,7 @@ pub fn for_function(
     let loc_clone = loc.clone();
     compile_matching(
         ctx_ref,
+        arena,
         || partial_function(ctx_ref, loc_clone),
         param,
         pat_act_list,
@@ -8266,6 +8314,7 @@ pub fn for_function(
 /// Equivalent to OCaml's `for_trywith`.
 pub fn for_trywith(
     ctx_ref: &TypeContext<'_>,
+    arena: &ParseArena,
     param: RawLambda,
     pat_act_list: Vec<(Pattern, RawLambda)>,
     next_raise_count: &mut i32,
@@ -8273,6 +8322,7 @@ pub fn for_trywith(
     let param_clone = param.clone();
     compile_matching(
         ctx_ref,
+        arena,
         || {
             RawLambda::Lprim(RawPrimInfo {
                 primitive: Primitive::Praise,
@@ -8291,6 +8341,7 @@ pub fn for_trywith(
 /// Equivalent to OCaml's `simple_for_let`.
 pub fn simple_for_let(
     ctx_ref: &TypeContext<'_>,
+    arena: &ParseArena,
     loc: Location,
     param: RawLambda,
     pat: Pattern,
@@ -8300,6 +8351,7 @@ pub fn simple_for_let(
     let loc_clone = loc.clone();
     compile_matching(
         ctx_ref,
+        arena,
         || partial_function(ctx_ref, loc_clone),
         param,
         vec![(pat, body)],
@@ -8312,6 +8364,7 @@ pub fn simple_for_let(
 /// Equivalent to OCaml's `for_let`.
 pub fn for_let(
     ctx_ref: &TypeContext<'_>,
+    arena: &ParseArena,
     loc: Location,
     param: RawLambda,
     pat: &Pattern,
@@ -8327,7 +8380,7 @@ pub fn for_let(
             // Fast path
             RawLambda::Llet(LetKind::Strict, id.clone(), Box::new(param), Box::new(body))
         }
-        _ => simple_for_let(ctx_ref, loc, param, pat.clone(), body, next_raise_count),
+        _ => simple_for_let(ctx_ref, arena, loc, param, pat.clone(), body, next_raise_count),
     }
 }
 
@@ -8335,6 +8388,7 @@ pub fn for_let(
 /// Equivalent to OCaml's `for_tupled_function`.
 pub fn for_tupled_function(
     ctx_ref: &TypeContext<'_>,
+    arena: &ParseArena,
     loc: Location,
     paraml: &[Ident],
     pats_act_list: Vec<(Vec<Pattern>, RawLambda)>,
@@ -8355,6 +8409,7 @@ pub fn for_tupled_function(
     };
     match compile_match(
         ctx_ref,
+        arena,
         None,
         &partial,
         &start_ctx(paraml.len()),
@@ -8497,6 +8552,7 @@ fn flatten_precompiled(
 /// Equivalent to OCaml's `compile_flattened`.
 fn compile_flattened(
     ctx_ref: &TypeContext<'_>,
+    arena: &ParseArena,
     partial: &Partial,
     ctx: &[Ctx],
     _arg: &RawLambda,
@@ -8504,12 +8560,15 @@ fn compile_flattened(
     next_raise_count: &mut i32,
 ) -> Result<(RawLambda, Jumps), Unused> {
     match pmh {
-        PmHalfCompiled::Pm(pm) => compile_match(ctx_ref, None, partial, ctx, pm, next_raise_count),
+        PmHalfCompiled::Pm(pm) => {
+            compile_match(ctx_ref, arena, None, partial, ctx, pm, next_raise_count)
+        }
         PmHalfCompiled::PmOr(PmOrCompiled { body, handlers, .. }) => {
-            let (lam, total) = compile_match(ctx_ref, None, partial, ctx, body, next_raise_count)?;
+            let (lam, total) =
+                compile_match(ctx_ref, arena, None, partial, ctx, body, next_raise_count)?;
             let mut compile_fn =
                 |ctx: &[Ctx], pm: &PatternMatching| -> Result<(RawLambda, Jumps), Unused> {
-                    compile_match(ctx_ref, None, partial, ctx, pm, next_raise_count)
+                    compile_match(ctx_ref, arena, None, partial, ctx, pm, next_raise_count)
                 };
             Ok(compile_orhandlers(
                 &mut compile_fn,
@@ -8527,6 +8586,7 @@ fn compile_flattened(
 /// Equivalent to OCaml's `do_for_multiple_match`.
 pub fn do_for_multiple_match(
     ctx_ref: &TypeContext<'_>,
+    arena: &ParseArena,
     loc: Location,
     paraml: Vec<RawLambda>,
     pat_act_list: Vec<(Pattern, RawLambda)>,
@@ -8607,7 +8667,7 @@ pub fn do_for_multiple_match(
                               arg: &RawLambda,
                               pmh: &PmHalfCompiled|
          -> Result<(RawLambda, Jumps), Unused> {
-            compile_flattened(ctx_ref, partial, ctx, arg, pmh, next_raise_count)
+            compile_flattened(ctx_ref, arena, partial, ctx, arg, pmh, next_raise_count)
         };
 
         let dummy_arg = RawLambda::Lconst(crate::lambda::Constant::int(0));
@@ -8645,6 +8705,7 @@ pub fn do_for_multiple_match(
             // Fallback: compile without flattening
             match compile_match(
                 ctx_ref,
+                arena,
                 None,
                 &partial,
                 &start_ctx(1),
@@ -8691,6 +8752,7 @@ fn bind_opt(v_eo: (Ident, Option<RawLambda>), k: RawLambda) -> RawLambda {
 /// Equivalent to OCaml's `for_multiple_match`.
 pub fn for_multiple_match(
     ctx_ref: &TypeContext<'_>,
+    arena: &ParseArena,
     loc: Location,
     paraml: Vec<RawLambda>,
     pat_act_list: Vec<(Pattern, RawLambda)>,
@@ -8704,6 +8766,7 @@ pub fn for_multiple_match(
         .collect();
     let inner = do_for_multiple_match(
         ctx_ref,
+        arena,
         loc,
         new_paraml,
         pat_act_list,

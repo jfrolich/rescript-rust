@@ -218,6 +218,7 @@ fn make_if(cond: RawLambda, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
 
 /// Build an Lswitch from a mapping table.
 fn build_lswitch(
+    loc: &Location,
     arg: RawLambda,
     tbl: &[usize],
     acts: &[RawLambda],
@@ -239,6 +240,7 @@ fn build_lswitch(
             sw_failaction: None,
             sw_names,
         },
+        loc.clone(),
     )
 }
 
@@ -821,6 +823,7 @@ fn do_make_if_in(h: RawLambda, arg: RawLambda, ifso: RawLambda, ifno: RawLambda)
 /// This combines comp_clusters, make_clusters, and c_test.
 fn build_clustered_test(
     compiler: &mut SwitchCompiler,
+    loc: &Location,
     cases: &[(i32, i32, usize)],
     actions: &[RawLambda],
     arg: &RawLambda,
@@ -841,6 +844,7 @@ fn build_clustered_test(
     fn build_clusters(
         j: usize,
         ir: usize,
+        loc: &Location,
         cases: &[(i32, i32, usize)],
         actions: &[RawLambda],
         k: &[usize],
@@ -900,6 +904,7 @@ fn build_clustered_test(
 
             // Build the switch action inline
             let switch_lam = build_lswitch(
+                loc,
                 // arg will be filled in during c_test when this action is used
                 // We need to use a marker... but c_test just uses actions[idx].clone()
                 // Actually c_test passes arg directly. The switch needs the actual arg.
@@ -937,6 +942,7 @@ fn build_clustered_test(
             build_clusters(
                 i - 1,
                 ir - 1,
+                loc,
                 cases,
                 actions,
                 k,
@@ -953,6 +959,7 @@ fn build_clustered_test(
     build_clusters(
         len - 1,
         n_clusters - 1,
+        loc,
         cases,
         actions,
         &k,
@@ -985,7 +992,7 @@ fn build_clustered_test(
 /// Fix up any Lswitch nodes that have a unit placeholder as their arg.
 fn fix_switch_arg(lam: &mut RawLambda, real_arg: &RawLambda) {
     match lam {
-        RawLambda::Lswitch(switch_arg, _) => {
+        RawLambda::Lswitch(switch_arg, _, _) => {
             if switch_arg.is_unit() {
                 *switch_arg = Box::new(real_arg.clone());
             }
@@ -1045,6 +1052,7 @@ fn wrap_handlers(mut result: RawLambda, handlers: Vec<(i32, RawLambda)>) -> RawL
 ///
 /// Port of OCaml's `Switcher.zyva` / `Switch.Make.zyva`.
 pub fn zyva(
+    loc: Location,
     edges: (i32, i32),
     arg: RawLambda,
     cases: &[(i32, i32, usize)],
@@ -1061,7 +1069,7 @@ pub fn zyva(
     let ok_inter = low.abs() <= INTER_LIMIT && high.abs() <= INTER_LIMIT;
     let mut compiler = SwitchCompiler::new(ok_inter);
 
-    let result = build_clustered_test(&mut compiler, cases, &actions, &arg, &sw_names);
+    let result = build_clustered_test(&mut compiler, &loc, cases, &actions, &arg, &sw_names);
     wrap_handlers(result, handlers)
 }
 
@@ -1253,6 +1261,7 @@ fn get_edges(low: i32, high: i32, sorted: &[(i32, RawLambda)]) -> (i32, i32) {
 
 /// High-level entry point matching OCaml's `call_switcher`.
 pub fn call_switcher(
+    loc: Location,
     fail: Option<RawLambda>,
     arg: RawLambda,
     low: i32,
@@ -1265,5 +1274,5 @@ pub fn call_switcher(
     sorted.sort_by_key(|(i, _)| *i);
 
     let (edges, cases, store) = as_interval(fail, low, high, &sorted);
-    zyva(edges, arg, &cases, &store, sw_names, next_raise)
+    zyva(loc, edges, arg, &cases, &store, sw_names, next_raise)
 }

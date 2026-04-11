@@ -93,7 +93,7 @@ fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
                     collect(arg, fv);
                 }
             }
-            RawLambda::Lswitch(arg, sw) => {
+            RawLambda::Lswitch(arg, sw, _) => {
                 collect(arg, fv);
                 for (_, lam) in &sw.sw_consts {
                     collect(lam, fv);
@@ -209,7 +209,7 @@ fn raw_subst_lambda(subst: &HashMap<Ident, RawLambda>, lam: &RawLambda) -> RawLa
                 .collect(),
             loc: info.loc.clone(),
         }),
-        RawLambda::Lswitch(arg, sw) => RawLambda::Lswitch(
+        RawLambda::Lswitch(arg, sw, loc) => RawLambda::Lswitch(
             Box::new(raw_subst_lambda(subst, arg)),
             crate::raw_lambda::RawLambdaSwitch {
                 sw_consts_full: sw.sw_consts_full,
@@ -230,6 +230,7 @@ fn raw_subst_lambda(subst: &HashMap<Ident, RawLambda>, lam: &RawLambda) -> RawLa
                     .map(|lam| Box::new(raw_subst_lambda(subst, lam))),
                 sw_names: sw.sw_names.clone(),
             },
+            loc.clone(),
         ),
         RawLambda::LstringSwitch(arg, cases, default) => RawLambda::LstringSwitch(
             Box::new(raw_subst_lambda(subst, arg)),
@@ -1000,14 +1001,18 @@ impl<'a> RawLambdaConverter<'a> {
                 Some(RawLambda::Lapply(crate::raw_lambda::RawApply {
                     ap_func: Box::new(func),
                     ap_args: args,
-                    ..ap.clone()
+                    ap_info: crate::lambda::ApInfo {
+                        loc: Location::none(),
+                        ..ap.ap_info.clone()
+                    },
+                    ap_transformed_jsx: ap.ap_transformed_jsx,
                 }))
             }
             // For complex constructs (functions, letrec, loops, etc.),
             // bail out to avoid complexity — OCaml does the same (Not_simple)
             RawLambda::Lfunction(_) | RawLambda::Lletrec(_, _)
             | RawLambda::Lwhile(_, _) | RawLambda::Lfor(_, _, _, _, _) => None,
-            RawLambda::Lswitch(scrut, sw) => {
+            RawLambda::Lswitch(scrut, sw, loc) => {
                 let scrut_norm = Self::normalize_for_key(scrut, env, counter)?;
                 let mut consts = Vec::new();
                 for (tag, act) in &sw.sw_consts {
@@ -1031,6 +1036,7 @@ impl<'a> RawLambdaConverter<'a> {
                         sw_failaction: fail,
                         sw_names: sw.sw_names.clone(),
                     },
+                    loc.clone(),
                 ))
             }
             RawLambda::LtryWith(body, id, handler) => {
@@ -1225,6 +1231,7 @@ impl<'a> RawLambdaConverter<'a> {
                         ))),
                         sw_names: None,
                     },
+                    Location::none(),
                 );
                 RawLambda::LstaticCatch(
                     Box::new(switch),
@@ -1244,7 +1251,7 @@ impl<'a> RawLambdaConverter<'a> {
                 // OCaml: share_actions_sw then reintroduce_fail
                 let share_handlers = self.share_actions_sw(&mut sw);
                 Self::reintroduce_fail(&mut sw);
-                let mut result = RawLambda::Lswitch(Box::new(scrut), sw);
+                let mut result = RawLambda::Lswitch(Box::new(scrut), sw, Location::none());
                 // Wrap with catch handlers from share_actions_sw.
                 // OCaml's handle_shared composes handlers as h(ohs(x)),
                 // so the first shared action is innermost. We iterate forward
@@ -4802,6 +4809,7 @@ impl<'a> RawLambdaConverter<'a> {
             let paraml: Vec<RawLambda> = argl.iter().map(|a| self.convert_expr_raw(a)).collect();
             return full_matching::for_multiple_match(
                 self.type_ctx,
+                self.arena,
                 loc,
                 paraml,
                 pat_act_list,
@@ -4847,6 +4855,7 @@ impl<'a> RawLambdaConverter<'a> {
         };
         full_matching::compile_matching(
             self.type_ctx,
+            self.arena,
             handler_fun,
             scrut_lam,
             pat_act_list,
@@ -4926,6 +4935,7 @@ impl<'a> RawLambdaConverter<'a> {
             };
             full_matching::compile_matching(
                 self.type_ctx,
+                self.arena,
                 handler_fun,
                 RawLambda::var(val_id.clone()),
                 pat_act_list,
@@ -4983,6 +4993,7 @@ impl<'a> RawLambdaConverter<'a> {
         };
         full_matching::compile_matching(
             self.type_ctx,
+            self.arena,
             handler_fun,
             RawLambda::var(exn_id.clone()),
             pat_act_list,
@@ -6242,6 +6253,7 @@ impl<'a> RawLambdaConverter<'a> {
                             sw_failaction: None,
                             sw_names: None,
                         },
+                        Location::none(),
                     )
                 };
 
@@ -7864,6 +7876,7 @@ impl<'a> RawLambdaConverter<'a> {
                 sw_failaction: failaction,
                 sw_names: None,
             },
+            Location::none(),
         ))
     }
 
@@ -8129,6 +8142,7 @@ impl<'a> RawLambdaConverter<'a> {
                             };
                             acc = full_matching::compile_matching(
                                 self.type_ctx,
+                                self.arena,
                                 handler_fun,
                                 value,
                                 pat_act_list,
@@ -8165,6 +8179,7 @@ impl<'a> RawLambdaConverter<'a> {
                     } else if Self::is_irrefutable_pattern(&binding.vb_pat) {
                         acc = full_matching::for_let(
                             self.type_ctx,
+                            self.arena,
                             self.loc(binding.vb_pat.pat_loc),
                             value,
                             &binding.vb_pat,
@@ -8241,6 +8256,7 @@ impl<'a> RawLambdaConverter<'a> {
                     let pat_act = vec![(pat, body)];
                     full_matching::for_function(
                         self.type_ctx,
+                        self.arena,
                         loc,
                         RawLambda::var(id.clone()),
                         pat_act,

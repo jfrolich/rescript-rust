@@ -93,7 +93,7 @@ pub enum RawLambda {
     /// Primitive operation.
     Lprim(RawPrimInfo),
     /// Switch on integer/block tag.
-    Lswitch(Box<RawLambda>, RawLambdaSwitch),
+    Lswitch(Box<RawLambda>, RawLambdaSwitch, Location),
     /// Switch on string value.
     LstringSwitch(Box<RawLambda>, Vec<(String, RawLambda)>, Option<Box<RawLambda>>),
     /// Raise a static exception.
@@ -252,6 +252,7 @@ impl RawLambda {
                         .map(|lam| Box::new(RawLambda::from_lowered(*lam))),
                     sw_names: sw.sw_names,
                 },
+                Location::none(),
             ),
             Lambda::LstringSwitch(arg, cases, default) => RawLambda::LstringSwitch(
                 Box::new(RawLambda::from_lowered(*arg)),
@@ -335,7 +336,7 @@ impl RawLambda {
                 args: info.args.into_iter().map(RawLambda::into_lowered).collect(),
                 loc: info.loc,
             }),
-            RawLambda::Lswitch(arg, sw) => Lambda::Lswitch(
+            RawLambda::Lswitch(arg, sw, _) => Lambda::Lswitch(
                 Box::new(arg.into_lowered()),
                 crate::lambda::LambdaSwitch {
                     sw_consts_full: sw.sw_consts_full,
