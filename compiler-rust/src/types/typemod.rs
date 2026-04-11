@@ -10535,6 +10535,17 @@ fn type_structure_item<'a>(
                         _ => None,
                     })
                     .collect();
+                let mut visited = HashSet::new();
+                rewrite_included_signature_paths_to_local(
+                    tctx.type_ctx,
+                    &mut sig,
+                    include_root_path.as_ref(),
+                    include_flat_name.as_deref(),
+                    &local_include_types,
+                    &local_include_modules,
+                    &local_include_modtypes,
+                    &mut visited,
+                );
                 sig
             });
             let mut new_env = env.clone();

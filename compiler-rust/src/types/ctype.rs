@@ -1389,11 +1389,28 @@ fn resolve_type_item_through_env<'a>(
     let module_sig =
         resolve_signature_through_env_module_type(ctx, env, &module_mty, &mut visiting)?;
     let module_sig = crate::types::typecore::copy_lookup_signature_for_subst(&module_sig, ctx);
+    let module_access_origin_is_persistent = module_path.head().is_persistent()
+        || matches!(module_path, Path::Pident(_))
+            && env
+                .lookup_module(module_path)
+                .or_else(|_| match module_path {
+                    Path::Pident(id) => env.find_module(id.name()),
+                    _ => unreachable!(),
+                })
+                .ok()
+                .and_then(|md| md.md_path.as_ref())
+                .is_some_and(|path| path.head().is_persistent());
     // For alias modules, expansion should expose the alias target path
     // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
     let alias_target_for_strengthening = if strengthen_alias_types {
         match &module_mty {
-            super::decl::ModuleType::MtyAlias(_, target_path) => Some(target_path.clone()),
+            // Preserve local access paths like `L.t` / `V.t` instead of
+            // collapsing them back to the alias target during expansion.
+            super::decl::ModuleType::MtyAlias(_, target_path)
+                if module_access_origin_is_persistent =>
+            {
+                Some(target_path.clone())
+            }
             _ => None,
         }
     } else {
