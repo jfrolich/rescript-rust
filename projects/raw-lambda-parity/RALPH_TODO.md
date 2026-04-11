@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 648/657 (98.6%), 7 failures, 14 hunks
+**Status:** 634/657 (96.5%), 21 failures, 70 hunks
 
 ## Goal
 
@@ -15,11 +15,14 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **655/657** on the 16-way authoritative run
-- Unoptimized lambda parity: **648/657**
-- Parity hunks: **14**
+- Unoptimized lambda parity: **634/657**
+- Parity hunks: **70**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 - Focused raw runs for `Import.res` and `global_module_alias_test.res` both pass; the
   full 16-way baseline still times those two files out intermittently.
+- `pr6726.res` now reaches focused raw parity after preserving alias children in
+  extracted structure signatures; the remaining failures are a broader alias/module
+  lowering cluster exposed by that OCaml-aligned change.
 
 ## Working Rules
 
@@ -30,30 +33,29 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 7 Failures by Category
+## Remaining 21 Failures by Category
 
-### Module coercion / alias resolution (4 files)
-coercion_module_alias_test(7), derive_projector_test(1), pr6726(1), recmodule(1)
+### Alias / module lowering after preserving child aliases (17 files)
+DynamicImportModuleWithAlias, a, alias_default_value_test, async_await, coercion_module_alias_test,
+derive_projector_test, functors, gpr_3865_bar, gpr_3897_test, gpr_4274_test, inner_call,
+module_alias_test, recmodule, recursive_module_test, test_include, test_non_export, test_set
 
-**Issues:**
-- `coercion_module_alias_test` is the remaining direct module-coercion diff after fixing
-  implicit structure signature simplification and package arg-module extraction
-- `pr6726` still resolves through the wrong alias/runtime slot path
-- `derive_projector_test` still carries extra include/signature structure from deriving
-- `recmodule` still needs the OCaml recursive module init/runtime shape
+**Issue:** extracted structure signatures now preserve `Tmod_ident` children as aliases
+instead of eagerly resolving them to signatures. That fixes `pr6726`, but it exposes the
+remaining raw-lambda mismatch in downstream alias/coercion lowering, especially around
+module exports, include/module-type-of coercions, and recursive-module init/update shapes.
 
 ### Dict pattern compilation (2 files)
-json_decorders(1), stdlib_Stdlib_DictTests(1)
+json_decorders, stdlib_Stdlib_DictTests
 
-**Issue:** OCaml's Dict path mutates `lbl_all` with synthetic per-field labels and only strips
-`Some(...)` wrappers in the narrow `Parmatch.all_record_args` cases. Rust now matches that
-for the resolved Dict files, but two Dict-focused lambda diffs remain.
+**Issue:** Dict synthetic labels / narrow optional-wrapper stripping fixed the earlier
+cluster, but two Dict-focused raw diffs remain.
 
-### Other (1 file)
-bs_poly_map_test(2)
+### Other (2 files)
+bs_poly_map_test, inline_map2_test
 
-**Issue:** remaining library-specific lambda shape difference outside the main
-module/Dict clusters
+**Issue:** remaining library-specific raw lambda shape differences outside the main alias
+cluster.
 
 ## Key Findings from Session 2026-04-10/11
 
@@ -164,6 +166,29 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (preserve alias children when extracting structure signatures)
+
+OCaml `typemod.ml` keeps `Sig_module(..., {md_type = modl.mod_type}, ...)` for structure
+items, so child `module X = Y` aliases stay aliases in the exported structure signature.
+Rust's structure-signature extraction path was resolving those alias children back into
+concrete signatures and then localizing them, which hid the alias from raw path
+normalization and produced the wrong lowered path in files like `pr6726`.
+
+Rust now:
+- threads the typed environment through raw normal-path translation and `field:-1`
+  runtime-slot resolution
+- stores the typed environment on `Tcoerce_alias` wrappers instead of hardcoding `EnvRef(0)`
+- preserves `Tmod_ident` child modules as `MtyAlias` when extracting structure signatures,
+  instead of expanding them to signatures
+- uses the type-checker alias-target query during raw module-path normalization
+
+**Result:** `pr6726` now reaches focused raw parity, but the authoritative raw baseline
+regresses to **634/657** with **70** hunks because the OCaml-aligned alias preservation
+exposes a broader downstream alias/module-lowering cluster (`DynamicImportModuleWithAlias`,
+`module_alias_test`, `test_include`, `recmodule`, etc.). Per repo rules this change stays,
+and the next loop needs to port the downstream lowering behavior rather than reverting the
+alias preservation.
 
 ### 2026-04-11 (Dict synthetic labels + narrow optional wrapper stripping)
 

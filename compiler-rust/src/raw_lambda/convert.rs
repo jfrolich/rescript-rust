@@ -2606,7 +2606,12 @@ impl<'a> RawLambdaConverter<'a> {
             .any(|(name, _)| self.arena.get_string(name.txt) == "internal.local")
     }
 
-    fn translate_normal_path_raw(&self, path: &crate::types::Path, loc: Location) -> RawLambda {
+    fn translate_normal_path_raw_in_env(
+        &self,
+        env: &crate::types::env::Env,
+        path: &crate::types::Path,
+        loc: Location,
+    ) -> RawLambda {
         match path {
             crate::types::Path::Pident(id) => {
                 if id.is_global() {
@@ -2616,11 +2621,12 @@ impl<'a> RawLambdaConverter<'a> {
                 }
             }
             crate::types::Path::Pdot(prefix, name, pos) => {
-                let prefix_lam = self.translate_normal_path_raw(prefix, loc);
+                let prefix_lam = self.translate_normal_path_raw_in_env(env, prefix, loc);
                 // If position is -1 (from normalize_path alias following),
                 // try to resolve the correct position from the module's signature
                 let resolved_pos = if *pos < 0 {
-                    self.resolve_field_position_in_module(prefix, name).unwrap_or(*pos)
+                    self.resolve_field_position_in_module(env, prefix, name)
+                        .unwrap_or(*pos)
                 } else {
                     *pos
                 };
@@ -2634,15 +2640,20 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn translate_normal_path_raw(&self, path: &crate::types::Path, loc: Location) -> RawLambda {
+        self.translate_normal_path_raw_in_env(self.env, path, loc)
+    }
+
     /// Resolve the runtime field position of a name within a module's signature.
     fn resolve_field_position_in_module(
         &self,
+        env: &crate::types::env::Env,
         module_path: &crate::types::Path,
         field_name: &str,
     ) -> Option<i32> {
         use crate::types::decl::{ModuleType, SignatureItem, ValueKind};
         // Try to find the module's type from the env or persistent env
-        let md_type = self.env.lookup_module(module_path).ok()
+        let md_type = env.lookup_module(module_path).ok()
             .map(|md| md.md_type.clone())
             .or_else(|| {
                 // For persistent modules (Belt_Id, etc.), try the persistent env
@@ -2682,52 +2693,6 @@ impl<'a> RawLambdaConverter<'a> {
         None
     }
 
-    fn resolve_module_type_for_path(
-        &mut self,
-        env: &crate::types::env::Env,
-        path: &crate::types::Path,
-        visiting: &mut HashSet<crate::types::Path>,
-    ) -> Option<crate::types::decl::ModuleType> {
-        use crate::types::decl::{ModuleType, SignatureItem};
-
-        if !visiting.insert(path.clone()) {
-            return None;
-        }
-
-        match path {
-            crate::types::Path::Pident(id) => {
-                if let Ok(md) = env.lookup_module(path) {
-                    Some(md.md_type.clone())
-                } else if id.is_persistent() {
-                    self.persistent_env
-                        .as_mut()
-                        .and_then(|pers| pers.find_pers_struct(id.name(), self.type_ctx))
-                        .map(|ps| ModuleType::MtySignature(ps.ps_sig.clone()))
-                } else {
-                    None
-                }
-            }
-            crate::types::Path::Pdot(parent, name, _) => {
-                let parent_mty = self.resolve_module_type_for_path(env, parent, visiting)?;
-                let parent_sig = match parent_mty {
-                    ModuleType::MtySignature(sig) => sig,
-                    ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
-                        match self.resolve_module_type_for_path(env, &alias_path, visiting)? {
-                            ModuleType::MtySignature(sig) => sig,
-                            _ => return None,
-                        }
-                    }
-                    ModuleType::MtyFunctor { .. } => return None,
-                };
-                parent_sig.iter().find_map(|item| match item {
-                    SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md.md_type.clone()),
-                    _ => None,
-                })
-            }
-            crate::types::Path::Papply(_, _) => None,
-        }
-    }
-
     fn normalize_module_path_in_env(
         &mut self,
         env: &crate::types::env::Env,
@@ -2746,13 +2711,18 @@ impl<'a> RawLambdaConverter<'a> {
             _ => path.clone(),
         };
 
-        let mut visiting = HashSet::new();
-        match self.resolve_module_type_for_path(env, &path, &mut visiting) {
-            Some(crate::types::decl::ModuleType::MtyAlias(_, alias_path)) => {
-                self.normalize_module_path_in_env(env, &alias_path)
+        if let Some(alias_target) = crate::types::typecore::alias_target_for_module_path(
+            &path,
+            env,
+            &mut self.persistent_env,
+            self.type_ctx,
+        )
+        {
+            if !alias_target.same(&path) {
+                return self.normalize_module_path_in_env(env, &alias_target);
             }
-            _ => path,
         }
+        path
     }
 
     fn normalize_value_path_in_env(
@@ -2773,7 +2743,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn translate_module_path_raw(&mut self, path: &crate::types::Path, loc: Location) -> RawLambda {
         let normalized = self.normalize_module_path_in_env(self.env, path);
-        self.translate_normal_path_raw(&normalized, loc)
+        self.translate_normal_path_raw_in_env(self.env, &normalized, loc)
     }
 
     fn translate_module_path_raw_in_env(
@@ -2783,7 +2753,7 @@ impl<'a> RawLambdaConverter<'a> {
         loc: Location,
     ) -> RawLambda {
         let normalized = self.normalize_module_path_in_env(env, path);
-        self.translate_normal_path_raw(&normalized, loc)
+        self.translate_normal_path_raw_in_env(env, &normalized, loc)
     }
 
     fn translate_value_path_raw(&mut self, path: &crate::types::Path, loc: Location) -> RawLambda {
@@ -2794,7 +2764,7 @@ impl<'a> RawLambdaConverter<'a> {
         if let Some(lam) = self.value_path_loc_constant(&normalized, loc) {
             return lam;
         }
-        self.translate_normal_path_raw(&normalized, loc)
+        self.translate_normal_path_raw_in_env(self.env, &normalized, loc)
     }
 
     fn translate_value_path_raw_in_env(
@@ -2810,7 +2780,7 @@ impl<'a> RawLambdaConverter<'a> {
         if let Some(lam) = self.value_path_loc_constant(&normalized, loc) {
             return lam;
         }
-        self.translate_normal_path_raw(&normalized, loc)
+        self.translate_normal_path_raw_in_env(env, &normalized, loc)
     }
 
     fn translate_extension_path_raw(
@@ -3025,7 +2995,15 @@ impl<'a> RawLambdaConverter<'a> {
                         loc.clone(),
                         LetKind::Alias,
                         final_inner,
-                        this.translate_normal_path_raw(&normalized, loc.clone()),
+                        if let Some(env) = this.type_ctx.get_typed_env(*final_env_ref) {
+                            this.translate_normal_path_raw_in_env(
+                                env.as_ref(),
+                                &normalized,
+                                loc.clone(),
+                            )
+                        } else {
+                            this.translate_normal_path_raw(&normalized, loc.clone())
+                        },
                     )
                 })
             }

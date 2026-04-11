@@ -13473,20 +13473,21 @@ fn wrap_alias_ident_in_constraint(
             if let Some(alias_target) = alias_info {
                 let inner_loc = module.mod_loc;
                 let inner_attrs = module.mod_attributes.clone();
+                let env_ref = ctx.store_typed_env(env);
                 crate::types::typedtree::ModuleExpr {
                     mod_desc: ModuleExprDesc::Tmod_constraint(
                         Box::new(module),
                         crate::types::typedtree::ModuleType::placeholder(),
                         ModuleTypeConstraint::Tmodtype_implicit,
                         ModuleCoercion::Tcoerce_alias(
-                            crate::types::typedtree::EnvRef(0),
+                            env_ref,
                             alias_target,
                             Box::new(ModuleCoercion::Tcoerce_none),
                         ),
                     ),
                     mod_loc: inner_loc,
                     mod_type: crate::types::typedtree::ModuleType::placeholder(),
-                    mod_env: crate::types::typedtree::EnvRef(0),
+                    mod_env: env_ref,
                     mod_attributes: inner_attrs,
                 }
             } else {
@@ -18976,7 +18977,7 @@ fn resolve_module_signature_for_path<'a>(
     }
 }
 
-fn alias_target_for_module_path<'a>(
+pub(crate) fn alias_target_for_module_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,

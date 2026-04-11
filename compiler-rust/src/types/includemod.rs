@@ -223,7 +223,7 @@ fn modtypes_inner<'a>(
                     crate::types::decl::AliasPresence::MtaAbsent,
                     crate::types::decl::AliasPresence::MtaPresent,
                 ) => Ok(ModuleCoercion::Tcoerce_alias(
-                    crate::types::typedtree::EnvRef(0),
+                    type_ctx.store_typed_env(env),
                     impl_path,
                     Box::new(ModuleCoercion::Tcoerce_none),
                 )),
@@ -242,7 +242,7 @@ fn modtypes_inner<'a>(
             match pres_impl {
                 crate::types::decl::AliasPresence::MtaPresent => Ok(coercion),
                 crate::types::decl::AliasPresence::MtaAbsent => Ok(ModuleCoercion::Tcoerce_alias(
-                    crate::types::typedtree::EnvRef(0),
+                    type_ctx.store_typed_env(env),
                     impl_path,
                     Box::new(coercion),
                 )),

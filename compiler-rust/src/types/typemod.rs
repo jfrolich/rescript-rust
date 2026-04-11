@@ -6521,47 +6521,6 @@ where
                     }
                     StructureItemDesc::Tstr_module(mb) => {
                         let inner_mty = preserve_structure_module_alias(&mb.mb_expr)
-                            .and_then(|mty| match (&mty, current_env, type_ctx) {
-                                    (DeclMty::MtyAlias(_, path), Some(env), Some(type_ctx)) => {
-                                        crate::types::ctype::resolve_module_type_through_env(
-                                            type_ctx,
-                                            env,
-                                            path,
-                                        )
-                                        .or_else(|| resolve_module_type_path_in_env(path, env, Some(type_ctx)))
-                                        .and_then(|resolved_mty| match resolved_mty {
-                                            DeclMty::MtySignature(sig) => Some(sig),
-                                            other => resolve_modtype_to_sig_in_env(&other, env, Some(type_ctx)),
-                                        })
-                                        .or_else(|| {
-                                            resolve_modtype_to_sig_in_env(
-                                                &DeclMty::MtyIdent(path.clone()),
-                                                env,
-                                                Some(type_ctx),
-                                            )
-                                        })
-                                        .map(|sig| {
-                                        let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(
-                                            &sig,
-                                            type_ctx,
-                                        );
-                                        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                                            &sig,
-                                            path,
-                                            &Path::pident(mb.mb_id.clone()),
-                                            type_ctx,
-                                        );
-                                        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
-                                            &mut sig,
-                                            path,
-                                            &Path::pident(mb.mb_id.clone()),
-                                        );
-                                        strip_self_module_prefix_in_sig(&sig, &mb.mb_id, type_ctx);
-                                        DeclMty::MtySignature(sig)
-                                    })
-                                }
-                                _ => Some(mty),
-                            })
                             .or_else(|| {
                                 extract_module_type_from_mod_expr_with_resolver(
                                     &mb.mb_expr,
@@ -6571,12 +6530,16 @@ where
                                 )
                             })
                             .unwrap_or(DeclMty::MtySignature(vec![]));
-                        let inner_mty = localize_exported_structure_module_type(
-                            inner_mty,
-                            &mb.mb_id,
-                            current_env,
-                            type_ctx,
-                        );
+                        let inner_mty = if matches!(inner_mty, DeclMty::MtyAlias(..)) {
+                            inner_mty
+                        } else {
+                            localize_exported_structure_module_type(
+                                inner_mty,
+                                &mb.mb_id,
+                                current_env,
+                                type_ctx,
+                            )
+                        };
                         let module_decl = crate::types::decl::ModuleDeclaration {
                             md_type: inner_mty,
                             md_attributes: vec![],
@@ -6595,51 +6558,6 @@ where
                     StructureItemDesc::Tstr_recmodule(mbs) => {
                         for mb in mbs {
                             let inner_mty = preserve_structure_module_alias(&mb.mb_expr)
-                                .and_then(|mty| match (&mty, current_env, type_ctx) {
-                                    (DeclMty::MtyAlias(_, path), Some(env), Some(type_ctx)) => {
-                                        crate::types::ctype::resolve_module_type_through_env(
-                                            type_ctx,
-                                            env,
-                                            path,
-                                        )
-                                            .or_else(|| resolve_module_type_path_in_env(path, env, Some(type_ctx)))
-                                            .and_then(|resolved_mty| match resolved_mty {
-                                                DeclMty::MtySignature(sig) => Some(sig),
-                                                other => resolve_modtype_to_sig_in_env(&other, env, Some(type_ctx)),
-                                            })
-                                            .or_else(|| {
-                                                resolve_modtype_to_sig_in_env(
-                                                    &DeclMty::MtyIdent(path.clone()),
-                                                    env,
-                                                    Some(type_ctx),
-                                                )
-                                            })
-                                            .map(|sig| {
-                                            let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(
-                                                &sig,
-                                                type_ctx,
-                                            );
-                                            crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                                                &sig,
-                                                path,
-                                                &Path::pident(mb.mb_id.clone()),
-                                                type_ctx,
-                                            );
-                                            crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
-                                                &mut sig,
-                                                path,
-                                                &Path::pident(mb.mb_id.clone()),
-                                            );
-                                            strip_self_module_prefix_in_sig(
-                                                &sig,
-                                                &mb.mb_id,
-                                                type_ctx,
-                                            );
-                                            DeclMty::MtySignature(sig)
-                                        })
-                                    }
-                                    _ => Some(mty),
-                                })
                                 .or_else(|| {
                                     extract_module_type_from_mod_expr_with_resolver(
                                         &mb.mb_expr,
@@ -6649,12 +6567,16 @@ where
                                     )
                                 })
                                 .unwrap_or(DeclMty::MtySignature(vec![]));
-                            let inner_mty = localize_exported_structure_module_type(
-                                inner_mty,
-                                &mb.mb_id,
-                                current_env,
-                                type_ctx,
-                            );
+                            let inner_mty = if matches!(inner_mty, DeclMty::MtyAlias(..)) {
+                                inner_mty
+                            } else {
+                                localize_exported_structure_module_type(
+                                    inner_mty,
+                                    &mb.mb_id,
+                                    current_env,
+                                    type_ctx,
+                                )
+                            };
                             let module_decl = crate::types::decl::ModuleDeclaration {
                                 md_type: inner_mty,
                                 md_attributes: vec![],
@@ -7008,11 +6930,12 @@ fn type_module_expr_with_alias<'a>(
             };
 
             let path_clone = path.clone();
+            let env_ref = tctx.type_ctx.store_typed_env(env);
             let ident_mod = ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_ident(path, lid.clone()),
                 mod_loc: loc,
                 mod_type: typed_mod_type,
-                mod_env: tctx.type_ctx.store_typed_env(env),
+                mod_env: env_ref,
                 mod_attributes: mod_expr.pmod_attributes.clone(),
             };
 
@@ -7051,14 +6974,14 @@ fn type_module_expr_with_alias<'a>(
                         ModuleType::placeholder(),
                         crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
                         ModuleCoercion::Tcoerce_alias(
-                            EnvRef(0),
+                            env_ref,
                             alias_target,
                             Box::new(ModuleCoercion::Tcoerce_none),
                         ),
                     ),
                     mod_loc: loc,
                     mod_type: ModuleType::placeholder(),
-                    mod_env: EnvRef(0),
+                    mod_env: env_ref,
                     mod_attributes: mod_expr.pmod_attributes.clone(),
                 })
             } else {
