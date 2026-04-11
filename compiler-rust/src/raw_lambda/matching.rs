@@ -497,6 +497,7 @@ fn untagged_payload_type_cannot_be_undefined(
                 || path.same(&crate::types::predef::path_float())
                 || path.same(&crate::types::predef::path_bigint())
                 || path.same(&crate::types::predef::path_bool())
+                || path.same(&crate::types::predef::path_array())
                 || matches!(path, crate::types::path::Path::Pident(id) if id.name() == "dict")
                 || matches!(path.name().as_str(), "Js.Dict.t" | "Js_dict.t")
         }
@@ -585,11 +586,44 @@ fn all_record_args(
     }
 
     let first_lbl = &lbls[0].1;
+    let first_opt = lbls[0].3;
 
     // Try to resolve all labels from the type
     let all_labels = ctx_ref.and_then(|ctx| {
         resolve_labels_from_type(ctx, first_lbl.lbl_res, pat_env)
             .or_else(|| resolve_labels_from_type(ctx, pat_type, pat_env))
+            .or_else(|| {
+                let cached = ctx.get_dict_pattern_labels();
+                if cached.is_empty() {
+                    return None;
+                }
+                let matches_cached = lbls.iter().all(|(_, lbl, _, _)| {
+                    cached
+                        .iter()
+                        .any(|(name, pos, _, _, _)| name == &lbl.lbl_name && *pos == lbl.lbl_pos)
+                });
+                if !matches_cached {
+                    return None;
+                }
+                Some(
+                    cached
+                        .into_iter()
+                        .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
+                            lbl_name: name,
+                            lbl_res: TypeExprRef(0),
+                            lbl_arg: TypeExprRef(0),
+                            lbl_mut: mutflag,
+                            lbl_optional: true,
+                            lbl_pos: pos,
+                            lbl_all: crate::types::decl::LabelArrayRef(0),
+                            lbl_repres: repr,
+                            lbl_private: crate::types::asttypes::PrivateFlag::Public,
+                            lbl_loc: crate::location::Location::none(),
+                            lbl_attributes: attrs,
+                        })
+                        .collect(),
+                )
+            })
     });
 
     match all_labels {
@@ -606,7 +640,7 @@ fn all_record_args(
                         dummy_loc.clone(),
                         lbl.clone(),
                         omega(),
-                        first_lbl.lbl_optional,
+                        first_opt,
                     )
                 })
                 .collect();
@@ -1005,9 +1039,10 @@ pub fn make_default(
 /// returns (to_left_pattern, expanded_right) or Err(NoMatch).
 ///
 /// Equivalent to OCaml's `ctx_matcher`.
-pub fn ctx_matcher(
+pub fn ctx_matcher<'a>(
+    ctx_ref: Option<&'a TypeContext<'a>>,
     p: &Pattern,
-) -> Box<dyn Fn(&Pattern, &[Pattern]) -> Result<(Pattern, Vec<Pattern>), MatchError> + '_> {
+) -> Box<dyn Fn(&Pattern, &[Pattern]) -> Result<(Pattern, Vec<Pattern>), MatchError> + 'a> {
     let p = normalize_pat(p);
     match &p.pat_desc {
         PatternDesc::Tpat_construct(_, cstr, pats) => {
@@ -1111,7 +1146,7 @@ pub fn ctx_matcher(
             let p = p.clone();
             Box::new(move |q: &Pattern, rem: &[Pattern]| match &q.pat_desc {
                 PatternDesc::Tpat_record(fields2, _) if !fields2.is_empty() => {
-                    let expanded = all_record_args(None, q.pat_type, q.pat_env, fields2);
+                    let expanded = all_record_args(ctx_ref, q.pat_type, q.pat_env, fields2);
                     let mut result: Vec<Pattern> =
                         expanded.iter().map(|(_, _, p, _)| p.clone()).collect();
                     result.extend(rem.iter().cloned());
@@ -1136,8 +1171,12 @@ pub fn ctx_matcher(
 
 /// Filter contexts using a matcher built from pattern q.
 /// Equivalent to OCaml's `filter_ctx`.
-pub fn filter_ctx(q: &Pattern, ctx: &[Ctx]) -> Vec<Ctx> {
-    let matcher = ctx_matcher(q);
+pub fn filter_ctx<'a>(
+    ctx_ref: Option<&'a TypeContext<'a>>,
+    q: &Pattern,
+    ctx: &[Ctx],
+) -> Vec<Ctx> {
+    let matcher = ctx_matcher(ctx_ref, q);
 
     fn filter_rec(
         matcher: &dyn Fn(&Pattern, &[Pattern]) -> Result<(Pattern, Vec<Pattern>), MatchError>,
@@ -3899,7 +3938,7 @@ fn make_constant_matching(
         Some((_, argl)) => {
             let key = get_key_constant("make", p);
             let def = make_default(&|p2, rem| matcher_const(&key, p2, rem), def);
-            let ctx = filter_ctx(p, ctx);
+            let ctx = filter_ctx(None, p, ctx);
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
@@ -4235,7 +4274,7 @@ fn make_constr_matching(
                     args: newargs,
                     default: make_default(&|p2, rem| matcher_constr(&cstr_clone, p2, rem), def),
                 },
-                ctx: filter_ctx(p, ctx),
+                ctx: filter_ctx(Some(ctx_ref), p, ctx),
                 pat: normalize_pat(p),
             }
         }
@@ -4294,7 +4333,7 @@ fn make_variant_matching_constant(
         Some((_, argl)) => {
             let lab_owned = lab.to_string();
             let def = make_default(&|p2, rem| matcher_variant_const(&lab_owned, p2, rem), def);
-            let ctx = filter_ctx(p, ctx);
+            let ctx = filter_ctx(None, p, ctx);
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
@@ -4348,7 +4387,7 @@ fn make_variant_matching_nonconst(
                 &|p2, rem| matcher_variant_nonconst(&lab_owned, p2, rem),
                 def,
             );
-            let ctx = filter_ctx(p, ctx);
+            let ctx = filter_ctx(None, p, ctx);
             let mut new_args = vec![(
                 RawLambda::Lprim(RawPrimInfo {
                     primitive: Primitive::Pfield(1, FieldDbgInfo::PolyVarContent),
@@ -4580,7 +4619,7 @@ fn divide_tuple(
     pm: &PatternMatching,
 ) -> MatchCell {
     divide_line(
-        |c| filter_ctx(p, c),
+        |c| filter_ctx(None, p, c),
         |def, args| make_tuple_matching(arena.to_location(p.pat_loc), arity, def, args),
         |pat, rem| get_args_tuple(arity, pat, rem),
         p.clone(),
@@ -4737,6 +4776,7 @@ fn make_record_matching(
 /// Divide a pattern matching by record fields.
 /// Equivalent to OCaml's `divide_record`.
 fn divide_record(
+    ctx_ref: &TypeContext<'_>,
     arena: &ParseArena,
     all_labels: &[LabelDescription],
     p: &Pattern,
@@ -4745,7 +4785,7 @@ fn divide_record(
 ) -> MatchCell {
     let num_fields = all_labels.len();
     divide_line(
-        |c| filter_ctx(p, c),
+        |c| filter_ctx(Some(ctx_ref), p, c),
         |def, args| make_record_matching(arena.to_location(p.pat_loc), all_labels, def, args),
         |pat, rem| get_args_record(num_fields, pat, rem),
         p.clone(),
@@ -4828,7 +4868,7 @@ fn make_array_matching(
             }
             new_args.extend(argl.iter().cloned());
             let def = make_default(&|p2, rem| matcher_array(len, p2, rem), def);
-            let ctx = filter_ctx(p, ctx);
+            let ctx = filter_ctx(None, p, ctx);
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
@@ -7612,7 +7652,9 @@ fn do_compile_matching(
                     compile_no_test(
                         ctx_ref,
                         arena,
-                        &move |ctx, pm| divide_record(arena, &all_labels, &norm_pat, ctx, pm),
+                        &move |ctx, pm| {
+                            divide_record(ctx_ref, arena, &all_labels, &norm_pat, ctx, pm)
+                        },
                         &|ctx| ctx_combine(ctx),
                         partial,
                         ctx,

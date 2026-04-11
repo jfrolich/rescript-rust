@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 654/657 (99.5%), 3 parity failures, 4 hunks
+**Status:** 657/657 (100%), 0 parity failures, 0 hunks
 
 ## Goal
 
@@ -15,8 +15,8 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657** on the 16-way authoritative run
-- Unoptimized lambda parity: **654/657**
-- Parity hunks: **4**
+- Unoptimized lambda parity: **657/657**
+- Parity hunks: **0**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 - Raw timeouts on the authoritative run: none
 - Raw crashes on the authoritative run: none
@@ -33,20 +33,9 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 3 Parity Failures by Category
+## Remaining Parity Failures
 
-### Dict pattern compilation (2 files)
-json_decorders, stdlib_Stdlib_DictTests
-
-**Issue:** Dict synthetic labels / narrow optional-wrapper stripping fixed the earlier
-cluster, and the alias/module-path regressions are gone again. Two Dict-focused raw diffs
-still remain.
-
-### Remaining collection raw shape difference (1 file)
-bs_poly_map_test
-
-**Issue:** the package/path crash cluster is gone, leaving one collection-specific raw lambda
-parity file outside the Dict path.
+None. The authoritative raw-lambda baseline is now at full parity.
 
 ## Key Findings from Session 2026-04-10/11
 
@@ -177,6 +166,32 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (full raw lambda parity)
+
+The final three raw-lambda failures split across two OCaml behaviors:
+
+- `Parmatch.all_record_args` keeps expanding dict-pattern copies through the mutated
+  synthetic `lbl_all` set, and strips the outer `Some` wrapper for optional dict fields
+  when the inner pattern is a constant or an untagged payload that cannot be `undefined`.
+- `translcore` / `typeopt` still pick `Blk_some_not_nested` for optional-shape
+  constructors when the payload type is safe after manifest expansion, even if the
+  expression-side env snapshot is missing and the no-env classifier has to carry the load.
+
+The Rust port now matches both behaviors:
+
+- raw matching threads `TypeContext` through record context filtering, preserves the
+  record-pattern `opt` bit in `all_record_args`, falls back to the cached dict synthetic
+  label set when later simplified copies no longer have a resolvable `pat_type`, and
+  treats array payloads like OCaml's untagged `InstanceType Array` when deciding whether
+  to strip the outer `Some`.
+- `type_cannot_contain_undefined_no_env` now follows manifest aliases, and optional
+  constructor boxing uses the OR of env-based and no-env safety checks instead of letting
+  a missing-env `false` override a manifest-expanded `true`.
+
+**Result:** `json_decorders`, `stdlib/Stdlib_DictTests`, and `bs_poly_map_test` all reach
+raw parity, and the clean authoritative baseline improves from **654/657** with **4**
+hunks to **657/657** with **0** hunks.
 
 ### 2026-04-11 (module/interface variance checks now match OCaml)
 

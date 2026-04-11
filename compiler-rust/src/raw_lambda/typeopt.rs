@@ -135,32 +135,44 @@ pub(crate) fn type_cannot_contain_undefined_no_env(
     ctx: &TypeContext<'_>,
     ty: TypeExprRef,
 ) -> bool {
-    let ty = ctx.repr(ty);
-    match &*ctx.get_desc(ty) {
-        TypeDesc::Tconstr { path, .. } => {
-            match type_is_builtin_path_but_option(path) {
+    fn rec(ctx: &TypeContext<'_>, ty: TypeExprRef, seen: &mut HashSet<TypeExprRef>) -> bool {
+        let ty = ctx.repr(ty);
+        if !seen.insert(ty) {
+            return false;
+        }
+        match &*ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, .. } => match type_is_builtin_path_but_option(path) {
                 BuiltinPathTest::ForSureYes => true,
                 BuiltinPathTest::ForSureNo => false,
                 BuiltinPathTest::NotApplicable => {
-                    // Try finding the type declaration
-                    if let Some(decl) = find_type_decl(ctx, &crate::types::env::Env::empty(), path) {
+                    if let Some(decl) = find_type_decl(ctx, &crate::types::env::Env::empty(), path)
+                    {
+                        if let Some(manifest) = decl.type_manifest {
+                            return rec(ctx, manifest, seen);
+                        }
                         match &decl.type_kind {
                             TypeKind::TypeRecord(_, _) => true,
-                            TypeKind::TypeAbstract => decl.type_attributes.iter().any(is_not_undefined_attr),
+                            TypeKind::TypeAbstract => {
+                                decl.type_attributes.iter().any(is_not_undefined_attr)
+                            }
                             _ => false,
                         }
                     } else {
                         false
                     }
                 }
-            }
+            },
+            TypeDesc::Ttuple(_)
+            | TypeDesc::Tvariant(_)
+            | TypeDesc::Tpackage { .. }
+            | TypeDesc::Tarrow { .. } => true,
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => rec(ctx, *next, seen),
+            _ => false,
         }
-        TypeDesc::Ttuple(_)
-        | TypeDesc::Tvariant(_)
-        | TypeDesc::Tpackage { .. }
-        | TypeDesc::Tarrow { .. } => true,
-        _ => false,
     }
+
+    let mut seen = HashSet::new();
+    rec(ctx, ty, &mut seen)
 }
 
 /// Get the unboxed representation of a type, if possible.
