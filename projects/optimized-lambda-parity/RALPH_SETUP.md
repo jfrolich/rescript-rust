@@ -28,6 +28,8 @@ This reports:
 
 The script also writes stamp-canonicalized normalized diffs alongside the exact diffs.
 
+`PLAN.md` defines the phase order. Use it before choosing work.
+
 ## Focused Iteration
 
 Use a mix of smallest and largest current failures:
@@ -92,6 +94,23 @@ diff -u /tmp/ocaml.raw /tmp/rust.raw | sed -n '1,220p'
 ```
 
 If raw matches but optimized diverges, the bug is after raw conversion.
+
+More precisely for this project:
+
+- raw mismatch => bug is upstream of optimized lowering
+- raw match + optimized mismatch => bug belongs in `raw_lambda/lower.rs` / `Lam_convert.convert` parity
+- optimized match + loc mismatch => bug is location threading / printing only
+
+## Phase Gate
+
+Before taking on large clusters, make sure the current change improves at least one of:
+
+- the smallest 1-hunk files
+- the representative structural files:
+  - `AsInUncurriedExternals.res`
+  - `minimal_test.res`
+- the top hunk cluster:
+  - `js_array_test.res`
 
 ## Guards
 

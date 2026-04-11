@@ -1,6 +1,6 @@
 # Ralph TODO: Optimized Lambda Parity
 
-**Last Updated:** 2026-04-11
+**Last Updated:** 2026-04-12
 **Status:** 0/657 (0%), 657 parity failures, 1631 hunks
 
 ## Goal
@@ -10,6 +10,8 @@ Achieve **100% optimized lambda parity** between the Rust compiler and the OCaml
 ```bash
 ./scripts/test_lambda_parity.sh -j1
 ```
+
+Execution order and phase gates live in `PLAN.md`.
 
 ## Current Baseline
 
@@ -32,8 +34,9 @@ Achieve **100% optimized lambda parity** between the Rust compiler and the OCaml
 2. **Keep verified OCaml-aligned changes.** Temporary parity regressions are acceptable if the port is correct.
 3. **Commit immediately after each verified improvement.** Do not accumulate uncommitted work.
 4. **Use hunk count as a navigation signal.** File count alone hides structural progress.
-5. **Fix lowering and passes, not the sexp printer.** `sexp_lambda.rs` should reflect produced lambda, not normalize it.
+5. **Fix lowering, not the sexp printer.** `sexp_lambda.rs` should reflect produced lambda, not normalize it.
 6. **Raw lambda parity is already complete.** All remaining differences are after the raw stage.
+7. **Do not confuse `-dlambda-sexp` with later backend passes.** The parity target is the output printed immediately after `Lam_convert.convert`.
 
 ## Remaining Parity Failures
 
@@ -49,11 +52,11 @@ Current frontier characteristics:
 ### raw lambda parity is complete, but optimized parity still bypasses that work
 The current Rust `-dlambda-sexp` path in `compiler-rust/src/driver.rs` still constructs
 lambda with `lambda::convert::LambdaConverter::convert_structure(&typed_structure)` and
-prints that directly. OCaml prints optimized lambda after `Lam_convert.convert` and the
-pass pipeline inside `lam_compile_main.ml`.
+prints that directly. OCaml prints optimized lambda immediately after
+`Lam_convert.convert` in `lam_compile_main.ml`.
 
 This means optimized parity is currently measuring the old shortcut path, not the real
-OCaml-aligned raw-lambda-plus-passes pipeline.
+OCaml-aligned raw-lambda-to-optimized-lambda lowering stage.
 
 ### the raw-to-lowered boundary is still an identity conversion
 `compiler-rust/src/raw_lambda/lower.rs` currently does:
@@ -65,7 +68,7 @@ pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
 ```
 
 That is not an OCaml `Lam_convert.convert` port. It confirms the optimized stage still
-needs a real conversion boundary and pass pipeline.
+needs a real conversion boundary.
 
 ### stamp canonicalization does not help the current baseline
 The parity script already writes exact diffs and stamp-canonicalized normalized diffs.
@@ -75,7 +78,7 @@ The normalized baseline is identical to the exact one:
 - normalized parity: **0/657**, **1631** hunks
 
 This means stamp numbering is not the primary problem. The current gap is stage shape and
-pass behavior.
+lowering behavior.
 
 ### small diffs already show stage-structure mismatches
 `AsInUncurriedExternals.res` is only a 1-hunk diff, but it already shows major pipeline
@@ -105,24 +108,31 @@ This is another signal that the optimized pipeline itself has not been ported ye
 2. **Port `Lam_convert.convert`**
    - Replace the identity `raw.into_lowered()` boundary
    - Match OCaml's lowering decisions and data sharing
-3. **Port the pass pipeline in OCaml order**
-   - `Lam_pass_deep_flatten`
-   - `Lam_pass_exits`
-   - `Lam_pass_remove_alias`
-   - `Lam_pass_alpha_conversion`
-   - Any downstream passes required before parity converges
-4. **Use smallest failures for quick structural validation**
+3. **Use smallest failures for quick structural validation**
    - `AsInUncurriedExternals.res`
    - `Coercion.res`
    - `DictInference.res`
    - `DictInternalRepresentation.res`
    - `DictPatternMatchingOptimization.res`
-5. **Use largest failures for pass-order validation**
+4. **Use largest failures for generalization validation**
    - `js_array_test.res`
    - `caml_compare_test.res`
    - `js_math_test.res`
    - `js_string_test.res`
    - `js_float_test.res`
+5. **Treat later `lam_pass_*` work as out of direct parity scope**
+   - only touch those passes if a shared infrastructure change requires it
+   - do not spend cycles there while `raw_lambda/lower.rs` is still a stub
+
+## Immediate Next Milestone
+
+1. Route `-dlambda-sexp` through raw lambda plus the new lowering boundary.
+2. Replace the first slice of `raw.into_lowered()` with real `Lam_convert.convert` logic.
+3. Re-test:
+   - `AsInUncurriedExternals.res`
+   - `minimal_test.res`
+   - `js_array_test.res`
+4. Only after the small structural files become sane, expand to the wider corpus.
 
 ## Session Log
 

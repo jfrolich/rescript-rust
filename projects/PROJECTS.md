@@ -67,6 +67,7 @@ Achieve full optimized lambda parity between the Rust and OCaml compilers. Focus
 
 | Document | Description |
 |----------|-------------|
+| [PLAN.md](./optimized-lambda-parity/PLAN.md) | Optimized lambda parity phase plan and execution order |
 | [RALPH_PROMPT.md](./optimized-lambda-parity/RALPH_PROMPT.md) | Agent loop instructions for optimized lambda parity |
 | [RALPH_TODO.md](./optimized-lambda-parity/RALPH_TODO.md) | Agent task tracking for optimized lambda parity |
 | [RALPH_SETUP.md](./optimized-lambda-parity/RALPH_SETUP.md) | Build, baseline, and cache inspection instructions |
