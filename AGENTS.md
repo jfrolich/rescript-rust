@@ -793,6 +793,8 @@ All project documentation is organized under **[projects/](projects/PROJECTS.md)
 - **[projects/compiler-rewrite/](projects/compiler-rewrite/)** - OCaml-to-Rust compiler rewrite (PLAN, PROGRESS, GLOBAL_STATE_AUDIT, BINARY_AST)
 - **[projects/parser-parity/](projects/parser-parity/)** - Parser AST and binary parity (PLAN, tasks, agent docs)
 - **[projects/parser-performance-engineering/](projects/parser-performance-engineering/)** - Parser performance engineering (PLAN, PROGRESS)
+- **[projects/raw-lambda-parity/](projects/raw-lambda-parity/)** - Unoptimized lambda parity (agent docs, setup, tracker)
+- **[projects/optimized-lambda-parity/](projects/optimized-lambda-parity/)** - Optimized lambda parity (agent docs, setup, tracker)
 - **[projects/printer-parity/](projects/printer-parity/)** - Printer/formatter parity (PLAN, formatter, agent docs)
 - **[projects/comptime/](projects/comptime/)** - Compile-time metaprogramming design
 
