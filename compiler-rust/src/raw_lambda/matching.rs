@@ -160,9 +160,9 @@ fn get_mins<T: Clone>(le: impl Fn(&T, &T) -> bool, ps: Vec<T>) -> Vec<T> {
                 if rest.iter().any(|p0| le(p0, p)) {
                     select_rec(le, r, rest)
                 } else {
-                    let mut r = r;
-                    r.push(p.clone());
-                    select_rec(le, r, rest)
+                    let mut new_r = vec![p.clone()];
+                    new_r.extend(r);
+                    select_rec(le, new_r, rest)
                 }
             }
         }

@@ -115,6 +115,13 @@ workaround back to OCaml's `ctx_lub (list_as_pat pats) ctx` still exposes `ctx_l
 panics in `gpr_1698_test`, `inline_map2_test`, and `test_set`. The remaining bug is in the
 downstream context remapping, not in `do_split_or`.
 
+### get_mins order now matches OCaml
+Rust `get_mins` was preserving survivors in forward order, while OCaml prepends survivors on
+each pass. The helper now matches OCaml's selection order exactly.
+
+**Result:** full raw baseline still stays **626/657** with **89** hunks. This confirms the
+remaining raw-lambda mismatch is not just a context-order artifact inside `get_mins`.
+
 ## Session Log
 
 ### 2026-04-10/11 (major session)
@@ -157,3 +164,14 @@ accumulator. Updated Rust to match that constructor-list ordering.
 (`ctx_lub (list_as_pat pats) ctx`) still crashes several focused matching files, so the
 remaining divergence is in later context remapping / handler compilation, not in the
 constructor-list ordering itself.
+
+### 2026-04-11 (get_mins ordering)
+
+Aligned Rust `get_mins` with OCaml's survivor ordering by prepending retained elements on
+each selection pass instead of appending them.
+
+**Baseline after change:** still **626/657** with **89** hunks.
+
+**Takeaway:** the remaining inner-handler mismatch is not explained by `get_mins` ordering
+alone. The next likely root cause is still later context remapping during handler
+compilation (`compile_list`, `compile_orhandlers`, or the downstream `ctx_*` transforms).
