@@ -13651,15 +13651,23 @@ fn type_pack(
     )
     .unwrap_or(crate::types::decl::ModuleType::MtyIdent(pack_path.clone()));
     let package_mty = typed_module_type_for_unpack(tctx.arena, loc, &decl_package_mty);
-    let arg_mty = crate::types::typemod::decl_module_type_from_typed(&typed_module.mod_type)
-    .or_else(|| {
+    let arg_mty = {
         crate::types::typemod::extract_module_type_from_mod_expr_with_ctx(
             &typed_module,
             Some(env),
             ctx,
         )
-    })
-    .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+        .or_else(|| crate::types::typemod::decl_module_type_from_typed(&typed_module.mod_type))
+        .or_else(|| {
+            crate::types::typemod::lookup_module_type_from_parsed_module_expr(
+                tctx,
+                env,
+                tctx.arena,
+                module_expr,
+            )
+        })
+        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]))
+    };
     let coercion = crate::types::includemod::modtypes(ctx, env, &arg_mty, &decl_package_mty)
         .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
     let wrapped_module = crate::types::typedtree::ModuleExpr {

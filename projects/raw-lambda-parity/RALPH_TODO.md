@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 640/657 (97.4%), 17 failures, 29 hunks
+**Status:** 644/657 (98.0%), 11 failures, 19 hunks
 
 ## Goal
 
@@ -14,10 +14,12 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 ## Current Baseline
 
 - OCaml compile coverage: **657/657**
-- Rust compile coverage: **657/657**
-- Unoptimized lambda parity: **640/657**
-- Parity hunks: **29**
+- Rust compile coverage: **655/657** on the 16-way authoritative run
+- Unoptimized lambda parity: **644/657**
+- Parity hunks: **19**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
+- Focused raw runs for `Import.res` and `global_module_alias_test.res` both pass; the
+  full 16-way baseline still times those two files out intermittently.
 
 ## Working Rules
 
@@ -28,36 +30,30 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 5. **Log in BOTH compilers to compare behavior.** Add eprintln in Rust, Printf.eprintf in OCaml.
 6. **The typed trees are identical.** ALL remaining differences are in the lambda conversion stage.
 
-## Remaining 17 Failures by Category
+## Remaining 11 Failures by Category
 
-### Module coercion / alias resolution (7 files)
-coercion_module_alias_test(1), Import(1), offset(1), DynamicImportModuleWithAlias(1),
-derive_projector_test(2), pr6726(1), recmodule(2)
+### Module coercion / alias resolution (4 files)
+coercion_module_alias_test(1), derive_projector_test(2), pr6726(1), recmodule(2)
 
 **Issues:**
-- `strengthen_module_type_for_inclusion_path` creates mismatches for modules with value shadowing
-- Module alias paths not normalized (pr6726 uses `field:All/0 ExtUnix/1` instead of `ExtUnixAll/1`)
-- Include signatures have extra entries from @deriving PPX
-- Recursive module init shapes wrong (components_of_module_maker not implemented)
+- `coercion_module_alias_test` is the remaining direct module-coercion diff after fixing
+  implicit structure signature simplification and package arg-module extraction
+- `pr6726` still resolves through the wrong alias/runtime slot path
+- `derive_projector_test` still carries extra include/signature structure from deriving
+- `recmodule` still needs the OCaml recursive module init/runtime shape
 
-### JSX PPX field positions (3 files)
-jsx_preserve_test(19), jsx_optional_props_test(1), async_jsx(3)
+### Dict pattern compilation (6 files)
+DictInternalRepresentation(1), DictPatternMatchingOptimization(1), json_decorders(1),
+pattern_match_json(1), stdlib_Stdlib_DictTests(2), stdlib_Stdlib_JsonTests(2)
 
-**Root cause:** `@react.component` generates TWO `let make` bindings (original + wrapper).
-`signature_runtime_value` returns position of LAST occurrence (1), but module block
-deduplication keeps LAST value at position 0. OCaml's env stores simplified signatures.
+**Issue:** OCaml uses typed field accesses for Dict patterns. Rust still uses option checks
+in the remaining raw-lambda Dict cluster.
 
-### Dict pattern compilation (5 files)
-DictInternalRepresentation(1), DictPatternMatchingOptimization(1), stdlib_Stdlib_DictTests(2),
-pattern_match_json(1), json_decorders(1)
+### Other (1 file)
+bs_poly_map_test(3)
 
-**Issue:** OCaml uses typed field accesses for Dict patterns. Rust uses option checks.
-
-### Other (2 files)
-bs_poly_map_test(3), stdlib_Stdlib_JsonTests(2)
-
-**Issues:** remaining library-specific lambda shape differences outside the main
-matching/module/JSX/Dict clusters
+**Issue:** remaining library-specific lambda shape difference outside the main
+module/Dict clusters
 
 ## Key Findings from Session 2026-04-10/11
 
@@ -168,6 +164,30 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (module type simplification for implicit structure constraints)
+
+OCaml `typemod.ml` wraps `Pmod_structure` results in an implicit `Tmod_constraint` when
+`simplify_signature sg` removes duplicate value entries. Rust was only approximating that
+decision from structure bindings and then exposing the inner unsimplified structure
+signature again when later module-path and package code extracted semantic module types.
+
+Rust now:
+- uses `simplify_signature(structure.str_type)` directly to decide when a structure needs
+  an implicit constraint
+- treats `Tmod_constraint(..., Tmodtype_implicit)` over a structure as exposing the
+  simplified structure signature during module-type extraction
+- restores the OCaml `type_package` data flow by preferring the typed module expression's
+  extracted module type before falling back to parsed semantic lookup
+- short-circuits inclusion/coercion checks on exact-equal module declarations and module
+  type declarations, backed by `PartialEq/Eq` derives on declaration types
+- removes module aliases under `module type of` the same way OCaml's `Mtype.remove_aliases`
+  does for this path
+
+**Result:** full authoritative raw baseline improves to **644/657** with **19** hunks.
+`Import.res`, `DynamicImportModuleWithAlias.res`, `global_module_alias_test.res`, and the
+first-class module pack crash cluster now pass focused raw parity. The only remaining
+direct module-coercion regression is `coercion_module_alias_test`.
 
 ### 2026-04-11 (thread real pattern locations through raw matching)
 

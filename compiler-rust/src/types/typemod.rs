@@ -2698,70 +2698,32 @@ fn decl_module_type_from_typed_module_expr_for_sig(
         ModuleExprDesc::Tmod_structure(structure) => Some(
             crate::types::decl::ModuleType::MtySignature(structure.str_type.clone()),
         ),
+        ModuleExprDesc::Tmod_constraint(
+            inner,
+            _,
+            crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
+            _,
+        ) => match &inner.mod_desc {
+            ModuleExprDesc::Tmod_structure(structure) => Some(
+                crate::types::decl::ModuleType::MtySignature(
+                    crate::types::includemod::simplify_signature(&structure.str_type),
+                ),
+            ),
+            _ => decl_module_type_from_typed(&mod_expr.mod_type),
+        },
         _ => decl_module_type_from_typed(&mod_expr.mod_type),
     }
 }
 
-/// Check if a structure has duplicate value names (like OCaml's simplify_signature).
-/// Returns true if there are duplicates, meaning the structure should be wrapped
-/// in Tmod_constraint with Tmodtype_implicit.
-///
-/// OCaml's simplify_signature operates on the signature (Sig_value items).
-/// We approximate this by collecting value names from structure items (explicit defs
-/// and includes) and checking for duplicates.
-///
-/// `env_before` is the env before typing the structure body.
-/// `env_after` is the env after typing the structure body.
-/// We use the difference between them to detect which names were added by includes.
-fn structure_has_duplicate_value_names(structure: &Structure, env_before: &Env, env_after: &Env) -> bool {
-    // Collect explicit value names (from Tstr_value and Tstr_primitive)
-    let mut explicit_names: Vec<String> = Vec::new();
-    let mut has_include = false;
-
-    for item in &structure.str_items {
-        match &item.str_desc {
-            StructureItemDesc::Tstr_value(_, bindings) => {
-                for vb in bindings {
-                    iter_bound_pattern_idents(&vb.vb_pat, &mut |id| {
-                        explicit_names.push(id.name().to_string());
-                    });
-                }
-            }
-            StructureItemDesc::Tstr_primitive(vd) => {
-                explicit_names.push(vd.val_name.txt.clone());
-            }
-            StructureItemDesc::Tstr_include(_) => {
-                has_include = true;
-            }
-            _ => {}
-        }
+fn simplified_structure_signature(
+    structure: &Structure,
+) -> Option<crate::types::decl::Signature> {
+    let simplified = crate::types::includemod::simplify_signature(&structure.str_type);
+    if simplified.len() == structure.str_type.len() {
+        None
+    } else {
+        Some(simplified)
     }
-
-    // Check for duplicates among explicit definitions only
-    let mut seen = HashSet::new();
-    for name in explicit_names.iter().rev() {
-        if !seen.insert(name.clone()) {
-            return true;
-        }
-    }
-
-    // If there are includes, check if any explicit name shadows a value brought
-    // in by an include within THIS structure. We detect this by checking if the
-    // name has MORE bindings in env_after than env_before — the difference represents
-    // bindings added by this structure (both includes and explicit defs).
-    if has_include {
-        for name in &explicit_names {
-            let before_count = env_before.count_value_bindings(name);
-            let after_count = env_after.count_value_bindings(name);
-            // If env_after has at least 2 MORE bindings than env_before, it means
-            // both an include and an explicit def added this name in this structure.
-            if after_count >= before_count + 2 {
-                return true;
-            }
-        }
-    }
-
-    false
 }
 
 /// Look up the semantic module type for a longident by searching env and persistent env.
@@ -4663,6 +4625,74 @@ fn lookup_module_type_from_unpack_expr<'a>(
     )
 }
 
+fn remove_module_type_aliases_for_typeof<'b>(
+    mty: &crate::types::decl::ModuleType,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) -> crate::types::decl::ModuleType {
+    use crate::types::decl::ModuleType as DeclMty;
+    use crate::types::decl::SignatureItem as SigItem;
+
+    match mty {
+        DeclMty::MtySignature(sig) => {
+            let mut env = env.clone();
+            let mut out = Vec::with_capacity(sig.len());
+            for item in sig {
+                match item {
+                    SigItem::SigModule(id, md, rs) => {
+                        let child_mty = match &md.md_type {
+                            DeclMty::MtyAlias(_, _) => {
+                                match scrape_alias_module_type(&md.md_type, &env, pers_env, ctx) {
+                                    Some(scraped @ DeclMty::MtyAlias(_, _))
+                                    | Some(scraped @ DeclMty::MtyIdent(_)) => scraped,
+                                    Some(scraped) => {
+                                        remove_module_type_aliases_for_typeof(
+                                            &scraped,
+                                            &env,
+                                            pers_env,
+                                            ctx,
+                                        )
+                                    }
+                                    None => md.md_type.clone(),
+                                }
+                            }
+                            DeclMty::MtyIdent(_) => md.md_type.clone(),
+                            other => {
+                                remove_module_type_aliases_for_typeof(other, &env, pers_env, ctx)
+                            }
+                        };
+                        let md = crate::types::decl::ModuleDeclaration {
+                            md_type: child_mty.clone(),
+                            ..md.clone()
+                        };
+                        env.add_module(id.clone(), md.clone());
+                        out.push(SigItem::SigModule(id.clone(), md, *rs));
+                    }
+                    SigItem::SigModtype(id, mtd) => {
+                        env.add_modtype(id.clone(), mtd.clone());
+                        out.push(item.clone());
+                    }
+                    _ => out.push(item.clone()),
+                }
+            }
+            DeclMty::MtySignature(out)
+        }
+        DeclMty::MtyAlias(_, _) => {
+            match scrape_alias_module_type(mty, env, pers_env, ctx) {
+                Some(scraped @ DeclMty::MtyAlias(_, _))
+                | Some(scraped @ DeclMty::MtyIdent(_)) => scraped,
+                Some(scraped) => {
+                    remove_module_type_aliases_for_typeof(&scraped, env, pers_env, ctx)
+                }
+                None => mty.clone(),
+            }
+        }
+        DeclMty::MtyIdent(_) => mty.clone(),
+        _ => mty.clone(),
+    }
+}
+
 /// Look up semantic module type information for parsed module expressions.
 /// This mirrors OCaml's behavior of using semantic module types for bindings.
 pub fn lookup_module_type_from_parsed_module_expr<'a>(
@@ -5242,9 +5272,16 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
         }
         PMtyDesc::Pmty_typeof(me_idx) => {
             let me = arena.get_mod_expr(*me_idx);
-            lookup_module_type_from_parsed_module_expr(tctx, env, arena, me).ok_or(
-                TypeModError::InvalidModuleExpr(arena.to_location(mty.pmty_loc)),
-            )
+            lookup_module_type_from_parsed_module_expr(tctx, env, arena, me)
+                .map(|mty| {
+                    remove_module_type_aliases_for_typeof(
+                        &mty,
+                        env,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    )
+                })
+                .ok_or(TypeModError::InvalidModuleExpr(arena.to_location(mty.pmty_loc)))
         }
         PMtyDesc::Pmty_alias(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
@@ -6888,7 +6925,18 @@ where
                     decl_module_type_from_typed_module_type(mty)
                 }
                 crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit => {
-                    decl_module_type_from_typed_module_type(constrained_mty)
+                    decl_module_type_from_typed_module_type(constrained_mty).or_else(|| {
+                        match &inner.mod_desc {
+                            ModuleExprDesc::Tmod_structure(structure) => Some(
+                                DeclMty::MtySignature(
+                                    crate::types::includemod::simplify_signature(
+                                        &structure.str_type,
+                                    ),
+                                ),
+                            ),
+                            _ => None,
+                        }
+                    })
                 }
             };
             constrained.or_else(|| {
@@ -7020,11 +7068,11 @@ fn type_module_expr_with_alias<'a>(
 
         ParsedModuleExprDesc::Pmod_structure(items) => {
             // Module structure: { ... }
-            let (structure, new_env) = type_structure(tctx, env, arena, items)?;
+            let (structure, _new_env) = type_structure(tctx, env, arena, items)?;
 
             // Like OCaml: if simplify_signature would shrink the signature
             // (duplicate value names), wrap in Tmod_constraint implicit
-            let needs_constraint = structure_has_duplicate_value_names(&structure, env, &new_env);
+            let needs_constraint = simplified_structure_signature(&structure).is_some();
 
             let md = ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_structure(structure),
@@ -7812,7 +7860,7 @@ fn type_structure_no_export<'a>(
 
     // Like OCaml: if simplify_signature would shrink the signature
     // (duplicate value names), wrap in Tmod_constraint implicit first
-    let needs_implicit_constraint = structure_has_duplicate_value_names(&inner_structure, env, &current_env);
+    let needs_implicit_constraint = simplified_structure_signature(&inner_structure).is_some();
 
     let mod_structure = ModuleExpr {
         mod_desc: ModuleExprDesc::Tmod_structure(inner_structure),

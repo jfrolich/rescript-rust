@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 // ============================================================================
 
 /// A value description (type of a let-bound value).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValueDescription {
     /// Type of the value
     pub val_type: TypeExprRef,
@@ -31,7 +31,7 @@ pub struct ValueDescription {
 }
 
 /// Kind of value.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueKind {
     /// Regular value
     ValReg,
@@ -40,7 +40,7 @@ pub enum ValueKind {
 }
 
 /// Description of a primitive operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrimitiveDescription {
     /// Primitive name
     pub prim_name: String,
@@ -59,7 +59,7 @@ pub struct PrimitiveDescription {
 // ============================================================================
 
 /// A type declaration (`type t = ...`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeDeclaration {
     /// Type parameters
     pub type_params: Vec<TypeExprRef>,
@@ -91,7 +91,7 @@ pub struct TypeDeclaration {
 }
 
 /// An inlined type representation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeInlinedType {
     /// Inlined record
     Record {
@@ -101,7 +101,7 @@ pub enum TypeInlinedType {
 }
 
 /// Kind of type definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeKind {
     /// Abstract type
     TypeAbstract,
@@ -168,7 +168,7 @@ impl Default for UnboxedStatus {
 }
 
 /// A label (field) declaration in a record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelDeclaration {
     /// Label identifier
     pub ld_id: Ident,
@@ -185,7 +185,7 @@ pub struct LabelDeclaration {
 }
 
 /// A constructor declaration in a variant.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstructorDeclaration {
     /// Constructor identifier
     pub cd_id: Ident,
@@ -200,7 +200,7 @@ pub struct ConstructorDeclaration {
 }
 
 /// Constructor arguments.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstructorArguments {
     /// Tuple arguments
     CstrTuple(Vec<TypeExprRef>),
@@ -213,7 +213,7 @@ pub enum ConstructorArguments {
 // ============================================================================
 
 /// An extension constructor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionConstructor {
     /// Path to the extensible type
     pub ext_type_path: Path,
@@ -238,7 +238,7 @@ pub struct ExtensionConstructor {
 // ============================================================================
 
 /// A constructor description (used in typing environment).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstructorDescription {
     /// Constructor name
     pub cstr_name: String,
@@ -295,7 +295,7 @@ impl ConstructorTag {
 }
 
 /// A label description (used in typing environment).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelDescription {
     /// Short name
     pub lbl_name: String,
@@ -330,7 +330,7 @@ pub struct LabelArrayRef(pub usize);
 // ============================================================================
 
 /// A module type.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleType {
     /// Module type identifier
     MtyIdent(Path),
@@ -359,7 +359,7 @@ pub enum AliasPresence {
 pub type Signature = Vec<SignatureItem>;
 
 /// A signature item.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignatureItem {
     /// Value in signature
     SigValue(Ident, ValueDescription),
@@ -477,7 +477,7 @@ pub fn signature_runtime_bound_idents(sig: &[SignatureItem]) -> Vec<(Ident, usiz
 }
 
 /// A module declaration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleDeclaration {
     /// Module type
     pub md_type: ModuleType,
@@ -491,7 +491,7 @@ pub struct ModuleDeclaration {
 }
 
 /// A module type declaration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModtypeDeclaration {
     /// Module type (None for abstract)
     pub mtd_type: Option<ModuleType>,

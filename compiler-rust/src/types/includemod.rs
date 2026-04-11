@@ -104,6 +104,9 @@ fn modtypes_inner<'a>(
         }
     }
     let _guard = DepthGuard;
+    if mty_impl == mty_sig {
+        return Ok(ModuleCoercion::Tcoerce_none);
+    }
     if depth > 50 {
         return Ok(ModuleCoercion::Tcoerce_none);
     }
@@ -608,20 +611,15 @@ fn signature_item<'a>(
                 }
             }
             if let Some((pos, impl_id, impl_mod_decl)) = found {
-                // When impl and target modules have the same stamp (e.g., when
-                // the target was cloned from impl by simplify_signature), skip
-                // strengthening and return Tcoerce_none. Strengthening can create
-                // false mismatches for modules with internal value shadowing.
-                if impl_id.same(id) {
+                if impl_mod_decl == mod_decl {
                     return Ok((pos, ModuleCoercion::Tcoerce_none));
                 }
-                let strengthened_impl =
-                    crate::types::ctype::strengthen_module_type_for_inclusion_path(
-                        type_ctx,
-                        &Path::pident(impl_id),
-                        &impl_mod_decl.md_type,
-                    );
-                let coercion = modtypes(type_ctx, env, &strengthened_impl, &mod_decl.md_type)?;
+                let impl_mty = crate::types::ctype::strengthen_module_type_for_inclusion_path(
+                    type_ctx,
+                    &Path::pident(impl_id),
+                    &impl_mod_decl.md_type,
+                );
+                let coercion = modtypes(type_ctx, env, &impl_mty, &mod_decl.md_type)?;
                 Ok((pos, coercion))
             } else {
                 Err(IncludeModError::MissingModule(id.clone()))
@@ -1155,6 +1153,9 @@ fn modtype_declarations<'a>(
     impl_decl: &ModtypeDeclaration,
     sig_decl: &ModtypeDeclaration,
 ) -> IncludeModResult<()> {
+    if impl_decl == sig_decl {
+        return Ok(());
+    }
     match (&impl_decl.mtd_type, &sig_decl.mtd_type) {
         // Both abstract - compatible
         (None, None) => Ok(()),
@@ -1170,6 +1171,9 @@ fn modtype_declarations<'a>(
 
         // Both have types - check compatibility (bidirectional)
         (Some(impl_mty), Some(sig_mty)) => {
+            if impl_mty == sig_mty {
+                return Ok(());
+            }
             // Module types must be equivalent (both directions)
             modtypes(type_ctx, env, impl_mty, sig_mty)?;
             modtypes(type_ctx, env, sig_mty, impl_mty)?;
