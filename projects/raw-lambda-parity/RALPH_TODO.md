@@ -1,7 +1,7 @@
 # Ralph TODO: Raw Lambda Parity
 
 **Last Updated:** 2026-04-11
-**Status:** 650/657 (98.9%), 3 parity failures + 4 compile issues, 4 hunks
+**Status:** 651/657 (99.1%), 3 parity failures + 3 compile issues, 4 hunks
 
 ## Goal
 
@@ -14,13 +14,12 @@ CANONICAL_STAMPS=1 ./scripts/test_lambda_parity.sh --raw
 ## Current Baseline
 
 - OCaml compile coverage: **657/657**
-- Rust compile coverage: **653/657** on the 16-way authoritative run
-- Unoptimized lambda parity: **650/657**
+- Rust compile coverage: **654/657** on the 16-way authoritative run
+- Unoptimized lambda parity: **651/657**
 - Parity hunks: **4**
 - Canonicalization: per-function stamp/exit reset (`scripts/canonicalize_lambda_stamps.py`)
 - Raw timeouts on the authoritative run: `Import.res`, `global_module_alias_test.res`
-- Raw crashes on the authoritative run: `defunctor_make_test.res`,
-  `derive_projector_test.res`
+- Raw crashes on the authoritative run: `defunctor_make_test.res`
 - `belt_hashmap_test.res`, `bs_map_set_dict_test.res`, `bs_poly_mutable_map_test.res`,
   `bs_poly_mutable_set_test.res`, `bs_poly_set_test.res`, and the `int_map` cluster now
   compile again after restoring OCaml's strengthened packed-module path behavior.
@@ -52,7 +51,7 @@ parity file outside the Dict path.
 ## Additional Raw Compile Issues
 
 - Timeouts: `Import`, `global_module_alias_test`
-- Crashes: `defunctor_make_test`, `derive_projector_test`
+- Crashes: `defunctor_make_test`
 
 ## Key Findings from Session 2026-04-10/11
 
@@ -163,6 +162,32 @@ inner-matching failures survive this port too, so the root cause is narrower tha
 high-level handler traversal shape.
 
 ## Session Log
+
+### 2026-04-11 (semantic module signatures now simplify duplicate value specs)
+
+OCaml `typemod.ml` runs `simplify_signature` on the semantic signature produced by
+`transl_signature`, keeping only the rightmost value declaration for duplicate names.
+Rust's typed-module-type reconstruction was still turning `Tmty_signature` back into a
+`decl::ModuleType::MtySignature` with all duplicate `SigValue`s intact, and
+`translate_module_type_to_decl_with_typed_hint` was doing the same for parsed
+`Pmty_signature`.
+
+That broke the `@deriving(accessors)` projector path in `derive_projector_test`: the
+generated structure-side include uses an explicit signature with duplicate `hei` / `d`
+accessors, and Rust was feeding the unsimplified semantic signature into module inclusion.
+OCaml had already collapsed those duplicates semantically, so the include compiled and the
+raw lambda matched.
+
+Rust now:
+- simplifies duplicate value specs when reconstructing a semantic module type from
+  `typedtree::ModuleTypeDesc::Tmty_signature`
+- simplifies duplicate value specs when translating parsed `Pmty_signature` into a
+  semantic `decl::ModuleType`
+
+**Result:** `derive_projector_test` now compiles and reaches raw parity. The clean
+authoritative raw baseline improves to **651/657** with **4** hunks, and Rust compile
+coverage rises to **654/657**. The remaining compile issues are the two module-alias
+timeouts (`Import`, `global_module_alias_test`) and the `defunctor_make_test` crash.
 
 ### 2026-04-11 (packed modules now compare strengthened path-based module types)
 

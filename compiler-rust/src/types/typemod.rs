@@ -5208,7 +5208,9 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                     _ => {}
                 }
             }
-            Ok(DeclMty::MtySignature(items))
+            Ok(DeclMty::MtySignature(
+                crate::types::includemod::simplify_signature(&items),
+            ))
         }
         PMtyDesc::Pmty_ident(lid) => {
             // Match OCaml transl_modtype: keep an identifier path and let later
@@ -5668,7 +5670,9 @@ pub(crate) fn decl_module_type_from_typed(
                     | TypedSignatureItemDesc::Tsig_attribute(_) => {}
                 }
             }
-            Some(DeclMty::MtySignature(out))
+            Some(DeclMty::MtySignature(
+                crate::types::includemod::simplify_signature(&out),
+            ))
         }
         ModuleTypeDesc::Tmty_functor(param, _name, param_mty, result_mty) => {
             let decl_param_mty = param_mty
