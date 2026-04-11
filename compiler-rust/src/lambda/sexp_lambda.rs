@@ -267,6 +267,7 @@ fn pointer_info(info: &Option<PointerInfo>) -> Sexp {
 fn string_delim(delim: &Option<StringDelim>) -> Sexp {
     match delim {
         None => Sexp::atom("None"),
+        Some(StringDelim::StarJ) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("DStarJ")]),
         Some(StringDelim::NoQuotes) => {
             Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("DNoQuotes")])
         }
@@ -301,9 +302,7 @@ fn constant(c: &Constant) -> Sexp {
             string(s),
             string_delim(delim),
         ]),
-        Constant::ImmString(s) => {
-            Sexp::list(vec![Sexp::atom("Const_immstring"), string(s)])
-        }
+        Constant::ImmString(s) => Sexp::list(vec![Sexp::atom("Const_immstring"), string(s)]),
         Constant::Float(f) => Sexp::list(vec![Sexp::atom("Const_float"), string(f)]),
         Constant::BigInt { negative, value } => Sexp::list(vec![
             Sexp::atom("Const_bigint"),

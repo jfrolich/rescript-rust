@@ -13,17 +13,15 @@ use crate::context::IdGenerator;
 use crate::js_ir::printer::print_program;
 use crate::lambda::compile::LambdaCompiler;
 use crate::parser::ast::{
-    Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature, Structure,
-    SignatureItemDesc, StructureItemDesc,
+    Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature,
+    SignatureItemDesc, Structure, StructureItemDesc,
 };
 use crate::parser::{jsx_ppx, module, Parser};
 use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
 };
-use crate::types::{
-    TypeCheckContext, TypeContext, initial_env, transl_signature, type_structure,
-};
+use crate::types::{initial_env, transl_signature, type_structure, TypeCheckContext, TypeContext};
 
 // OCaml's Predef sets `Ident.set_current_time 999`. OCaml's Parmatch.extra_pat
 // then eagerly creates Ident.create "+" consuming stamp 1000.
@@ -90,20 +88,17 @@ fn expression_has_string_literal(
         ED::Pexp_apply(inner) => {
             let crate::parser::ast::PexpApply { funct, args, .. } = &**inner;
             expression_has_string_literal(arena.get_expr(*funct), value, arena)
-                || args
-                    .iter()
-                    .any(|(_, arg)| expression_has_string_literal(arena.get_expr(*arg), value, arena))
+                || args.iter().any(|(_, arg)| {
+                    expression_has_string_literal(arena.get_expr(*arg), value, arena)
+                })
         }
         ED::Pexp_match(inner) | ED::Pexp_try(inner) => {
             let (scrutinee, cases) = &**inner;
             expression_has_string_literal(arena.get_expr(*scrutinee), value, arena)
                 || cases.iter().any(|case| {
-                    case.pc_guard
-                        .as_ref()
-                        .is_some_and(|g| {
-                            expression_has_string_literal(arena.get_expr(*g), value, arena)
-                        })
-                        || expression_has_string_literal(arena.get_expr(case.pc_rhs), value, arena)
+                    case.pc_guard.as_ref().is_some_and(|g| {
+                        expression_has_string_literal(arena.get_expr(*g), value, arena)
+                    }) || expression_has_string_literal(arena.get_expr(case.pc_rhs), value, arena)
                 })
         }
         ED::Pexp_tuple(items) | ED::Pexp_array(items) => items
@@ -114,21 +109,21 @@ fn expression_has_string_literal(
             .is_some_and(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena)),
         ED::Pexp_variant(inner) => {
             let (_, arg) = &**inner;
-            arg.as_ref()
-                .is_some_and(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena))
+            arg.as_ref().is_some_and(|arg| {
+                expression_has_string_literal(arena.get_expr(*arg), value, arena)
+            })
         }
         ED::Pexp_record(inner) => {
             let (fields, base) = &**inner;
-            fields
-                .iter()
-                .any(|field| expression_has_string_literal(arena.get_expr(field.expr), value, arena))
-                || base
-                    .as_ref()
-                    .is_some_and(|base| expression_has_string_literal(arena.get_expr(*base), value, arena))
+            fields.iter().any(|field| {
+                expression_has_string_literal(arena.get_expr(field.expr), value, arena)
+            }) || base.as_ref().is_some_and(|base| {
+                expression_has_string_literal(arena.get_expr(*base), value, arena)
+            })
         }
-        ED::Pexp_field(expr, _)
-        | ED::Pexp_assert(expr)
-        | ED::Pexp_await(expr) => expression_has_string_literal(arena.get_expr(*expr), value, arena),
+        ED::Pexp_field(expr, _) | ED::Pexp_assert(expr) | ED::Pexp_await(expr) => {
+            expression_has_string_literal(arena.get_expr(*expr), value, arena)
+        }
         ED::Pexp_newtype(inner) => {
             let (_, expr) = &**inner;
             expression_has_string_literal(arena.get_expr(*expr), value, arena)
@@ -158,11 +153,9 @@ fn expression_has_string_literal(
             let (cond, then_expr, else_expr) = &**inner;
             expression_has_string_literal(arena.get_expr(*cond), value, arena)
                 || expression_has_string_literal(arena.get_expr(*then_expr), value, arena)
-                || else_expr
-                    .as_ref()
-                    .is_some_and(|else_expr| {
-                        expression_has_string_literal(arena.get_expr(*else_expr), value, arena)
-                    })
+                || else_expr.as_ref().is_some_and(|else_expr| {
+                    expression_has_string_literal(arena.get_expr(*else_expr), value, arena)
+                })
         }
         ED::Pexp_for(inner) => {
             let (_, start, end, _, body) = &**inner;
@@ -213,11 +206,9 @@ fn payload_has_string_literal(
         Payload::PPat(inner) => {
             let (pat, guard) = &**inner;
             pattern_has_string_literal(arena.get_pat(*pat), value, arena)
-                || guard
-                    .as_ref()
-                    .is_some_and(|guard| {
-                        expression_has_string_literal(arena.get_expr(*guard), value, arena)
-                    })
+                || guard.as_ref().is_some_and(|guard| {
+                    expression_has_string_literal(arena.get_expr(*guard), value, arena)
+                })
         }
         Payload::PTyp(_) | Payload::PSig(_) => false,
     }
@@ -232,9 +223,9 @@ fn pattern_has_string_literal(
 
     match &*pat.ppat_desc {
         PD::Ppat_constant(c) => matches!(&**c, Constant::String(s, _) if s == value),
-        PD::Ppat_alias(inner, _)
-        | PD::Ppat_exception(inner)
-        | PD::Ppat_open(_, inner) => pattern_has_string_literal(arena.get_pat(*inner), value, arena),
+        PD::Ppat_alias(inner, _) | PD::Ppat_exception(inner) | PD::Ppat_open(_, inner) => {
+            pattern_has_string_literal(arena.get_pat(*inner), value, arena)
+        }
         PD::Ppat_constraint(inner) => {
             let (inner_pat, _) = &**inner;
             pattern_has_string_literal(arena.get_pat(*inner_pat), value, arena)
@@ -278,12 +269,9 @@ fn module_expr_has_config_string(
         }
         ModuleExprDesc::Pmod_functor(inner) => {
             let (_, param, body) = &**inner;
-            param
-                .as_ref()
-                .is_some_and(|param| {
-                    module_type_has_config_string(arena.get_mod_type(*param), value, arena)
-                })
-                || module_expr_has_config_string(arena.get_mod_expr(*body), value, arena)
+            param.as_ref().is_some_and(|param| {
+                module_type_has_config_string(arena.get_mod_type(*param), value, arena)
+            }) || module_expr_has_config_string(arena.get_mod_expr(*body), value, arena)
         }
         ModuleExprDesc::Pmod_apply(lhs, rhs) => {
             module_expr_has_config_string(arena.get_mod_expr(*lhs), value, arena)
@@ -316,12 +304,9 @@ fn module_type_has_config_string(
         }),
         MTD::Pmty_functor(inner) => {
             let (_, param, body) = &**inner;
-            param
-                .as_ref()
-                .is_some_and(|param| {
-                    module_type_has_config_string(arena.get_mod_type(*param), value, arena)
-                })
-                || module_type_has_config_string(arena.get_mod_type(*body), value, arena)
+            param.as_ref().is_some_and(|param| {
+                module_type_has_config_string(arena.get_mod_type(*param), value, arena)
+            }) || module_type_has_config_string(arena.get_mod_type(*body), value, arena)
         }
         MTD::Pmty_with(inner) => {
             let (inner_mty, _) = &**inner;
@@ -340,21 +325,21 @@ fn structure_has_config_string(
     arena: &crate::parse_arena::ParseArena,
 ) -> bool {
     structure.iter().any(|item| match &*item.pstr_desc {
-        StructureItemDesc::Pstr_attribute(attr) => payload_has_string_literal(&attr.1, value, arena),
+        StructureItemDesc::Pstr_attribute(attr) => {
+            payload_has_string_literal(&attr.1, value, arena)
+        }
         StructureItemDesc::Pstr_module(mb) => {
             module_expr_has_config_string(arena.get_mod_expr(mb.pmb_expr), value, arena)
         }
-        StructureItemDesc::Pstr_recmodule(mbs) => mbs.iter().any(|mb| {
-            module_expr_has_config_string(arena.get_mod_expr(mb.pmb_expr), value, arena)
-        }),
+        StructureItemDesc::Pstr_recmodule(mbs) => mbs
+            .iter()
+            .any(|mb| module_expr_has_config_string(arena.get_mod_expr(mb.pmb_expr), value, arena)),
         StructureItemDesc::Pstr_include(incl) => {
             module_expr_has_config_string(arena.get_mod_expr(incl.pincl_mod), value, arena)
         }
         _ => false,
     })
 }
-
-
 
 fn module_expr_needs_jsx_rewrite(
     module_expr: &ModuleExpr,
@@ -383,11 +368,16 @@ fn structure_needs_jsx_rewrite(
 ) -> bool {
     structure.iter().any(|item| match &*item.pstr_desc {
         // External @react.component declarations need JSX PPX lowering.
-        StructureItemDesc::Pstr_primitive(vd) => has_react_component_attr(&vd.pval_attributes, arena),
-        StructureItemDesc::Pstr_value(inner) => { let (_, bindings) = &**inner; bindings.iter().any(|vb| {
-            has_react_component_attr(&vb.pvb_attributes, arena)
-                || has_react_component_with_props_attr(&vb.pvb_attributes, arena)
-        })},
+        StructureItemDesc::Pstr_primitive(vd) => {
+            has_react_component_attr(&vd.pval_attributes, arena)
+        }
+        StructureItemDesc::Pstr_value(inner) => {
+            let (_, bindings) = &**inner;
+            bindings.iter().any(|vb| {
+                has_react_component_attr(&vb.pvb_attributes, arena)
+                    || has_react_component_with_props_attr(&vb.pvb_attributes, arena)
+            })
+        }
         StructureItemDesc::Pstr_module(mb) => {
             module_expr_needs_jsx_rewrite(arena.get_mod_expr(mb.pmb_expr), arena)
         }
@@ -510,9 +500,10 @@ pub fn compile_source_to_js_with_options(
     // OCaml's type_implementation_more calls normalize_signature ONLY when there
     // is no .resi file (Mli_exists branch skips it). Match this behavior:
     // normalize sorts Tvariant row fields and Tobject field chains alphabetically.
-    let has_resi = options.source_filename.as_ref().is_some_and(|f| {
-        f.ends_with(".res") && std::path::Path::new(&format!("{}i", f)).exists()
-    });
+    let has_resi = options
+        .source_filename
+        .as_ref()
+        .is_some_and(|f| f.ends_with(".res") && std::path::Path::new(&format!("{}i", f)).exists());
     if !has_resi {
         normalize_signature_types(&type_ctx, &typed_structure, &final_env);
     }
@@ -550,9 +541,11 @@ pub fn compile_source_to_js_with_options(
 
     let lambda_start_stamp = type_ctx.current_stamp();
 
-    if options.dump_lambda {
+    let needs_raw_lambda =
+        options.dump_lambda || options.dump_lambda_sexp || options.dump_lambda_sexp_locs;
+    let raw_lambda = if needs_raw_lambda {
         let raw_trace = std::env::var_os("RUST_DRAWLAMBDA_STAGE_TRACE").is_some();
-        if raw_trace {
+        if options.dump_lambda && raw_trace {
             eprintln!("[drawlambda-stage] start");
         }
         let unit_name = options
@@ -560,8 +553,13 @@ pub fn compile_source_to_js_with_options(
             .as_deref()
             .map(module_name_from_source_filename)
             .unwrap_or_default();
-        let implementation_coercion =
-            compute_raw_implementation_coercion(&mut tctx, &type_ctx, &env, &typed_structure, options);
+        let implementation_coercion = compute_raw_implementation_coercion(
+            &mut tctx,
+            &type_ctx,
+            &env,
+            &typed_structure,
+            options,
+        );
         let mut raw_converter =
             crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
                 parser.arena(),
@@ -573,30 +571,54 @@ pub fn compile_source_to_js_with_options(
         if let Some(persistent_env) = tctx.persistent_env.clone() {
             raw_converter.set_persistent_env(persistent_env);
         }
-        if raw_trace {
+        if options.dump_lambda && raw_trace {
             eprintln!("[drawlambda-stage] before-convert");
         }
-        let raw_lambda =
-            raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
-        if raw_trace {
-            eprintln!("[drawlambda-stage] after-convert");
-            eprintln!("[drawlambda-stage] before-print");
+        let raw_lambda = raw_converter
+            .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+        if options.dump_lambda {
+            if raw_trace {
+                eprintln!("[drawlambda-stage] after-convert");
+                eprintln!("[drawlambda-stage] before-print");
+            }
+            use std::io::Write;
+            let mut stderr = std::io::stderr();
+            let mut raw_buf = Vec::new();
+            crate::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut raw_buf);
+            raw_buf.push(b'\n');
+            let _ = stderr.write_all(&raw_buf);
+            if raw_trace {
+                eprintln!("[drawlambda-stage] after-print");
+            }
+            let raw_only = std::env::var_os("RUST_RAWLAMBDA_ONLY").is_some();
+            if !raw_only {
+                let _ = stderr.flush();
+            }
+            if raw_only {
+                std::process::exit(0);
+            }
         }
-        use std::io::Write;
-        let mut stderr = std::io::stderr();
-        let mut raw_buf = Vec::new();
-        crate::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut raw_buf);
-        raw_buf.push(b'\n');
-        let _ = stderr.write_all(&raw_buf);
-        if raw_trace {
-            eprintln!("[drawlambda-stage] after-print");
-        }
-        let raw_only = std::env::var_os("RUST_RAWLAMBDA_ONLY").is_some();
-        if !raw_only {
+        Some(raw_lambda)
+    } else {
+        None
+    };
+
+    if options.dump_lambda_sexp || options.dump_lambda_sexp_locs {
+        let lowered_lambda =
+            crate::raw_lambda::lower::lower_to_lambda(raw_lambda.clone().expect("raw lambda"));
+
+        if options.dump_lambda_sexp {
+            use std::io::Write;
+            let mut stderr = std::io::stderr();
+            let _ = crate::lambda::sexp_lambda::print_lambda(&lowered_lambda, &mut stderr);
             let _ = stderr.flush();
         }
-        if raw_only {
-            std::process::exit(0);
+        if options.dump_lambda_sexp_locs {
+            use std::io::Write;
+            let mut stderr = std::io::stderr();
+            let _ =
+                crate::lambda::sexp_lambda::print_lambda_with_locs(&lowered_lambda, &mut stderr);
+            let _ = stderr.flush();
         }
     }
 
@@ -607,20 +629,6 @@ pub fn compile_source_to_js_with_options(
         lambda_start_stamp,
     );
     let lambda = lambda_converter.convert_structure(&typed_structure);
-
-    // Print Lambda sexp if requested
-    if options.dump_lambda_sexp {
-        use std::io::Write;
-        let mut stderr = std::io::stderr();
-        let _ = crate::lambda::sexp_lambda::print_lambda(&lambda, &mut stderr);
-        let _ = stderr.flush();
-    }
-    if options.dump_lambda_sexp_locs {
-        use std::io::Write;
-        let mut stderr = std::io::stderr();
-        let _ = crate::lambda::sexp_lambda::print_lambda_with_locs(&lambda, &mut stderr);
-        let _ = stderr.flush();
-    }
 
     // Lambda -> JS IR
     let mut compiler = LambdaCompiler::new();
@@ -649,7 +657,8 @@ fn compute_raw_implementation_coercion(
         let Some(module_name) = std::path::Path::new(source_file)
             .file_stem()
             .and_then(|s| s.to_str())
-            .map(|s| s.to_string()) else {
+            .map(|s| s.to_string())
+        else {
             return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
         };
         let Some(pers) = &mut tctx.persistent_env else {
@@ -693,7 +702,10 @@ pub fn typecheck_interface_source(
     let mut parser = Parser::new(filename, source);
     let signature = module::parse_signature(&mut parser);
     if parser.has_errors() {
-        return Err(anyhow!("Parse failed with {} error(s)", parser.diagnostics().len()));
+        return Err(anyhow!(
+            "Parse failed with {} error(s)",
+            parser.diagnostics().len()
+        ));
     }
 
     // Type check
@@ -727,19 +739,21 @@ pub fn typecheck_interface_source(
     }
     if options.dump_typed_sexp_locs {
         let mut stderr = std::io::stderr();
-        let _ = print_typed_signature_with_locs(parser.arena(), &type_ctx, &typed_signature, &mut stderr);
+        let _ = print_typed_signature_with_locs(
+            parser.arena(),
+            &type_ctx,
+            &typed_signature,
+            &mut stderr,
+        );
     }
 
     Ok(())
 }
 
 /// Type-check an interface file and dump typed sexp if requested.
-pub fn typecheck_interface_file(
-    path: &std::path::Path,
-    options: &CompilerOptions,
-) -> Result<()> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+pub fn typecheck_interface_file(path: &std::path::Path, options: &CompilerOptions) -> Result<()> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let source: String = bytes.iter().map(|&b| b as char).collect();
     let filename = path.to_string_lossy();
     typecheck_interface_source(&source, &filename, options)
@@ -849,7 +863,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
 
         // Type check
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+        let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
         let type_ctx = TypeContext::new(&id_gen);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         let mut env = initial_env(&type_ctx);
@@ -892,7 +906,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
 
         // Type check
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+        let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
         let type_ctx = TypeContext::new(&id_gen);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         let mut env = initial_env(&type_ctx);
@@ -906,8 +920,9 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
         tctx.set_persistent_env(pers_env);
 
-        let (typed_structure, _final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
-            .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+        let (typed_structure, _final_env) =
+            type_structure(&mut tctx, &env, parser.arena(), &structure)
+                .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
 
         apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
 
@@ -932,8 +947,8 @@ fn apply_moregen_constraints(
     typed_structure: &crate::types::typedtree::Structure,
     options: &CompilerOptions,
 ) {
-    use crate::types::type_expr::TypeExprRef;
     use crate::types::decl::SignatureItem;
+    use crate::types::type_expr::TypeExprRef;
 
     let source_file = match &options.source_filename {
         Some(f) => f,
@@ -970,7 +985,8 @@ fn apply_moregen_constraints(
             None => return,
         };
         // Temporarily add source dir to load path
-        let source_dir = std::path::Path::new(source_file).parent()
+        let source_dir = std::path::Path::new(source_file)
+            .parent()
             .map(|d| d.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
         let already_in_path = pers.load_path_contains(&source_dir);
@@ -996,45 +1012,63 @@ fn apply_moregen_constraints(
     // stamp to the implementation's Pident path in all type_exprs.
     {
         let impl_sig = &typed_structure.str_type;
-        let mut stamp_remap: ahash::AHashMap<i32, crate::types::Path> =
-            ahash::AHashMap::new();
+        let mut stamp_remap: ahash::AHashMap<i32, crate::types::Path> = ahash::AHashMap::new();
         // Match OCaml pair_components: remap Sig_type, Sig_module, Sig_modtype
         for iface_item in &iface_sig {
-            let (iface_id, find_fn): (&crate::ident::Ident, Box<dyn Fn(&SignatureItem) -> Option<&crate::ident::Ident>>) = match iface_item {
-                SignatureItem::SigType(id, _, _) => (id, Box::new(|i| match i {
-                    SignatureItem::SigType(impl_id, _, _) => Some(impl_id),
-                    _ => None,
-                })),
-                SignatureItem::SigModule(id, _, _) => (id, Box::new(|i| match i {
-                    SignatureItem::SigModule(impl_id, _, _) => Some(impl_id),
-                    _ => None,
-                })),
-                SignatureItem::SigModtype(id, _) => (id, Box::new(|i| match i {
-                    SignatureItem::SigModtype(impl_id, _) => Some(impl_id),
-                    _ => None,
-                })),
+            let (iface_id, find_fn): (
+                &crate::ident::Ident,
+                Box<dyn Fn(&SignatureItem) -> Option<&crate::ident::Ident>>,
+            ) = match iface_item {
+                SignatureItem::SigType(id, _, _) => (
+                    id,
+                    Box::new(|i| match i {
+                        SignatureItem::SigType(impl_id, _, _) => Some(impl_id),
+                        _ => None,
+                    }),
+                ),
+                SignatureItem::SigModule(id, _, _) => (
+                    id,
+                    Box::new(|i| match i {
+                        SignatureItem::SigModule(impl_id, _, _) => Some(impl_id),
+                        _ => None,
+                    }),
+                ),
+                SignatureItem::SigModtype(id, _) => (
+                    id,
+                    Box::new(|i| match i {
+                        SignatureItem::SigModtype(impl_id, _) => Some(impl_id),
+                        _ => None,
+                    }),
+                ),
                 _ => continue,
             };
             if let Some(impl_id) = impl_sig.iter().find_map(|i| {
                 let candidate = find_fn(i)?;
                 (candidate.name() == iface_id.name()).then_some(candidate)
             }) {
-                if iface_id.stamp() != 0 && impl_id.stamp() != 0 && iface_id.stamp() != impl_id.stamp() {
-                    stamp_remap.insert(iface_id.stamp(), crate::types::Path::pident(impl_id.clone()));
+                if iface_id.stamp() != 0
+                    && impl_id.stamp() != 0
+                    && iface_id.stamp() != impl_id.stamp()
+                {
+                    stamp_remap.insert(
+                        iface_id.stamp(),
+                        crate::types::Path::pident(impl_id.clone()),
+                    );
                 }
             }
         }
         if !stamp_remap.is_empty() {
             // Apply stamp remapping to interface type_exprs
             crate::cmi::persistent_env::substitute_type_paths_in_sig_with_stamp_map(
-                &iface_sig, &stamp_remap, type_ctx,
+                &iface_sig,
+                &stamp_remap,
+                type_ctx,
             );
         }
     }
 
     // Build a map from value name -> interface type
-    let mut iface_val_types: ahash::AHashMap<String, TypeExprRef> =
-        ahash::AHashMap::new();
+    let mut iface_val_types: ahash::AHashMap<String, TypeExprRef> = ahash::AHashMap::new();
     for item in &iface_sig {
         if let SignatureItem::SigValue(id, vd) = item {
             iface_val_types.insert(id.name().to_string(), vd.val_type);
@@ -1046,7 +1080,10 @@ fn apply_moregen_constraints(
     let mut debug = Vec::new();
 
     // Debug: dump all top-level binding names and types
-    debug.push(format!("TOTAL TOP-LEVEL ITEMS: {}", typed_structure.str_items.len()));
+    debug.push(format!(
+        "TOTAL TOP-LEVEL ITEMS: {}",
+        typed_structure.str_items.len()
+    ));
     for item in &typed_structure.str_items {
         match &item.str_desc {
             crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => {
@@ -1054,9 +1091,18 @@ fn apply_moregen_constraints(
                     let name = extract_pat_name(&binding.vb_pat);
                     debug.push(format!("TOP-LEVEL VALUE: {:?}", name));
                     if name.as_deref() == Some("wrapJsForReason") {
-                        debug.push(format!("=== wrapJsForReason pat_type={:?} level={}",
-                            binding.vb_pat.pat_type, type_ctx.get_level(type_ctx.repr(binding.vb_pat.pat_type))));
-                        dump_all_tvars(type_ctx, binding.vb_pat.pat_type, &mut debug, &mut ahash::AHashSet::new(), 0);
+                        debug.push(format!(
+                            "=== wrapJsForReason pat_type={:?} level={}",
+                            binding.vb_pat.pat_type,
+                            type_ctx.get_level(type_ctx.repr(binding.vb_pat.pat_type))
+                        ));
+                        dump_all_tvars(
+                            type_ctx,
+                            binding.vb_pat.pat_type,
+                            &mut debug,
+                            &mut ahash::AHashSet::new(),
+                            0,
+                        );
                     }
                 }
             }
@@ -1093,11 +1139,18 @@ fn moregen_link_structure(
                     let name = extract_pat_name(&binding.vb_pat);
                     if let Some(ref name) = name {
                         if let Some(&iface_ty) = iface_val_types.get(name) {
-                            debug.push(format!("moregen_link: {} impl={:?} iface={:?}",
-                                name, binding.vb_pat.pat_type, iface_ty));
+                            debug.push(format!(
+                                "moregen_link: {} impl={:?} iface={:?}",
+                                name, binding.vb_pat.pat_type, iface_ty
+                            ));
                             let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
-                            moregen_link(type_ctx, binding.vb_pat.pat_type, iface_inst,
-                                &mut ahash::AHashSet::new(), debug);
+                            moregen_link(
+                                type_ctx,
+                                binding.vb_pat.pat_type,
+                                iface_inst,
+                                &mut ahash::AHashSet::new(),
+                                debug,
+                            );
                             if let crate::types::typedtree::ExpressionDesc::Texp_ident(_, _, desc) =
                                 &binding.vb_expr.exp_desc
                             {
@@ -1176,11 +1229,25 @@ fn dump_all_tvars(
     let indent = "  ".repeat(depth);
     match &*desc {
         TypeDesc::Tvar(name) => {
-            let generic_str = if level == GENERIC_LEVEL { "GENERIC" } else { "NON-GENERIC" };
-            debug.push(format!("{}Tvar({:?}) {:?} {} level={}", indent, name, ty, generic_str, level));
+            let generic_str = if level == GENERIC_LEVEL {
+                "GENERIC"
+            } else {
+                "NON-GENERIC"
+            };
+            debug.push(format!(
+                "{}Tvar({:?}) {:?} {} level={}",
+                indent, name, ty, generic_str, level
+            ));
         }
         TypeDesc::Tconstr { path, args, .. } => {
-            debug.push(format!("{}Tconstr({:?}) {:?} level={} args={}", indent, path, ty, level, args.len()));
+            debug.push(format!(
+                "{}Tconstr({:?}) {:?} level={} args={}",
+                indent,
+                path,
+                ty,
+                level,
+                args.len()
+            ));
             let args = args.clone();
             drop(desc);
             for arg in &args {
@@ -1200,16 +1267,10 @@ fn dump_all_tvars(
     drop(desc);
 }
 
-fn extract_pat_name(
-    pat: &crate::types::typedtree::Pattern,
-) -> Option<String> {
+fn extract_pat_name(pat: &crate::types::typedtree::Pattern) -> Option<String> {
     match &pat.pat_desc {
-        crate::types::typedtree::PatternDesc::Tpat_var(id, _) => {
-            Some(id.name().to_string())
-        }
-        crate::types::typedtree::PatternDesc::Tpat_alias(_, id, _) => {
-            Some(id.name().to_string())
-        }
+        crate::types::typedtree::PatternDesc::Tpat_var(id, _) => Some(id.name().to_string()),
+        crate::types::typedtree::PatternDesc::Tpat_alias(_, id, _) => Some(id.name().to_string()),
         _ => None,
     }
 }
@@ -1243,7 +1304,10 @@ fn moregen_link(
     ctx: &TypeContext<'_>,
     impl_ty: crate::types::type_expr::TypeExprRef,
     iface_ty: crate::types::type_expr::TypeExprRef,
-    visited: &mut ahash::AHashSet<(crate::types::type_expr::TypeExprRef, crate::types::type_expr::TypeExprRef)>,
+    visited: &mut ahash::AHashSet<(
+        crate::types::type_expr::TypeExprRef,
+        crate::types::type_expr::TypeExprRef,
+    )>,
     debug: &mut Vec<String>,
 ) {
     moregen_link_impl(ctx, impl_ty, iface_ty, visited, debug, false);
@@ -1253,7 +1317,10 @@ fn moregen_link_exported_alias(
     ctx: &TypeContext<'_>,
     impl_ty: crate::types::type_expr::TypeExprRef,
     iface_ty: crate::types::type_expr::TypeExprRef,
-    visited: &mut ahash::AHashSet<(crate::types::type_expr::TypeExprRef, crate::types::type_expr::TypeExprRef)>,
+    visited: &mut ahash::AHashSet<(
+        crate::types::type_expr::TypeExprRef,
+        crate::types::type_expr::TypeExprRef,
+    )>,
     debug: &mut Vec<String>,
 ) {
     moregen_link_impl(ctx, impl_ty, iface_ty, visited, debug, true);
@@ -1263,7 +1330,10 @@ fn moregen_link_impl(
     ctx: &TypeContext<'_>,
     impl_ty: crate::types::type_expr::TypeExprRef,
     iface_ty: crate::types::type_expr::TypeExprRef,
-    visited: &mut ahash::AHashSet<(crate::types::type_expr::TypeExprRef, crate::types::type_expr::TypeExprRef)>,
+    visited: &mut ahash::AHashSet<(
+        crate::types::type_expr::TypeExprRef,
+        crate::types::type_expr::TypeExprRef,
+    )>,
     debug: &mut Vec<String>,
     allow_generic_anonymous: bool,
 ) {
@@ -1289,8 +1359,13 @@ fn moregen_link_impl(
                 TypeDesc::Tconstr { path, .. } => format!("Tconstr({:?})", path),
                 _ => "other".to_string(),
             };
-            debug.push(format!("  LINK {:?} Tvar({:?}) level={} -> {}",
-                impl_ty, name, ctx.get_level(impl_ty), iface_summary));
+            debug.push(format!(
+                "  LINK {:?} Tvar({:?}) level={} -> {}",
+                impl_ty,
+                name,
+                ctx.get_level(impl_ty),
+                iface_summary
+            ));
             drop(impl_desc);
             drop(iface_desc);
             crate::types::ctype::link_type(ctx, impl_ty, iface_ty);
@@ -1313,14 +1388,27 @@ fn moregen_link_impl(
             crate::types::ctype::link_type(ctx, impl_ty, iface_ty);
         }
         (TypeDesc::Tvar(name), _) => {
-            debug.push(format!("  SKIP generic {:?} Tvar({:?}) level={}",
-                impl_ty, name, ctx.get_level(impl_ty)));
+            debug.push(format!(
+                "  SKIP generic {:?} Tvar({:?}) level={}",
+                impl_ty,
+                name,
+                ctx.get_level(impl_ty)
+            ));
         }
-        (TypeDesc::Tconstr { path: p1, args: a1, .. },
-         TypeDesc::Tconstr { path: p2, args: a2, .. })
-            if moregen_paths_compatible(p1, p2) && a1.len() == a2.len() =>
-        {
-            debug.push(format!("  Tconstr match: {:?} ~ {:?} args={}", p1, p2, a1.len()));
+        (
+            TypeDesc::Tconstr {
+                path: p1, args: a1, ..
+            },
+            TypeDesc::Tconstr {
+                path: p2, args: a2, ..
+            },
+        ) if moregen_paths_compatible(p1, p2) && a1.len() == a2.len() => {
+            debug.push(format!(
+                "  Tconstr match: {:?} ~ {:?} args={}",
+                p1,
+                p2,
+                a1.len()
+            ));
             let a1 = a1.clone();
             let a2 = a2.clone();
             drop(impl_desc);
@@ -1329,9 +1417,14 @@ fn moregen_link_impl(
                 moregen_link_impl(ctx, *a, *b, visited, debug, allow_generic_anonymous);
             }
         }
-        (TypeDesc::Tarrow { arg: a1, ret: r1, .. },
-         TypeDesc::Tarrow { arg: a2, ret: r2, .. }) =>
-        {
+        (
+            TypeDesc::Tarrow {
+                arg: a1, ret: r1, ..
+            },
+            TypeDesc::Tarrow {
+                arg: a2, ret: r2, ..
+            },
+        ) => {
             debug.push(format!("  Tarrow match"));
             let (a1t, r1) = (a1.typ, *r1);
             let (a2t, r2) = (a2.typ, *r2);
@@ -1349,11 +1442,21 @@ fn moregen_link_impl(
                 moregen_link_impl(ctx, *a, *b, visited, debug, allow_generic_anonymous);
             }
         }
-        (TypeDesc::Tconstr { path: p1, args: a1, .. },
-         TypeDesc::Tconstr { path: p2, args: a2, .. }) =>
-        {
-            debug.push(format!("  Tconstr MISMATCH: impl={:?}({}) iface={:?}({})",
-                p1, a1.len(), p2, a2.len()));
+        (
+            TypeDesc::Tconstr {
+                path: p1, args: a1, ..
+            },
+            TypeDesc::Tconstr {
+                path: p2, args: a2, ..
+            },
+        ) => {
+            debug.push(format!(
+                "  Tconstr MISMATCH: impl={:?}({}) iface={:?}({})",
+                p1,
+                a1.len(),
+                p2,
+                a2.len()
+            ));
         }
         _ => {
             debug.push(format!("  NO match"));
@@ -1593,10 +1696,14 @@ pub(crate) fn normalize_signature_types(
             PatternDesc::Tpat_tuple(pats)
             | PatternDesc::Tpat_construct(_, _, pats)
             | PatternDesc::Tpat_array(pats) => {
-                for p in pats { collect_bound_names(p, names); }
+                for p in pats {
+                    collect_bound_names(p, names);
+                }
             }
             PatternDesc::Tpat_record(fields, _) => {
-                for (_, _, p, _) in fields { collect_bound_names(p, names); }
+                for (_, _, p, _) in fields {
+                    collect_bound_names(p, names);
+                }
             }
             PatternDesc::Tpat_variant(_, Some(inner), _) => collect_bound_names(inner, names),
             PatternDesc::Tpat_or(left, _, _) => collect_bound_names(left, names),
@@ -1604,7 +1711,9 @@ pub(crate) fn normalize_signature_types(
         }
     }
 
-    fn local_sig_values(sig: &[SignatureItem]) -> ahash::AHashMap<String, crate::types::type_expr::TypeExprRef> {
+    fn local_sig_values(
+        sig: &[SignatureItem],
+    ) -> ahash::AHashMap<String, crate::types::type_expr::TypeExprRef> {
         let mut map = ahash::AHashMap::new();
         for item in sig {
             if let SignatureItem::SigValue(id, vd) = item {
@@ -1669,12 +1778,25 @@ pub(crate) fn normalize_signature_types(
         }
     }
 
-    fn norm_modexpr(ctx: &TypeContext<'_>, env: &crate::types::env::Env, me: &crate::types::typedtree::ModuleExpr) {
+    fn norm_modexpr(
+        ctx: &TypeContext<'_>,
+        env: &crate::types::env::Env,
+        me: &crate::types::typedtree::ModuleExpr,
+    ) {
         match &me.mod_desc {
-            ModuleExprDesc::Tmod_structure(s) => { norm_structure(ctx, env, s, true); }
-            ModuleExprDesc::Tmod_constraint(me, _, _, _) => { norm_modexpr(ctx, env, me); }
-            ModuleExprDesc::Tmod_functor(_, _, _, me) => { norm_modexpr(ctx, env, me); }
-            ModuleExprDesc::Tmod_apply(me1, me2, _) => { norm_modexpr(ctx, env, me1); norm_modexpr(ctx, env, me2); }
+            ModuleExprDesc::Tmod_structure(s) => {
+                norm_structure(ctx, env, s, true);
+            }
+            ModuleExprDesc::Tmod_constraint(me, _, _, _) => {
+                norm_modexpr(ctx, env, me);
+            }
+            ModuleExprDesc::Tmod_functor(_, _, _, me) => {
+                norm_modexpr(ctx, env, me);
+            }
+            ModuleExprDesc::Tmod_apply(me1, me2, _) => {
+                norm_modexpr(ctx, env, me1);
+                norm_modexpr(ctx, env, me2);
+            }
             _ => {}
         }
     }

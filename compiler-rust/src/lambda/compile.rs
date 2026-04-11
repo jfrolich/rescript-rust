@@ -561,7 +561,7 @@ impl LambdaCompiler {
             Constant::String { s, delim } => {
                 let delim = match delim {
                     Some(StringDelim::Backtick) => Delim::BackQuotes,
-                    Some(StringDelim::NoQuotes) | None => Delim::None,
+                    Some(StringDelim::StarJ) | Some(StringDelim::NoQuotes) | None => Delim::None,
                 };
                 Expression::new(ExpressionDesc::Str {
                     delim,
@@ -667,8 +667,8 @@ fn comparison_to_binop(cmp: Comparison) -> BinOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lambda::Lambda;
     use crate::lambda::constant::Constant;
+    use crate::lambda::Lambda;
 
     #[test]
     fn test_compile_constant_int() {

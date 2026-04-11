@@ -295,6 +295,9 @@ impl<'a> LambdaConverter<'a> {
             TConstant::String(s, delim) => Constant::String {
                 s: s.clone(),
                 delim: delim.as_ref().and_then(|d| match d.as_str() {
+                    "*j" | "js" | "j" => Some(StringDelim::StarJ),
+                    "json" => Some(StringDelim::NoQuotes),
+                    "bq" => Some(StringDelim::Backtick),
                     "`" => Some(StringDelim::Backtick),
                     _ => None,
                 }),
@@ -399,11 +402,7 @@ impl<'a> LambdaConverter<'a> {
                         lapply(
                             loc.clone(),
                             lam,
-                            applied_args
-                                .into_iter()
-                                .rev()
-                                .map(|(arg, _)| arg)
-                                .collect(),
+                            applied_args.into_iter().rev().map(|(arg, _)| arg).collect(),
                         )
                     };
 
@@ -422,8 +421,13 @@ impl<'a> LambdaConverter<'a> {
                     next_args_rev.push((Lambda::var(id_arg.clone()), *optional));
                     next_args_rev.extend(remaining_args.into_iter());
 
-                    let body =
-                        build_apply(converter, loc.clone(), handle, next_args_rev, &protected_tail);
+                    let body = build_apply(
+                        converter,
+                        loc.clone(),
+                        handle,
+                        next_args_rev,
+                        &protected_tail,
+                    );
 
                     let mut wrapped = match body {
                         Lambda::Lfunction(func) => {
@@ -951,7 +955,12 @@ impl<'a> LambdaConverter<'a> {
     fn convert_record(
         &mut self,
         loc: Location,
-        fields: &[(Located<LidentIdx>, LabelDescription, RecordLabelDefinition, bool)],
+        fields: &[(
+            Located<LidentIdx>,
+            LabelDescription,
+            RecordLabelDefinition,
+            bool,
+        )],
         base: Option<&Expression>,
     ) -> Lambda {
         let mut values = vec![None; fields.len()];

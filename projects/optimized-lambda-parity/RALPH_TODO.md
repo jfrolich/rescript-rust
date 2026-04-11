@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 0/657 (0%), 657 parity failures, 1631 hunks
+**Status:** 208/657 (31.7%), 449 parity failures, 7862 hunks
 
 ## Goal
 
@@ -15,18 +15,24 @@ Execution order and phase gates live in `PLAN.md`.
 
 ## Current Baseline
 
+Authoritative run:
+
+```bash
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
 - OCaml compile coverage: **657/657**
-- Rust compile coverage: **657/657** on the 1-way authoritative run
-- Optimized lambda parity: **0/657**
-- Stamp-canonicalized parity: **0/657**
-- Parity hunks: **1631**
-- Stamp-canonicalized hunks: **1631**
+- Rust compile coverage: **657/657**
+- Optimized lambda parity: **208/657**
+- Stamp-canonicalized parity: **208/657**
+- Exact hunks: **7862**
+- Stamp-canonicalized hunks: **7862**
 - Largest current exact diffs:
-  - `js_array_test.res`: **69** hunks
-  - `caml_compare_test.res`: **54** hunks
-  - `js_math_test.res`: **50** hunks
-  - `js_string_test.res`: **42** hunks
-  - `js_float_test.res`: **38** hunks
+  - `big_polyvar_test.res`: **1203** hunks
+  - `belt_list_test.res`: **347** hunks
+  - `stringmatch_test.res`: **284** hunks
+  - `js_date_test.res`: **252** hunks
+  - `bs_array_test.res`: **238** hunks
 
 ## Working Rules
 
@@ -40,101 +46,136 @@ Execution order and phase gates live in `PLAN.md`.
 
 ## Remaining Parity Failures
 
-All **657** files still fail optimized-lambda parity.
+All **449** remaining failures are now real optimized-lambda lowering gaps, not a dump-path mismatch.
 
 Current frontier characteristics:
-- The smallest failures are already structural 1-hunk diffs, not just stamp noise.
-- Stamp canonicalization does not improve the baseline at all.
-- The current Rust `-dlambda-sexp` path is still using the legacy typedtree-to-lambda shortcut.
+- `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
+- `raw_lambda/lower.rs` is no longer an identity shim.
+- Small structural sanity checks now pass exactly:
+  - `AsInUncurriedExternals.res`
+  - `minimal_test.res`
+- `js_array_test.res` is still a useful large-file guard at **207** hunks.
+- Stamp canonicalization still does not reduce the baseline at all.
 
-## Key Findings from Session 2026-04-11
+## Key Findings from Session 2026-04-12
 
-### raw lambda parity is complete, but optimized parity still bypasses that work
-The current Rust `-dlambda-sexp` path in `compiler-rust/src/driver.rs` still constructs
-lambda with `lambda::convert::LambdaConverter::convert_structure(&typed_structure)` and
-prints that directly. OCaml prints optimized lambda immediately after
-`Lam_convert.convert` in `lam_compile_main.ml`.
+### dump routing is now correct
+`compiler-rust/src/driver.rs` no longer prints `-dlambda-sexp` from the legacy typedtree-to-lambda shortcut.
+The dump path now does:
 
-This means optimized parity is currently measuring the old shortcut path, not the real
-OCaml-aligned raw-lambda-to-optimized-lambda lowering stage.
-
-### the raw-to-lowered boundary is still an identity conversion
-`compiler-rust/src/raw_lambda/lower.rs` currently does:
-
-```rust
-pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
-    raw.into_lowered()
-}
+```text
+typedtree -> raw_lambda::convert -> raw_lambda::lower -> sexp_lambda
 ```
 
-That is not an OCaml `Lam_convert.convert` port. It confirms the optimized stage still
-needs a real conversion boundary.
+The JS backend path remains unchanged for now.
 
-### stamp canonicalization does not help the current baseline
-The parity script already writes exact diffs and stamp-canonicalized normalized diffs.
-The normalized baseline is identical to the exact one:
+### the first real `Lam_convert.convert` slice is landed
+`compiler-rust/src/raw_lambda/lower.rs` now performs real lowering work instead of
+`raw.into_lowered()`.
 
-- exact parity: **0/657**, **1631** hunks
-- normalized parity: **0/657**, **1631** hunks
+Implemented slices include:
+- alias-following through a lowering context
+- application status lowering to `App_uncurry`
+- constructor/pointer normalization needed by optimized lambda
+- let/letrec rebuilding, including splitting non-recursive bindings out of `letrec`
+- switch lowering, including offset-switch folding
+- try/with lowering with `PwrapExn`
+- initial primitive/module-lowering cases used by the small parity files
 
-This means stamp numbering is not the primary problem. The current gap is stage shape and
-lowering behavior.
+### constructor metadata had to survive the raw stage
+To keep raw parity intact while enabling optimized lowering:
+- `raw_lambda/convert.rs` now preserves constructor information on integer constants
+- `raw_lambda/print.rs` prints constructor-tagged ints back as raw `0a`-style pointers
+- lambda string-delimiter handling was extended for `*j` / `js` / `json` / backtick forms
 
-### small diffs already show stage-structure mismatches
-`AsInUncurriedExternals.res` is only a 1-hunk diff, but it already shows major pipeline
-differences:
+### the first milestone produced repo-wide movement
+Verified focused checks:
 
-- OCaml emits nested `Llet Strict` structure with module-export assembly
-- Rust emits `Lsequence` plus `Llet Alias`
-- OCaml uses the expected call/application shapes
-- Rust emits a different `Pjs_call` / `App_na` / constant structure
+- `AsInUncurriedExternals.res`: **exact parity**
+- `minimal_test.res`: **exact parity**
+- `js_array_test.res`: **207 hunks**
 
-These are not printer formatting issues.
+Authoritative repo-wide baseline moved from:
 
-### simple files still miss the optimized tail shape
-`minimal_test.res` shows the raw data-structure shape is still off in optimized output:
+- **0/657**, **1631** hunks
 
-- OCaml ends with the expected module-export block
-- Rust ends with `Const_js_undefined true`
-- list/block construction shape also differs
+to:
 
-This is another signal that the optimized pipeline itself has not been ported yet.
+- **208/657**, **7862** hunks
+
+The file-count improvement confirms the routing/lowering boundary is now real. The hunk increase is expected: parity is finally measuring the correct optimized stage instead of the old shortcut path.
 
 ## Root-Cause Frontiers
 
-1. **Route `-dlambda-sexp` through the real optimized path**
-   - Stop using the legacy `lambda::convert` shortcut as the parity target
-   - Start from the now-correct raw lambda stage
-2. **Port `Lam_convert.convert`**
-   - Replace the identity `raw.into_lowered()` boundary
-   - Match OCaml's lowering decisions and data sharing
-3. **Use smallest failures for quick structural validation**
-   - `AsInUncurriedExternals.res`
+1. **Continue porting `Lam_convert.convert`**
+   - module export tail shape
+   - let-kind selection (`Strict`, `Alias`, `StrictOpt`, `Variable`)
+   - JS-call primitive lowering
+   - constant/block/pointer representation
+   - module/coercion lowering forms
+2. **Use smallest failures for quick structural validation**
    - `Coercion.res`
    - `DictInference.res`
    - `DictInternalRepresentation.res`
    - `DictPatternMatchingOptimization.res`
-4. **Use largest failures for generalization validation**
+   - `DisambiguateOptionalFields.res`
+3. **Use large files to validate that a rule generalizes**
    - `js_array_test.res`
    - `caml_compare_test.res`
    - `js_math_test.res`
    - `js_string_test.res`
    - `js_float_test.res`
-5. **Treat later `lam_pass_*` work as out of direct parity scope**
+4. **Treat later `lam_pass_*` work as out of direct parity scope**
    - only touch those passes if a shared infrastructure change requires it
-   - do not spend cycles there while `raw_lambda/lower.rs` is still a stub
+   - do not spend cycles there while `raw_lambda/lower.rs` is still incomplete
 
 ## Immediate Next Milestone
 
-1. Route `-dlambda-sexp` through raw lambda plus the new lowering boundary.
-2. Replace the first slice of `raw.into_lowered()` with real `Lam_convert.convert` logic.
-3. Re-test:
-   - `AsInUncurriedExternals.res`
-   - `minimal_test.res`
+1. Port the next `Lam_convert.convert` rules around module export tails and let-kind selection.
+2. Re-test:
+   - `Coercion.res`
+   - `DictInference.res`
+   - `DictInternalRepresentation.res`
+   - `DictPatternMatchingOptimization.res`
+3. Validate the same rule on:
    - `js_array_test.res`
-4. Only after the small structural files become sane, expand to the wider corpus.
+   - `caml_compare_test.res`
+4. Re-run:
+
+```bash
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+5. Commit immediately after the next verified OCaml-aligned improvement.
 
 ## Session Log
+
+### 2026-04-12 (routing fixed, first lowerer slice landed)
+
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests
+timeout 180 ./scripts/test_lambda_parity.sh -j1 AsInUncurriedExternals
+timeout 180 ./scripts/test_lambda_parity.sh -j1 minimal_test
+timeout 180 ./scripts/test_lambda_parity.sh -j1 js_array_test
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- OCaml compile coverage: **657/657**
+- Rust compile coverage: **657/657**
+- Optimized lambda parity: **208/657**
+- Stamp-canonicalized parity: **208/657**
+- Exact hunks: **7862**
+- Stamp-canonicalized hunks: **7862**
+
+Key checkpoints:
+
+- `AsInUncurriedExternals.res`: passes
+- `minimal_test.res`: passes
+- `js_array_test.res`: 207 hunks
 
 ### 2026-04-11 (project created from first optimized baseline)
 
@@ -152,5 +193,5 @@ Result:
 - Parity hunks: **1631**
 
 The script-generated normalized diffs matched the exact baseline exactly, so stamp
-canonicalization did not reduce a single failure. This is the starting point for the
+canonicalization did not reduce a single failure. This was the starting point for the
 optimized-lambda project.

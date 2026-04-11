@@ -5,7 +5,7 @@ use std::io::Write;
 
 use crate::ident::Ident;
 use crate::lambda::compat::LetKind;
-use crate::lambda::constant::Constant;
+use crate::lambda::constant::{Constant, PointerInfo};
 use crate::lambda::primitive::Mutable;
 use crate::lambda::print::raw_primitive_to_string;
 use crate::lambda::{FieldDbgInfo, FunctionAttribute, InlineAttribute, Primitive, TagInfo};
@@ -162,7 +162,10 @@ fn print_tag_info<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
 
 fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
     match cst {
-        Constant::Int { i, .. } => f.print(format_args!("{i}")),
+        Constant::Int { i, comment } => match comment {
+            Some(PointerInfo::Constructor(_)) => f.print(format_args!("{i}a")),
+            _ => f.print(format_args!("{i}")),
+        },
         Constant::NativeInt { i, .. } => f.print(format_args!("{i}")),
         Constant::Char(i) => {
             if let Some(ch) = char::from_u32(*i as u32) {
@@ -256,7 +259,11 @@ fn print_apply<W: Write>(f: &mut Formatter<W>, apply: &RawApply, reraise_exn: Op
     f.close_box();
 }
 
-fn print_function<W: Write>(f: &mut Formatter<W>, func: &RawLFunction, reraise_exn: Option<&Ident>) {
+fn print_function<W: Write>(
+    f: &mut Formatter<W>,
+    func: &RawLFunction,
+    reraise_exn: Option<&Ident>,
+) {
     f.open_box(BoxKind::Box, 2);
     f.string("(function");
     for param in &func.params {
