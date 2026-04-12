@@ -6,14 +6,15 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
 use crate::lambda::constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 use crate::lambda::free_variables::free_variables;
+use crate::lambda::primitive::Primitive;
 use crate::lambda::primitive::{
     ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, ExternalReturnWrapper,
 };
-use crate::lambda::primitive::Primitive;
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
@@ -27,14 +28,16 @@ struct LoweringContext {
     alias_tbl: HashMap<Ident, Ident>,
     exit_map: HashMap<i32, i32>,
     exported_idents: HashSet<Ident>,
+    id_gen: IdGenerator,
 }
 
 impl LoweringContext {
-    fn new(exported_idents: HashSet<Ident>) -> Self {
+    fn new(exported_idents: HashSet<Ident>, start_stamp: i32) -> Self {
         Self {
             alias_tbl: HashMap::new(),
             exit_map: HashMap::new(),
             exported_idents,
+            id_gen: IdGenerator::with_start_stamp(start_stamp),
         }
     }
 
@@ -59,7 +62,7 @@ impl LoweringContext {
             RawLambda::Lapply(apply) => self.lower_apply(apply),
             RawLambda::Lfunction(func) => {
                 let (renamed_params, renamed_body) =
-                    rename_optional_parameters(func.params, *func.body);
+                    rename_optional_parameters(&self.id_gen, func.params, *func.body);
                 Lambda::function_(
                     func.arity,
                     renamed_params,
@@ -328,14 +331,19 @@ impl LoweringContext {
                 );
                 wrap_ffi_result(call, return_wrapper, loc)
             }
-            Primitive::Pmakeblock(tag, TagInfo::PolyVar(name), mutable_flag) => match args.as_slice() {
-                [_, value] => Lambda::prim(
-                    Primitive::Pmakeblock(tag, TagInfo::PolyVar(name.clone()), mutable_flag),
-                    vec![Lambda::const_(polyvar_block_tag_constant(&name)), value.clone()],
-                    loc,
-                ),
-                _ => unreachable!("polyvariant blocks expect tag and payload"),
-            },
+            Primitive::Pmakeblock(tag, TagInfo::PolyVar(name), mutable_flag) => {
+                match args.as_slice() {
+                    [_, value] => Lambda::prim(
+                        Primitive::Pmakeblock(tag, TagInfo::PolyVar(name.clone()), mutable_flag),
+                        vec![
+                            Lambda::const_(polyvar_block_tag_constant(&name)),
+                            value.clone(),
+                        ],
+                        loc,
+                    ),
+                    _ => unreachable!("polyvariant blocks expect tag and payload"),
+                }
+            }
             Primitive::Pmakeblock(_, TagInfo::SomeNotNested, _) => {
                 Lambda::prim(Primitive::PsomeNotNest, args, loc)
             }
@@ -451,7 +459,7 @@ impl LoweringContext {
         let lowered_body = self.lower_lambda(body);
         let lowered_handler = self.lower_lambda(handler);
         if exception_id_destructed(&lowered_handler, &id) {
-            let raw_id = Ident::create_local(format!("raw_{}", id.name()));
+            let raw_id = self.id_gen.create(&format!("raw_{}", id.name()));
             let wrapped = Lambda::let_(
                 LetKind::StrictOpt,
                 id,
@@ -660,8 +668,12 @@ fn const_switch_is_dense_from_zero(sw_consts: &[(i32, RawLambda)]) -> bool {
         .all(|(idx, (tag, _))| *tag == idx as i32)
 }
 
-fn rename_optional_parameters(params: Vec<Ident>, body: RawLambda) -> (Vec<Ident>, RawLambda) {
-    let (param_map, body) = rename_optional_parameter_prefix(&params, body);
+fn rename_optional_parameters(
+    id_gen: &IdGenerator,
+    params: Vec<Ident>,
+    body: RawLambda,
+) -> (Vec<Ident>, RawLambda) {
+    let (param_map, body) = rename_optional_parameter_prefix(id_gen, &params, body);
     let params = params
         .into_iter()
         .map(|param| param_map.get(&param).cloned().unwrap_or(param))
@@ -670,6 +682,7 @@ fn rename_optional_parameters(params: Vec<Ident>, body: RawLambda) -> (Vec<Ident
 }
 
 fn rename_optional_parameter_prefix(
+    id_gen: &IdGenerator,
     params: &[Ident],
     body: RawLambda,
 ) -> (HashMap<Ident, Ident>, RawLambda) {
@@ -682,7 +695,7 @@ fn rename_optional_parameter_prefix(
         return (HashMap::new(), RawLambda::Llet(kind, id, value, rest));
     }
 
-    let (mut param_map, renamed_rest) = rename_optional_parameter_prefix(params, *rest);
+    let (mut param_map, renamed_rest) = rename_optional_parameter_prefix(id_gen, params, *rest);
     let RawLambda::LifThenElse(cond, then_, else_) = *value else {
         unreachable!("validated optional parameter binding")
     };
@@ -695,7 +708,7 @@ fn rename_optional_parameter_prefix(
     let [RawLambda::Lvar(opt)] = cond_info.args.as_slice() else {
         unreachable!("validated optional parameter binding")
     };
-    let new_id = Ident::create_local(format!("{}Opt", id.name()));
+    let new_id = id_gen.create(&format!("{}Opt", id.name()));
     param_map.insert(opt.clone(), new_id.clone());
 
     let renamed_value = RawLambda::LifThenElse(
@@ -737,18 +750,31 @@ fn matches_optional_parameter_binding(params: &[Ident], value: &RawLambda) -> bo
     opt.same(opt2) && params.iter().any(|param| param.same(opt))
 }
 
-fn make_apply(func: Lambda, args: Vec<Lambda>, ap_info: ApInfo, ap_transformed_jsx: bool) -> Lambda {
+fn make_apply(
+    func: Lambda,
+    args: Vec<Lambda>,
+    ap_info: ApInfo,
+    ap_transformed_jsx: bool,
+) -> Lambda {
     match func {
         Lambda::Lfunction(function) => {
             if let Some(reduced) = eta_reduce_function_apply(&function, &args, &ap_info) {
                 return reduced;
             }
-            make_lapply(Lambda::Lfunction(function), args, ap_info, ap_transformed_jsx)
+            make_lapply(
+                Lambda::Lfunction(function),
+                args,
+                ap_info,
+                ap_transformed_jsx,
+            )
         }
         Lambda::Llet(kind, id, value, body) => match *body {
-            body @ Lambda::Lfunction(_) => {
-                Lambda::let_(kind, id, *value, make_apply(body, args, ap_info, ap_transformed_jsx))
-            }
+            body @ Lambda::Lfunction(_) => Lambda::let_(
+                kind,
+                id,
+                *value,
+                make_apply(body, args, ap_info, ap_transformed_jsx),
+            ),
             body => make_lapply(
                 Lambda::Llet(kind, id, value, Box::new(body)),
                 args,
@@ -760,7 +786,11 @@ fn make_apply(func: Lambda, args: Vec<Lambda>, ap_info: ApInfo, ap_transformed_j
     }
 }
 
-fn eta_reduce_function_apply(function: &LFunction, args: &[Lambda], ap_info: &ApInfo) -> Option<Lambda> {
+fn eta_reduce_function_apply(
+    function: &LFunction,
+    args: &[Lambda],
+    ap_info: &ApInfo,
+) -> Option<Lambda> {
     match function.body.as_ref() {
         Lambda::Lprim(PrimInfo {
             primitive:
@@ -822,7 +852,11 @@ fn function_primitive(body: &Lambda) -> Option<Primitive> {
     }
 }
 
-fn eta_conversion_args(params: &[Ident], inner_args: &[Lambda], outer_args: &[Lambda]) -> Option<Vec<Lambda>> {
+fn eta_conversion_args(
+    params: &[Ident],
+    inner_args: &[Lambda],
+    outer_args: &[Lambda],
+) -> Option<Vec<Lambda>> {
     if params.len() != inner_args.len() || params.len() != outer_args.len() {
         return None;
     }
@@ -860,7 +894,12 @@ fn eta_conversion_args(params: &[Ident], inner_args: &[Lambda], outer_args: &[La
         .collect()
 }
 
-fn make_lapply(func: Lambda, args: Vec<Lambda>, ap_info: ApInfo, ap_transformed_jsx: bool) -> Lambda {
+fn make_lapply(
+    func: Lambda,
+    args: Vec<Lambda>,
+    ap_info: ApInfo,
+    ap_transformed_jsx: bool,
+) -> Lambda {
     Lambda::Lapply(Apply {
         ap_func: Box::new(func),
         ap_args: args,
@@ -954,9 +993,13 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Locatio
             (Primitive::Pnot, Constant::JsTrue) => return Lambda::false_(),
             (Primitive::Pnot, Constant::JsFalse) => return Lambda::true_(),
             _ => {}
-        }
+        },
         [Lambda::Lconst(lhs), Lambda::Lconst(rhs)] => match (&primitive, lhs, rhs) {
-            (Primitive::Pintcomp(comparison), Constant::Int { i: lhs, .. }, Constant::Int { i: rhs, .. }) => {
+            (
+                Primitive::Pintcomp(comparison),
+                Constant::Int { i: lhs, .. },
+                Constant::Int { i: rhs, .. },
+            ) => {
                 return bool_const(comparison.cmp_int32(*lhs, *rhs));
             }
             (Primitive::Pfloatcomp(comparison), lhs, rhs) => {
@@ -1473,19 +1516,137 @@ fn strongly_connected_binding_components(deps: &[Vec<usize>]) -> Vec<Vec<usize>>
 }
 
 /// Lower raw lambda into the existing JS-facing Lambda IR.
-pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
+fn max_ident_stamp(raw: &RawLambda) -> i32 {
+    fn visit_ident(max_stamp: &mut i32, id: &Ident) {
+        *max_stamp = (*max_stamp).max(id.stamp());
+    }
+
+    fn visit_raw(max_stamp: &mut i32, raw: &RawLambda) {
+        match raw {
+            RawLambda::Lvar(id) | RawLambda::LglobalModule(id, _) => visit_ident(max_stamp, id),
+            RawLambda::Lconst(_) => {}
+            RawLambda::Lapply(apply) => {
+                visit_raw(max_stamp, &apply.ap_func);
+                for arg in &apply.ap_args {
+                    visit_raw(max_stamp, arg);
+                }
+            }
+            RawLambda::Lfunction(func) => {
+                for param in &func.params {
+                    visit_ident(max_stamp, param);
+                }
+                visit_raw(max_stamp, &func.body);
+            }
+            RawLambda::Llet(_, id, value, body) => {
+                visit_ident(max_stamp, id);
+                visit_raw(max_stamp, value);
+                visit_raw(max_stamp, body);
+            }
+            RawLambda::Lletrec(bindings, body) => {
+                for (id, lam) in bindings {
+                    visit_ident(max_stamp, id);
+                    visit_raw(max_stamp, lam);
+                }
+                visit_raw(max_stamp, body);
+            }
+            RawLambda::Lprim(info) => {
+                if let Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _) = &info.primitive {
+                    for id in ids {
+                        visit_ident(max_stamp, id);
+                    }
+                }
+                for arg in &info.args {
+                    visit_raw(max_stamp, arg);
+                }
+            }
+            RawLambda::Lswitch(scrutinee, switch, _) => {
+                visit_raw(max_stamp, scrutinee);
+                for (_, lam) in &switch.sw_consts {
+                    visit_raw(max_stamp, lam);
+                }
+                for (_, lam) in &switch.sw_blocks {
+                    visit_raw(max_stamp, lam);
+                }
+                if let Some(failaction) = &switch.sw_failaction {
+                    visit_raw(max_stamp, failaction);
+                }
+            }
+            RawLambda::LstringSwitch(scrutinee, cases, default) => {
+                visit_raw(max_stamp, scrutinee);
+                for (_, lam) in cases {
+                    visit_raw(max_stamp, lam);
+                }
+                if let Some(default) = default {
+                    visit_raw(max_stamp, default);
+                }
+            }
+            RawLambda::LstaticRaise(_, args) => {
+                for arg in args {
+                    visit_raw(max_stamp, arg);
+                }
+            }
+            RawLambda::LstaticCatch(body, (_, ids), handler) => {
+                for id in ids {
+                    visit_ident(max_stamp, id);
+                }
+                visit_raw(max_stamp, body);
+                visit_raw(max_stamp, handler);
+            }
+            RawLambda::LtryWith(body, id, handler) => {
+                visit_ident(max_stamp, id);
+                visit_raw(max_stamp, body);
+                visit_raw(max_stamp, handler);
+            }
+            RawLambda::LifThenElse(cond, then_, else_) => {
+                visit_raw(max_stamp, cond);
+                visit_raw(max_stamp, then_);
+                visit_raw(max_stamp, else_);
+            }
+            RawLambda::Lsequence(first, second) => {
+                visit_raw(max_stamp, first);
+                visit_raw(max_stamp, second);
+            }
+            RawLambda::Lwhile(cond, body) => {
+                visit_raw(max_stamp, cond);
+                visit_raw(max_stamp, body);
+            }
+            RawLambda::Lfor(id, start, end, _, body) => {
+                visit_ident(max_stamp, id);
+                visit_raw(max_stamp, start);
+                visit_raw(max_stamp, end);
+                visit_raw(max_stamp, body);
+            }
+            RawLambda::Lassign(id, value) => {
+                visit_ident(max_stamp, id);
+                visit_raw(max_stamp, value);
+            }
+            RawLambda::Lsend(_, obj, _) => visit_raw(max_stamp, obj),
+        }
+    }
+
+    let mut max_stamp = 0;
+    visit_raw(&mut max_stamp, raw);
+    max_stamp
+}
+
+pub fn lower_to_lambda_with_start_stamp(raw: RawLambda, start_stamp: i32) -> Lambda {
     let mut exported_idents = HashSet::new();
     collect_exported_idents(&raw, &mut exported_idents);
-    LoweringContext::new(exported_idents).lower_lambda(raw)
+    LoweringContext::new(exported_idents, start_stamp).lower_lambda(raw)
+}
+
+pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
+    let start_stamp = max_ident_stamp(&raw);
+    lower_to_lambda_with_start_stamp(raw, start_stamp)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lambda::InlineAttribute;
     use crate::lambda::compat::LetKind;
     use crate::lambda::constant::{ConstructorRuntimeTag, ConstructorTag, StringDelim};
     use crate::lambda::primitive::{JsRawInfo, Mutable};
-    use crate::lambda::InlineAttribute;
 
     #[test]
     fn lowers_unit_constructor_pointer_to_unit_constant() {
@@ -1617,13 +1778,15 @@ mod tests {
             crate::lambda::FunctionAttribute::default(),
         );
 
-        let lowered = lower_to_lambda(raw);
+        let lowered = lower_to_lambda_with_start_stamp(raw, 41);
         let Lambda::Lfunction(func) = lowered else {
             panic!("expected function");
         };
         assert_eq!(func.params[0].name(), "xOpt");
         assert_eq!(func.params[1].name(), "y");
         assert_eq!(func.params[2].name(), "zOpt");
+        assert_eq!(func.params[0].stamp(), 43);
+        assert_eq!(func.params[2].stamp(), 42);
 
         let Lambda::Llet(LetKind::Strict, _, first_value, first_rest) = func.body.as_ref() else {
             panic!("expected first strict let");
@@ -1871,7 +2034,10 @@ mod tests {
     fn folds_integer_comparison_constants_to_boolean_constant() {
         let lowered = lower_to_lambda(RawLambda::prim(
             Primitive::Pintcomp(Comparison::Eq),
-            vec![RawLambda::const_(Constant::int(1)), RawLambda::const_(Constant::int(2))],
+            vec![
+                RawLambda::const_(Constant::int(1)),
+                RawLambda::const_(Constant::int(2)),
+            ],
             Location::none(),
         ));
 

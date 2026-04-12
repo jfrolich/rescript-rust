@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::PersistentEnv;
@@ -16,12 +16,12 @@ use crate::parser::ast::{
     Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature,
     SignatureItemDesc, Structure, StructureItemDesc,
 };
-use crate::parser::{jsx_ppx, module, Parser};
+use crate::parser::{Parser, jsx_ppx, module};
 use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
 };
-use crate::types::{initial_env, transl_signature, type_structure, TypeCheckContext, TypeContext};
+use crate::types::{TypeCheckContext, TypeContext, initial_env, transl_signature, type_structure};
 
 // OCaml's Predef sets `Ident.set_current_time 999`. OCaml's Parmatch.extra_pat
 // then eagerly creates Ident.create "+" consuming stamp 1000.
@@ -543,7 +543,7 @@ pub fn compile_source_to_js_with_options(
 
     let needs_raw_lambda =
         options.dump_lambda || options.dump_lambda_sexp || options.dump_lambda_sexp_locs;
-    let raw_lambda = if needs_raw_lambda {
+    let (raw_lambda, raw_lambda_current_stamp) = if needs_raw_lambda {
         let raw_trace = std::env::var_os("RUST_DRAWLAMBDA_STAGE_TRACE").is_some();
         if options.dump_lambda && raw_trace {
             eprintln!("[drawlambda-stage] start");
@@ -576,6 +576,7 @@ pub fn compile_source_to_js_with_options(
         }
         let raw_lambda = raw_converter
             .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+        let raw_lambda_current_stamp = raw_converter.current_stamp();
         if options.dump_lambda {
             if raw_trace {
                 eprintln!("[drawlambda-stage] after-convert");
@@ -598,14 +599,16 @@ pub fn compile_source_to_js_with_options(
                 std::process::exit(0);
             }
         }
-        Some(raw_lambda)
+        (Some(raw_lambda), raw_lambda_current_stamp)
     } else {
-        None
+        (None, lambda_start_stamp)
     };
 
     if options.dump_lambda_sexp || options.dump_lambda_sexp_locs {
-        let lowered_lambda =
-            crate::raw_lambda::lower::lower_to_lambda(raw_lambda.clone().expect("raw lambda"));
+        let lowered_lambda = crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
+            raw_lambda.clone().expect("raw lambda"),
+            raw_lambda_current_stamp,
+        );
 
         if options.dump_lambda_sexp {
             use std::io::Write;
@@ -1219,7 +1222,7 @@ fn dump_all_tvars(
     seen: &mut ahash::AHashSet<crate::types::type_expr::TypeExprRef>,
     depth: usize,
 ) {
-    use crate::types::type_expr::{TypeDesc, GENERIC_LEVEL};
+    use crate::types::type_expr::{GENERIC_LEVEL, TypeDesc};
     let ty = ctx.repr(ty);
     if !seen.insert(ty) {
         return;
@@ -1337,7 +1340,7 @@ fn moregen_link_impl(
     debug: &mut Vec<String>,
     allow_generic_anonymous: bool,
 ) {
-    use crate::types::type_expr::{TypeDesc, GENERIC_LEVEL};
+    use crate::types::type_expr::{GENERIC_LEVEL, TypeDesc};
 
     let impl_ty = ctx.repr(impl_ty);
     let iface_ty = ctx.repr(iface_ty);

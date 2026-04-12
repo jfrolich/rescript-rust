@@ -130,6 +130,49 @@ Current frontier characteristics:
 
 ## Key Findings from Session 2026-04-12
 
+### lowerer-generated ids now continue from the raw-lambda stamp stream
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests::renames_optional_parameter_guards_from_prefix_lets -- --exact
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 300 ./scripts/test_lambda_parity.sh -j1 'option_repr_test|inline_const_test|inline_const|Stdlib_TempTests'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- Optimized lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Optimized lambda parity: **632/657**
+  - Exact hunks: **91**
+
+Key checkpoints:
+
+- authoritative optimized baseline stayed flat at **632/657**, **91** hunks
+- the new lowerer unit test locks OCaml's reverse-prefix optional-param rename allocation order
+- direct per-file repro now matters more than the raw parity script for the stamp-heavy guard files:
+  - `option_repr_test.res`: direct `-drawlambda` still shows Rust raw exits at `1` where OCaml has `3`
+  - `gpr_5557.res`: direct `-drawlambda` still shows Rust raw exit `1` where OCaml has `2`
+
+`compiler/core/lam_convert.ml` uses the current global `Ident` stamp after
+raw-lambda construction when it synthesizes ids for optional-parameter renames
+and wrapped exception handlers. Rust `compiler-rust/src/raw_lambda/lower.rs`
+was still allocating those ids from `Ident::create_local`, which does not
+continue from `RawLambdaConverter`'s internal `IdGenerator`. The lowerer now
+receives the raw converter's current stamp from `driver.rs` and allocates its
+fresh ids from a dedicated lowering `IdGenerator`, matching OCaml's phase
+boundary semantics instead of the unrelated global local-id counter.
+
+This slice is source-aligned and non-regressing, but it did **not** move the
+authoritative optimized baseline on its own. The practical outcome is that the
+remaining drift in files like `option_repr_test.res` is now clearly a raw/static
+exit numbering problem rather than another lowerer stamp-allocation bug. One
+important caveat from this session: for these files, direct `bsc -drawlambda`
+repros currently disagree with the raw parity script's reported "exact" status,
+so trust the direct repro when debugging the remaining exit-number mismatch.
+
 ### function directives and dense tag switches now lower like OCaml
 Ran:
 

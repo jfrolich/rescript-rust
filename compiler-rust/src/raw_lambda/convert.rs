@@ -10,6 +10,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::context::IdGenerator;
 use crate::ident::{Ident, IdentFlags};
+use crate::lambda::Constant;
 use crate::lambda::compat::LetKind;
 use crate::lambda::constant::{
     ConstructorRuntimeTag, ConstructorTag as PointerConstructorTag, PointerInfo, StringDelim,
@@ -19,7 +20,6 @@ use crate::lambda::primitive::{
     ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, ExternalReturnWrapper, Mutable,
 };
 use crate::lambda::tag_info::TagInfo;
-use crate::lambda::Constant;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
     Lambda, LambdaSwitch, Primitive, SetFieldDbgInfo,
@@ -33,6 +33,8 @@ use crate::raw_lambda::typeopt::{
     type_cannot_contain_undefined_no_env, type_is_builtin_object,
 };
 use crate::raw_lambda::{RawLambda, RawPrimInfo};
+use crate::types::ConstructorTag;
+use crate::types::SignatureItem;
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
 use crate::types::context::TypeContext;
 use crate::types::decl::{LabelDescription, RecordRepresentation, ValueKind};
@@ -43,8 +45,6 @@ use crate::types::typedtree::{
     Partial, Pattern, PatternDesc, RecordLabelDefinition, Structure, StructureItem,
     StructureItemDesc, ValueBinding,
 };
-use crate::types::ConstructorTag;
-use crate::types::SignatureItem;
 
 const PREDEF_MATCH_FAILURE_STAMP: i32 = 17;
 const PREDEF_ASSERT_FAILURE_STAMP: i32 = 27;
@@ -73,10 +73,7 @@ fn recmodule_function_shape_constant() -> Constant {
     }
 }
 
-fn raw_constructor_constant(
-    cstr: &crate::types::ConstructorDescription,
-    tag: i32,
-) -> Constant {
+fn raw_constructor_constant(cstr: &crate::types::ConstructorDescription, tag: i32) -> Constant {
     Constant::Int {
         i: tag,
         comment: Some(PointerInfo::Constructor(PointerConstructorTag {
@@ -751,6 +748,12 @@ impl<'a> RawLambdaConverter<'a> {
         persistent_env: crate::cmi::persistent_env::PersistentEnv,
     ) {
         self.persistent_env = Some(persistent_env);
+    }
+
+    pub fn current_stamp(&self) -> i32 {
+        self.id_gen
+            .current_stamp()
+            .max(self.lowered.current_stamp())
     }
 
     #[inline]
@@ -3858,10 +3861,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 tag_info: TagInfo::Tuple,
                                 elements: vec![
                                     init_v,
-                                    Constant::string_with_delim(
-                                        id.name(),
-                                        StringDelim::Plain,
-                                    ),
+                                    Constant::string_with_delim(id.name(), StringDelim::Plain),
                                 ],
                             });
                         }
@@ -4402,7 +4402,8 @@ impl<'a> RawLambdaConverter<'a> {
                     .iter()
                     .map(|case| self.push_defaults_case(Vec::new(), case))
                     .collect::<Vec<_>>();
-                let directive = Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
+                let directive =
+                    Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
                 self.convert_function_raw(
                     params,
                     &pushed_body,
@@ -4810,14 +4811,17 @@ impl<'a> RawLambdaConverter<'a> {
             TConstant::Char(c) => Constant::Char(*c),
             TConstant::String(s, delim) => Constant::String {
                 s: s.clone(),
-                delim: delim.as_ref().and_then(|d| match d.as_str() {
-                    "" => Some(StringDelim::Plain),
-                    "*j" | "js" | "j" => Some(StringDelim::StarJ),
-                    "json" => Some(StringDelim::NoQuotes),
-                    "bq" => Some(StringDelim::Backtick),
-                    "`" => Some(StringDelim::Backtick),
-                    _ => None,
-                }).or_else(|| delim.is_none().then_some(StringDelim::Plain)),
+                delim: delim
+                    .as_ref()
+                    .and_then(|d| match d.as_str() {
+                        "" => Some(StringDelim::Plain),
+                        "*j" | "js" | "j" => Some(StringDelim::StarJ),
+                        "json" => Some(StringDelim::NoQuotes),
+                        "bq" => Some(StringDelim::Backtick),
+                        "`" => Some(StringDelim::Backtick),
+                        _ => None,
+                    })
+                    .or_else(|| delim.is_none().then_some(StringDelim::Plain)),
             },
             TConstant::Float(f) => Constant::Float(f.clone()),
             TConstant::BigInt(positive, v) => Constant::BigInt {
@@ -5584,12 +5588,8 @@ impl<'a> RawLambdaConverter<'a> {
             _ => None,
         };
 
-        let tests = self.build_simple_trywith_extension_chain_raw(
-            loc,
-            exn_id,
-            extension_cases,
-            default,
-        );
+        let tests =
+            self.build_simple_trywith_extension_chain_raw(loc, exn_id, extension_cases, default);
 
         Some(match (exit_id, catch_handler) {
             // Explicit catch-all: catch the static raise with the real body
@@ -9486,10 +9486,12 @@ mod tests {
         };
 
         assert!(matches!(info.primitive, Primitive::Pjscomp(Comparison::Eq)));
-        assert!(matches!(info.args.as_slice(), [RawLambda::Lvar(id), RawLambda::Lconst(Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
+        assert!(
+            matches!(info.args.as_slice(), [RawLambda::Lvar(id), RawLambda::Lconst(Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
             if id.same(&scrutinee_id)
                 && *i == crate::types::btype::hash_variant("InvalidNext")
-                && name == "InvalidNext"));
+                && name == "InvalidNext")
+        );
     }
 
     #[test]
@@ -9630,10 +9632,9 @@ mod tests {
         let directive_attrs = Attributes::from_vec(vec![(
             Located::mknoloc(arena.intern_string("directive")),
             crate::parser::ast::Payload::PStr(Box::new(vec![crate::parser::ast::StructureItem {
-                pstr_desc: Box::new(crate::parser::ast::StructureItemDesc::Pstr_eval(Box::new((
-                    directive_expr_idx,
-                    Attributes::new(),
-                )))),
+                pstr_desc: Box::new(crate::parser::ast::StructureItemDesc::Pstr_eval(Box::new(
+                    (directive_expr_idx, Attributes::new()),
+                ))),
                 pstr_loc: LocIdx::none(),
             }])),
         )]);
@@ -9711,7 +9712,8 @@ mod tests {
             RawLambda::LstaticRaise(1, Vec::new()),
         );
 
-        let RawLambda::LstaticCatch(first_case, (first_handler, first_params), rest) = handler else {
+        let RawLambda::LstaticCatch(first_case, (first_handler, first_params), rest) = handler
+        else {
             panic!("expected outer static catch");
         };
         assert_eq!(first_handler, 3);

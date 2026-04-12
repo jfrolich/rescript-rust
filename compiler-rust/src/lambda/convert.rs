@@ -62,6 +62,10 @@ impl<'a> LambdaConverter<'a> {
         }
     }
 
+    pub(crate) fn current_stamp(&self) -> i32 {
+        self.id_gen.current_stamp()
+    }
+
     /// Helper to convert a LocIdx to a Location.
     #[inline]
     fn loc(&self, idx: LocIdx) -> Location {
