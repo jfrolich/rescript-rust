@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 39 / 657 JS snapshots passing, 0 compile errors, 618 output diffs
+**Status:** 46 / 657 JS snapshots passing, 0 compile errors, 611 output diffs
 
 ## Goal
 
@@ -35,9 +35,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **39 / 657**
+- JS snapshot parity: **46 / 657**
 - Compile errors: **0**
-- Output diffs: **618**
+- Output diffs: **611**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -53,6 +53,13 @@ Interpretation:
   `@as(...)` constants and `@obj` field assembly: the backend must lower these
   from preserved FFI metadata rather than trying to reconstruct them from the
   final primitive name
+- a small OCaml-aligned post-lowering lambda simplifier is now on the JS path:
+  obvious local function applications are beta-reduced before JS IR lowering,
+  and dead pure lets are dropped instead of leaking through as backend noise
+- `tests/tests/src/AsInUncurriedExternals.res` is now fully resolved in the
+  checked-in snapshot set; `tests/tests/src/Import.res` narrowed further after
+  the simplifier removed some dead-let churn, but its remaining drift is still
+  later backend shaping rather than import-path resolution
 - the `ExternalShadow.res` cluster is now resolved end-to-end in the checked-in
   snapshot set; the remaining frontier has moved on from that external-call /
   shadowing case
@@ -162,3 +169,23 @@ Remaining internal compile errors under the measured wrapper baseline:
 - Verified focused guards for this cluster:
   - `tests/tests/src/DynamicImportModuleWithAlias.res` now matches its checked-in `.mjs` snapshot exactly.
   - `tests/tests/src/Import.res` still differs, but the dynamic-import path and int coercion route are no longer the active blocker there; the remaining drift is later-stage list/object/let shaping.
+- `compiler-rust/src/lambda/simplify.rs` now ports a small OCaml-aligned subset
+  of the post-lowering lambda cleanup used on the JS backend path:
+  - inline obvious local `Lfunction` applications with the existing
+    `lfunction_can_be_inlined` / beta-reduction utilities
+  - remove dead pure lets and keep dead impure lets only as sequences
+- `compiler-rust/src/lambda/compile.rs` now runs that simplifier before JS IR
+  lowering and before computing the module side-effect reason, so the emitted JS
+  path sees the same reduced lambda shape the OCaml backend expects at this
+  stage.
+- Focused guards for this cluster:
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::simplify::tests::inlines_known_local_function_applications --lib`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/AsInUncurriedExternals.res -o /tmp/AsInUncurriedExternals.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Import.res -o /tmp/Import.mjs`
+- The authoritative JS snapshot baseline now reports **46 / 657** passing, **0**
+  compile errors, and **611** output diffs.
+- `tests/tests/src/AsInUncurriedExternals.res` now matches its checked-in `.mjs`
+  snapshot exactly.
+- `tests/tests/src/Import.res` still differs, but the dead `let = undefined`
+  churn is materially reduced; the remaining drift is still in later lambda/JS
+  backend shaping.

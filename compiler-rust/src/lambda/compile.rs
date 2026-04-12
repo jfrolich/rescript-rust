@@ -67,7 +67,8 @@ impl LambdaCompiler {
 
     /// Compile a Lambda expression into a JS IR program with module metadata.
     pub fn compile_deps_program(&mut self, lam: &Lambda) -> DepsProgram {
-        let compiled = self.compile_expr(lam);
+        let simplified = crate::lambda::simplify::simplify_for_js_backend(lam);
+        let compiled = self.compile_expr(&simplified);
         let mut block = compiled.prelude;
         let exports = match compiled.expr.desc {
             ExpressionDesc::CamlBlock(_, _, _, TagInfo::ModuleExport(exports)) => exports,
@@ -81,7 +82,7 @@ impl LambdaCompiler {
         let mut deps = apply_external_shadow_pass(DepsProgram {
             program: Program::new(block, exports),
             modules: vec![],
-            side_effect: module_side_effect_reason(lam),
+            side_effect: module_side_effect_reason(&simplified),
         });
         deps.modules = self.collect_required_modules(&deps.program.block);
         deps
