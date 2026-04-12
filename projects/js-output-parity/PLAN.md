@@ -11,6 +11,8 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 This project targets the final emitted `.mjs` / `.bs.js` snapshots, not lambda
 dumps or typedtree dumps.
+The dedicated wrapper defaults to the same canonical in-repo 657-file set used
+by the typedtree and lambda parity projects.
 
 ## Upstream Status
 
@@ -127,11 +129,14 @@ Objective:
 - keep Spice parity enabled as a guard
 - record the authoritative baseline from the existing snapshot harness
 - make the upstream-status assumption explicit so work stays focused downstream
+- default the wrapper to the canonical 657-file in-repo set instead of the
+  external corpus
 
 Acceptance:
 - `./scripts/test_js_output_parity.sh` exists
 - `projects/js-output-parity/` documents the current frontier
 - a measured baseline is recorded in `RALPH_TODO.md`
+- the default baseline only covers `tests/tests/src`
 
 ### Phase 1: Route JS Through The Real Backend Path
 
@@ -199,7 +204,8 @@ Acceptance:
 ## Focus Files
 
 Start with in-repo files first because they are faster to iterate and easier to
-compare against checked-in snapshots.
+compare against checked-in snapshots. The dedicated wrapper measures only this
+canonical in-repo set by default.
 
 ### Small Internal Structural Files
 

@@ -18,7 +18,8 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 ```
 
 This keeps Spice PPX parity enabled as a guard and measures the JS snapshot
-section through the existing parity harness.
+section through the existing parity harness on the canonical 657-file in-repo
+set by default. Use `--with-external` only as a secondary sweep.
 
 ## Upstream Status
 

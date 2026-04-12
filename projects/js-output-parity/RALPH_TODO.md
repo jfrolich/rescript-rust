@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 0 / 2784 JS snapshots passing, 1927 compile errors, 857 output diffs
+**Status:** 0 / 657 JS snapshots passing, 1 compile error, 656 output diffs
 
 ## Goal
 
@@ -35,21 +35,23 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **0 / 2784**
-- Compile errors: **1927**
-- Output diffs: **857**
+- JS snapshot parity: **0 / 657**
+- Compile errors: **1**
+- Output diffs: **656**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
-- the current Rust final codegen path is still fundamentally misaligned
-- the first frontier is routing and backend-shape correctness, not last-mile printing
-- compile failures still dominate, but one Phase 1 routing change already converted a hard failure into a diff
+- the current wrapper now measures the same canonical in-repo 657-file set as
+  the typedtree and lambda parity projects
+- remaining compile failures are down to a single targeted file
+- almost the entire frontier is now emitted-JS diffs rather than compile noise
+- external-corpus runs remain useful, but only as an explicit secondary sweep
 - typedtree/raw/optimized-lambda are not part of the active frontier
 
-This wrapper baseline included the in-repo snapshots plus the configured
-external corpus under `TELLA_DIR`.
+The previous external-corpus baseline remains useful as a stress sweep, but it
+is no longer the default project metric.
 
 ## Working Rules
 
@@ -64,9 +66,10 @@ external corpus under `TELLA_DIR`.
 ## Immediate Frontier
 
 - [x] Run the first dedicated `./scripts/test_js_output_parity.sh` baseline and record the full results here.
-- [ ] Route final JS codegen in `compiler-rust/src/driver.rs` through the raw-lambda / lowering path instead of the legacy typedtree shortcut.
-- [ ] Inventory the current internal compile-error files from `temp/rust-parity/diffs/js_src_*.err`.
-- [ ] Inventory the current internal text-diff files from `temp/rust-parity/diffs/js_src_*.diff`.
+- [x] Re-run the wrapper after rescoping it to the canonical 657-file in-repo set and record the new baseline.
+- [x] Route final JS codegen in `compiler-rust/src/driver.rs` through the raw-lambda / lowering path instead of the legacy typedtree shortcut.
+- [x] Inventory the current internal compile-error files from `temp/rust-parity/diffs/js_src_*.err`.
+- [x] Inventory the current internal text-diff files from `temp/rust-parity/diffs/js_src_*.diff`.
 - [ ] Pick one small internal structural file and one internal compile-error guard as the first implementation targets.
 
 ## Expected Root-Cause Buckets
@@ -97,21 +100,23 @@ Internal text diffs already observed in the pre-wrapper run:
 - `tests/tests/src/test_other_exn.res`
 - `tests/tests/src/test_unsafe_cmp.res`
 
-Internal compile errors already observed in the pre-wrapper run:
+Current internal compile error:
 
-- `tests/tests/src/gpr_3595_test.res`
-- `tests/tests/src/js_array_test.res`
-- `tests/tests/src/stdlib/Stdlib_TypedArrayTests.res`
+- `tests/tests/src/Import.res`
 
 ## Latest Session Findings
 
 - A dedicated wrapper script now exists at `scripts/test_js_output_parity.sh`.
-- The wrapper keeps Spice enabled by default, but the first authoritative run skipped the Spice guard because the configured external `SPICE_PPX` binary was missing in this environment.
-- The existing JS-output parity check already lived inside `scripts/test_rust_parity.sh`; the new wrapper now gives it a dedicated project entry point.
-- The current measured JS frontier is severe enough that project work should start at backend routing, not printer polish.
+- The wrapper keeps Spice enabled by default, but the authoritative runs still skip the Spice guard in this environment because the configured external `SPICE_PPX` binary is missing.
+- The existing JS-output parity check already lived inside `scripts/test_rust_parity.sh`; the wrapper now exposes that section directly.
 - `compiler-rust/src/driver.rs` now routes final JS generation through `raw_lambda::convert` + `raw_lambda::lower` instead of the legacy `lambda::convert::LambdaConverter` shortcut.
-- The authoritative baseline moved from **1928 compile errors / 856 diffs** to **1927 compile errors / 857 diffs**, which indicates one hard failure turned into an emitted-JS mismatch.
-- Focused checks after the routing change:
-  - `tests/tests/src/ExternalShadow.res` still differs structurally, but it now clearly reflects the raw-lambda-backed path.
-  - `tests/tests/src/js_array_test.res` still fails during type checking with `UndefinedMethod { method: "describe" }`, so that compile-error cluster remains active.
+- `scripts/test_rust_parity.sh` now compiles JS snapshots with each file's owning ReScript project's `compiler-args` and runs `bsc` from that project's `lib/bs`.
+- This removed the largest source of false compile-error noise:
+  - the measured wrapper baseline moved from **1927 compile errors / 857 diffs** to **90 compile errors / 2694 diffs**
+  - the canonical in-repo baseline is now **1 compile error / 656 diffs** across **657** files
+  - the lone remaining compile error is `js_src_Import.res.err`
+  - internal text diffs now account for the other **656** files
+- Verified focused checks under the new project-context invocation:
+  - `tests/tests/src/js_array_test.res` now compiles and lands in JS diff territory instead of failing with `UndefinedMethod { method: "describe" }`
+  - `/Users/jake/dev/tella-fusion/packages/core/webapp/src/backend/Service__PublicVideo.res` now compiles and lands in JS diff territory instead of a missing-binding failure
 - Typedtree parity and both lambda parity stages are considered complete for this project and are not part of the remaining frontier.

@@ -26,9 +26,17 @@ This uses the existing `test_rust_parity.sh` harness with:
 - syntax section skipped
 - Spice PPX parity still enabled
 - JS snapshot section enabled
+- external corpus disabled by default, so the baseline tracks only
+  `tests/tests/src` (657 `.res` files)
 
 The project metric is the `JS COMPILATION SNAPSHOTS` section. Spice is kept as
 a guard because it is built into the compiler now.
+
+To include the external corpus explicitly:
+
+```bash
+timeout 1800 ./scripts/test_js_output_parity.sh --with-external
+```
 
 ## Upstream Status
 
@@ -74,30 +82,43 @@ sed -n '1,220p' temp/rust-parity/diffs/js_src_js_array_test.res.err
 
 ## Focused Iteration
 
-The wrapper is intentionally thin, so for focused work use direct compiler
-invocations against checked-in snapshots.
+Do not compile snapshot files as standalone `.res` inputs when the file belongs
+to a ReScript project. Use the owning project's `compiler-args` and run `bsc`
+from that project's `lib/bs` so include paths, package output, JSX flags, and
+opened modules match the checked-in snapshot build.
 
 ### Internal `.mjs` snapshot example
 
 ```bash
-timeout 10 ./compiler-rust/target/release/bsc \
+cd tests/tests
+../../packages/@rescript/darwin-arm64/bin/rescript.exe compiler-args src/ExternalShadow.res
+
+cd lib/bs
+timeout 10 ../../../compiler-rust/target/release/bsc \
+  -I ../ocaml \
+  -runtime-path /absolute/path/to/parity-stamp/node_modules/@rescript/runtime \
+  -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 \
+  -warn-error A \
   -bs-package-name rescript-tests \
-  -bs-module-type esmodule \
-  tests/tests/src/ExternalShadow.res \
+  -bs-package-output esmodule:src:.mjs \
+  src/ExternalShadow.ast \
   -o /tmp/ExternalShadow.mjs
 
-diff -u tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs | sed -n '1,220p'
+diff -u /absolute/path/to/parity-stamp/tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs | sed -n '1,220p'
 ```
 
 ### External `.bs.js` snapshot example
 
 ```bash
-timeout 10 ./compiler-rust/target/release/bsc \
-  -bs-package-name rescript-tests \
-  /absolute/path/to/File.res \
-  -o /tmp/File.bs.js
+cd /absolute/path/to/project-root
+/absolute/path/to/parity-stamp/packages/@rescript/darwin-arm64/bin/rescript.exe compiler-args src/backend/Service__PublicVideo.res
 
-diff -u /absolute/path/to/File.bs.js /tmp/File.bs.js | sed -n '1,220p'
+cd lib/bs
+timeout 10 /absolute/path/to/parity-stamp/compiler-rust/target/release/bsc \
+  <compiler_args...> \
+  -o /tmp/Service__PublicVideo.bs.js
+
+diff -u /absolute/path/to/project-root/src/backend/Service__PublicVideo.bs.js /tmp/Service__PublicVideo.bs.js | sed -n '1,220p'
 ```
 
 ## Guards
