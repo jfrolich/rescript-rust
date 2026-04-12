@@ -63,7 +63,7 @@ Achieve full unoptimized lambda parity between the Rust and OCaml compilers. Foc
 
 ### [optimized-lambda-parity](./optimized-lambda-parity/)
 
-Achieve full optimized lambda parity between the Rust and OCaml compilers. Focuses on replacing the legacy typedtree-to-lambda shortcut with the real OCaml lambda conversion and pass pipeline from `lam_compile_main.ml` and the `lam_*` pass modules. Current baseline: 0/657 files, 1631 hunks.
+Achieve full optimized lambda parity between the Rust and OCaml compilers. Focuses on replacing the legacy typedtree-to-lambda shortcut with the real OCaml lambda conversion and pass pipeline from `lam_compile_main.ml` and the `lam_*` pass modules. Current baseline: 657/657 files, 0 hunks.
 
 | Document | Description |
 |----------|-------------|
@@ -74,7 +74,7 @@ Achieve full optimized lambda parity between the Rust and OCaml compilers. Focus
 
 ### [js-output-parity](./js-output-parity/)
 
-Achieve byte-for-byte emitted JavaScript parity between the Rust and OCaml compilers. Focuses on the real downstream backend after optimized lambda: lambda passes, grouping/coercion, JS IR lowering, JS passes, and final JS dumping. Baseline is tracked via the dedicated wrapper over the existing snapshot harness.
+Achieve byte-for-byte emitted JavaScript parity between the Rust and OCaml compilers. Typedtree parity, raw lambda parity, and optimized lambda parity are already at 100%; this project focuses only on the real downstream backend after optimized lambda: lambda passes, grouping/coercion, JS IR lowering, JS passes, and final JS dumping. Baseline is tracked via the dedicated wrapper over the existing snapshot harness.
 
 | Document | Description |
 |----------|-------------|

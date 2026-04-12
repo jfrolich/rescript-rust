@@ -30,6 +30,17 @@ This uses the existing `test_rust_parity.sh` harness with:
 The project metric is the `JS COMPILATION SNAPSHOTS` section. Spice is kept as
 a guard because it is built into the compiler now.
 
+## Upstream Status
+
+This project starts after the upstream parity work that is already complete:
+
+- typedtree parity: **657/657**
+- raw lambda parity: **657/657**
+- optimized lambda parity: **657/657**
+
+Do not use this project to reopen those stages. Use them only as guardrails
+when shared code changes.
+
 ## Artifacts
 
 The parity harness writes artifacts to:

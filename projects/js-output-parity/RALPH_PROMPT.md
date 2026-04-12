@@ -20,12 +20,24 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 This keeps Spice PPX parity enabled as a guard and measures the JS snapshot
 section through the existing parity harness.
 
+## Upstream Status
+
+For this project, assume the upstream parity stages are already complete:
+
+- typedtree parity: **657/657**
+- raw lambda parity: **657/657**
+- optimized lambda parity: **657/657**
+
+There are no open issues to solve there. The remaining work is in the backend
+after optimized lambda.
+
 ## Core Principle: 1:1 OCaml Backend Port
 
 - **Read OCaml first** before touching Rust.
 - **Do not treat JS diffs as a printer-only problem by default.**
 - **Do not fix emitted JS by adding ad hoc string rewrites.**
 - **Do not keep the legacy typedtree -> `LambdaCompiler` shortcut as the long-term JS path.**
+- **Do not spend time reopening typedtree or lambda parity work. Those stages are already green.**
 - **Match the OCaml backend stage boundaries exactly.**
 
 Primary OCaml references:
@@ -143,6 +155,6 @@ Only when all are true:
 
 - `./scripts/test_js_output_parity.sh` reports full parity
 - `RALPH_TODO.md` has no unchecked tasks remaining
-- raw and optimized lambda guards still pass where applicable
+- typedtree, raw lambda, and optimized lambda guards still pass where applicable
 
 Do not output or mention `RALPH_COMPLETE` early.

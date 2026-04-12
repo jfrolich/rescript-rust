@@ -14,6 +14,17 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 Execution order and phase gates live in `PLAN.md`.
 
+## Upstream Status
+
+For this project, the upstream parity stages are already complete:
+
+- typedtree parity: **657/657**
+- raw lambda parity: **657/657**
+- optimized lambda parity: **657/657**
+
+There are no open issues there. The remaining parity work is downstream in the
+JS backend only.
+
 ## Current Baseline
 
 Authoritative wrapper run on **2026-04-12** using:
@@ -35,6 +46,7 @@ Interpretation:
 - the current Rust final codegen path is still fundamentally misaligned
 - the first frontier is routing and backend-shape correctness, not last-mile printing
 - compile failures still dominate, but one Phase 1 routing change already converted a hard failure into a diff
+- typedtree/raw/optimized-lambda are not part of the active frontier
 
 This wrapper baseline included the in-repo snapshots plus the configured
 external corpus under `TELLA_DIR`.
@@ -47,11 +59,12 @@ external corpus under `TELLA_DIR`.
 4. **Treat compile errors as highest priority.** A crash or compile failure hides downstream diff information.
 5. **Fix the backend path, not the output string by hand.** Final printer work is the last mile, not the starting point.
 6. **Keep Spice enabled as a guard.** It is built into the compiler now and should not be artificially skipped in the project wrapper.
+7. **Do not reopen typedtree or lambda parity work.** Those stages are already at 100%.
 
 ## Immediate Frontier
 
 - [x] Run the first dedicated `./scripts/test_js_output_parity.sh` baseline and record the full results here.
-- [x] Route final JS codegen in `compiler-rust/src/driver.rs` through the raw-lambda / lowering path instead of the legacy typedtree shortcut.
+- [ ] Route final JS codegen in `compiler-rust/src/driver.rs` through the raw-lambda / lowering path instead of the legacy typedtree shortcut.
 - [ ] Inventory the current internal compile-error files from `temp/rust-parity/diffs/js_src_*.err`.
 - [ ] Inventory the current internal text-diff files from `temp/rust-parity/diffs/js_src_*.diff`.
 - [ ] Pick one small internal structural file and one internal compile-error guard as the first implementation targets.
@@ -64,6 +77,12 @@ external corpus under `TELLA_DIR`.
 - baseline `LambdaCompiler` shape differs from `Lam_compile`
 - missing `js_pass_*` normalization
 - final JS printer/dumper byte-shape differences
+
+Not expected root-cause buckets for this project:
+
+- typedtree parity
+- raw lambda parity
+- optimized lambda parity
 
 ## Candidate Focus Files
 
@@ -95,3 +114,4 @@ Internal compile errors already observed in the pre-wrapper run:
 - Focused checks after the routing change:
   - `tests/tests/src/ExternalShadow.res` still differs structurally, but it now clearly reflects the raw-lambda-backed path.
   - `tests/tests/src/js_array_test.res` still fails during type checking with `UndefinedMethod { method: "describe" }`, so that compile-error cluster remains active.
+- Typedtree parity and both lambda parity stages are considered complete for this project and are not part of the remaining frontier.

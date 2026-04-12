@@ -12,6 +12,17 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 This project targets the final emitted `.mjs` / `.bs.js` snapshots, not lambda
 dumps or typedtree dumps.
 
+## Upstream Status
+
+For this project, treat the upstream parity stages as already complete:
+
+- typedtree parity: **657/657**
+- raw lambda parity: **657/657**
+- optimized lambda parity: **657/657**
+
+There are no open parity issues to solve in those stages for this project. The
+remaining work is strictly downstream in the backend after optimized lambda.
+
 ## Scope
 
 The direct parity target is:
@@ -34,8 +45,8 @@ snapshots produced by the OCaml backend.
 
 ## Critical Clarification
 
-Optimized lambda parity is now complete, but that only proves parity at the
-`Lam_convert.convert` dump boundary.
+Typedtree parity and both lambda parity stages are already complete. The
+remaining backend gap starts after the optimized-lambda dump boundary.
 
 OCaml continues through the later backend in
 `compiler/core/lam_compile_main.ml`:
@@ -59,8 +70,8 @@ Out of scope for direct JS output parity:
 - raw lambda parity
 - optimized lambda dump parity
 
-Those stages remain guards only unless a JS mismatch proves the root cause lives
-upstream.
+Those stages are already green and remain guards only. They are not the active
+frontier for this project.
 
 ## Current Architecture Gap
 
@@ -92,7 +103,8 @@ typedtree
 ```
 
 The current Rust JS path is still a legacy shortcut and does not yet go through
-the OCaml-aligned raw-lambda + lowering + backend pipeline.
+the OCaml-aligned backend pipeline that starts after the already-correct
+typedtree/raw/optimized-lambda stages.
 
 ## Ownership Map
 
@@ -114,6 +126,7 @@ Objective:
 - establish a dedicated JS-output parity project and wrapper command
 - keep Spice parity enabled as a guard
 - record the authoritative baseline from the existing snapshot harness
+- make the upstream-status assumption explicit so work stays focused downstream
 
 Acceptance:
 - `./scripts/test_js_output_parity.sh` exists
@@ -218,4 +231,5 @@ Only when all are true:
 - `./scripts/test_js_output_parity.sh` reports full JS snapshot parity
 - Spice PPX guard remains non-regressing on the same command
 - no unchecked tasks remain in `RALPH_TODO.md`
-- raw and optimized lambda guards stay green when shared backend code changes
+- typedtree, raw lambda, and optimized lambda guards stay green when shared
+  backend code changes
