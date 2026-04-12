@@ -492,6 +492,16 @@ fn raw_record_mutable_flag(
         .unwrap_or(ParserMutableFlag::Immutable)
 }
 
+fn inlined_record_representation(
+    cstr: &crate::types::ConstructorDescription,
+) -> Option<RecordRepresentation> {
+    let inlined = cstr.cstr_inlined.as_ref()?;
+    match &inlined.type_kind {
+        crate::types::decl::TypeKind::TypeRecord(_, repr) => Some(repr.clone()),
+        _ => None,
+    }
+}
+
 fn trace_raw_fallback(kind: &'static str) {
     if std::env::var_os("RUST_RAW_FALLBACK_TRACE").is_none() {
         return;
@@ -2621,7 +2631,18 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> RawLambda {
         if cstr.cstr_inlined.is_some() {
             return match args {
-                [arg] => self.convert_expr_raw(arg),
+                [arg] => match &arg.exp_desc {
+                    ExpressionDesc::Texp_record {
+                        fields,
+                        extended_expression,
+                    } => self.convert_record_raw(
+                        self.loc(arg.exp_loc),
+                        fields,
+                        extended_expression.as_deref(),
+                        inlined_record_representation(cstr),
+                    ),
+                    _ => self.convert_expr_raw(arg),
+                },
                 [] if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) => {
                     RawLambda::const_(raw_constructor_constant(cstr, 0))
                 }
@@ -2668,21 +2689,13 @@ impl<'a> RawLambdaConverter<'a> {
             bool,
         )],
         base: Option<&Expression>,
+        empty_repres: Option<RecordRepresentation>,
     ) -> RawLambda {
-        let Some((_, first_lbl, _, _)) = fields.first() else {
-            // Empty record: OCaml creates Pmakeblock(tag=0, []) which prints as [0]
-            return self.raw_block_or_prim(
-                0,
-                TagInfo::Record {
-                    fields: Vec::new(),
-                    mutable_flag: ParserMutableFlag::Immutable,
-                },
-                Vec::new(),
-                loc,
-            );
-        };
-
-        let repres = first_lbl.lbl_repres.clone();
+        let first_lbl = fields.first().map(|(_, first_lbl, _, _)| first_lbl);
+        let repres = first_lbl
+            .map(|lbl| lbl.lbl_repres.clone())
+            .or(empty_repres)
+            .unwrap_or(RecordRepresentation::RecordRegular);
         let mutable_flag = raw_record_mutable_flag(fields);
         let base_lam = base.map(|expr| self.convert_expr_raw(expr));
         let has_optional = fields.iter().any(|(_, lbl, _, _)| lbl.lbl_optional);
@@ -2809,6 +2822,9 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 }
                 RecordRepresentation::RecordExtension => {
+                    let Some(first_lbl) = first_lbl else {
+                        return RawLambda::unit();
+                    };
                     let path = match self.type_desc(first_lbl.lbl_res) {
                         TypeDesc::Tconstr { path, .. } => path,
                         _ => return RawLambda::unit(),
@@ -4587,6 +4603,7 @@ impl<'a> RawLambdaConverter<'a> {
                 self.loc(expr.exp_loc),
                 fields,
                 extended_expression.as_deref(),
+                None,
             ),
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
@@ -9711,6 +9728,82 @@ mod tests {
                     runtime_tag: None,
                 })),
             }) if name == "OnlyOne" && const_ == 1 && non_const == 0
+        ));
+    }
+
+    #[test]
+    fn empty_inlined_record_constructor_keeps_inlined_record_metadata() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+
+        let arg = Expression::new(
+            ExpressionDesc::Texp_record {
+                fields: vec![],
+                extended_expression: None,
+            },
+            LocIdx::none(),
+            crate::types::TypeExprRef(0),
+            EnvRef(0),
+            Attributes::new(),
+        );
+        let cstr = crate::types::ConstructorDescription {
+            cstr_name: "B".to_string(),
+            cstr_res: crate::types::TypeExprRef(0),
+            cstr_existentials: Vec::new(),
+            cstr_args: Vec::new(),
+            cstr_arity: 1,
+            cstr_tag: crate::types::ConstructorTag::CstrBlock(0),
+            cstr_consts: 1,
+            cstr_nonconsts: 1,
+            cstr_generalized: false,
+            cstr_private: crate::types::asttypes::PrivateFlag::Public,
+            cstr_loc: Location::none(),
+            cstr_attributes: Vec::new(),
+            cstr_inlined: Some(Box::new(crate::types::TypeDeclaration {
+                type_params: vec![],
+                type_arity: 0,
+                type_kind: crate::types::decl::TypeKind::TypeRecord(
+                    vec![],
+                    crate::types::decl::RecordRepresentation::RecordInlined {
+                        tag: 0,
+                        name: "B".to_string(),
+                        num_nonconsts: 1,
+                        attrs: vec![],
+                    },
+                ),
+                type_private: crate::types::asttypes::PrivateFlag::Public,
+                type_manifest: None,
+                type_variance: vec![],
+                type_newtype_level: None,
+                type_loc: Location::none(),
+                type_attributes: vec![],
+                type_immediate: false,
+                type_unboxed: crate::types::decl::UnboxedStatus::default(),
+                type_inlined_types: vec![],
+                type_path: None,
+            })),
+        };
+
+        let lowered = converter.convert_construct_raw(Location::none(), EnvRef(0), &cstr, &[arg]);
+
+        assert!(matches!(
+            lowered,
+            RawLambda::Lconst(Constant::Block {
+                tag: 0,
+                tag_info:
+                    TagInfo::RecordInlined {
+                        name,
+                        num_nonconst,
+                        tag: 0,
+                        fields,
+                        mutable_flag: ParserMutableFlag::Immutable,
+                        ..
+                    },
+                elements,
+            }) if name == "B" && num_nonconst == 1 && fields.is_empty() && elements.is_empty()
         ));
     }
 

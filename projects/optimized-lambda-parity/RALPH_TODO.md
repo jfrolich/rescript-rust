@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 641/657 (97.6%), 16 parity failures, 64 hunks
+**Status:** 642/657 (97.7%), 15 parity failures, 62 hunks
 
 ## Goal
 
@@ -23,8 +23,8 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **641/657**
-- Parity hunks: **64**
+- Optimized lambda parity: **642/657**
+- Parity hunks: **62**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
@@ -49,7 +49,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **16** remaining optimized-lambda failures after this slice. The dominant frontier is still split between raw construction order and post-raw lowering, and stage isolation is mandatory before taking the next fix.
+There are **15** remaining optimized-lambda failures after this slice. The dominant frontier is still split between raw construction order and post-raw lowering, and stage isolation is mandatory before taking the next fix.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -73,6 +73,10 @@ Current frontier characteristics:
 - `conditional/cond_a.res` now also passes exactly as a minimal assert-failure guard.
 - `js_array_test.res` now also passes exactly as a large-file guard.
 - `inline_const.res` and `inline_const_test.res` now also pass exactly after preserving marshaled `FfiInlineConst` metadata through the raw-lambda path and teaching the marshal reader to decode OCaml's fixed custom `int32` payload.
+- empty inlined-record constructors now preserve `RecordInlined` metadata even when the record argument has no explicit fields, which removed:
+  - `record_regression.res`
+  and reduced:
+  - `inline_record_test.res`: **1 hunk** on the current authoritative baseline
 - nullary `CstrUnboxed` constructor metadata is now preserved in raw lambda, which removed the hidden `OnlyOne` constructor-vs-unit mismatch in `UntaggedVariants.res`; that file is now down to **4** hunks, all in the existing static-exit numbering cluster.
 - `big_polyvar_test.res` now also passes exactly on the current authoritative baseline.
 - `alias_default_value_test.res`, `function_directives.res`, `function_directives_async.res`, `function_directives_no_inline.res`, and `adt_optimize_test.res` now also pass exactly on the current authoritative baseline.
@@ -144,6 +148,44 @@ Current frontier characteristics:
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### empty inline-record constructors must keep `RecordInlined` metadata even with zero explicit fields
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml empty_inlined_record_constructor_keeps_inlined_record_metadata -- --nocapture
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 300 ./scripts/test_lambda_parity.sh -j1 'record_regression|inline_record_test'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- Optimized lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Optimized lambda parity: **642/657**
+  - Exact hunks: **62**
+
+Key checkpoints:
+
+- focused optimized parity:
+  - `record_regression.res`: **exact parity**
+  - `inline_record_test.res`: **1 hunk** remaining
+- authoritative optimized baseline moved from **641/657**, **64** hunks to **642/657**, **62** hunks
+
+OCaml `translcore.transl_record` preserves the enclosing `Record_inlined`
+representation even when an inline-record constructor argument has zero explicit
+fields, so `V0({})` and `B({})` still lower to `Const_block` with
+`Blk_record_inlined`, not a plain empty `Blk_record`.
+
+Rust `compiler-rust/src/raw_lambda/convert.rs` had an early empty-record
+fallback that defaulted all zero-field records to `TagInfo::Record`, which was
+invisible in `-drawlambda` (`[0]` in both compilers) but wrong in
+`-dlambda-sexp`. This slice threads the inlined record representation from the
+constructor into the empty-record path and adds a unit test that locks the
+`B({})` case so empty inline records do not regress back to regular record
+blocks.
 
 ### structure-item evals must recurse into the tail before converting the head
 Ran:
