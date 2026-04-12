@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 634/657 (96.5%), 23 parity failures, 89 hunks
+**Status:** 636/657 (96.8%), 21 parity failures, 85 hunks
 
 ## Goal
 
@@ -23,8 +23,8 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **634/657**
-- Parity hunks: **89**
+- Optimized lambda parity: **636/657**
+- Parity hunks: **85**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
@@ -50,7 +50,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **23** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
+There are **21** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -124,13 +124,55 @@ Current frontier characteristics:
   - focused raw guardrail for `recursive_module.res`, `recursive_module_test.res`, `rec_module_test.res`, `rec_module_opt.res`, and `recmodule.res`: **5/5 exact**
   - the function-slot metadata slice kept OCaml's `Pt_constructor("Function", 3, 2)` behavior from `transl_recmodule.ml`
   - the recursive-module shape-name delimiter slice now also matches OCaml's `Const_base (Const_string (_, None)) -> Some DNone` lowering path
-  - focused optimized recursive-module diffs are now down to **1** hunk total, all in `recmodule.res`, and that remaining hunk is identifier-stamp drift rather than shape construction
-- the next visible optimized frontier is the current exact-diff leaders (`record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`) plus the remaining switch-facing files (`variant.res`, `UntaggedVariants.res`, `switch_string.res`) and the stamp-heavy exception / `recmodule.res` residuals.
-- the next visible optimized frontier is the current exact-diff leaders (`record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`) plus the remaining raw-upstream exit-number files (`coercion_module_alias_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `record_extension_test.res`, `variant.res`) and the stamp-heavy exception / `recmodule.res` residuals.
+  - optimized recursive-module parity is now exact again:
+    - `recmodule.res`: **exact parity**
+    - `functors.res`: **exact parity**
+  - `raw_lambda::lower` now matches OCaml's module-alias collapse rule more closely: only a field-selection prefix starting at slot `0` collapses to the source module; non-prefix slices such as `presentLight` stay materialized as `Blk_module`
+- the next visible optimized frontier is the current exact-diff leaders (`record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`) plus the remaining switch-facing files (`variant.res`, `UntaggedVariants.res`) and the raw-upstream exit-number cluster (`coercion_module_alias_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `record_extension_test.res`, `variant.res`).
 - a fresh full raw `-drawlambda` rerun after this slice reported **653/657** with **5** hunks across `coercion_module_alias_test.res`, `exception_raise_test.res`, `record_extension_test.res`, and `variant.res`; focused raw guards for `UntaggedVariants.res` and `js_exception_catch_test.res` stayed exact, and `variantsMatching.res` no longer crashes, so the remaining raw drift is now concentrated in the existing exit-number files plus the exception path in `exception_raise_test.res`.
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### module-alias collapse now requires a zero-based field prefix like OCaml `Lam_convert.convert`
+Ran:
+
+```bash
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 300 ./scripts/test_lambda_parity.sh -j1 'record_regression|recmodule|inline_const_test|gpr_5557'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests::preserves_module_makeblock_shape -- --exact
+```
+
+Result:
+
+- Optimized lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Optimized lambda parity: **636/657**
+  - Exact hunks: **85**
+
+Key checkpoints:
+
+- `recmodule.res`: passes
+- `functors.res`: passes
+- authoritative optimized baseline moved from **634/657**, **89** hunks to **636/657**, **85** hunks
+
+Direct `recmodule.res` repro showed that Rust `compiler-rust/src/raw_lambda/lower.rs`
+was collapsing any one-field `Blk_module` assembled from `Pfield(Module ...)` back to
+the source module variable, while OCaml only does that when the selected fields form a
+prefix of the source module starting at slot `0`.
+
+That distinction matters for recursive-module wiring:
+
+- `makeblock [handleGetLight] (field 0 A)` is a prefix alias and OCaml collapses it to `A`
+- `makeblock [presentLight] (field 1 A)` is **not** a prefix alias and OCaml keeps it as
+  a materialized `Blk_module`
+
+Rust now mirrors that rule by requiring the first selected module field to come from
+index `0` and all subsequent selected fields to continue contiguously. The new lowerer
+regression test locks the non-zero-first-field case so this does not regress back to the
+over-collapse that was hiding inside `recmodule.res` and `functors.res`.
 
 ### primitive-value specialization now uses the expression env like OCaml `transl_primitive`
 Ran:

@@ -1150,24 +1150,21 @@ fn collapse_module_alias(fields: &[String], args: &[Lambda]) -> Option<Lambda> {
     let (first_field, rest_fields) = fields.split_first()?;
     let (first_arg, rest_args) = args.split_first()?;
 
-    let (field_name, module_value) = module_field_access(first_arg)?;
-    if field_name != first_field.as_str() {
+    let (field_name, first_index, module_value) = module_field_access(first_arg)?;
+    if field_name != first_field.as_str() || first_index != 0 {
         return None;
     }
 
     let mut expected_index = 1i32;
     for (field, arg) in rest_fields.iter().zip(rest_args.iter()) {
-        let (field_name, arg_module_value) = module_field_access(arg)?;
-        if field_name != field.as_str() || !same_module_source(&module_value, &arg_module_value) {
+        let (field_name, arg_index, arg_module_value) = module_field_access(arg)?;
+        if field_name != field.as_str()
+            || arg_index != expected_index
+            || !same_module_source(&module_value, &arg_module_value)
+        {
             return None;
         }
-        match arg {
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pfield(index, FieldDbgInfo::Module { .. }),
-                ..
-            }) if *index == expected_index => expected_index += 1,
-            _ => return None,
-        }
+        expected_index += 1;
     }
 
     if rest_fields.len() != rest_args.len() {
@@ -1177,7 +1174,7 @@ fn collapse_module_alias(fields: &[String], args: &[Lambda]) -> Option<Lambda> {
     Some(module_value)
 }
 
-fn module_field_access(arg: &Lambda) -> Option<(String, Lambda)> {
+fn module_field_access(arg: &Lambda) -> Option<(String, i32, Lambda)> {
     let Lambda::Lprim(PrimInfo {
         primitive: Primitive::Pfield(index, FieldDbgInfo::Module { name }),
         args,
@@ -1192,7 +1189,7 @@ fn module_field_access(arg: &Lambda) -> Option<(String, Lambda)> {
     if *index < 0 {
         return None;
     }
-    Some((name.clone(), module_value.clone()))
+    Some((name.clone(), *index, module_value.clone()))
 }
 
 fn same_module_source(lhs: &Lambda, rhs: &Lambda) -> bool {
@@ -2552,6 +2549,48 @@ mod tests {
         ));
         let Lambda::LglobalModule(id, false) = body.as_ref() else {
             panic!("expected non-dynamic imported global module in alias body");
+        };
+        assert!(id.same(&module_id));
+    }
+
+    #[test]
+    fn preserves_module_makeblock_shape() {
+        let module_id = Ident::create_local("A");
+        let lowered = lower_to_lambda(RawLambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::Module(vec!["presentLight".to_string()]),
+                Mutable::Immutable,
+            ),
+            vec![RawLambda::prim(
+                Primitive::Pfield(
+                    1,
+                    FieldDbgInfo::Module {
+                        name: "presentLight".to_string(),
+                    },
+                ),
+                vec![RawLambda::var(module_id.clone())],
+                Location::none(),
+            )],
+            Location::none(),
+        ));
+
+        let Lambda::Lprim(block) = lowered else {
+            panic!("expected module makeblock to be preserved");
+        };
+        assert!(matches!(
+            block.primitive,
+            Primitive::Pmakeblock(0, TagInfo::Module(_), Mutable::Immutable)
+        ));
+        let [Lambda::Lprim(field)] = block.args.as_slice() else {
+            panic!("expected module field access to stay under makeblock");
+        };
+        assert!(matches!(
+            field.primitive,
+            Primitive::Pfield(1, FieldDbgInfo::Module { ref name }) if name == "presentLight"
+        ));
+        let [Lambda::Lvar(id)] = field.args.as_slice() else {
+            panic!("expected module source variable");
         };
         assert!(id.same(&module_id));
     }
