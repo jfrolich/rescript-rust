@@ -2842,7 +2842,11 @@ impl<'a> RawLambdaConverter<'a> {
                                     .collect(),
                                 mutable_flag,
                             },
-                            Mutable::Immutable,
+                            if matches!(mutable_flag, ParserMutableFlag::Mutable) {
+                                Mutable::Mutable
+                            } else {
+                                Mutable::Immutable
+                            },
                         ),
                         args,
                         loc,
@@ -5437,30 +5441,12 @@ impl<'a> RawLambdaConverter<'a> {
     /// Compile try-with exception handler from exception cases.
     /// Matches OCaml's Matching.for_trywith.
     fn compile_trywith_handler_raw(&mut self, exn_id: &Ident, exn_cases: &[Case]) -> RawLambda {
-        // Try the simple handler first (handles extension constructors)
-        if let Some(handler) =
-            self.compile_simple_trywith_extension_handler_raw(Location::none(), exn_id, exn_cases)
-        {
-            return handler;
-        }
-
-        // Fall back to full matching compiler with reraise as default
         let pat_act_list = self.cases_to_pat_act_list(exn_cases);
-        let exn_id_clone = exn_id.clone();
-        let handler_fun = move || {
-            RawLambda::Lprim(RawPrimInfo {
-                primitive: Primitive::Praise,
-                args: vec![RawLambda::var(exn_id_clone.clone())],
-                loc: Location::none(),
-            })
-        };
-        full_matching::compile_matching(
+        full_matching::for_trywith(
             self.type_ctx,
             self.arena,
-            handler_fun,
             RawLambda::var(exn_id.clone()),
             pat_act_list,
-            Partial::Partial,
             &mut self.next_static_raise,
         )
     }
@@ -8520,12 +8506,18 @@ impl<'a> RawLambdaConverter<'a> {
                         && !Self::is_irrefutable_pattern(&binding.vb_pat)
                 }) {
                     // Use OCaml's simple_for_let / for_let approach via full matching compiler
+                    let converted_bindings = bindings
+                        .iter()
+                        .map(|binding| {
+                            let mut value = self.convert_expr_raw(&binding.vb_expr);
+                            let inline_attr =
+                                Self::get_inline_attribute_from(&binding.vb_attributes, self.arena);
+                            value = Self::apply_inline_attribute_raw(value, inline_attr);
+                            (binding, value)
+                        })
+                        .collect::<Vec<_>>();
                     let mut acc = body;
-                    for binding in bindings.iter().rev() {
-                        let mut value = self.convert_expr_raw(&binding.vb_expr);
-                        let inline_attr =
-                            Self::get_inline_attribute_from(&binding.vb_attributes, self.arena);
-                        value = Self::apply_inline_attribute_raw(value, inline_attr);
+                    for (binding, value) in converted_bindings.into_iter().rev() {
                         if let Some(id) = simple_let_binding_id(binding) {
                             let kind = match &binding.vb_pat.pat_desc {
                                 PatternDesc::Tpat_alias(inner, _, _)
@@ -8591,13 +8583,19 @@ impl<'a> RawLambdaConverter<'a> {
                     return acc;
                 }
 
+                let converted_bindings = bindings
+                    .iter()
+                    .map(|binding| {
+                        let mut value = self.convert_expr_raw(&binding.vb_expr);
+                        // OCaml's transl_let applies inline attributes from vb_attributes
+                        let inline_attr =
+                            Self::get_inline_attribute_from(&binding.vb_attributes, self.arena);
+                        value = Self::apply_inline_attribute_raw(value, inline_attr);
+                        (binding, value)
+                    })
+                    .collect::<Vec<_>>();
                 let mut acc = body;
-                for binding in bindings.iter().rev() {
-                    let mut value = self.convert_expr_raw(&binding.vb_expr);
-                    // OCaml's transl_let applies inline attributes from vb_attributes
-                    let inline_attr =
-                        Self::get_inline_attribute_from(&binding.vb_attributes, self.arena);
-                    value = Self::apply_inline_attribute_raw(value, inline_attr);
+                for (binding, value) in converted_bindings.into_iter().rev() {
                     if let Some(id) = simple_let_binding_id(binding) {
                         // OCaml's Matching.for_let uses Strict for Tpat_var(id).
                         // For Tpat_alias(Tpat_any, id, _), compile_matching produces
@@ -9887,6 +9885,21 @@ mod tests {
         )
     }
 
+    fn simple_value_binding(id: Ident, expr: Expression) -> ValueBinding {
+        ValueBinding {
+            vb_pat: Pattern::new(
+                PatternDesc::Tpat_var(id.clone(), Located::mknoloc(id.name().to_string())),
+                LocIdx::none(),
+                crate::types::TypeExprRef(0),
+                EnvRef(0),
+                Attributes::new(),
+            ),
+            vb_expr: expr,
+            vb_attributes: Attributes::new(),
+            vb_loc: LocIdx::none(),
+        }
+    }
+
     #[test]
     fn function_expression_preserves_directive_attribute() {
         let mut arena = ParseArena::new();
@@ -10067,6 +10080,42 @@ mod tests {
 
         assert_eq!(try_handler_exit_id(&first), Some(2));
         assert_eq!(try_handler_exit_id(&second), Some(1));
+    }
+
+    #[test]
+    fn raw_nonrecursive_let_converts_bindings_in_source_order_for_raise_counts() {
+        let mut arena = ParseArena::new();
+        let first_id = Ident::create_local("first");
+        let second_id = Ident::create_local("second");
+        let bindings = vec![
+            simple_value_binding(first_id.clone(), simple_extension_try(&mut arena, "A", 1, 11)),
+            simple_value_binding(
+                second_id.clone(),
+                simple_extension_try(&mut arena, "B", 2, 22),
+            ),
+        ];
+
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let lam = converter.convert_let_with_body_raw(
+            crate::parser::ast::RecFlag::Nonrecursive,
+            &bindings,
+            RawLambda::unit(),
+        );
+
+        let RawLambda::Llet(_, outer_id, outer_value, inner) = lam else {
+            panic!("expected outer let");
+        };
+        let RawLambda::Llet(_, inner_id, inner_value, _) = inner.as_ref() else {
+            panic!("expected inner let");
+        };
+
+        assert!(outer_id.same(&first_id));
+        assert!(inner_id.same(&second_id));
+        assert_eq!(try_handler_exit_id(outer_value.as_ref()), Some(1));
+        assert_eq!(try_handler_exit_id(inner_value.as_ref()), Some(2));
     }
 
     #[test]

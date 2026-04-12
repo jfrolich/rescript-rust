@@ -82,14 +82,22 @@ impl LoweringContext {
                 self.lower_primitive(info.primitive, info.args, info.loc, dynamic_import)
             }
             RawLambda::Lswitch(scrutinee, switch, _) => self.lower_switch(*scrutinee, switch),
-            RawLambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
-                Box::new(self.lower_lambda(*scrutinee)),
-                cases
+            RawLambda::LstringSwitch(scrutinee, cases, default) => {
+                // `Lam.stringswitch (convert_aux e) ... (convert_aux default)` depends on
+                // OCaml's right-to-left argument evaluation, so lower the tail before
+                // the scrutinee to keep alias/exit-map visibility aligned.
+                let lowered_default = default.map(|lam| Box::new(self.lower_lambda(*lam)));
+                let lowered_cases = cases
                     .into_iter()
                     .map(|(name, lam)| (name, self.lower_lambda(lam)))
-                    .collect(),
-                default.map(|lam| Box::new(self.lower_lambda(*lam))),
-            ),
+                    .collect();
+                let lowered_scrutinee = self.lower_lambda(*scrutinee);
+                Lambda::LstringSwitch(
+                    Box::new(lowered_scrutinee),
+                    lowered_cases,
+                    lowered_default,
+                )
+            }
             RawLambda::LstaticRaise(id, args) if args.is_empty() => {
                 Lambda::static_raise(self.remap_exit(id), Vec::new())
             }
@@ -107,31 +115,34 @@ impl LoweringContext {
                 self.exit_map.insert(i, self.remap_exit(j));
                 self.lower_lambda(*body)
             }
-            RawLambda::LstaticCatch(body, (i, ids), handler) => Lambda::static_catch(
-                self.lower_lambda(*body),
-                i,
-                ids,
-                self.lower_lambda(*handler),
-            ),
+            RawLambda::LstaticCatch(body, (i, ids), handler) => {
+                let lowered_handler = self.lower_lambda(*handler);
+                let lowered_body = self.lower_lambda(*body);
+                Lambda::static_catch(lowered_body, i, ids, lowered_handler)
+            }
             RawLambda::LtryWith(body, id, handler) => self.lower_try_with(*body, id, *handler),
-            RawLambda::LifThenElse(cond, then_, else_) => Lambda::if_(
-                self.lower_lambda(*cond),
-                self.lower_lambda(*then_),
-                self.lower_lambda(*else_),
-            ),
+            RawLambda::LifThenElse(cond, then_, else_) => {
+                let lowered_else = self.lower_lambda(*else_);
+                let lowered_then = self.lower_lambda(*then_);
+                let lowered_cond = self.lower_lambda(*cond);
+                Lambda::if_(lowered_cond, lowered_then, lowered_else)
+            }
             RawLambda::Lsequence(first, second) => {
-                Lambda::seq(self.lower_lambda(*first), self.lower_lambda(*second))
+                let lowered_second = self.lower_lambda(*second);
+                let lowered_first = self.lower_lambda(*first);
+                Lambda::seq(lowered_first, lowered_second)
             }
             RawLambda::Lwhile(cond, body) => {
-                Lambda::while_(self.lower_lambda(*cond), self.lower_lambda(*body))
+                let lowered_body = self.lower_lambda(*body);
+                let lowered_cond = self.lower_lambda(*cond);
+                Lambda::while_(lowered_cond, lowered_body)
             }
-            RawLambda::Lfor(var, start, end, dir, body) => Lambda::for_(
-                var,
-                self.lower_lambda(*start),
-                self.lower_lambda(*end),
-                dir,
-                self.lower_lambda(*body),
-            ),
+            RawLambda::Lfor(var, start, end, dir, body) => {
+                let lowered_body = self.lower_lambda(*body);
+                let lowered_end = self.lower_lambda(*end);
+                let lowered_start = self.lower_lambda(*start);
+                Lambda::for_(var, lowered_start, lowered_end, dir, lowered_body)
+            }
             RawLambda::Lassign(id, value) => Lambda::assign(id, self.lower_lambda(*value)),
             RawLambda::Lsend(name, obj, loc) => Lambda::prim(
                 Primitive::PjsUnsafeDowngrade {
@@ -175,11 +186,11 @@ impl LoweringContext {
                 );
             }
 
-            let lowered_func = self.lower_lambda(RawLambda::Lsend(name, obj, loc));
             let lowered_args = ap_args
                 .into_iter()
                 .map(|arg| self.lower_lambda(arg))
                 .collect();
+            let lowered_func = self.lower_lambda(RawLambda::Lsend(name, obj, loc));
             return make_apply(
                 lowered_func,
                 lowered_args,
@@ -192,12 +203,14 @@ impl LoweringContext {
             );
         }
 
+        let lowered_args = ap_args
+            .into_iter()
+            .map(|arg| self.lower_lambda(arg))
+            .collect();
+        let lowered_func = self.lower_lambda(func);
         make_apply(
-            self.lower_lambda(func),
-            ap_args
-                .into_iter()
-                .map(|arg| self.lower_lambda(arg))
-                .collect(),
+            lowered_func,
+            lowered_args,
             ApInfo {
                 loc: ap_info.loc,
                 inlined: ap_info.inlined,
@@ -402,8 +415,6 @@ impl LoweringContext {
         let lowered_scrutinee = self.lower_lambda(scrutinee);
         let simple_const_only_switch =
             switch.sw_failaction.is_none() && switch.sw_blocks.is_empty();
-        let dense_const_only_switch =
-            simple_const_only_switch && const_switch_is_dense_from_zero(&switch.sw_consts);
         let lowered_consts = switch
             .sw_consts
             .into_iter()
@@ -440,8 +451,7 @@ impl LoweringContext {
         Lambda::Lswitch(
             Box::new(lowered_scrutinee),
             LambdaSwitch {
-                sw_consts_full: dense_const_only_switch
-                    || switch.sw_consts_full
+                sw_consts_full: switch.sw_consts_full
                     || switch
                         .sw_names
                         .as_ref()
@@ -664,13 +674,6 @@ fn is_valid_hash_number(value: &str) -> bool {
         [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
         _ => false,
     }
-}
-
-fn const_switch_is_dense_from_zero(sw_consts: &[(i32, RawLambda)]) -> bool {
-    sw_consts
-        .iter()
-        .enumerate()
-        .all(|(idx, (tag, _))| *tag == idx as i32)
 }
 
 fn rename_optional_parameters(
@@ -2343,7 +2346,7 @@ mod tests {
     }
 
     #[test]
-    fn marks_dense_const_only_switch_full_without_names() {
+    fn keeps_const_only_switch_consts_full_from_input_without_names() {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::var(Ident::create_local("v"))),
             RawLambdaSwitch {
@@ -2363,8 +2366,106 @@ mod tests {
         let Lambda::Lswitch(_, switch) = lowered else {
             panic!("expected switch");
         };
-        assert!(switch.sw_consts_full);
+        assert!(!switch.sw_consts_full);
         assert!(switch.sw_blocks_full);
+    }
+
+    fn raw_exit_alias(alias_from: i32, alias_to: i32) -> RawLambda {
+        RawLambda::LstaticCatch(
+            Box::new(RawLambda::LstaticRaise(alias_from, Vec::new())),
+            (alias_from, Vec::new()),
+            Box::new(RawLambda::LstaticRaise(alias_to, Vec::new())),
+        )
+    }
+
+    #[test]
+    fn lowers_sequence_rhs_before_lhs_for_exit_aliases() {
+        let lowered = lower_to_lambda(RawLambda::Lsequence(
+            Box::new(RawLambda::LstaticRaise(7, Vec::new())),
+            Box::new(raw_exit_alias(7, 8)),
+        ));
+
+        let Lambda::Lsequence(first, second) = lowered else {
+            panic!("expected sequence");
+        };
+        assert!(matches!(
+            first.as_ref(),
+            Lambda::LstaticRaise(8, args) if args.is_empty()
+        ));
+        assert!(matches!(
+            second.as_ref(),
+            Lambda::LstaticRaise(8, args) if args.is_empty()
+        ));
+    }
+
+    #[test]
+    fn lowers_if_else_before_then_before_cond_for_exit_aliases() {
+        let lowered = lower_to_lambda(RawLambda::LifThenElse(
+            Box::new(RawLambda::LstaticRaise(7, Vec::new())),
+            Box::new(RawLambda::const_(Constant::int(1))),
+            Box::new(raw_exit_alias(7, 8)),
+        ));
+
+        let Lambda::LifThenElse(cond, _, else_) = lowered else {
+            panic!("expected if");
+        };
+        assert!(matches!(
+            cond.as_ref(),
+            Lambda::LstaticRaise(8, args) if args.is_empty()
+        ));
+        assert!(matches!(
+            else_.as_ref(),
+            Lambda::LstaticRaise(8, args) if args.is_empty()
+        ));
+    }
+
+    #[test]
+    fn lowers_staticcatch_handler_before_body_for_exit_aliases() {
+        let lowered = lower_to_lambda(RawLambda::LstaticCatch(
+            Box::new(raw_exit_alias(7, 8)),
+            (9, vec![Ident::create_local("param")]),
+            Box::new(RawLambda::LstaticRaise(7, Vec::new())),
+        ));
+
+        let Lambda::LstaticCatch(body, (id, params), handler) = lowered else {
+            panic!("expected static catch");
+        };
+        assert_eq!(id, 9);
+        assert_eq!(params.len(), 1);
+        assert!(matches!(
+            body.as_ref(),
+            Lambda::LstaticRaise(8, args) if args.is_empty()
+        ));
+        assert!(matches!(
+            handler.as_ref(),
+            Lambda::LstaticRaise(7, args) if args.is_empty()
+        ));
+    }
+
+    #[test]
+    fn lowers_apply_arguments_before_function_for_exit_aliases() {
+        let lowered = lower_to_lambda(RawLambda::Lapply(RawApply {
+            ap_func: Box::new(RawLambda::LstaticRaise(7, Vec::new())),
+            ap_args: vec![raw_exit_alias(7, 8)],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        }));
+
+        let Lambda::Lapply(apply) = lowered else {
+            panic!("expected apply");
+        };
+        assert!(matches!(
+            apply.ap_func.as_ref(),
+            Lambda::LstaticRaise(8, args) if args.is_empty()
+        ));
+        assert!(matches!(
+            apply.ap_args.as_slice(),
+            [Lambda::LstaticRaise(8, args)] if args.is_empty()
+        ));
     }
 
     #[test]

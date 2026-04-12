@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 642/657 (97.7%), 15 parity failures, 62 hunks
+**Status:** 646/657 (98.3%), 11 parity failures, 43 hunks
 
 ## Goal
 
@@ -23,19 +23,22 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **642/657**
-- Parity hunks: **62**
+- Optimized lambda parity: **646/657**
+- Parity hunks: **43**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
-  - `record_extension_test.res`: **11** hunks
   - `exception_raise_test.res`: **11** hunks
   - `Stdlib_DictTests.res`: **8** hunks
   - `large_record_duplication_test.res`: **7** hunks
   - `Stdlib_TempTests.res`: **4** hunks
   - `UntaggedVariants.res`: **4** hunks
-  - `variant.res`: **3** hunks
-  - `Stdlib_IntlTests.res`: **3** hunks
+  - `coercion_module_alias_test.res`: **2** hunks
+  - `inline_regression_test.res`: **2** hunks
+  - `mario_game.res`: **2** hunks
+  - `adt_optimize_test.res`: **1** hunk
+  - `gpr_5557.res`: **1** hunk
+  - `option_repr_test.res`: **1** hunk
 
 ## Working Rules
 
@@ -49,11 +52,15 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **15** remaining optimized-lambda failures after this slice. The dominant frontier is still split between raw construction order and post-raw lowering, and stage isolation is mandatory before taking the next fix.
+There are **11** remaining optimized-lambda failures after this slice. The dominant frontier is still split between exact raw static-exit allocation and a smaller number of post-raw lowering mismatches, and stage isolation is still mandatory before taking the next fix.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
 - `raw_lambda/lower.rs` is no longer an identity shim.
+- raw `try ... catch` handlers now route through the full matching compiler (`Matching.for_trywith`) instead of the specialized extension fast path, which removed:
+  - `record_extension_test.res`
+  - `Stdlib_IntlTests.res`
+  - `variant.res`
 - structure-item eval conversion in `raw_lambda::convert` now matches `translmod.ml`: Rust recurses into the remainder of the structure before lowering the current `Tstr_eval`, which restored OCaml's static-exit allocation order on eval-heavy files and removed:
   - `equal_exception_test.res`
   - `js_exception_catch_test.res`
@@ -73,13 +80,12 @@ Current frontier characteristics:
 - `conditional/cond_a.res` now also passes exactly as a minimal assert-failure guard.
 - `js_array_test.res` now also passes exactly as a large-file guard.
 - `inline_const.res` and `inline_const_test.res` now also pass exactly after preserving marshaled `FfiInlineConst` metadata through the raw-lambda path and teaching the marshal reader to decode OCaml's fixed custom `int32` payload.
-- empty inlined-record constructors now preserve `RecordInlined` metadata even when the record argument has no explicit fields, which removed:
+- empty inlined-record constructors now preserve `RecordInlined` metadata even when the record argument has no explicit fields, and mutable extension-backed inline records now preserve the outer `Pmakeblock` mutability, which removed:
   - `record_regression.res`
-  and reduced:
-  - `inline_record_test.res`: **1 hunk** on the current authoritative baseline
+  - `inline_record_test.res`
 - nullary `CstrUnboxed` constructor metadata is now preserved in raw lambda, which removed the hidden `OnlyOne` constructor-vs-unit mismatch in `UntaggedVariants.res`; that file is now down to **4** hunks, all in the existing static-exit numbering cluster.
 - `big_polyvar_test.res` now also passes exactly on the current authoritative baseline.
-- `alias_default_value_test.res`, `function_directives.res`, `function_directives_async.res`, `function_directives_no_inline.res`, and `adt_optimize_test.res` now also pass exactly on the current authoritative baseline.
+- `alias_default_value_test.res`, `function_directives.res`, `function_directives_async.res`, and `function_directives_no_inline.res` now also pass exactly on the current authoritative baseline.
 - `js_json_test.res` now also passes exactly on the current authoritative baseline.
 - `LetUnwrap.res` now also passes exactly after preserving named polyvariant hash metadata in raw match tests.
 - `polyvar_test.res` now also passes exactly on the current authoritative baseline.
@@ -136,7 +142,7 @@ Current frontier characteristics:
     - `recmodule.res`: **exact parity**
     - `functors.res`: **exact parity**
   - `raw_lambda::lower` now matches OCaml's module-alias collapse rule more closely: only a field-selection prefix starting at slot `0` collapses to the source module; non-prefix slices such as `presentLight` stay materialized as `Blk_module`
-- the next visible optimized frontier is the current exact-diff leaders (`record_extension_test.res`, `exception_raise_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`) plus the remaining switch-facing files (`variant.res`, `UntaggedVariants.res`) and the raw-upstream exit-number cluster (`coercion_module_alias_test.res`, `exception_raise_test.res`, `record_extension_test.res`, `variant.res`).
+- the next visible optimized frontier is the current exact-diff leaders (`exception_raise_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`, `Stdlib_TempTests.res`, `UntaggedVariants.res`) plus the remaining raw-upstream exact-exit cluster (`adt_optimize_test.res`, `gpr_5557.res`, `inline_regression_test.res`, `option_repr_test.res`) and the remaining lowering-side outliers (`coercion_module_alias_test.res`, `mario_game.res`).
 - focused raw guards after this slice all went exact:
   - `equal_exception_test.res`
   - `js_exception_catch_test.res`
@@ -148,6 +154,49 @@ Current frontier characteristics:
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### `Matching.for_trywith` routing and mutable extension-record `Pmakeblock` flags moved the authoritative baseline to 646/657
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::raw_ -- --nocapture
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 300 ./scripts/test_lambda_parity.sh -j1 'UntaggedVariants|coercion_module_alias_test|exception_raise_test|inline_record_test|large_record_duplication_test|mario_game|record_extension_test|Stdlib_DictTests|Stdlib_TempTests|Stdlib_IntlTests|variant'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- Optimized lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Optimized lambda parity: **646/657**
+  - Exact hunks: **43**
+
+Key checkpoints:
+
+- focused optimized parity improved from **6/17** to **10/17** exact on the 11-file frontier plus the already-exact guards in that slice
+- removed from the focused frontier:
+  - `inline_record_test.res`
+  - `record_extension_test.res`
+  - `Stdlib_IntlTests.res`
+  - `variant.res`
+- authoritative optimized baseline moved from **642/657**, **62** hunks to **646/657**, **43** hunks
+
+OCaml's `translcore.transl_try` always routes exception handlers through
+`Matching.for_trywith`; the raw Rust path still had a specialized extension
+fast path, which matched many normalized shapes but consumed static exits in a
+different order and produced a larger exact optimized frontier. Routing raw
+try-with handlers through the full matching compiler removed the remaining
+structural mismatch on `variant.res` and collapsed the matching-exception
+cluster enough to drop `record_extension_test.res` and `Stdlib_IntlTests.res`
+from the authoritative baseline.
+
+The last `inline_record_test.res` hunk was separate: inline-record extensions
+already carried the correct inner `Blk_record_ext(..., Mutable)` metadata, but
+Rust still hard-coded the outer `Pmakeblock(..., Immutable)` flag in
+`convert_record_raw`. Making that outer mutability follow the record fields
+restored exact parity for `A4({mutable x, y, mutable z})`.
 
 ### empty inline-record constructors must keep `RecordInlined` metadata even with zero explicit fields
 Ran:
