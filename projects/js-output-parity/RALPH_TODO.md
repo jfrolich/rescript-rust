@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 90 / 657 JS snapshots passing, 0 compile errors, 567 output diffs
+**Status:** 106 / 657 JS snapshots passing, 0 compile errors, 551 output diffs
 
 ## Goal
 
@@ -35,14 +35,30 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **90 / 657**
+- JS snapshot parity: **106 / 657**
 - Compile errors: **0**
-- Output diffs: **567**
+- Output diffs: **551**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
+- OCaml `core/js_dump.ml` now matches more closely on one more printer slice:
+  `Blk_record`, `Blk_record_inlined`, `Blk_record_ext`, and `Blk_module`
+  `Caml_block` values no longer bypass Rust's shared object-literal emitter
+  with ad hoc compact formatting; they now follow the same object-layout path
+  OCaml uses when it first rewrites those blocks into `Object (...)`
+- `tests/tests/src/EmptyRecord.res` now matches its checked-in `.mjs`
+  snapshot exactly after the shared object-layout fix
+- `tests/tests/src/EnvUnifiedOps.res` now also matches its checked-in `.mjs`
+  snapshot exactly after the same printer change
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the object-layout fix, which confirms this slice stays isolated to
+  record/module object dumping rather than broader import/export handling
+- `tests/tests/src/DerivingAccessorsCurried.res` and
+  `tests/tests/src/VariantSpreads.res` both narrowed materially:
+  their remaining drift is now later constructor-object layout and backend tag
+  shaping rather than record/module object formatting
 - OCaml `frontend/ast_config.ml` / `core/js_dump_program.ml` top-level
   directive handling is now matched more closely on the Rust JS-output path:
   file-level `@@directive("...")` attributes are collected from the parsed
@@ -219,6 +235,45 @@ Remaining internal compile errors under the measured wrapper baseline:
 - none
 
 ## Latest Session Findings
+
+- `compiler-rust/src/js_ir/printer.rs` now matches one more slice of
+  OCaml `core/js_dump.ml` more closely on the Rust JS-output path:
+  record-like and module-like `Caml_block` variants (`Blk_record`,
+  `Blk_record_inlined`, `Blk_record_ext`, and `Blk_module`) no longer use
+  bespoke compact brace printing in Rust; they now flow through the shared
+  object-literal emitter, which mirrors OCaml's `Caml_block -> Object (...)`
+  rewrite before dumping
+- Verified focused guards for this cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_record_omits_optional_undefined_fields -- --test-threads=1`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_module_block_uses_object_layout -- --test-threads=1`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/EmptyRecord.res -o /tmp/EmptyRecord.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/EnvUnifiedOps.res -o /tmp/EnvUnifiedOps.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/VariantSpreads.res -o /tmp/VariantSpreads.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsCurried.res -o /tmp/DerivingAccessorsCurried.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/EmptyRecord.res` and `tests/tests/src/EnvUnifiedOps.res`
+  now both match their checked-in snapshots exactly after the object-layout
+  change
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the change, which confirms this printer slice does not perturb the already
+  resolved external-shadow/import behavior
+- `tests/tests/src/VariantSpreads.res` narrowed materially:
+  record/module object literals now use the correct multi-line layout, and the
+  remaining drift is later constructor-object formatting plus missing backend
+  tag shaping on `q`
+- `tests/tests/src/DerivingAccessorsCurried.res` narrowed materially in the
+  same way:
+  record/module object layout is now aligned, and the remaining drift is later
+  constructor-object formatting and declaration ordering rather than this
+  printer slice
+- The authoritative JS snapshot baseline now reports **106 / 657** passing,
+  **0** compile errors, and **551** output diffs.
+- Interpretation:
+  this is a real OCaml `js_dump` parity improvement on the final printer path.
+  It resolves one high-volume object-layout motif without hiding the remaining
+  constructor-specific and backend-shaping gaps that still need later passes.
 
 - `compiler-rust/src/lambda/compile.rs` now matches OCaml
   `lam_compile_const.ml` more closely for constructor-tagged integer

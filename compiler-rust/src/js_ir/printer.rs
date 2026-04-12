@@ -693,45 +693,16 @@ impl JsPrinter {
                 self.write_char(']');
             }
 
-            ExpressionDesc::Object(dup, props) => {
-                let needs_paren = level > 1;
-                if needs_paren {
-                    self.write_char('(');
-                }
-
-                self.write_char('{');
-                if !props.is_empty() || dup.is_some() {
-                    self.indent();
-
-                    // Handle spread/duplicate
-                    if let Some(spread) = dup {
-                        self.newline();
-                        self.write("...");
-                        self.print_expression(spread, 1);
-                        if !props.is_empty() {
-                            self.write_char(',');
-                        }
-                    }
-
-                    for (i, (name, value)) in props.iter().enumerate() {
-                        self.newline();
-                        self.print_property_name(name);
-                        self.write(": ");
-                        self.print_expression(value, 1);
-                        if i < props.len() - 1 {
-                            self.write_char(',');
-                        }
-                    }
-
-                    self.dedent();
-                    self.newline();
-                }
-                self.write_char('}');
-
-                if needs_paren {
-                    self.write_char(')');
-                }
-            }
+            ExpressionDesc::Object(dup, props) => self.print_object_literal(
+                level,
+                dup.as_deref(),
+                props.iter(),
+                |this, (name, value)| {
+                    this.print_property_name(name);
+                    this.write(": ");
+                    this.print_expression(value, 1);
+                },
+            ),
 
             ExpressionDesc::Seq(e1, e2) => {
                 let needs_paren = level > 0;
@@ -1093,70 +1064,73 @@ impl JsPrinter {
                             }
                             self.write_char(']');
                         } else {
-                            self.write_char('{');
-                            let mut first = true;
-                            for (elem, (field_name, optional)) in elements.iter().zip(fields.iter())
-                            {
-                                if *optional && is_undefined_literal(elem) {
-                                    continue;
-                                }
-                                if !first {
-                                    self.write(", ");
-                                }
-                                first = false;
-                                self.write(field_name);
-                                self.write(": ");
-                                self.print_expression(elem, 1);
-                            }
-                            self.write_char('}');
+                            self.print_object_literal(
+                                level,
+                                None,
+                                elements.iter().zip(fields.iter()).filter_map(
+                                    |(elem, (field_name, optional))| {
+                                        if *optional && is_undefined_literal(elem) {
+                                            None
+                                        } else {
+                                            Some((field_name.as_str(), elem))
+                                        }
+                                    },
+                                ),
+                                |this, (field_name, elem)| {
+                                    this.print_literal_property_name(field_name);
+                                    this.write(": ");
+                                    this.print_expression(elem, 1);
+                                },
+                            );
                         }
                     }
                     TagInfo::RecordInlined { fields, .. } if fields.len() == elements.len() => {
-                        // Output as JS object for inlined records
-                        self.write_char('{');
-                        let mut first = true;
-                        for (elem, (field_name, optional)) in elements.iter().zip(fields.iter()) {
-                            if *optional && is_undefined_literal(elem) {
-                                continue;
-                            }
-                            if !first {
-                                self.write(", ");
-                            }
-                            first = false;
-                            self.write(field_name);
-                            self.write(": ");
-                            self.print_expression(elem, 1);
-                        }
-                        self.write_char('}');
+                        self.print_object_literal(
+                            level,
+                            None,
+                            elements.iter().zip(fields.iter()).filter_map(
+                                |(elem, (field_name, optional))| {
+                                    if *optional && is_undefined_literal(elem) {
+                                        None
+                                    } else {
+                                        Some((field_name.as_str(), elem))
+                                    }
+                                },
+                            ),
+                            |this, (field_name, elem)| {
+                                this.print_literal_property_name(field_name);
+                                this.write(": ");
+                                this.print_expression(elem, 1);
+                            },
+                        );
                     }
                     TagInfo::RecordExt { fields, .. } if fields.len() == elements.len() => {
-                        // Output as JS object for record extensions
-                        self.write_char('{');
-                        for (i, (elem, field_name)) in
-                            elements.iter().zip(fields.iter()).enumerate()
-                        {
-                            if i > 0 {
-                                self.write(", ");
-                            }
-                            self.write(field_name);
-                            self.write(": ");
-                            self.print_expression(elem, 1);
-                        }
-                        self.write_char('}');
+                        self.print_object_literal(
+                            level,
+                            None,
+                            elements
+                                .iter()
+                                .zip(fields.iter())
+                                .map(|(elem, field_name)| (field_name.as_str(), elem)),
+                            |this, (field_name, elem)| {
+                                this.print_literal_property_name(field_name);
+                                this.write(": ");
+                                this.print_expression(elem, 1);
+                            },
+                        );
                     }
                     TagInfo::Module(fields) if fields.len() == elements.len() => {
-                        self.write_char('{');
-                        for (i, (elem, field_name)) in
-                            elements.iter().zip(fields.iter()).enumerate()
-                        {
-                            if i > 0 {
-                                self.write(", ");
-                            }
-                            self.write(&convert_ident_name(field_name));
-                            self.write(": ");
-                            self.print_expression(elem, 1);
-                        }
-                        self.write_char('}');
+                        self.print_object_literal(
+                            level,
+                            None,
+                            elements.iter().zip(fields.iter()),
+                            |this, (elem, field_name)| {
+                                let field_name = convert_ident_name(field_name);
+                                this.print_literal_property_name(&field_name);
+                                this.write(": ");
+                                this.print_expression(elem, 1);
+                            },
+                        );
                     }
                     TagInfo::Constructor { name, .. } => {
                         self.write_char('{');
@@ -1240,16 +1214,65 @@ impl JsPrinter {
         }
     }
 
+    fn print_object_literal<T, I, F>(
+        &mut self,
+        level: u8,
+        dup: Option<&Expression>,
+        props: I,
+        mut print_prop: F,
+    ) where
+        I: IntoIterator<Item = T>,
+        F: FnMut(&mut Self, T),
+    {
+        let needs_paren = level > 1;
+        if needs_paren {
+            self.write_char('(');
+        }
+
+        self.write_char('{');
+        let mut props = props.into_iter().peekable();
+        if dup.is_some() || props.peek().is_some() {
+            self.indent();
+
+            if let Some(spread) = dup {
+                self.newline();
+                self.write("...");
+                self.print_expression(spread, 1);
+                if props.peek().is_some() {
+                    self.write_char(',');
+                }
+            }
+
+            while let Some(prop) = props.next() {
+                self.newline();
+                print_prop(self, prop);
+                if props.peek().is_some() {
+                    self.write_char(',');
+                }
+            }
+
+            self.dedent();
+            self.newline();
+        }
+        self.write_char('}');
+
+        if needs_paren {
+            self.write_char(')');
+        }
+    }
+
+    fn print_literal_property_name(&mut self, name: &str) {
+        if is_valid_js_ident(name) {
+            self.write(name);
+        } else {
+            self.print_string(name);
+        }
+    }
+
     /// Print a property name
     fn print_property_name(&mut self, name: &PropertyName) {
         match name {
-            PropertyName::Lit(s) => {
-                if is_valid_js_ident(s) {
-                    self.write(s);
-                } else {
-                    self.print_string(s);
-                }
-            }
+            PropertyName::Lit(s) => self.print_literal_property_name(s),
             PropertyName::Symbol => {
                 self.write("[Symbol.for(\"name\")]");
             }
@@ -2042,7 +2065,9 @@ mod tests {
             ident_info: Default::default(),
         })]);
 
-        assert!(rendered.contains("function testFnWithDirective(name) {\n  'use memo';\n  return \"Hello\";\n}"));
+        assert!(rendered.contains(
+            "function testFnWithDirective(name) {\n  'use memo';\n  return \"Hello\";\n}"
+        ));
     }
 
     #[test]
@@ -2057,7 +2082,10 @@ mod tests {
             directive: Some("'use cache'".to_string()),
         }));
 
-        assert_eq!(rendered, "name => {\n  'use cache';\n  return \"Hello\";\n}");
+        assert_eq!(
+            rendered,
+            "name => {\n  'use cache';\n  return \"Hello\";\n}"
+        );
     }
 
     #[test]
@@ -2102,7 +2130,7 @@ mod tests {
             ),
         ));
 
-        assert_eq!(print_expression(&expr), "{x: 10}");
+        assert_eq!(print_expression(&expr), "{\n  x: 10\n}");
     }
 
     #[test]
@@ -2121,5 +2149,17 @@ mod tests {
         ));
 
         assert_eq!(print_expression(&expr), "[1, 2]");
+    }
+
+    #[test]
+    fn test_print_module_block_uses_object_layout() {
+        let expr = Expression::new(ExpressionDesc::CamlBlock(
+            vec![Expression::number(Number::int(1))],
+            MutableFlag::Immutable,
+            Box::new(Expression::number(Number::int(0))),
+            TagInfo::Module(vec!["value".to_string()]),
+        ));
+
+        assert_eq!(print_expression(&expr), "{\n  value: 1\n}");
     }
 }
