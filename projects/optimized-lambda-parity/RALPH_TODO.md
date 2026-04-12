@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 461/657 (70.2%), 196 parity failures, 1855 hunks
+**Status:** 461/657 (70.2%), 196 parity failures, 1858 hunks
 
 ## Goal
 
@@ -25,8 +25,8 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 - Rust compile coverage: **657/657**
 - Optimized lambda parity: **461/657**
 - Stamp-canonicalized parity: **461/657**
-- Exact hunks: **1855**
-- Stamp-canonicalized hunks: **1855**
+- Exact hunks: **1858**
+- Stamp-canonicalized hunks: **1858**
 - Largest current exact diffs:
   - `big_polyvar_test.res`: **601** hunks
   - `stringmatch_test.res`: **284** hunks
@@ -62,7 +62,8 @@ Current frontier characteristics:
   - `VariantCoercion.res`
   - `minimal_test.res`
 - `js_array_test.res` now also passes exactly as a large-file guard.
-- constant-condition folding in `Lam.if_` is now landed; the remaining `Lam.if_` frontier is the non-constant smart-constructor behavior still visible in `LetUnwrap.res`.
+- direct-ident constructor switch names now come through `pat.pat_env`; `LetUnwrap.res` dropped from **19 hunks** to **1 hunk**, leaving only the `InvalidNext` constructor-literal mismatch there.
+- the remaining `Lam.if_` frontier is still the non-constant smart-constructor behavior from `compiler/core/lam.ml`, but `LetUnwrap.res` is no longer the main switch-shape example.
 - `big_polyvar_test.res` dropped from **1202** hunks to **601** hunks.
 - Stamp canonicalization still does not reduce the baseline at all.
 
@@ -232,6 +233,40 @@ This confirms the constant-condition branch was the last blocker for
 `Import.res`. The next structural frontier is the remaining `Lam.if_`
 smart-constructor rewrites plus the alias/module-export shape still showing up
 in the accessor files.
+
+### direct-ident constructor switch names now honor `pat_env`
+`compiler-rust/src/raw_lambda/matching.rs` now mirrors the OCaml
+`matching_polyfill.ml` rule for direct constructor-type identifiers: recover
+switch names from the typed pattern environment instead of resolving against an
+empty environment.
+
+That slice is intentionally narrow:
+
+- direct `Path::Pident` constructor types now use `pat.pat_env`
+- qualified paths still fall back to the old resolver for now because a broad
+  `env.lookup_type` path introduced a `string_set.res` stack overflow
+- a new unit test covers `result` constructor-name recovery through `pat_env`
+
+Verified focused checks:
+
+- `LetUnwrap.res`: **1 hunk** remaining (down from **19**)
+- `string_set.res`: direct repro no longer crashes after narrowing lookup back
+  away from `Pdot` resolution
+
+Authoritative repo-wide baseline moved from:
+
+- **461/657**, **1855** hunks
+
+to:
+
+- **461/657**, **1858** hunks
+
+This is a correctness-aligned change, not a local parity win yet. The direct
+`pat_env` recovery is still worth keeping because it matches OCaml for the
+`Pident` case and removes the wrong switch-metadata shape from `LetUnwrap.res`;
+the remaining work is to port the qualified-path lookup safely enough to avoid
+reintroducing the `string_set.res` recursion and then clean up the constructor
+literal / exception-tail regressions it exposes.
 
 ## Root-Cause Frontiers
 

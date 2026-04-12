@@ -8264,7 +8264,14 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Opt
     }
 
     fn resolve_path(ctx_ref: &TypeContext<'_>, path: &Path, env: &Env) -> Option<SwitchNames> {
-        let decl = crate::raw_lambda::typeopt::find_type_decl_pub(ctx_ref, env, path)?;
+        let decl = match path {
+            Path::Pident(_) => env
+                .lookup_type(path)
+                .ok()
+                .cloned()
+                .or_else(|| crate::raw_lambda::typeopt::find_type_decl_pub(ctx_ref, env, path)),
+            _ => crate::raw_lambda::typeopt::find_type_decl_pub(ctx_ref, env, path),
+        }?;
         match &decl.type_kind {
             TypeKind::TypeVariant(cstrs) => Some(switch_names_from_variant(cstrs)),
             TypeKind::TypeAbstract => decl
@@ -8274,7 +8281,8 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Opt
         }
     }
 
-    resolve_type(ctx_ref, pat.pat_type, &Env::empty())
+    let env = ctx_ref.get_typed_env(pat.pat_env)?;
+    resolve_type(ctx_ref, pat.pat_type, env.as_ref())
 }
 
 // ============================================================================
@@ -8978,4 +8986,28 @@ pub fn for_multiple_match(
         .into_iter()
         .rev()
         .fold(inner, |body, v_eo| bind_opt(v_eo, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::IdGenerator;
+    use crate::types::env::initial_env;
+    use crate::types::predef;
+
+    #[test]
+    fn constructor_switch_names_use_pattern_env() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let env_ref = ctx.store_typed_env(&env);
+        let pat_type =
+            ctx.new_generic_constr(predef::path_result(), vec![ctx.new_var(None), ctx.new_var(None)]);
+        let pat = make_pat(PatternDesc::Tpat_any, pat_type, env_ref);
+
+        let names = names_from_construct_pattern(&ctx, &pat).expect("result switch names");
+
+        assert!(names.consts.is_empty());
+        assert_eq!(names.blocks, vec!["Ok".to_string(), "Error".to_string()]);
+    }
 }
