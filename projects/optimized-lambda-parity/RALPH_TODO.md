@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 530/657 (80.7%), 127 parity failures, 569 hunks
+**Status:** 533/657 (81.1%), 124 parity failures, 515 hunks
 
 ## Goal
 
@@ -23,17 +23,18 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **530/657**
-- Exact hunks: **569**
+- Optimized lambda parity: **533/657**
+- Parity hunks: **515**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
   - `js_json_test.res`: **45** hunks
   - `coercion_module_alias_test.res`: **40** hunks
-  - `mario_game.res`: **21** hunks
   - `bs_unwrap_test.res`: **21** hunks
-  - `uncurried_default.args.res`: **16** hunks
   - `ticker.res`: **13** hunks
+  - `inline_map_test.res`: **12** hunks
+  - `inline_map2_test.res`: **12** hunks
+  - `exception_raise_test.res`: **12** hunks
 
 ## Working Rules
 
@@ -47,7 +48,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **127** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, not dump-path routing.
+There are **124** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, not dump-path routing.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -80,11 +81,49 @@ Current frontier characteristics:
 - the focused `Lam.if_` assert-failure rewrite is now landed:
   - `stringmatch_test.res`: **exact parity** (down from **1 hunk** on the prior baseline)
   - `js_json_test.res`: **45 hunks** on a focused rerun, so its remaining diffs are no longer dominated by that one rewrite
-- the next visible optimized frontier is the current exact-diff leaders (`js_json_test.res`, `coercion_module_alias_test.res`, `mario_game.res`, `bs_unwrap_test.res`, `uncurried_default.args.res`, `ticker.res`) plus the exception static-exit numbering cluster (`test_trywith.res`, `exception_raise_test.res`) and the remaining switch-control-flow files (`set_gen.res`, `test_set.res`, `variant.res`).
+- the next visible optimized frontier is the current exact-diff leaders (`js_json_test.res`, `coercion_module_alias_test.res`, `bs_unwrap_test.res`, `ticker.res`, `inline_map_test.res`, `inline_map2_test.res`) plus the exception static-exit numbering cluster (`test_trywith.res`, `exception_raise_test.res`) and the remaining switch-control-flow files (`set_gen.res`, `test_set.res`, `variant.res`).
 - a fresh full raw `-drawlambda` rerun reported **656/657** with one exact failure in `coercion_module_alias_test.res`; that looks separate from the assert-failure lowering slice and should be handled in a dedicated raw-parity session.
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### optional-parameter renaming moved the uncurry frontier
+`compiler/core/lam_convert.ml` runs `rename_optional_parameters` before lowering
+function bodies. That pass rewrites leading optional-argument guard lets from the
+hidden `*opt*` parameter name to fresh names derived from the bound value id
+(`xOpt`, `zOpt`, and so on), and then updates the function parameter list to
+match.
+
+Rust `raw_lambda/lower.rs` was still lowering `RawLambda::Lfunction` bodies
+directly, so `-dlambda-sexp` kept printing raw `*opt*` names even when
+`-drawlambda` already matched OCaml.
+
+`compiler-rust/src/raw_lambda/lower.rs` now ports that OCaml prefix-only rewrite
+for function bodies and covers it with:
+
+- `raw_lambda::lower::tests::renames_optional_parameter_guards_from_prefix_lets`
+
+Verified focused checks:
+
+- `uncurried_default.args.res`: **exact parity** (down from **16 hunks**)
+- `test_case_opt_collision.res`: **exact parity**
+- `uncurried_cast.res`: **exact parity**
+- `more_uncurry.res`: **exact parity**
+- `mario_game.res`: still failing on the authoritative baseline, so its remaining
+  diffs are no longer explained by hidden optional-parameter naming alone
+
+Authoritative repo-wide baseline moved from:
+
+- **530/657**, **569** hunks
+
+to:
+
+- **533/657**, **515** hunks
+
+That is a gain of **3 files** and **54 hunks**. The `*opt*`-naming cluster is
+smaller now; the remaining uncurry-heavy frontier is the larger files that still
+fail after this pass (`UncurriedAlways.res`, `option_repr_test.res`,
+`reasonReact.res`, `mario_game.res`).
 
 ### `Pisout` normalization plus const-only switch fullness moved the switch frontier
 `compiler/core/lam_convert.ml` emits `Pisout` in lowered lambda as the OCaml

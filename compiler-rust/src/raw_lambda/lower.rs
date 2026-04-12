@@ -40,11 +40,7 @@ impl LoweringContext {
         self.lower_lambda_with_dynamic_import(raw, false)
     }
 
-    fn lower_lambda_with_dynamic_import(
-        &mut self,
-        raw: RawLambda,
-        dynamic_import: bool,
-    ) -> Lambda {
+    fn lower_lambda_with_dynamic_import(&mut self, raw: RawLambda, dynamic_import: bool) -> Lambda {
         match raw {
             RawLambda::Lvar(id) => Lambda::var(self.alias_target(id)),
             RawLambda::LglobalModule(id, imported) => {
@@ -59,12 +55,16 @@ impl LoweringContext {
             }
             RawLambda::Lconst(c) => Lambda::const_(lower_constant(c)),
             RawLambda::Lapply(apply) => self.lower_apply(apply),
-            RawLambda::Lfunction(func) => Lambda::function_(
-                func.arity,
-                func.params,
-                self.lower_lambda(*func.body),
-                func.attr,
-            ),
+            RawLambda::Lfunction(func) => {
+                let (renamed_params, renamed_body) =
+                    rename_optional_parameters(func.params, *func.body);
+                Lambda::function_(
+                    func.arity,
+                    renamed_params,
+                    self.lower_lambda(renamed_body),
+                    func.attr,
+                )
+            }
             RawLambda::Llet(kind, id, value, body) if dynamic_import => {
                 if let RawLambda::LglobalModule(global_id, _) = value.as_ref() {
                     return Lambda::global_module(global_id.clone(), true);
@@ -380,7 +380,8 @@ impl LoweringContext {
 
     fn lower_switch(&mut self, scrutinee: RawLambda, switch: RawLambdaSwitch) -> Lambda {
         let lowered_scrutinee = self.lower_lambda(scrutinee);
-        let simple_const_only_switch = switch.sw_failaction.is_none() && switch.sw_blocks.is_empty();
+        let simple_const_only_switch =
+            switch.sw_failaction.is_none() && switch.sw_blocks.is_empty();
         let lowered_consts = switch
             .sw_consts
             .into_iter()
@@ -594,6 +595,83 @@ fn lower_constant(constant: Constant) -> Constant {
         Constant::Some(inner) => Constant::Some(Box::new(lower_constant(*inner))),
         other => other,
     }
+}
+
+fn rename_optional_parameters(params: Vec<Ident>, body: RawLambda) -> (Vec<Ident>, RawLambda) {
+    let (param_map, body) = rename_optional_parameter_prefix(&params, body);
+    let params = params
+        .into_iter()
+        .map(|param| param_map.get(&param).cloned().unwrap_or(param))
+        .collect();
+    (params, body)
+}
+
+fn rename_optional_parameter_prefix(
+    params: &[Ident],
+    body: RawLambda,
+) -> (HashMap<Ident, Ident>, RawLambda) {
+    let RawLambda::Llet(kind, id, value, rest) = body else {
+        return (HashMap::new(), body);
+    };
+
+    let should_rename = matches_optional_parameter_binding(params, value.as_ref());
+    if !should_rename {
+        return (HashMap::new(), RawLambda::Llet(kind, id, value, rest));
+    }
+
+    let (mut param_map, renamed_rest) = rename_optional_parameter_prefix(params, *rest);
+    let RawLambda::LifThenElse(cond, then_, else_) = *value else {
+        unreachable!("validated optional parameter binding")
+    };
+    let RawLambda::Lprim(cond_info) = *cond else {
+        unreachable!("validated optional parameter binding")
+    };
+    let RawLambda::Lprim(then_info) = *then_ else {
+        unreachable!("validated optional parameter binding")
+    };
+    let [RawLambda::Lvar(opt)] = cond_info.args.as_slice() else {
+        unreachable!("validated optional parameter binding")
+    };
+    let new_id = Ident::create_local(format!("{}Opt", id.name()));
+    param_map.insert(opt.clone(), new_id.clone());
+
+    let renamed_value = RawLambda::LifThenElse(
+        Box::new(RawLambda::prim(
+            cond_info.primitive,
+            vec![RawLambda::var(new_id.clone())],
+            cond_info.loc,
+        )),
+        Box::new(RawLambda::prim(
+            then_info.primitive,
+            vec![RawLambda::var(new_id)],
+            then_info.loc,
+        )),
+        else_,
+    );
+
+    (
+        param_map,
+        RawLambda::Llet(kind, id, Box::new(renamed_value), Box::new(renamed_rest)),
+    )
+}
+
+fn matches_optional_parameter_binding(params: &[Ident], value: &RawLambda) -> bool {
+    let RawLambda::LifThenElse(cond, then_, _) = value else {
+        return false;
+    };
+    let RawLambda::Lprim(cond_info) = cond.as_ref() else {
+        return false;
+    };
+    let RawLambda::Lprim(then_info) = then_.as_ref() else {
+        return false;
+    };
+    let [RawLambda::Lvar(opt)] = cond_info.args.as_slice() else {
+        return false;
+    };
+    let [RawLambda::Lvar(opt2)] = then_info.args.as_slice() else {
+        return false;
+    };
+    opt.same(opt2) && params.iter().any(|param| param.same(opt))
 }
 
 fn int_const_value_any(lam: &Lambda) -> Option<i32> {
@@ -1040,6 +1118,109 @@ mod tests {
     }
 
     #[test]
+    fn renames_optional_parameter_guards_from_prefix_lets() {
+        let opt_x = Ident::create_local("*opt*");
+        let y = Ident::create_local("y");
+        let opt_z = Ident::create_local("*opt*");
+        let x = Ident::create_local("x");
+        let z = Ident::create_local("z");
+        let raw = RawLambda::function_(
+            3,
+            vec![opt_x.clone(), y.clone(), opt_z.clone()],
+            RawLambda::let_(
+                LetKind::Strict,
+                x.clone(),
+                RawLambda::LifThenElse(
+                    Box::new(RawLambda::prim(
+                        Primitive::PisNotNone,
+                        vec![RawLambda::var(opt_x.clone())],
+                        Location::none(),
+                    )),
+                    Box::new(RawLambda::prim(
+                        Primitive::PvalFromOptionNotNest,
+                        vec![RawLambda::var(opt_x.clone())],
+                        Location::none(),
+                    )),
+                    Box::new(RawLambda::const_(Constant::int(3))),
+                ),
+                RawLambda::let_(
+                    LetKind::Strict,
+                    z.clone(),
+                    RawLambda::LifThenElse(
+                        Box::new(RawLambda::prim(
+                            Primitive::PisNotNone,
+                            vec![RawLambda::var(opt_z.clone())],
+                            Location::none(),
+                        )),
+                        Box::new(RawLambda::prim(
+                            Primitive::PvalFromOptionNotNest,
+                            vec![RawLambda::var(opt_z.clone())],
+                            Location::none(),
+                        )),
+                        Box::new(RawLambda::const_(Constant::int(4))),
+                    ),
+                    RawLambda::prim(
+                        Primitive::Paddint,
+                        vec![RawLambda::var(x), RawLambda::var(z)],
+                        Location::none(),
+                    ),
+                ),
+            ),
+            crate::lambda::FunctionAttribute::default(),
+        );
+
+        let lowered = lower_to_lambda(raw);
+        let Lambda::Lfunction(func) = lowered else {
+            panic!("expected function");
+        };
+        assert_eq!(func.params[0].name(), "xOpt");
+        assert_eq!(func.params[1].name(), "y");
+        assert_eq!(func.params[2].name(), "zOpt");
+
+        let Lambda::Llet(LetKind::Strict, _, first_value, first_rest) = func.body.as_ref() else {
+            panic!("expected first strict let");
+        };
+        let Lambda::LifThenElse(first_cond, first_then, _) = first_value.as_ref() else {
+            panic!("expected first optional guard");
+        };
+        let Lambda::Lprim(first_cond_prim) = first_cond.as_ref() else {
+            panic!("expected first guard primitive");
+        };
+        let [Lambda::Lvar(first_guard_param)] = first_cond_prim.args.as_slice() else {
+            panic!("expected first guard to use renamed param");
+        };
+        assert!(first_guard_param.same(&func.params[0]));
+        let Lambda::Lprim(first_then_prim) = first_then.as_ref() else {
+            panic!("expected first unwrap primitive");
+        };
+        let [Lambda::Lvar(first_unwrap_param)] = first_then_prim.args.as_slice() else {
+            panic!("expected first unwrap to use renamed param");
+        };
+        assert!(first_unwrap_param.same(&func.params[0]));
+
+        let Lambda::Llet(LetKind::Strict, _, second_value, _) = first_rest.as_ref() else {
+            panic!("expected second strict let");
+        };
+        let Lambda::LifThenElse(second_cond, second_then, _) = second_value.as_ref() else {
+            panic!("expected second optional guard");
+        };
+        let Lambda::Lprim(second_cond_prim) = second_cond.as_ref() else {
+            panic!("expected second guard primitive");
+        };
+        let [Lambda::Lvar(second_guard_param)] = second_cond_prim.args.as_slice() else {
+            panic!("expected second guard to use renamed param");
+        };
+        assert!(second_guard_param.same(&func.params[2]));
+        let Lambda::Lprim(second_then_prim) = second_then.as_ref() else {
+            panic!("expected second unwrap primitive");
+        };
+        let [Lambda::Lvar(second_unwrap_param)] = second_then_prim.args.as_slice() else {
+            panic!("expected second unwrap to use renamed param");
+        };
+        assert!(second_unwrap_param.same(&func.params[2]));
+    }
+
+    #[test]
     fn lowers_blank_js_call_to_object_create() {
         let raw = RawLambda::prim(
             Primitive::PjsCall {
@@ -1079,7 +1260,10 @@ mod tests {
         let Lambda::Lprim(info) = lowered else {
             panic!("expected Lprim");
         };
-        assert!(matches!(info.primitive, Primitive::Pstringcomp(Comparison::Eq)));
+        assert!(matches!(
+            info.primitive,
+            Primitive::Pstringcomp(Comparison::Eq)
+        ));
         let [lhs, Lambda::Lvar(rhs)] = info.args.as_slice() else {
             panic!("expected string comparison arguments");
         };
@@ -1474,7 +1658,10 @@ mod tests {
         let [Lambda::Llet(LetKind::Alias, _, value, body)] = import.args.as_slice() else {
             panic!("expected alias let under import");
         };
-        assert!(matches!(value.as_ref(), Lambda::Lconst(Constant::ModuleAlias)));
+        assert!(matches!(
+            value.as_ref(),
+            Lambda::Lconst(Constant::ModuleAlias)
+        ));
         let Lambda::LglobalModule(id, false) = body.as_ref() else {
             panic!("expected non-dynamic imported global module in alias body");
         };
