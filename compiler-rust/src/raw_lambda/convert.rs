@@ -1555,8 +1555,28 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn is_function_type(&self, ty: TypeExprRef) -> Option<(TypeExprRef, TypeExprRef)> {
-        match self.type_desc(ty) {
-            TypeDesc::Tarrow { arg, ret, .. } => Some((arg.typ, ret)),
+        self.is_function_type_with_env(ty, self.env)
+    }
+
+    fn is_function_type_with_env(
+        &self,
+        ty: TypeExprRef,
+        env: &crate::types::env::Env,
+    ) -> Option<(TypeExprRef, TypeExprRef)> {
+        let ty = self.type_ctx.repr(ty);
+        match &*self.type_ctx.get_desc(ty) {
+            TypeDesc::Tarrow { arg, ret, .. } => Some((arg.typ, *ret)),
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+                self.is_function_type_with_env(*next, env)
+            }
+            TypeDesc::Tconstr { .. } => {
+                let expanded = crate::types::ctype::expand_head(self.type_ctx, env, ty);
+                if expanded == ty {
+                    None
+                } else {
+                    self.is_function_type_with_env(expanded, env)
+                }
+            }
             _ => None,
         }
     }
@@ -1564,11 +1584,31 @@ impl<'a> RawLambdaConverter<'a> {
     /// Like is_function_type but only matches when the argument has no label (Nolabel).
     /// Matches OCaml's check: Tarrow ({lbl = Nolabel; typ}, ...)
     fn is_nolabel_function_type(&self, ty: TypeExprRef) -> Option<(TypeExprRef, TypeExprRef)> {
-        match self.type_desc(ty) {
+        self.is_nolabel_function_type_with_env(ty, self.env)
+    }
+
+    fn is_nolabel_function_type_with_env(
+        &self,
+        ty: TypeExprRef,
+        env: &crate::types::env::Env,
+    ) -> Option<(TypeExprRef, TypeExprRef)> {
+        let ty = self.type_ctx.repr(ty);
+        match &*self.type_ctx.get_desc(ty) {
             TypeDesc::Tarrow { arg, ret, .. }
                 if matches!(arg.lbl, crate::types::asttypes::ArgLabel::Nolabel) =>
             {
-                Some((arg.typ, ret))
+                Some((arg.typ, *ret))
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+                self.is_nolabel_function_type_with_env(*next, env)
+            }
+            TypeDesc::Tconstr { .. } => {
+                let expanded = crate::types::ctype::expand_head(self.type_ctx, env, ty);
+                if expanded == ty {
+                    None
+                } else {
+                    self.is_nolabel_function_type_with_env(expanded, env)
+                }
             }
             _ => None,
         }
@@ -1627,26 +1667,38 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn is_immediate_type(&self, ty: TypeExprRef) -> bool {
-        self.is_base_type(ty, "int")
-            || self.is_base_type(ty, "char")
-            || self.is_base_type(ty, "bool")
-            || self.is_base_type(ty, "unit")
-            || self.is_immediate_poly_variant(ty)
+        self.is_immediate_type_with_env(ty, self.env)
+    }
+
+    fn is_immediate_type_with_env(&self, ty: TypeExprRef, env: &crate::types::env::Env) -> bool {
+        self.is_base_type_with_env(ty, "int", env)
+            || self.is_base_type_with_env(ty, "char", env)
+            || self.is_base_type_with_env(ty, "bool", env)
+            || self.is_base_type_with_env(ty, "unit", env)
+            || self.is_immediate_poly_variant_with_env(ty, env)
     }
 
     /// Check if a type is "immediate" (not a pointer), matching OCaml's
     /// maybe_pointer_type. Checks type_immediate on type declarations,
     /// all-constant variant types, and closed poly variant rows without payloads.
     fn is_immediate_poly_variant(&self, ty: TypeExprRef) -> bool {
+        self.is_immediate_poly_variant_with_env(ty, self.env)
+    }
+
+    fn is_immediate_poly_variant_with_env(
+        &self,
+        ty: TypeExprRef,
+        env: &crate::types::env::Env,
+    ) -> bool {
         use crate::types::btype;
         use crate::types::type_expr::TypeDesc;
         // Try expand_head first to resolve type aliases
-        let expanded = crate::types::ctype::expand_head(self.type_ctx, self.env, ty);
+        let expanded = crate::types::ctype::expand_head(self.type_ctx, env, ty);
         let ty = self.type_ctx.repr(expanded);
         match &*self.type_ctx.get_desc(ty) {
             TypeDesc::Tconstr { path, .. } => {
                 if let Some(decl) =
-                    crate::raw_lambda::typeopt::find_type_decl_pub(self.type_ctx, self.env, path)
+                    crate::raw_lambda::typeopt::find_type_decl_pub(self.type_ctx, env, path)
                 {
                     if decl.type_immediate {
                         return true;
@@ -1659,7 +1711,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                     // For abstract types with a manifest, check the manifest
                     if let Some(manifest) = decl.type_manifest {
-                        return self.is_immediate_poly_variant(manifest);
+                        return self.is_immediate_poly_variant_with_env(manifest, env);
                     }
                 }
                 false
@@ -1896,20 +1948,31 @@ impl<'a> RawLambdaConverter<'a> {
         prim_name: &str,
         lhs_type: TypeExprRef,
     ) -> Option<Primitive> {
+        self.translate_unified_ops_primitive_with_env(prim_name, lhs_type, self.env)
+    }
+
+    fn translate_unified_ops_primitive_with_env(
+        &self,
+        prim_name: &str,
+        lhs_type: TypeExprRef,
+        env: &crate::types::env::Env,
+    ) -> Option<Primitive> {
         let choose = |int_prim: Primitive,
                       bool_prim: Option<Primitive>,
                       float_prim: Option<Primitive>,
                       bigint_prim: Option<Primitive>,
                       string_prim: Option<Primitive>| {
-            if self.is_base_type(lhs_type, "int") || self.is_immediate_type(lhs_type) {
+            if self.is_base_type_with_env(lhs_type, "int", env)
+                || self.is_immediate_type_with_env(lhs_type, env)
+            {
                 int_prim
-            } else if self.is_base_type(lhs_type, "float") {
+            } else if self.is_base_type_with_env(lhs_type, "float", env) {
                 float_prim.unwrap_or(int_prim)
-            } else if self.is_base_type(lhs_type, "bigint") {
+            } else if self.is_base_type_with_env(lhs_type, "bigint", env) {
                 bigint_prim.unwrap_or(int_prim)
-            } else if self.is_base_type(lhs_type, "string") {
+            } else if self.is_base_type_with_env(lhs_type, "string", env) {
                 string_prim.unwrap_or(int_prim)
-            } else if self.is_base_type(lhs_type, "bool") {
+            } else if self.is_base_type_with_env(lhs_type, "bool", env) {
                 bool_prim.unwrap_or(int_prim)
             } else {
                 int_prim
@@ -2068,18 +2131,27 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn specialize_comparison(&self, table: ComparisonSpecialization, ty: TypeExprRef) -> Primitive {
-        if self.is_base_type(ty, "int")
-            || self.is_base_type(ty, "char")
-            || self.is_immediate_type(ty)
+        self.specialize_comparison_in_env(table, ty, self.env)
+    }
+
+    fn specialize_comparison_in_env(
+        &self,
+        table: ComparisonSpecialization,
+        ty: TypeExprRef,
+        env: &crate::types::env::Env,
+    ) -> Primitive {
+        if self.is_base_type_with_env(ty, "int", env)
+            || self.is_base_type_with_env(ty, "char", env)
+            || self.is_immediate_type_with_env(ty, env)
         {
             table.intcomp
-        } else if self.is_base_type(ty, "float") {
+        } else if self.is_base_type_with_env(ty, "float", env) {
             table.floatcomp
-        } else if self.is_base_type(ty, "string") {
+        } else if self.is_base_type_with_env(ty, "string", env) {
             table.stringcomp
-        } else if self.is_base_type(ty, "bigint") {
+        } else if self.is_base_type_with_env(ty, "bigint", env) {
             table.bigintcomp
-        } else if self.is_base_type(ty, "bool") {
+        } else if self.is_base_type_with_env(ty, "bool", env) {
             table.boolcomp
         } else {
             table.objcomp
@@ -2097,23 +2169,7 @@ impl<'a> RawLambdaConverter<'a> {
         let ty = arg.exp_type;
         let env = self.env_for_expr(arg);
         let env_ref = env.as_deref().unwrap_or(self.env);
-
-        if self.is_base_type_with_env(ty, "int", env_ref)
-            || self.is_base_type_with_env(ty, "char", env_ref)
-            || self.is_immediate_type(ty)
-        {
-            table.intcomp
-        } else if self.is_base_type_with_env(ty, "float", env_ref) {
-            table.floatcomp
-        } else if self.is_base_type_with_env(ty, "string", env_ref) {
-            table.stringcomp
-        } else if self.is_base_type_with_env(ty, "bigint", env_ref) {
-            table.bigintcomp
-        } else if self.is_base_type_with_env(ty, "bool", env_ref) {
-            table.boolcomp
-        } else {
-            table.objcomp
-        }
+        self.specialize_comparison_in_env(table, ty, env_ref)
     }
 
     fn has_constant_constructor_arg(expr: &Expression) -> bool {
@@ -2333,13 +2389,24 @@ impl<'a> RawLambdaConverter<'a> {
         prim: &crate::types::PrimitiveDescription,
         ty: TypeExprRef,
     ) -> Option<Primitive> {
+        self.specialize_primitive_raw_with_env(prim, ty, self.env)
+    }
+
+    fn specialize_primitive_raw_with_env(
+        &self,
+        prim: &crate::types::PrimitiveDescription,
+        ty: TypeExprRef,
+        env: &crate::types::env::Env,
+    ) -> Option<Primitive> {
         let prim_name = Self::raw_primitive_name(&prim.prim_name);
-        if let Some((lhs, _)) = self.is_function_type(ty) {
-            if let Some(primitive) = self.translate_unified_ops_primitive(prim_name, lhs) {
+        if let Some((lhs, _)) = self.is_function_type_with_env(ty, env) {
+            if let Some(primitive) =
+                self.translate_unified_ops_primitive_with_env(prim_name, lhs, env)
+            {
                 return Some(primitive);
             }
             if let Some(table) = Self::comparison_specialization(prim_name) {
-                return Some(self.specialize_comparison(table, lhs));
+                return Some(self.specialize_comparison_in_env(table, lhs, env));
             }
         } else if let Some(table) = Self::comparison_specialization(prim_name) {
             return Some(table.objcomp);
@@ -4372,7 +4439,16 @@ impl<'a> RawLambdaConverter<'a> {
         match &expr.exp_desc {
             ExpressionDesc::Texp_ident(path, _, desc) => match &desc.val_kind {
                 ValueKind::ValPrim(prim) => {
-                    self.translate_primitive_raw(self.loc(expr.exp_loc), prim, expr.exp_type)
+                    if let Some(env) = self.env_for_expr(expr) {
+                        self.translate_primitive_raw_in_env(
+                            self.loc(expr.exp_loc),
+                            prim,
+                            expr.exp_type,
+                            env.as_ref(),
+                        )
+                    } else {
+                        self.translate_primitive_raw(self.loc(expr.exp_loc), prim, expr.exp_type)
+                    }
                 }
                 ValueKind::ValReg => {
                     if let Some(env) = self.env_for_expr(expr) {
@@ -9302,6 +9378,16 @@ impl<'a> RawLambdaConverter<'a> {
         prim: &crate::types::PrimitiveDescription,
         ty: TypeExprRef,
     ) -> RawLambda {
+        self.translate_primitive_raw_in_env(loc, prim, ty, self.env)
+    }
+
+    fn translate_primitive_raw_in_env(
+        &mut self,
+        loc: Location,
+        prim: &crate::types::PrimitiveDescription,
+        ty: TypeExprRef,
+        env: &crate::types::env::Env,
+    ) -> RawLambda {
         let raw_name = Self::raw_primitive_name(&prim.prim_name);
         if let Some(kind) = Self::raw_loc_kind(raw_name) {
             let lam = self.raw_loc_constant(kind, loc);
@@ -9331,7 +9417,9 @@ impl<'a> RawLambdaConverter<'a> {
             // OCaml uses Lprim(Pundefined, []), not Lconst(JsUndefined)
             return RawLambda::prim(Primitive::Pundefined, vec![], loc);
         }
-        let primitive = if let Some(primitive) = self.specialize_primitive_raw(prim, ty) {
+        let primitive = if let Some(primitive) =
+            self.specialize_primitive_raw_with_env(prim, ty, env)
+        {
             primitive
         } else {
             Primitive::PjsCall {
@@ -9800,6 +9888,100 @@ mod tests {
 
         let spec = converter.ffi_spec_for_primitive(&prim, false, false);
         assert_eq!(spec.kind, ExternalFfiKind::ObjCreate);
+    }
+
+    fn type_alias_decl(manifest: TypeExprRef) -> crate::types::TypeDeclaration {
+        crate::types::TypeDeclaration {
+            type_params: vec![],
+            type_arity: 0,
+            type_kind: crate::types::decl::TypeKind::TypeAbstract,
+            type_private: crate::types::asttypes::PrivateFlag::Public,
+            type_manifest: Some(manifest),
+            type_variance: vec![],
+            type_newtype_level: None,
+            type_loc: Location::none(),
+            type_attributes: vec![],
+            type_immediate: false,
+            type_unboxed: crate::types::decl::UnboxedStatus::default(),
+            type_inlined_types: vec![],
+            type_path: None,
+        }
+    }
+
+    fn primitive_wrapper_body_primitive(lam: RawLambda) -> Primitive {
+        let RawLambda::Lfunction(function) = lam else {
+            panic!("expected primitive wrapper function");
+        };
+        let RawLambda::Lprim(info) = *function.body else {
+            panic!("expected primitive wrapper body");
+        };
+        info.primitive
+    }
+
+    #[test]
+    fn primitive_value_compare_specializes_through_alias_env() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let mut env = initial_env(&ctx);
+        let int_ty = ctx.predef_int();
+        let compare_ty = ctx.new_arrow_simple(int_ty, ctx.new_arrow_simple(int_ty, int_ty));
+        let alias_id = Ident::create_local("cmp_alias");
+        env.add_type(alias_id.clone(), type_alias_decl(compare_ty));
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let prim = crate::types::PrimitiveDescription {
+            prim_name: "%compare".to_string(),
+            prim_arity: 2,
+            prim_native_name: String::new(),
+            prim_native_float: false,
+            prim_from_constructor: false,
+        };
+        let alias_ty = ctx.new_constr(crate::types::Path::Pident(alias_id), vec![]);
+
+        let primitive = primitive_wrapper_body_primitive(converter.translate_primitive_raw_in_env(
+            Location::none(),
+            &prim,
+            alias_ty,
+            &env,
+        ));
+
+        assert_eq!(primitive, Primitive::Pintorder);
+    }
+
+    #[test]
+    fn primitive_value_equality_specializes_through_alias_env() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let mut env = initial_env(&ctx);
+        let string_ty = ctx.predef_string();
+        let bool_ty = ctx.predef_bool();
+        let eq_ty = ctx.new_arrow_simple(string_ty, ctx.new_arrow_simple(string_ty, bool_ty));
+        let alias_id = Ident::create_local("string_eq_alias");
+        env.add_type(alias_id.clone(), type_alias_decl(eq_ty));
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let prim = crate::types::PrimitiveDescription {
+            prim_name: "%equal".to_string(),
+            prim_arity: 2,
+            prim_native_name: String::new(),
+            prim_native_float: false,
+            prim_from_constructor: false,
+        };
+        let alias_ty = ctx.new_constr(crate::types::Path::Pident(alias_id), vec![]);
+
+        let primitive = primitive_wrapper_body_primitive(converter.translate_primitive_raw_in_env(
+            Location::none(),
+            &prim,
+            alias_ty,
+            &env,
+        ));
+
+        assert_eq!(
+            primitive,
+            Primitive::Pstringcomp(crate::lambda::Comparison::Eq)
+        );
     }
 
     #[test]

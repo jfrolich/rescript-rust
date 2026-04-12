@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 632/657 (96.2%), 25 parity failures, 91 hunks
+**Status:** 634/657 (96.5%), 23 parity failures, 89 hunks
 
 ## Goal
 
@@ -23,8 +23,8 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **632/657**
-- Parity hunks: **91**
+- Optimized lambda parity: **634/657**
+- Parity hunks: **89**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
@@ -50,7 +50,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **25** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
+There are **23** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -76,6 +76,8 @@ Current frontier characteristics:
 - `LetUnwrap.res` now also passes exactly after preserving named polyvariant hash metadata in raw match tests.
 - `polyvar_test.res` now also passes exactly on the current authoritative baseline.
 - `set_gen.res` now also passes exactly on the current authoritative baseline.
+- `bs_poly_set_test.res` now also passes exactly after env-aware primitive-value specialization for bare `compare`.
+- `topsort_test.res` now also passes exactly after the same env-aware primitive-value specialization for bare `"=="`.
 - `ari_regress_test.res`, `big_enum.res`, `equal_test.res`, `reasonReact.res`, and `reasonReactOptimizedCreateClass.res` now also pass exactly on the current authoritative baseline.
 - the optimized sexp printer now emits OCaml-style byte escapes for Latin-1 strings, which removed the remaining Unicode/raw-string formatting cluster:
   - `Stdlib_Intl_CollatorTest.res`: **exact parity**
@@ -129,6 +131,49 @@ Current frontier characteristics:
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### primitive-value specialization now uses the expression env like OCaml `transl_primitive`
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::primitive_value_compare_specializes_through_alias_env -- --exact
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::primitive_value_equality_specializes_through_alias_env -- --exact
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 300 ./scripts/test_lambda_parity.sh -j1 bs_poly_set_test
+timeout 300 ./scripts/test_lambda_parity.sh -j1 topsort_test
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- Optimized lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Optimized lambda parity: **634/657**
+  - Exact hunks: **89**
+
+Key checkpoints:
+
+- `bs_poly_set_test.res`: passes
+- `topsort_test.res`: passes
+- authoritative optimized baseline moved from **632/657**, **91** hunks to **634/657**, **89** hunks
+
+OCaml `translcore.ml` specializes primitive values through `Typeopt.is_function_type env ty`,
+which scrapes aliases and uses the current expression environment before choosing
+`Pintorder`, `Pstringcomp`, and the rest of the primitive wrapper body. Rust
+`compiler-rust/src/raw_lambda/convert.rs` was still specializing bare primitive
+values like `compare` and `"=="` against `self.env` with a shallow function-type
+check, so alias-expanded wrappers fell back to `Pobjorder` / `Pobjcomp` even when
+applications of the same primitive already specialized correctly.
+
+`raw_lambda::convert` now mirrors the OCaml behavior for primitive values:
+
+- function-type detection follows `Tlink` / `Tsubst` and `expand_head`
+- immediate/comparison/unified-op specialization can use the caller's env
+- `Texp_ident` primitive values now specialize through `expr.exp_env` when available
+
+The new unit tests lock the alias-expanded `%compare` and `%equal` wrapper cases so
+this path does not regress back to object primitives.
 
 ### matching-generated ids now continue from the shared raw-lambda stamp stream
 Ran:
