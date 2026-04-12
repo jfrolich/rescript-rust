@@ -26,17 +26,12 @@ This uses the existing `test_rust_parity.sh` harness with:
 - syntax section skipped
 - Spice PPX parity still enabled
 - JS snapshot section enabled
-- external corpus disabled by default, so the baseline tracks only
-  `tests/tests/src` (657 `.res` files)
 
 The project metric is the `JS COMPILATION SNAPSHOTS` section. Spice is kept as
 a guard because it is built into the compiler now.
 
-To include the external corpus explicitly:
-
-```bash
-timeout 1800 ./scripts/test_js_output_parity.sh --with-external
-```
+The current wrapper still includes the configured external corpus under
+`TELLA_DIR`. Rescoping it to an in-repo-only baseline remains separate work.
 
 ## Upstream Status
 

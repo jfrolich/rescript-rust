@@ -16,6 +16,7 @@ RUST_TARGET="${RUST_TARGET:-release}"
 RUST_BSC="$RUST_DIR/target/$RUST_TARGET/bsc"
 RUST_PARSER="$RUST_DIR/target/$RUST_TARGET/res_parser_rust"
 OCAML_BSC="$PROJECT_ROOT/packages/@rescript/$(./scripts/platform.sh)/bin/bsc.exe"
+RESCRIPT_CLI="$PROJECT_ROOT/packages/@rescript/$(./scripts/platform.sh)/bin/rescript.exe"
 OCAML_PARSER="$DUNE_BIN_DIR/res_parser"
 SPICE_PPX="${SPICE_PPX:-/Users/jaapf/conductor/repos/ppx_spice/ppx}"
 SPICE_TEST_DIR="$PROJECT_ROOT/tests/ppx_spice/src"
@@ -143,6 +144,40 @@ setup_temp_dir() {
     rm -rf "$TEMP_DIR"
     mkdir -p "$TEMP_DIR"
     mkdir -p "$DIFF_DIR"
+}
+
+find_rescript_project_root() {
+    local file_path="$1"
+    local current_dir
+    current_dir=$(dirname "$file_path")
+
+    while [[ "$current_dir" != "/" && -n "$current_dir" ]]; do
+        if [[ -f "$current_dir/rescript.json" || -f "$current_dir/bsconfig.json" ]]; then
+            if [[ -d "$current_dir/lib/bs" ]]; then
+                echo "$current_dir"
+                return 0
+            fi
+        fi
+        current_dir=$(dirname "$current_dir")
+    done
+
+    return 1
+}
+
+get_compiler_args_json() {
+    local project_dir="$1"
+    local file_path="$2"
+
+    if [[ ! -x "$RESCRIPT_CLI" || -z "$project_dir" || -z "$file_path" ]]; then
+        return 1
+    fi
+
+    if [[ "$file_path" != "$project_dir"/* ]]; then
+        return 1
+    fi
+
+    local rel_path="${file_path#$project_dir/}"
+    cd "$project_dir" && "$RESCRIPT_CLI" compiler-args "$rel_path" 2>/dev/null
 }
 
 # =============================================================================
@@ -635,6 +670,10 @@ run_js_compilation_tests() {
     local file_index=0
     while read -r res_file; do
         file_index=$((file_index + 1))
+        local full_res_file="$res_file"
+        if [[ "$full_res_file" != /* ]]; then
+            full_res_file="$PROJECT_ROOT/tests/tests/$res_file"
+        fi
 
         # Progress indicator
         if [[ $((file_index % 50)) -eq 0 ]] && $VERBOSE; then
@@ -664,10 +703,36 @@ run_js_compilation_tests() {
         local actual_mjs="$output_dir/$output_name"
         local compile_output="$TEMP_DIR/js/compile_output.txt"
 
-        # Note: We compile to a temp location to not disturb the actual test files
-        # Local syntax tests expect .mjs; external corpora usually expect .bs.js.
+        local project_dir=""
+        local compiler_args_json=""
+        local -a compiler_args=()
+
+        project_dir=$(find_rescript_project_root "$full_res_file") || project_dir=""
+        if [[ -n "$project_dir" ]]; then
+            compiler_args_json=$(get_compiler_args_json "$project_dir" "$full_res_file") || compiler_args_json=""
+        fi
+
+        if [[ -n "$compiler_args_json" ]]; then
+            while IFS= read -r arg; do
+                compiler_args+=("$arg")
+            done < <(
+                printf '%s' "$compiler_args_json" | python3 -c 'import json,sys; [print(arg) for arg in json.load(sys.stdin).get("compiler_args", [])]'
+            )
+        fi
+
+        # Prefer the owning project's compiler-args so snapshot compilation
+        # runs with the same include paths, package output, JSX, and warnings
+        # as the checked-in build. Fall back to standalone compilation only
+        # when compiler-args metadata is unavailable.
         local compile_ok=false
-        if [[ "$expected_ext" == "mjs" ]]; then
+        if [[ "${#compiler_args[@]}" -gt 0 && -d "$project_dir/lib/bs" ]]; then
+            if (
+                cd "$project_dir/lib/bs" &&
+                timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "${compiler_args[@]}" -o "$actual_mjs"
+            ) > "$compile_output" 2>&1; then
+                compile_ok=true
+            fi
+        elif [[ "$expected_ext" == "mjs" ]]; then
             if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-package-name rescript-tests -bs-module-type esmodule "$res_file" -o "$actual_mjs" > "$compile_output" 2>&1; then
                 compile_ok=true
             fi
