@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 587/657 (89.3%), 70 parity failures, 225 hunks
+**Status:** 594/657 (90.4%), 63 parity failures, 206 hunks
 
 ## Goal
 
@@ -23,21 +23,21 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **587/657**
-- Parity hunks: **225**
+- Optimized lambda parity: **594/657**
+- Parity hunks: **206**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
   - `bs_unwrap_test.res`: **19** hunks
-  - `record_extension_test.res`: **11** hunks
   - `exception_raise_test.res`: **11** hunks
+  - `record_extension_test.res`: **11** hunks
   - `js_exception_catch_test.res`: **9** hunks
-  - `Stdlib_DictTests.res`: **8** hunks
   - `rec_module_test.res`: **8** hunks
-  - `recmodule.res`: **7** hunks
+  - `Stdlib_DictTests.res`: **8** hunks
   - `large_record_duplication_test.res`: **7** hunks
-  - `rec_module_opt.res`: **6** hunks
+  - `recmodule.res`: **7** hunks
   - `gpr_3142_test.res`: **6** hunks
+  - `rec_module_opt.res`: **6** hunks
 
 ## Working Rules
 
@@ -51,7 +51,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **70** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order can still move whole control-flow clusters.
+There are **63** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -82,15 +82,100 @@ Current frontier characteristics:
   - `gpr_1438.res`: **exact parity**
   - `gpr_4069_test.res`: **exact parity**
   - `int_switch_test.res`: **exact parity**
-  - `mario_game.res`: **21 hunks** (down from **36**)
+  - `mario_game.res`: **2 hunks** on the current authoritative baseline (down from **36** across later slices)
 - the focused `Lam.if_` assert-failure rewrite is now landed:
   - `stringmatch_test.res`: **exact parity** (down from **1 hunk** on the prior baseline)
   - `js_json_test.res`: **45 hunks** on a focused rerun, so its remaining diffs are no longer dominated by that one rewrite
+- the external-return-wrapper slice is now landed:
+  - `bs_splice_partial.res`: **exact parity**
+  - `js_nullable_test.res`: **exact parity**
+  - `js_re_test.res`: **exact parity**
+  - `js_string_test.res`: **exact parity**
+  - `reactDOM.res`: **exact parity**
+  - `return_check.res`: **exact parity**
+  - `Stdlib_TempTests.res`: **4 hunks**, so its remaining diffs are now in static-exit numbering rather than nullable/unit FFI wrapping
 - the next visible optimized frontier is the current exact-diff leaders (`bs_unwrap_test.res`, `record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`) plus the recursive-module cluster (`recmodule.res`, `rec_module_test.res`, `rec_module_opt.res`) and the remaining switch-facing files (`variant.res`, `UntaggedVariants.res`, `switch_string.res`).
 - a fresh full raw `-drawlambda` rerun reported **656/657** with one exact failure in `coercion_module_alias_test.res`; that looks separate from the assert-failure lowering slice and should be handled in a dedicated raw-parity session.
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### external-call return wrappers and CMI byte preservation moved the FFI frontier
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::ffi_spec_reads_null_to_opt_return_wrapper
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests::wraps_null_to_opt_return_wrapper_around_js_call
+cargo test --release --manifest-path compiler-rust/Cargo.toml lambda::convert::tests::decoded_external_ffi_spec_reads_null_to_opt_wrapper
+cargo test --release --manifest-path compiler-rust/Cargo.toml cmi::marshal_reader::tests::test_read_small_string_preserves_non_utf8_bytes
+cargo build --release --manifest-path compiler-rust/Cargo.toml
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- OCaml compile coverage: **657/657**
+- Rust compile coverage: **657/657**
+- Optimized lambda parity: **594/657**
+- Stamp-canonicalized parity: not re-baselined in this rerun
+- Exact hunks: **206**
+- Stamp-canonicalized hunks: not re-baselined in this rerun
+
+Key checkpoints:
+
+- `bs_splice_partial.res`: passes
+- `js_nullable_test.res`: passes
+- `js_re_test.res`: passes
+- `js_string_test.res`: passes
+- `reactDOM.res`: passes
+- `return_check.res`: passes
+- `mario_game.res`: **2 hunks**
+- `Stdlib_TempTests.res`: **4 hunks**
+- next visible frontier from this slice: `sw_consts_full` lowering in `mario_game.res` plus static-exit numbering in `Stdlib_TempTests.res`
+
+`compiler/core/lam_convert.ml` does not leave JS externals as bare `Pjs_call`
+nodes when the FFI metadata says the result must be wrapped. It threads the
+marshaled external-return wrapper through lowering and applies `Lam.result_wrap`
+to produce `Pnull_to_opt`, `Pnull_undefined_to_opt`, or `Lsequence(call, ())`
+for replaced-unit returns.
+
+Rust had two distinct gaps:
+
+- `compiler-rust/src/raw_lambda/convert.rs` and the legacy fallback in
+  `compiler-rust/src/lambda/convert.rs` were discarding the marshaled wrapper
+  metadata carried in `primitive.prim_native_name`
+- `compiler-rust/src/cmi/marshal_reader.rs` was decoding OCaml strings with
+  UTF-8 lossiness, which corrupted the raw marshaled byte payload for stdlib
+  externals loaded from `.cmi` files
+
+Rust now:
+
+- records explicit `ExternalReturnWrapper` metadata in
+  `compiler-rust/src/lambda/primitive.rs`
+- decodes the marshaled FFI payload in both raw-lambda and legacy-lambda
+  primitive conversion, including object-create classification and nullable/unit
+  return wrappers
+- applies the wrapper in `compiler-rust/src/raw_lambda/lower.rs` the same way
+  OCaml `Lam.result_wrap` does
+- preserves OCaml string bytes exactly in
+  `compiler-rust/src/cmi/marshal_reader.rs`, so non-UTF-8 marshaled metadata
+  survives `.cmi` loading intact
+
+Representative `-drawlambda` checks for `js_nullable_test.res` and
+`mario_game.res` stayed exact, which kept this session scoped to optimized
+lowering and FFI metadata rather than upstream raw-lambda construction.
+
+Authoritative repo-wide baseline moved from:
+
+- **587/657**, **225** hunks
+
+to:
+
+- **594/657**, **206** hunks
+
+That is a gain of **7 files** and **19 hunks**. The wrapper-related external
+frontier is materially smaller now; the remaining failures on those code paths
+are no longer about nullable/unit result wrapping itself.
 
 ### `Lam.apply` smart constructors, `Lam.prim` folding, and builtin-object classification moved the baseline again
 `compiler/core/lam_convert.ml` does not lower applications and primitives by

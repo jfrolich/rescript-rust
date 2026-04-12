@@ -403,7 +403,8 @@ impl RawLambda {
                         ffi: crate::lambda::primitive::ExternalFfiSpec {
                             module_name: None,
                             kind: crate::lambda::primitive::ExternalFfiKind::Default,
-                            returns_unit: false,
+                            return_wrapper:
+                                crate::lambda::primitive::ExternalReturnWrapper::Identity,
                         },
                         dynamic_import: false,
                         transformed_jsx: false,

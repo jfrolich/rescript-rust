@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path as StdPath;
 use std::sync::{Mutex, OnceLock};
 
+use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::context::IdGenerator;
 use crate::ident::{Ident, IdentFlags};
 use crate::lambda::compat::LetKind;
@@ -14,7 +15,9 @@ use crate::lambda::constant::{
     ConstructorRuntimeTag, ConstructorTag as PointerConstructorTag, PointerInfo, StringDelim,
 };
 use crate::lambda::convert::LambdaConverter;
-use crate::lambda::primitive::{ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, Mutable};
+use crate::lambda::primitive::{
+    ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, ExternalReturnWrapper, Mutable,
+};
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::Constant;
 use crate::lambda::{
@@ -654,9 +657,6 @@ pub struct RawLambdaConverter<'a> {
 }
 
 impl<'a> RawLambdaConverter<'a> {
-    const OCAML_MARSHAL_HEADER_LEN: usize = 20;
-    const FFI_OBJ_CREATE_SMALL_BLOCK: u8 = 0x91;
-
     /// Create a new raw-lambda converter.
     pub fn new(
         arena: &'a ParseArena,
@@ -2342,28 +2342,31 @@ impl<'a> RawLambdaConverter<'a> {
         object_result: bool,
         returns_unit: bool,
     ) -> ExternalFfiSpec {
-        let kind = if self.primitive_is_obj_create(prim) || object_result {
+        let ffi_marshaled = decode_marshaled_ffi_type(&prim.prim_native_name);
+        let kind = if object_result
+            || ffi_marshaled
+                .as_ref()
+                .is_some_and(ffi_marshaled_is_obj_create)
+        {
             ExternalFfiKind::ObjCreate
         } else {
             ExternalFfiKind::Default
         };
+        let return_wrapper = ffi_marshaled
+            .as_ref()
+            .and_then(ffi_marshaled_return_wrapper)
+            .unwrap_or_else(|| {
+                if returns_unit {
+                    ExternalReturnWrapper::ReplacedWithUnit
+                } else {
+                    ExternalReturnWrapper::Identity
+                }
+            });
         ExternalFfiSpec {
             module_name: None,
             kind,
-            returns_unit,
+            return_wrapper,
         }
-    }
-
-    fn primitive_is_obj_create(&self, prim: &crate::types::PrimitiveDescription) -> bool {
-        let bytes = prim
-            .prim_native_name
-            .chars()
-            .map(|c| c as u32 as u8)
-            .collect::<Vec<_>>();
-        matches!(
-            bytes.get(Self::OCAML_MARSHAL_HEADER_LEN),
-            Some(&Self::FFI_OBJ_CREATE_SMALL_BLOCK)
-        )
     }
 
     fn applied_result_is_builtin_object(&self, ty: TypeExprRef, applied_args: usize) -> bool {
@@ -9359,9 +9362,37 @@ impl<'a> RawLambdaConverter<'a> {
     }
 }
 
+fn decode_marshaled_ffi_type(encoded: &str) -> Option<OcamlValue> {
+    if encoded.is_empty() {
+        return None;
+    }
+    let bytes = encoded.chars().map(|c| c as u32 as u8).collect::<Vec<_>>();
+    let mut reader = MarshalReader::new();
+    reader.read_from_bytes(&bytes).ok()
+}
+
+fn ffi_marshaled_is_obj_create(value: &OcamlValue) -> bool {
+    matches!(value.as_block_opt(), Some((1, _)))
+}
+
+fn ffi_marshaled_return_wrapper(value: &OcamlValue) -> Option<ExternalReturnWrapper> {
+    let (tag, fields) = value.as_block_opt()?;
+    if tag != 0 || fields.len() != 3 {
+        return None;
+    }
+    match fields[1].as_int() {
+        0 | 1 => Some(ExternalReturnWrapper::Identity),
+        2 => Some(ExternalReturnWrapper::NullToOpt),
+        3 => Some(ExternalReturnWrapper::NullUndefinedToOpt),
+        4 => Some(ExternalReturnWrapper::ReplacedWithUnit),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::binary_ast::ffi_types::{ExternalSpec, FfiType, ReturnWrapper, encode_ffi_type};
     use crate::context::IdGenerator;
     use crate::parse_arena::ParseArena;
     use crate::parser::ast::Attributes;
@@ -9539,5 +9570,50 @@ mod tests {
         };
         assert_eq!(try_handler_exit_id(&first), Some(2));
         assert_eq!(try_handler_exit_id(&second), Some(1));
+    }
+
+    #[test]
+    fn ffi_spec_reads_null_to_opt_return_wrapper() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let prim = crate::types::PrimitiveDescription {
+            prim_name: "get".to_string(),
+            prim_arity: 1,
+            prim_native_name: encode_ffi_type(&FfiType::FfiBs {
+                params: crate::binary_ast::ffi_types::Params::ParamNumber(1),
+                return_wrapper: ReturnWrapper::ReturnNullToOpt,
+                external_spec: ExternalSpec::JsGet {
+                    js_get_name: "x".to_string(),
+                    js_get_scopes: Vec::new(),
+                },
+            }),
+            prim_native_float: false,
+            prim_from_constructor: false,
+        };
+
+        let spec = converter.ffi_spec_for_primitive(&prim, false, false);
+        assert_eq!(spec.return_wrapper, ExternalReturnWrapper::NullToOpt);
+    }
+
+    #[test]
+    fn ffi_spec_reads_marshaled_object_create_kind() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let prim = crate::types::PrimitiveDescription {
+            prim_name: String::new(),
+            prim_arity: 1,
+            prim_native_name: encode_ffi_type(&FfiType::FfiObjCreate(Vec::new())),
+            prim_native_float: false,
+            prim_from_constructor: false,
+        };
+
+        let spec = converter.ffi_spec_for_primitive(&prim, false, false);
+        assert_eq!(spec.kind, ExternalFfiKind::ObjCreate);
     }
 }

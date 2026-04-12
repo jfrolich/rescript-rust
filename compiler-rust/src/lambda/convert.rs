@@ -6,12 +6,13 @@
 
 use std::path::Path as StdPath;
 
+use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::context::IdGenerator;
 use crate::ident::{Ident, IdentFlags};
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::constant::{Constant, StringDelim};
 use crate::lambda::primitive::{
-    ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, Mutable, Primitive,
+    ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, ExternalReturnWrapper, Mutable, Primitive,
 };
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::{
@@ -296,14 +297,17 @@ impl<'a> LambdaConverter<'a> {
             TConstant::Char(c) => Constant::Char(*c),
             TConstant::String(s, delim) => Constant::String {
                 s: s.clone(),
-                delim: delim.as_ref().and_then(|d| match d.as_str() {
-                    "" => Some(StringDelim::Plain),
-                    "*j" | "js" | "j" => Some(StringDelim::StarJ),
-                    "json" => Some(StringDelim::NoQuotes),
-                    "bq" => Some(StringDelim::Backtick),
-                    "`" => Some(StringDelim::Backtick),
-                    _ => None,
-                }).or_else(|| delim.is_none().then_some(StringDelim::Plain)),
+                delim: delim
+                    .as_ref()
+                    .and_then(|d| match d.as_str() {
+                        "" => Some(StringDelim::Plain),
+                        "*j" | "js" | "j" => Some(StringDelim::StarJ),
+                        "json" => Some(StringDelim::NoQuotes),
+                        "bq" => Some(StringDelim::Backtick),
+                        "`" => Some(StringDelim::Backtick),
+                        _ => None,
+                    })
+                    .or_else(|| delim.is_none().then_some(StringDelim::Plain)),
             },
             TConstant::Float(f) => Constant::Float(f.clone()),
             TConstant::BigInt(neg, v) => Constant::BigInt {
@@ -1095,11 +1099,7 @@ impl<'a> LambdaConverter<'a> {
         let prim = Primitive::PjsCall {
             prim_name: prim.prim_name.clone(),
             arg_types: vec![ExternalArgSpec { label: None }; prim.prim_arity as usize],
-            ffi: ExternalFfiSpec {
-                module_name: None,
-                kind: ExternalFfiKind::Default,
-                returns_unit: false,
-            },
+            ffi: decoded_external_ffi_spec(&prim.prim_native_name),
             dynamic_import: false,
             transformed_jsx: false,
         };
@@ -1280,9 +1280,56 @@ fn to_parser_mutable(flag: TypeMutableFlag) -> ParserMutableFlag {
     }
 }
 
+fn decoded_external_ffi_spec(encoded: &str) -> ExternalFfiSpec {
+    let ffi_marshaled = decode_marshaled_ffi_type(encoded);
+    ExternalFfiSpec {
+        module_name: None,
+        kind: if ffi_marshaled
+            .as_ref()
+            .is_some_and(ffi_marshaled_is_obj_create)
+        {
+            ExternalFfiKind::ObjCreate
+        } else {
+            ExternalFfiKind::Default
+        },
+        return_wrapper: ffi_marshaled
+            .as_ref()
+            .and_then(ffi_marshaled_return_wrapper)
+            .unwrap_or(ExternalReturnWrapper::Identity),
+    }
+}
+
+fn decode_marshaled_ffi_type(encoded: &str) -> Option<OcamlValue> {
+    if encoded.is_empty() {
+        return None;
+    }
+    let bytes = encoded.chars().map(|c| c as u32 as u8).collect::<Vec<_>>();
+    let mut reader = MarshalReader::new();
+    reader.read_from_bytes(&bytes).ok()
+}
+
+fn ffi_marshaled_is_obj_create(value: &OcamlValue) -> bool {
+    matches!(value.as_block_opt(), Some((1, _)))
+}
+
+fn ffi_marshaled_return_wrapper(value: &OcamlValue) -> Option<ExternalReturnWrapper> {
+    let (tag, fields) = value.as_block_opt()?;
+    if tag != 0 || fields.len() != 3 {
+        return None;
+    }
+    match fields[1].as_int() {
+        0 | 1 => Some(ExternalReturnWrapper::Identity),
+        2 => Some(ExternalReturnWrapper::NullToOpt),
+        3 => Some(ExternalReturnWrapper::NullUndefinedToOpt),
+        4 => Some(ExternalReturnWrapper::ReplacedWithUnit),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::binary_ast::ffi_types::{ExternalSpec, FfiType, ReturnWrapper, encode_ffi_type};
     use crate::ident::Ident;
     use crate::parse_arena::{Located, ParseArena};
     use crate::parser::longident::Longident;
@@ -1362,5 +1409,19 @@ mod tests {
             Lambda::Llet(_, _, _, _) => {}
             _ => panic!("expected let binding"),
         }
+    }
+
+    #[test]
+    fn decoded_external_ffi_spec_reads_null_to_opt_wrapper() {
+        let spec = decoded_external_ffi_spec(&encode_ffi_type(&FfiType::FfiBs {
+            params: crate::binary_ast::ffi_types::Params::ParamNumber(1),
+            return_wrapper: ReturnWrapper::ReturnNullToOpt,
+            external_spec: ExternalSpec::JsGet {
+                js_get_name: "x".to_string(),
+                js_get_scopes: Vec::new(),
+            },
+        }));
+
+        assert_eq!(spec.return_wrapper, ExternalReturnWrapper::NullToOpt);
     }
 }

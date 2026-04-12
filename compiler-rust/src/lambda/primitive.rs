@@ -45,8 +45,8 @@ pub struct ExternalFfiSpec {
     pub module_name: Option<String>,
     /// Minimal raw-ffi classification kept for optimized-lambda lowering.
     pub kind: ExternalFfiKind,
-    /// Whether the fully applied call should produce `seq(call, unit)`.
-    pub returns_unit: bool,
+    /// How the fully applied call result should be wrapped.
+    pub return_wrapper: ExternalReturnWrapper,
 }
 
 /// Raw FFI kind preserved across the raw-lambda boundary.
@@ -54,6 +54,15 @@ pub struct ExternalFfiSpec {
 pub enum ExternalFfiKind {
     Default,
     ObjCreate,
+}
+
+/// Result wrapping preserved for external calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalReturnWrapper {
+    Identity,
+    NullToOpt,
+    NullUndefinedToOpt,
+    ReplacedWithUnit,
 }
 
 /// Primitive operations
@@ -458,9 +467,7 @@ mod tests {
         assert!(Primitive::Paddint.eq_approx(&Primitive::Paddint));
         assert!(!Primitive::Paddint.eq_approx(&Primitive::Psubint));
 
-        assert!(
-            Primitive::Pintcomp(Comparison::Eq).eq_approx(&Primitive::Pintcomp(Comparison::Eq))
-        );
+        assert!(Primitive::Pintcomp(Comparison::Eq).eq_approx(&Primitive::Pintcomp(Comparison::Eq)));
         assert!(
             !Primitive::Pintcomp(Comparison::Eq).eq_approx(&Primitive::Pintcomp(Comparison::Neq))
         );

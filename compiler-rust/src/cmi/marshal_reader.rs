@@ -328,7 +328,7 @@ impl MarshalReader {
             let len = (code & 0x1F) as usize;
             let mut buf = vec![0u8; len];
             reader.read_exact(&mut buf)?;
-            let s = String::from_utf8_lossy(&buf).into_owned();
+            let s = decode_ocaml_string(&buf);
             let value = OcamlValue::String(s);
             self.obj_table.push(value.clone());
             return Ok(Some(value));
@@ -382,7 +382,7 @@ impl MarshalReader {
                 let len = read_u8(reader)? as usize;
                 let mut buf = vec![0u8; len];
                 reader.read_exact(&mut buf)?;
-                let s = String::from_utf8_lossy(&buf).into_owned();
+                let s = decode_ocaml_string(&buf);
                 let value = OcamlValue::String(s);
                 self.obj_table.push(value.clone());
                 Ok(Some(value))
@@ -391,7 +391,7 @@ impl MarshalReader {
                 let len = read_u32_be(reader)? as usize;
                 let mut buf = vec![0u8; len];
                 reader.read_exact(&mut buf)?;
-                let s = String::from_utf8_lossy(&buf).into_owned();
+                let s = decode_ocaml_string(&buf);
                 let value = OcamlValue::String(s);
                 self.obj_table.push(value.clone());
                 Ok(Some(value))
@@ -426,6 +426,10 @@ impl MarshalReader {
         }
         Ok(self.obj_table[target_idx].clone())
     }
+}
+
+fn decode_ocaml_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|&byte| char::from(byte)).collect()
 }
 
 // ============================================================================
@@ -520,6 +524,21 @@ mod tests {
         let mut reader = MarshalReader::new();
         let val = reader.read_from_bytes(&data).unwrap();
         assert_eq!(val.as_string(), "foo");
+    }
+
+    #[test]
+    fn test_read_small_string_preserves_non_utf8_bytes() {
+        let data = [
+            0x84, 0x95, 0xA6, 0xBE, // magic
+            0x00, 0x00, 0x00, 0x02, // data_len = 2
+            0x00, 0x00, 0x00, 0x01, // obj_count = 1
+            0x00, 0x00, 0x00, 0x00, // size_32
+            0x00, 0x00, 0x00, 0x00, // size_64
+            0x21, 0x84, // PREFIX_SMALL_STRING(1) + raw byte 0x84
+        ];
+        let mut reader = MarshalReader::new();
+        let val = reader.read_from_bytes(&data).unwrap();
+        assert_eq!(val.as_string().chars().next().unwrap() as u32 as u8, 0x84);
     }
 
     #[test]
