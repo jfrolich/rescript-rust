@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 84 / 657 JS snapshots passing, 0 compile errors, 573 output diffs
+**Status:** 85 / 657 JS snapshots passing, 0 compile errors, 572 output diffs
 
 ## Goal
 
@@ -35,9 +35,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **84 / 657**
+- JS snapshot parity: **85 / 657**
 - Compile errors: **0**
-- Output diffs: **573**
+- Output diffs: **572**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -183,6 +183,38 @@ Remaining internal compile errors under the measured wrapper baseline:
 - none
 
 ## Latest Session Findings
+
+- `compiler-rust/src/lambda/compile.rs` now matches the OCaml
+  `lam_compile.ml` static-catch and continuation-sensitive switch lowering more
+  closely on the Rust JS backend path:
+  `LstaticCatch` handlers are threaded through expression, declaration,
+  effect-block, and return-block lowering, and nested `Llet` values now preserve
+  declaration / effect / return context when they eventually lower into
+  `Lswitch` or `LstringSwitch`
+- Verified focused guards for this cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release staticcatch_wrapped_string_switches_use_the_handler_as_the_default_value -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release nested_let_values_preserve_declaration_context_for_wrapped_string_switches -- --nocapture`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_string_switch.res -o /tmp/test_string_switch.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/complete_parmatch_test.res -o /tmp/complete_parmatch_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+- `tests/tests/src/test_string_switch.res` is no longer on the old backend
+  temp-result path:
+  Rust now emits the same direct `let version; switch (...) { version = ... }`
+  structure as OCaml, and the remaining drift there is printer-only
+  (`case "darwin":` spacing and the final purity-trailer name)
+- `tests/tests/src/complete_parmatch_test.res` also moved off the old backend
+  fallback path:
+  it now lowers as a direct return-position switch, and its remaining drift is
+  printer-only around character comments and `case` spacing
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the static-catch / continuation changes
+- The authoritative JS snapshot baseline now reports **85 / 657** passing, **0**
+  compile errors, and **572** output diffs.
+- Interpretation:
+  this confirms the remaining drift in the focused switch/static-catch cluster
+  is no longer missing backend control-flow lowering in `lam_compile`; the next
+  frontier on those files is printer byte-shape parity, while broader backend
+  work still remains elsewhere in the 572-file diff set
 
 - `compiler-rust/src/lambda/compile.rs` now matches the OCaml
   `lam_compile.ml` switch/result continuation shape more closely for the

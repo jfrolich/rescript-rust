@@ -27,6 +27,7 @@ use crate::lambda::primitive::{
     ExternalModuleBindName, ExternalModuleName, ExternalObjLabel, ExternalObjSpec, ExternalSpec,
     Mutable, Primitive,
 };
+use crate::lambda::subst;
 use crate::lambda::{Apply, Lambda, LambdaSwitch, TagInfo};
 
 /// Compilation result for an expression: prelude statements plus a value expression.
@@ -36,10 +37,18 @@ struct Compiled {
     expr: Expression,
 }
 
+#[derive(Debug, Clone)]
+struct StaticHandler {
+    label: i32,
+    bindings: Vec<Ident>,
+    handler: Lambda,
+}
+
 /// Lambda compiler to JS IR.
 pub struct LambdaCompiler {
     id_gen: IdGenerator,
     module_path_resolver: Option<ModulePathResolver>,
+    static_handlers: Vec<StaticHandler>,
 }
 
 impl Default for LambdaCompiler {
@@ -54,6 +63,7 @@ impl LambdaCompiler {
         Self {
             id_gen: IdGenerator::new(),
             module_path_resolver: None,
+            static_handlers: Vec::new(),
         }
     }
 
@@ -62,6 +72,7 @@ impl LambdaCompiler {
         Self {
             id_gen: IdGenerator::new(),
             module_path_resolver,
+            static_handlers: Vec::new(),
         }
     }
 
@@ -166,15 +177,7 @@ impl LambdaCompiler {
                 }
             }
             Lambda::Llet(kind, id, value, body) => {
-                let mut prelude = vec![];
-                let value_compiled = self.compile_expr(value);
-                prelude.extend(value_compiled.prelude);
-                prelude.push(Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
-                    value: Some(value_compiled.expr),
-                    property: *kind,
-                    ident_info: IdentInfo::default(),
-                }));
+                let mut prelude = self.compile_let_binding(*kind, id, value);
                 let body_compiled = self.compile_expr(body);
                 prelude.extend(body_compiled.prelude);
                 Compiled {
@@ -211,7 +214,10 @@ impl LambdaCompiler {
             Lambda::LstringSwitch(scrut, cases, default) => {
                 self.compile_string_switch(scrut, cases, default.as_deref())
             }
-            Lambda::LstaticRaise(_id, args) => {
+            Lambda::LstaticRaise(id, args) => {
+                if let Some(handler) = self.resolve_static_raise(*id, args) {
+                    return self.compile_expr(&handler);
+                }
                 let expr = if let Some(arg) = args.first() {
                     self.compile_expr(arg).expr
                 } else {
@@ -222,7 +228,9 @@ impl LambdaCompiler {
                     expr: Expression::undefined(false),
                 }
             }
-            Lambda::LstaticCatch(body, _handler, _handler_body) => self.compile_expr(body),
+            Lambda::LstaticCatch(body, (label, bindings), handler) => {
+                self.with_static_handler(*label, bindings, handler, |this| this.compile_expr(body))
+            }
             Lambda::LtryWith(body, exn, handler) => {
                 let body_block = self.compile_block(body);
                 let handler_block = self.compile_block(handler);
@@ -326,12 +334,77 @@ impl LambdaCompiler {
         self.compile_effect_block(lam)
     }
 
+    fn compile_let_binding(&mut self, kind: LetKind, id: &Ident, value: &Lambda) -> Block {
+        match value {
+            Lambda::Llet(inner_kind, inner_id, inner_value, body) => {
+                let mut block = self.compile_let_binding(*inner_kind, inner_id, inner_value);
+                block.extend(self.compile_let_binding(kind, id, body));
+                block
+            }
+            Lambda::LstaticCatch(body, (label, bindings), handler) => {
+                self.with_static_handler(*label, bindings, handler, |this| {
+                    this.compile_let_binding(kind, id, body)
+                })
+            }
+            Lambda::Lswitch(scrut, switch) => {
+                let mut block = vec![Statement::variable(VariableDeclaration {
+                    ident: id.clone(),
+                    value: None,
+                    property: kind,
+                    ident_info: IdentInfo::default(),
+                })];
+                block.extend(self.compile_switch_assignment_block(id, scrut, switch));
+                block
+            }
+            Lambda::LstringSwitch(scrut, cases, default) => {
+                let mut block = vec![Statement::variable(VariableDeclaration {
+                    ident: id.clone(),
+                    value: None,
+                    property: kind,
+                    ident_info: IdentInfo::default(),
+                })];
+                block.extend(self.compile_string_switch_assignment_block(
+                    id,
+                    scrut,
+                    cases,
+                    default.as_deref(),
+                ));
+                block
+            }
+            _ => {
+                let value_compiled = self.compile_expr(value);
+                let mut block = value_compiled.prelude;
+                block.push(Statement::variable(VariableDeclaration {
+                    ident: id.clone(),
+                    value: Some(value_compiled.expr),
+                    property: kind,
+                    ident_info: IdentInfo::default(),
+                }));
+                block
+            }
+        }
+    }
+
     fn compile_effect_block(&mut self, lam: &Lambda) -> Block {
         match lam {
+            Lambda::Llet(kind, id, value, body) => {
+                let mut block = self.compile_let_binding(*kind, id, value);
+                block.extend(self.compile_effect_block(body));
+                block
+            }
             Lambda::Lsequence(first, second) => {
                 let mut block = self.compile_effect_block(first);
                 block.extend(self.compile_effect_block(second));
                 block
+            }
+            Lambda::LstaticCatch(body, (label, bindings), handler) => {
+                self.with_static_handler(*label, bindings, handler, |this| {
+                    this.compile_effect_block(body)
+                })
+            }
+            Lambda::Lswitch(scrut, switch) => self.compile_switch_effect_block(scrut, switch),
+            Lambda::LstringSwitch(scrut, cases, default) => {
+                self.compile_string_switch_effect_block(scrut, cases, default.as_deref())
             }
             _ => {
                 let compiled = self.compile_expr(lam);
@@ -344,15 +417,31 @@ impl LambdaCompiler {
 
     fn compile_return_block(&mut self, lam: &Lambda) -> Block {
         match lam {
+            Lambda::Llet(kind, id, value, body) => {
+                let mut block = self.compile_let_binding(*kind, id, value);
+                block.extend(self.compile_return_block(body));
+                block
+            }
             Lambda::Lsequence(first, second) => {
                 let mut block = self.compile_effect_block(first);
                 block.extend(self.compile_return_block(second));
                 block
             }
+            Lambda::LstaticCatch(body, (label, bindings), handler) => {
+                self.with_static_handler(*label, bindings, handler, |this| {
+                    this.compile_return_block(body)
+                })
+            }
+            Lambda::Lswitch(scrut, switch) => self.compile_switch_return_block(scrut, switch),
+            Lambda::LstringSwitch(scrut, cases, default) => {
+                self.compile_string_switch_return_block(scrut, cases, default.as_deref())
+            }
             _ => {
                 let compiled = self.compile_expr(lam);
                 let mut block = compiled.prelude;
-                block.push(Statement::return_(compiled.expr));
+                if !block_terminates(&block) {
+                    block.push(Statement::return_(compiled.expr));
+                }
                 block
             }
         }
@@ -399,8 +488,7 @@ impl LambdaCompiler {
 
         let mut cases = Vec::new();
         for (tag, body) in &switch.sw_consts {
-            let mut body_block = self.compile_switch_value_block(&tmp, body);
-            body_block.push(Statement::break_());
+            let body_block = self.compile_switch_value_block(&tmp, body);
             cases.push((
                 *tag,
                 crate::js_ir::CaseClause {
@@ -411,11 +499,10 @@ impl LambdaCompiler {
             ));
         }
 
-        let default_block = switch.sw_failaction.as_ref().map(|fallback| {
-            let mut block = self.compile_switch_value_block(&tmp, fallback);
-            block.push(Statement::break_());
-            block
-        });
+        let default_block = switch
+            .sw_failaction
+            .as_ref()
+            .map(|fallback| self.compile_switch_value_block(&tmp, fallback));
 
         prelude.push(Statement::new(StatementDesc::IntSwitch(
             scrut_compiled.expr,
@@ -447,8 +534,7 @@ impl LambdaCompiler {
 
         let mut clauses = Vec::new();
         for (tag, body) in cases {
-            let mut body_block = self.compile_switch_value_block(&tmp, body);
-            body_block.push(Statement::break_());
+            let body_block = self.compile_switch_value_block(&tmp, body);
             clauses.push(crate::js_ir::StringClause {
                 tag_type: tag.clone(),
                 clause: crate::js_ir::CaseClause {
@@ -459,11 +545,7 @@ impl LambdaCompiler {
             });
         }
 
-        let default_block = default.map(|fallback| {
-            let mut block = self.compile_switch_value_block(&tmp, fallback);
-            block.push(Statement::break_());
-            block
-        });
+        let default_block = default.map(|fallback| self.compile_switch_value_block(&tmp, fallback));
 
         prelude.push(Statement::new(StatementDesc::StringSwitch(
             scrut_compiled.expr,
@@ -478,12 +560,239 @@ impl LambdaCompiler {
     }
 
     fn compile_switch_value_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
-        let compiled = self.compile_expr(lam);
-        let mut block = compiled.prelude;
-        block.push(Statement::exp(Expression::bin(
-            BinOp::Eq,
-            Expression::var(result.clone()),
-            compiled.expr,
+        let mut block = self.compile_assign_to_target_block(result, lam);
+        if !block_terminates(&block) {
+            block.push(Statement::break_());
+        }
+        block
+    }
+
+    fn compile_assign_to_target_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
+        match lam {
+            Lambda::LstaticCatch(body, (label, bindings), handler) => {
+                self.with_static_handler(*label, bindings, handler, |this| {
+                    this.compile_assign_to_target_block(result, body)
+                })
+            }
+            Lambda::Lswitch(scrut, switch) => {
+                self.compile_switch_assignment_block(result, scrut, switch)
+            }
+            Lambda::LstringSwitch(scrut, cases, default) => self
+                .compile_string_switch_assignment_block(result, scrut, cases, default.as_deref()),
+            _ => {
+                let compiled = self.compile_expr(lam);
+                let mut block = compiled.prelude;
+                if !block_terminates(&block) {
+                    block.push(Statement::exp(Expression::bin(
+                        BinOp::Eq,
+                        Expression::var(result.clone()),
+                        compiled.expr,
+                    )));
+                }
+                block
+            }
+        }
+    }
+
+    fn compile_switch_assignment_block(
+        &mut self,
+        result: &Ident,
+        scrut: &Lambda,
+        switch: &LambdaSwitch,
+    ) -> Block {
+        let scrut_compiled = self.compile_expr(scrut);
+        let mut block = scrut_compiled.prelude;
+
+        let mut cases = Vec::new();
+        for (tag, body) in &switch.sw_consts {
+            cases.push((
+                *tag,
+                crate::js_ir::CaseClause {
+                    body: self.compile_switch_value_block(result, body),
+                    should_break: false,
+                    comment: None,
+                },
+            ));
+        }
+
+        let default_block = switch
+            .sw_failaction
+            .as_ref()
+            .map(|fallback| self.compile_assign_to_target_block(result, fallback));
+
+        block.push(Statement::new(StatementDesc::IntSwitch(
+            scrut_compiled.expr,
+            cases,
+            default_block,
+        )));
+        block
+    }
+
+    fn compile_string_switch_assignment_block(
+        &mut self,
+        result: &Ident,
+        scrut: &Lambda,
+        cases: &[(String, Lambda)],
+        default: Option<&Lambda>,
+    ) -> Block {
+        let scrut_compiled = self.compile_expr(scrut);
+        let mut block = scrut_compiled.prelude;
+
+        let mut clauses = Vec::new();
+        for (tag, body) in cases {
+            clauses.push(crate::js_ir::StringClause {
+                tag_type: tag.clone(),
+                clause: crate::js_ir::CaseClause {
+                    body: self.compile_switch_value_block(result, body),
+                    should_break: false,
+                    comment: None,
+                },
+            });
+        }
+
+        let default_block =
+            default.map(|fallback| self.compile_assign_to_target_block(result, fallback));
+
+        block.push(Statement::new(StatementDesc::StringSwitch(
+            scrut_compiled.expr,
+            clauses,
+            default_block,
+        )));
+        block
+    }
+
+    fn compile_switch_return_block(&mut self, scrut: &Lambda, switch: &LambdaSwitch) -> Block {
+        let scrut_compiled = self.compile_expr(scrut);
+        let mut block = scrut_compiled.prelude;
+
+        let mut cases = Vec::new();
+        for (tag, body) in &switch.sw_consts {
+            cases.push((
+                *tag,
+                crate::js_ir::CaseClause {
+                    body: self.compile_return_block(body),
+                    should_break: false,
+                    comment: None,
+                },
+            ));
+        }
+
+        let default_block = switch
+            .sw_failaction
+            .as_ref()
+            .map(|fallback| self.compile_return_block(fallback));
+
+        block.push(Statement::new(StatementDesc::IntSwitch(
+            scrut_compiled.expr,
+            cases,
+            default_block,
+        )));
+        block
+    }
+
+    fn compile_string_switch_return_block(
+        &mut self,
+        scrut: &Lambda,
+        cases: &[(String, Lambda)],
+        default: Option<&Lambda>,
+    ) -> Block {
+        let scrut_compiled = self.compile_expr(scrut);
+        let mut block = scrut_compiled.prelude;
+
+        let mut clauses = Vec::new();
+        for (tag, body) in cases {
+            clauses.push(crate::js_ir::StringClause {
+                tag_type: tag.clone(),
+                clause: crate::js_ir::CaseClause {
+                    body: self.compile_return_block(body),
+                    should_break: false,
+                    comment: None,
+                },
+            });
+        }
+
+        let default_block = default.map(|fallback| self.compile_return_block(fallback));
+
+        block.push(Statement::new(StatementDesc::StringSwitch(
+            scrut_compiled.expr,
+            clauses,
+            default_block,
+        )));
+        block
+    }
+
+    fn compile_switch_effect_block(&mut self, scrut: &Lambda, switch: &LambdaSwitch) -> Block {
+        let scrut_compiled = self.compile_expr(scrut);
+        let mut block = scrut_compiled.prelude;
+
+        let mut cases = Vec::new();
+        for (tag, body) in &switch.sw_consts {
+            let body = self.compile_effect_block(body);
+            cases.push((
+                *tag,
+                crate::js_ir::CaseClause {
+                    should_break: !block_terminates(&body),
+                    body,
+                    comment: None,
+                },
+            ));
+        }
+
+        let default_block = switch
+            .sw_failaction
+            .as_ref()
+            .map(|fallback| self.compile_effect_block(fallback));
+
+        let has_effectful_case = cases.iter().any(|(_, clause)| !clause.body.is_empty())
+            || default_block.as_ref().is_some_and(|body| !body.is_empty());
+        if !has_effectful_case {
+            push_effect_expression(&mut block, scrut_compiled.expr);
+            return block;
+        }
+
+        block.push(Statement::new(StatementDesc::IntSwitch(
+            scrut_compiled.expr,
+            cases,
+            default_block,
+        )));
+        block
+    }
+
+    fn compile_string_switch_effect_block(
+        &mut self,
+        scrut: &Lambda,
+        cases: &[(String, Lambda)],
+        default: Option<&Lambda>,
+    ) -> Block {
+        let scrut_compiled = self.compile_expr(scrut);
+        let mut block = scrut_compiled.prelude;
+
+        let mut clauses = Vec::new();
+        for (tag, body) in cases {
+            let body = self.compile_effect_block(body);
+            clauses.push(crate::js_ir::StringClause {
+                tag_type: tag.clone(),
+                clause: crate::js_ir::CaseClause {
+                    should_break: !block_terminates(&body),
+                    body,
+                    comment: None,
+                },
+            });
+        }
+
+        let default_block = default.map(|fallback| self.compile_effect_block(fallback));
+
+        let has_effectful_case = clauses.iter().any(|clause| !clause.clause.body.is_empty())
+            || default_block.as_ref().is_some_and(|body| !body.is_empty());
+        if !has_effectful_case {
+            push_effect_expression(&mut block, scrut_compiled.expr);
+            return block;
+        }
+
+        block.push(Statement::new(StatementDesc::StringSwitch(
+            scrut_compiled.expr,
+            clauses,
+            default_block,
         )));
         block
     }
@@ -1530,6 +1839,40 @@ impl LambdaCompiler {
         self.id_gen.create(prefix)
     }
 
+    fn with_static_handler<T>(
+        &mut self,
+        label: i32,
+        bindings: &[Ident],
+        handler: &Lambda,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.static_handlers.push(StaticHandler {
+            label,
+            bindings: bindings.to_vec(),
+            handler: handler.clone(),
+        });
+        let result = f(self);
+        self.static_handlers.pop();
+        result
+    }
+
+    fn resolve_static_raise(&self, label: i32, args: &[Lambda]) -> Option<Lambda> {
+        let handler = self
+            .static_handlers
+            .iter()
+            .rev()
+            .find(|handler| handler.label == label)?;
+        if handler.bindings.len() != args.len() {
+            return None;
+        }
+        if handler.bindings.is_empty() {
+            return Some(handler.handler.clone());
+        }
+
+        let subst = subst::make_subst(&handler.bindings, args);
+        Some(subst::subst(&subst, &handler.handler))
+    }
+
     fn collect_required_modules(&self, block: &Block) -> Vec<ModuleId> {
         let mut seen = std::collections::HashSet::new();
         collect_modules_from_block(block, &mut seen);
@@ -1727,6 +2070,41 @@ fn push_effect_expression(block: &mut Block, expr: Expression) {
         }
         _ if js_expr_no_side_effects(&expr) => {}
         _ => block.push(Statement::exp(expr)),
+    }
+}
+
+fn block_terminates(block: &Block) -> bool {
+    block.last().is_some_and(statement_terminates)
+}
+
+fn statement_terminates(stmt: &Statement) -> bool {
+    match &stmt.desc {
+        StatementDesc::Block(block) => block_terminates(block),
+        StatementDesc::Return(_)
+        | StatementDesc::Throw(_)
+        | StatementDesc::Break
+        | StatementDesc::Continue => true,
+        StatementDesc::If(_, then_block, else_block) => {
+            !then_block.is_empty()
+                && !else_block.is_empty()
+                && block_terminates(then_block)
+                && block_terminates(else_block)
+        }
+        StatementDesc::IntSwitch(_, cases, default) => {
+            default.as_ref().is_some_and(block_terminates)
+                && !cases.is_empty()
+                && cases
+                    .iter()
+                    .all(|(_, clause)| block_terminates(&clause.body))
+        }
+        StatementDesc::StringSwitch(_, cases, default) => {
+            default.as_ref().is_some_and(block_terminates)
+                && !cases.is_empty()
+                && cases
+                    .iter()
+                    .all(|clause| block_terminates(&clause.clause.body))
+        }
+        _ => false,
     }
 }
 
@@ -2861,6 +3239,216 @@ mod tests {
         assert_switch_case_assigns_int_result(default_block, result, 3);
     }
 
+    #[test]
+    fn let_bindings_lower_string_switches_directly_into_the_declared_binding() {
+        let mut compiler = LambdaCompiler::new();
+        let version = Ident::create_local("version");
+        let scrutinee = Ident::create_local("platform");
+        let program = compiler.compile_program(&Lambda::Llet(
+            LetKind::Strict,
+            version.clone(),
+            Box::new(Lambda::LstringSwitch(
+                Box::new(Lambda::var(scrutinee.clone())),
+                vec![
+                    ("linux".to_string(), Lambda::const_(Constant::int(1))),
+                    ("darwin".to_string(), Lambda::const_(Constant::int(2))),
+                ],
+                Some(Box::new(Lambda::const_(Constant::int(3)))),
+            )),
+            Box::new(Lambda::var(version.clone())),
+        ));
+
+        let [declare, switch_stmt] = program.block.as_slice() else {
+            panic!("expected a declaration followed by a string switch");
+        };
+        let StatementDesc::Variable(VariableDeclaration {
+            ident, value: None, ..
+        }) = &declare.desc
+        else {
+            panic!("expected an uninitialized binding declaration");
+        };
+        assert!(ident.same(&version));
+
+        let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc
+        else {
+            panic!("expected a direct string switch statement");
+        };
+        assert!(matches!(
+            test,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&scrutinee)
+        ));
+
+        let expected_cases = [("linux", 1_i32), ("darwin", 2_i32)];
+        for (clause, (expected_tag, expected_value)) in clauses.iter().zip(expected_cases) {
+            assert_eq!(clause.tag_type, expected_tag);
+            assert_switch_case_assigns_int_result(&clause.clause.body, &version, expected_value);
+        }
+        assert_switch_default_assigns_int_result(default_block, &version, 3);
+    }
+
+    #[test]
+    fn staticcatch_wrapped_string_switches_use_the_handler_as_the_default_value() {
+        let mut compiler = LambdaCompiler::new();
+        let version = Ident::create_local("version");
+        let scrutinee = Ident::create_local("platform");
+        let program = compiler.compile_program(&Lambda::Llet(
+            LetKind::Strict,
+            version.clone(),
+            Box::new(Lambda::LstaticCatch(
+                Box::new(Lambda::LstringSwitch(
+                    Box::new(Lambda::var(scrutinee.clone())),
+                    vec![
+                        ("linux".to_string(), Lambda::const_(Constant::int(1))),
+                        ("darwin".to_string(), Lambda::const_(Constant::int(2))),
+                    ],
+                    Some(Box::new(Lambda::static_raise(1, Vec::new()))),
+                )),
+                (1, vec![]),
+                Box::new(Lambda::const_(Constant::int(3))),
+            )),
+            Box::new(Lambda::var(version.clone())),
+        ));
+
+        let [declare, switch_stmt] = program.block.as_slice() else {
+            panic!("expected a declaration followed by a string switch");
+        };
+        let StatementDesc::Variable(VariableDeclaration {
+            ident, value: None, ..
+        }) = &declare.desc
+        else {
+            panic!("expected an uninitialized binding declaration");
+        };
+        assert!(ident.same(&version));
+
+        let StatementDesc::StringSwitch(_, clauses, Some(default_block)) = &switch_stmt.desc else {
+            panic!("expected a direct string switch statement");
+        };
+        let expected_cases = [("linux", 1_i32), ("darwin", 2_i32)];
+        for (clause, (expected_tag, expected_value)) in clauses.iter().zip(expected_cases) {
+            assert_eq!(clause.tag_type, expected_tag);
+            assert_switch_case_assigns_int_result(&clause.clause.body, &version, expected_value);
+        }
+        assert_switch_default_assigns_int_result(default_block, &version, 3);
+    }
+
+    #[test]
+    fn nested_let_values_preserve_declaration_context_for_wrapped_string_switches() {
+        let mut compiler = LambdaCompiler::new();
+        let version = Ident::create_local("version");
+        let match_id = Ident::create_local("match");
+        let scrutinee = Ident::create_local("platform");
+        let program = compiler.compile_program(&Lambda::Llet(
+            LetKind::Strict,
+            version.clone(),
+            Box::new(Lambda::let_(
+                LetKind::Strict,
+                match_id.clone(),
+                Lambda::var(scrutinee.clone()),
+                Lambda::LstaticCatch(
+                    Box::new(Lambda::LstringSwitch(
+                        Box::new(Lambda::var(match_id.clone())),
+                        vec![
+                            ("linux".to_string(), Lambda::const_(Constant::int(1))),
+                            ("darwin".to_string(), Lambda::const_(Constant::int(2))),
+                        ],
+                        Some(Box::new(Lambda::static_raise(1, Vec::new()))),
+                    )),
+                    (1, vec![]),
+                    Box::new(Lambda::const_(Constant::int(3))),
+                ),
+            )),
+            Box::new(Lambda::var(version.clone())),
+        ));
+
+        let [version_decl, switch_stmt] = program.block.as_slice() else {
+            panic!("expected simplification to inline the nested binding into a declaration and switch");
+        };
+
+        let StatementDesc::Variable(VariableDeclaration {
+            ident, value: None, ..
+        }) = &version_decl.desc
+        else {
+            panic!("expected an uninitialized declaration for the outer binding");
+        };
+        assert!(ident.same(&version));
+
+        let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc
+        else {
+            panic!("expected the outer declaration context to reach the string switch");
+        };
+        assert!(matches!(
+            test,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&scrutinee)
+        ));
+
+        let expected_cases = [("linux", 1_i32), ("darwin", 2_i32)];
+        for (clause, (expected_tag, expected_value)) in clauses.iter().zip(expected_cases) {
+            assert_eq!(clause.tag_type, expected_tag);
+            assert_switch_case_assigns_int_result(&clause.clause.body, &version, expected_value);
+        }
+        assert_switch_default_assigns_int_result(default_block, &version, 3);
+    }
+
+    #[test]
+    fn function_return_blocks_lower_switches_without_a_result_temp() {
+        let mut compiler = LambdaCompiler::new();
+        let scrutinee = Ident::create_local("scrutinee");
+        let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+            arity: 1,
+            params: vec![scrutinee.clone()],
+            body: Box::new(Lambda::Lswitch(
+                Box::new(Lambda::var(scrutinee.clone())),
+                LambdaSwitch {
+                    sw_consts_full: true,
+                    sw_consts: vec![
+                        (0, Lambda::const_(Constant::int(1))),
+                        (1, Lambda::const_(Constant::int(2))),
+                    ],
+                    sw_blocks_full: false,
+                    sw_blocks: vec![],
+                    sw_failaction: Some(Box::new(Lambda::const_(Constant::int(3)))),
+                    sw_names: None,
+                },
+            )),
+            attr: crate::lambda::FunctionAttribute::default(),
+        }));
+
+        let Expression {
+            desc: ExpressionDesc::Fun { body, .. },
+            ..
+        } = compiled.expr
+        else {
+            panic!("expected a function expression");
+        };
+
+        let [switch_stmt] = body.as_slice() else {
+            panic!("expected a single switch statement in the function body");
+        };
+        let StatementDesc::IntSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
+            panic!("expected a direct integer switch in the function body");
+        };
+        assert!(matches!(
+            test,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&scrutinee)
+        ));
+
+        let expected_cases = [(0, 1_i32), (1, 2_i32)];
+        for ((tag, clause), (expected_tag, expected_value)) in clauses.iter().zip(expected_cases) {
+            assert_eq!(*tag, expected_tag);
+            assert_switch_case_returns_int_result(&clause.body, expected_value);
+        }
+        assert_switch_default_returns_int_result(default_block, 3);
+    }
+
     fn assert_switch_case_assigns_int_result(block: &Block, result: &Ident, expected: i32) {
         let [assign, break_stmt] = block.as_slice() else {
             panic!("expected an assignment followed by break");
@@ -2888,6 +3476,51 @@ mod tests {
             other => panic!("expected a result assignment, got {other:?}"),
         }
         assert!(matches!(break_stmt.desc, StatementDesc::Break));
+    }
+
+    fn assert_switch_default_assigns_int_result(block: &Block, result: &Ident, expected: i32) {
+        let [assign] = block.as_slice() else {
+            panic!("expected a single default assignment");
+        };
+        match &assign.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Bin(BinOp::Eq, left, right),
+                ..
+            }) => {
+                assert!(matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(result)
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i, .. }),
+                        ..
+                    } if *i == expected
+                ));
+            }
+            other => panic!("expected a default assignment, got {other:?}"),
+        }
+    }
+
+    fn assert_switch_case_returns_int_result(block: &Block, expected: i32) {
+        let [ret] = block.as_slice() else {
+            panic!("expected a single return statement");
+        };
+        match &ret.desc {
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Number(Number::Int { i, .. }),
+                ..
+            }) if *i == expected => {}
+            other => panic!("expected a return of {expected}, got {other:?}"),
+        }
+    }
+
+    fn assert_switch_default_returns_int_result(block: &Block, expected: i32) {
+        assert_switch_case_returns_int_result(block, expected);
     }
 
     #[test]
