@@ -10549,13 +10549,17 @@ fn type_structure_item<'a>(
                     )
                 })
             });
-            let localized_include_sig = final_include_sig.as_ref().map(|sig_items| {
+            let stored_include_sig = final_include_sig.as_ref().map(|sig_items| {
                 let mut sig =
                     crate::types::typecore::copy_lookup_signature_for_subst(sig_items, tctx.type_ctx);
                 crate::cmi::persistent_env::freshen_signature_bound_idents(
                     &mut sig,
                     tctx.type_ctx,
                 );
+                sig
+            });
+            let localized_include_sig = stored_include_sig.as_ref().map(|sig_items| {
+                let mut sig = sig_items.clone();
                 let include_root_path = include_module_root_path(&typed_mod);
                 let include_flat_name = include_module_flat_name(&typed_mod);
                 let local_include_types: HashMap<String, Ident> = sig
@@ -10766,7 +10770,7 @@ fn type_structure_item<'a>(
                 }
             }
 
-            let item_sig = localized_include_sig.unwrap_or_default();
+            let item_sig = stored_include_sig.unwrap_or_default();
             let desc = StructureItemDesc::Tstr_include(IncludeDeclaration {
                 incl_mod: typed_mod,
                 incl_type: item_sig.clone(),
@@ -11255,6 +11259,9 @@ fn transl_sig_type_declarations_with_ids<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::IdGenerator;
+    use crate::parser::{Parser, module};
+    use crate::types::{TypeCheckContext, TypeContext, initial_env};
 
     #[test]
     fn test_type_module_error_conversion() {
@@ -11264,5 +11271,93 @@ mod tests {
             TypeModError::CoreError(_) => {}
             _ => panic!("Expected CoreError"),
         }
+    }
+
+    fn type_test_structure(source: &str) -> Structure {
+        crate::ident::Ident::set_current_time(999);
+        let id_gen = IdGenerator::with_start_stamp(999);
+        let _ = id_gen.next_stamp();
+        let type_ctx = TypeContext::new(&id_gen);
+        let mut parser = Parser::new("test.res", source);
+        let structure = module::parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "parse failed");
+        let arena = parser.arena();
+        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+        let env = initial_env(&type_ctx);
+        let (typed, _) = type_structure(&mut tctx, &env, arena, &structure).expect("typecheck");
+        typed
+    }
+
+    #[test]
+    fn constrained_include_structure_keeps_original_alias_path() {
+        let typed = type_test_structure(
+            r#"
+module M' = {
+  module N = {
+    let x = 1
+  }
+  module N' = N
+}
+
+module M3: {
+  module N': {
+    let x: int
+  }
+} = {
+  include M'
+}
+"#,
+        );
+
+        let m_prime = typed
+            .str_items
+            .iter()
+            .find_map(|item| match &item.str_desc {
+                StructureItemDesc::Tstr_module(binding) if binding.mb_id.name() == "M'" => {
+                    Some(binding.mb_id.clone())
+                }
+                _ => None,
+            })
+            .expect("M' binding");
+
+        let inner_structure = typed
+            .str_items
+            .iter()
+            .find_map(|item| match &item.str_desc {
+                StructureItemDesc::Tstr_module(binding) if binding.mb_id.name() == "M3" => {
+                    let ModuleExprDesc::Tmod_constraint(inner, _, _, _) = &binding.mb_expr.mod_desc
+                    else {
+                        panic!("expected constrained module");
+                    };
+                    let ModuleExprDesc::Tmod_structure(structure) = &inner.mod_desc else {
+                        panic!("expected inner structure");
+                    };
+                    Some(structure)
+                }
+                _ => None,
+            })
+            .expect("M3 structure");
+
+        let n_prime_decl = inner_structure
+            .str_type
+            .iter()
+            .find_map(|item| match item {
+                crate::types::decl::SignatureItem::SigModule(id, md, _)
+                    if id.name() == "N'" =>
+                {
+                    Some(md)
+                }
+                _ => None,
+            })
+            .expect("N' signature item");
+
+        assert!(matches!(
+            &n_prime_decl.md_type,
+            crate::types::decl::ModuleType::MtyAlias(
+                _,
+                Path::Pdot(prefix, name, _)
+            ) if matches!(prefix.as_ref(), Path::Pident(id) if id.same(&m_prime))
+                && name == "N"
+        ));
     }
 }

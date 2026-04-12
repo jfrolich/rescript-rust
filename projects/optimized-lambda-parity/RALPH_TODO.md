@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 655/657 (99.7%), 1 parity failure, 2 hunks, 1 Rust timeout (`Import.res`)
+**Status:** 656/657 (99.8%), 0 parity failures, 0 hunks, 1 Rust timeout (`Import.res`)
 
 ## Goal
 
@@ -23,12 +23,12 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **656/657**
-- Optimized lambda parity: **655/657**
-- Parity hunks: **2**
+- Optimized lambda parity: **656/657**
+- Parity hunks: **0**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
-  - `coercion_module_alias_test.res`: **2** hunks
+  - none
 - Rust timeout in the current authoritative run:
   - `Import.res`
 - Full raw `-drawlambda` baseline has not been re-run across all 657 files after this slice.
@@ -48,17 +48,19 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There is **1** remaining optimized-lambda parity failure on the current worktree, plus **1** Rust timeout on `Import.res`.
+There are **0** remaining optimized-lambda parity failures on the current worktree, plus **1** Rust timeout on `Import.res`.
 
 Current frontier characteristics:
-- fresh 2026-04-12 reruns on this worktree put the full optimized baseline at **655/657**, **2** hunks, with a Rust timeout on `Import.res`; older `647/657`, `649/657`, `653/657`, and `654/657` notes below are historical.
+- fresh 2026-04-12 reruns on this worktree put the full optimized baseline at **656/657**, **0** hunks, with a Rust timeout on `Import.res`; older `647/657`, `649/657`, `653/657`, `654/657`, and `655/657` notes below are historical.
 - newly exact after the alias-`simple_for_let` static-exit allocation fix:
   - `gpr_5557.res`
   - `option_repr_test.res`
 - newly exact after the constrained-persistent-submodule normalization fix:
   - `inner_call.res`
-- current remaining optimized failures:
+- newly exact after keeping constrained include signatures unlocalized in the stored typedtree:
   - `coercion_module_alias_test.res`
+- current remaining optimized failures:
+  - none
 - current Rust timeout:
   - `Import.res`
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -175,6 +177,59 @@ Current frontier characteristics:
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Latest Session Findings
+
+### constrained include typed signatures must keep the original alias path
+Ran:
+
+```bash
+cargo build --release --manifest-path compiler-rust/Cargo.toml
+timeout 900 ./scripts/test_lambda_parity.sh -j1 --raw coercion_module_alias_test
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml constrained_include_structure_keeps_original_alias_path
+```
+
+Result:
+
+- Focused raw guard on `coercion_module_alias_test.res`: **exact parity**
+- Full optimized baseline:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **656/657**
+  - Optimized lambda parity: **656/657**
+  - Exact hunks: **0**
+  - Rust timeout: `Import.res`
+- Regression test:
+  - `constrained_include_structure_keeps_original_alias_path`: **passed**
+
+This slice fixes the last optimized-lambda parity failure on the current
+worktree without touching the lowerer.
+
+The root cause was upstream in `compiler-rust/src/types/typemod.rs` during
+`Pstr_include` typing. Rust was freshening the include signature and then
+localizing that same signature before using it both to extend the environment
+and to store `incl_type` in the typed structure item. For constrained
+structures like:
+
+```rescript
+module M3: { module N': { let x: int } } = {
+  include M'
+}
+```
+
+that rewrote the stored typed signature from the original alias path
+`M'.N`/`M'.N'` onto the fresh local include binder, which then leaked into raw
+lambda as `N`/`M2` instead of OCaml's `field:N/0 M'`.
+
+The fix is to split the two roles:
+
+- keep a freshened-but-unlocalized include signature for `incl_type` / the
+  typed structure
+- derive a localized clone only for `Env.add_signature`-style environment
+  extension
+
+That preserves OCaml's original alias path inside the typedtree while still
+making included items visible locally in the environment, and
+`coercion_module_alias_test.res` is now exact in both focused raw parity and
+the full optimized baseline.
 
 ### constrained persistent submodules must not normalize through module-type paths
 Ran:
