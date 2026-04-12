@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow};
 use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::PersistentEnv;
 use crate::context::IdGenerator;
-use crate::js_ir::printer::print_program;
+use crate::js_ir::printer::print_deps_program;
 use crate::lambda::compile::LambdaCompiler;
 use crate::parser::ast::{
     Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature,
@@ -123,8 +123,7 @@ fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structure) 
                     }
                 }
             }
-            TypedCoreTypeDesc::Ttyp_poly(_, inner)
-            | TypedCoreTypeDesc::Ttyp_alias(inner, _) => {
+            TypedCoreTypeDesc::Ttyp_poly(_, inner) | TypedCoreTypeDesc::Ttyp_alias(inner, _) => {
                 visit_typed_core_type(max_stamp, inner);
             }
             TypedCoreTypeDesc::Ttyp_variant(fields, _, _) => {
@@ -551,7 +550,9 @@ fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structure) 
                 TypedSignatureItemDesc::Tsig_modtype(module_type_decl) => {
                     visit_module_type_decl(max_stamp, module_type_decl);
                 }
-                TypedSignatureItemDesc::Tsig_open(open_decl) => visit_open_decl(max_stamp, open_decl),
+                TypedSignatureItemDesc::Tsig_open(open_decl) => {
+                    visit_open_decl(max_stamp, open_decl)
+                }
                 TypedSignatureItemDesc::Tsig_include(include_desc) => {
                     visit_include_description(max_stamp, include_desc);
                 }
@@ -614,10 +615,7 @@ fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structure) 
         }
     }
 
-    fn visit_decl_type_decl(
-        max_stamp: &mut i32,
-        type_decl: &crate::types::decl::TypeDeclaration,
-    ) {
+    fn visit_decl_type_decl(max_stamp: &mut i32, type_decl: &crate::types::decl::TypeDeclaration) {
         if let Some(path) = &type_decl.type_path {
             visit_path(max_stamp, path);
         }
@@ -714,7 +712,9 @@ fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structure) 
                         visit_extension_constructor(max_stamp, ext);
                     }
                 }
-                StructureItemDesc::Tstr_exception(ext) => visit_extension_constructor(max_stamp, ext),
+                StructureItemDesc::Tstr_exception(ext) => {
+                    visit_extension_constructor(max_stamp, ext)
+                }
                 StructureItemDesc::Tstr_module(binding) => visit_module_binding(max_stamp, binding),
                 StructureItemDesc::Tstr_recmodule(bindings) => {
                     for binding in bindings {
@@ -1231,13 +1231,8 @@ pub fn compile_source_to_js_with_options(
         .as_deref()
         .map(module_name_from_source_filename)
         .unwrap_or_default();
-    let implementation_coercion = compute_raw_implementation_coercion(
-        &mut tctx,
-        &type_ctx,
-        &env,
-        &typed_structure,
-        options,
-    );
+    let implementation_coercion =
+        compute_raw_implementation_coercion(&mut tctx, &type_ctx, &env, &typed_structure, options);
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
             parser.arena(),
@@ -1308,10 +1303,10 @@ pub fn compile_source_to_js_with_options(
 
     // Lambda -> JS IR
     let mut compiler = LambdaCompiler::new();
-    let program = compiler.compile_program(&lowered_lambda);
+    let program = compiler.compile_deps_program(&lowered_lambda);
 
     // JS IR -> JS source
-    Ok(print_program(&program))
+    Ok(print_deps_program(&program))
 }
 
 fn compute_raw_implementation_coercion(

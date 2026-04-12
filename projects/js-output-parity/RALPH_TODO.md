@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 0 / 2784 JS snapshots passing, 90 compile errors, 2694 output diffs
+**Status:** 26 / 657 JS snapshots passing, 1 compile error, 630 output diffs
 
 ## Goal
 
@@ -35,23 +35,21 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **0 / 2784**
-- Compile errors: **90**
-- Output diffs: **2694**
+- JS snapshot parity: **26 / 657**
+- Compile errors: **1**
+- Output diffs: **630**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
-- the current wrapper is now measuring project-context JS output instead of mostly standalone-file compile failures
-- remaining compile failures are a much smaller, more targeted cluster
-- the canonical JS baseline should still be rescoped to the same in-repo 657-file set as
-  the typedtree and lambda parity projects
-- external-corpus runs remain useful, but should become an explicit secondary sweep after that rescope
-- typedtree/raw/optimized-lambda are not part of the active frontier
-
-This measured baseline still includes the external corpus under `TELLA_DIR`.
-Rescoping the wrapper to the canonical in-repo set remains pending.
+- the authoritative wrapper is now scoped to the canonical in-repo 657-file set
+- compile failures are down to a single remaining internal guard
+- the current high-impact backend gap is module emission after lowering:
+  export recovery, top-level function declaration shape, local JS-name mangling,
+  and purity trailer emission
+- external-corpus sweeps remain secondary; the in-repo backend frontier still has
+  ample signal
 
 ## Working Rules
 
@@ -66,7 +64,7 @@ Rescoping the wrapper to the canonical in-repo set remains pending.
 ## Immediate Frontier
 
 - [x] Run the first dedicated `./scripts/test_js_output_parity.sh` baseline and record the full results here.
-- [ ] Re-run the wrapper after rescoping it to the canonical 657-file in-repo set and record the new baseline.
+- [x] Re-run the wrapper after rescoping it to the canonical 657-file in-repo set and record the new baseline.
 - [x] Route final JS codegen in `compiler-rust/src/driver.rs` through the raw-lambda / lowering path instead of the legacy typedtree shortcut.
 - [x] Inventory the current internal compile-error files from `temp/rust-parity/diffs/js_src_*.err`.
 - [x] Inventory the current internal text-diff files from `temp/rust-parity/diffs/js_src_*.diff`.
@@ -111,11 +109,17 @@ Current internal compile error under the measured wrapper baseline:
 - The existing JS-output parity check already lived inside `scripts/test_rust_parity.sh`; the wrapper now exposes that section directly.
 - `compiler-rust/src/driver.rs` now routes final JS generation through `raw_lambda::convert` + `raw_lambda::lower` instead of the legacy `lambda::convert::LambdaConverter` shortcut.
 - `scripts/test_rust_parity.sh` now compiles JS snapshots with each file's owning ReScript project's `compiler-args` and runs `bsc` from that project's `lib/bs`.
-- This removed the largest source of false compile-error noise:
-  - the measured wrapper baseline moved from **1927 compile errors / 857 diffs** to **90 compile errors / 2694 diffs**
-  - internal compile errors dropped to **1 file**: `js_src_Import.res.err`
-  - internal text diffs now account for **656 files**
+- The canonical in-repo wrapper baseline now reports **26 / 657** passing, **1** compile error, and **630** output diffs.
+- A printer/module-emission pass is now wired through `DepsProgram` metadata in Rust:
+  - recover `program.exports` from the lowered `module/exports` block instead of printing a trailing array
+  - print the ReScript version header, ES module export block, and module purity trailer
+  - print top-level function-valued bindings as function declarations
+  - mangle local JS-reserved identifiers (`arguments`, `eval`, `exports`, `parseInt`, etc.) in emitted bindings
+  - treat `TagInfo::Module` blocks as JS objects instead of arrays
+  - lower `PjsFnMake`, `PjsFnMakeUnit`, and `PjsFnMethod` instead of dropping them to `undefined`
 - Verified focused checks under the new project-context invocation:
-  - `tests/tests/src/js_array_test.res` now compiles and lands in JS diff territory instead of failing with `UndefinedMethod { method: "describe" }`
-  - `/Users/jake/dev/tella-fusion/packages/core/webapp/src/backend/Service__PublicVideo.res` now compiles and lands in JS diff territory instead of a missing-binding failure
+  - `tests/tests/src/keep_uncurry_attribute.res` now matches its checked-in `.mjs` snapshot exactly
+  - `tests/tests/src/ident_mangles.res` now matches its checked-in `.mjs` snapshot exactly
+  - `tests/tests/src/ExternalShadow.res` now collapses to the remaining external-call/global-shadow semantics:
+    `globalThis.process`, `new URL`, and raw external value vs call lowering
 - Typedtree parity and both lambda parity stages are considered complete for this project and are not part of the remaining frontier.

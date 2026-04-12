@@ -9,13 +9,14 @@ use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Kind, LengthObject, MutableFlag, Number};
 use crate::js_ir::{
-    BinOp, Block, CallInfo, Delim, Expression, ExpressionDesc, ForDirection, ModuleId, Program,
-    Statement, StatementDesc, VariableDeclaration,
+    BinOp, Block, CallInfo, Delim, DepsProgram, Expression, ExpressionDesc, ForDirection, ModuleId,
+    Program, Statement, StatementDesc, VariableDeclaration,
 };
+use crate::lambda::analysis;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
 use crate::lambda::constant::{Constant, StringDelim};
 use crate::lambda::primitive::{Mutable, Primitive};
-use crate::lambda::{Apply, Lambda, LambdaSwitch};
+use crate::lambda::{Apply, Lambda, LambdaSwitch, TagInfo};
 
 /// Compilation result for an expression: prelude statements plus a value expression.
 #[derive(Debug, Clone)]
@@ -45,13 +46,27 @@ impl LambdaCompiler {
 
     /// Compile a Lambda expression into a JS IR program.
     pub fn compile_program(&mut self, lam: &Lambda) -> Program {
+        self.compile_deps_program(lam).program
+    }
+
+    /// Compile a Lambda expression into a JS IR program with module metadata.
+    pub fn compile_deps_program(&mut self, lam: &Lambda) -> DepsProgram {
         let compiled = self.compile_expr(lam);
         let mut block = compiled.prelude;
-        // Only add the final expression if it's not undefined
-        if !matches!(compiled.expr.desc, ExpressionDesc::Undefined { .. }) {
-            block.push(Statement::exp(compiled.expr));
+        let exports = match compiled.expr.desc {
+            ExpressionDesc::CamlBlock(_, _, _, TagInfo::ModuleExport(exports)) => exports,
+            ExpressionDesc::Undefined { .. } => vec![],
+            _ => {
+                block.push(Statement::exp(compiled.expr));
+                vec![]
+            }
+        };
+
+        DepsProgram {
+            program: Program::new(block, exports),
+            modules: vec![],
+            side_effect: module_side_effect_reason(lam),
         }
-        Program::new(block, vec![])
     }
 
     fn compile_expr(&mut self, lam: &Lambda) -> Compiled {
@@ -525,6 +540,38 @@ impl LambdaCompiler {
             )),
             Ptypeof => Expression::new(ExpressionDesc::Typeof(Box::new(compiled_args[0].clone()))),
             Pawait => Expression::new(ExpressionDesc::Await(Box::new(compiled_args[0].clone()))),
+            PjsFnMake(_) | PjsFnMakeUnit => compiled_args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| Expression::undefined(false)),
+            PjsFnMethod => match compiled_args.first().cloned() {
+                Some(Expression {
+                    desc:
+                        ExpressionDesc::Fun {
+                            params,
+                            body,
+                            env,
+                            return_unit,
+                            async_,
+                            directive,
+                            ..
+                        },
+                    comment,
+                }) => Expression {
+                    desc: ExpressionDesc::Fun {
+                        is_method: true,
+                        params,
+                        body,
+                        env,
+                        return_unit,
+                        async_,
+                        directive,
+                    },
+                    comment,
+                },
+                Some(expr) => expr,
+                None => Expression::undefined(false),
+            },
             Pimport => Expression::call(
                 Expression::var(Ident::create_persistent("import")),
                 compiled_args,
@@ -653,6 +700,35 @@ impl LambdaCompiler {
 
     fn fresh_ident(&self, prefix: &str) -> Ident {
         self.id_gen.create(prefix)
+    }
+}
+
+fn module_side_effect_reason(lam: &Lambda) -> Option<String> {
+    match lam {
+        Lambda::Llet(kind, id, value, body) => {
+            if matches!(kind, LetKind::Strict | LetKind::Variable)
+                && !analysis::no_side_effects(value)
+            {
+                Some(id.name().to_string())
+            } else {
+                module_side_effect_reason(body)
+            }
+        }
+        Lambda::Lletrec(bindings, body) => bindings
+            .iter()
+            .find_map(|(id, expr)| {
+                (!analysis::no_side_effects(expr)).then(|| id.name().to_string())
+            })
+            .or_else(|| module_side_effect_reason(body)),
+        Lambda::Lsequence(first, second) => {
+            if analysis::no_side_effects(first) {
+                module_side_effect_reason(second)
+            } else {
+                Some(String::new())
+            }
+        }
+        _ if analysis::no_side_effects(lam) => None,
+        _ => Some(String::new()),
     }
 }
 
