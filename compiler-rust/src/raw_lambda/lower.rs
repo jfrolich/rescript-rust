@@ -329,6 +329,14 @@ impl LoweringContext {
                     call
                 }
             }
+            Primitive::Pmakeblock(tag, TagInfo::PolyVar(name), mutable_flag) => match args.as_slice() {
+                [_, value] => Lambda::prim(
+                    Primitive::Pmakeblock(tag, TagInfo::PolyVar(name.clone()), mutable_flag),
+                    vec![Lambda::const_(polyvar_block_tag_constant(&name)), value.clone()],
+                    loc,
+                ),
+                _ => unreachable!("polyvariant blocks expect tag and payload"),
+            },
             Primitive::Pmakeblock(_, TagInfo::SomeNotNested, _) => {
                 Lambda::prim(Primitive::PsomeNotNest, args, loc)
             }
@@ -594,6 +602,32 @@ fn lower_constant(constant: Constant) -> Constant {
         }
         Constant::Some(inner) => Constant::Some(Box::new(lower_constant(*inner))),
         other => other,
+    }
+}
+
+fn polyvar_block_tag_constant(name: &str) -> Constant {
+    if is_valid_hash_number(name) {
+        Constant::Int {
+            i: name
+                .parse::<i32>()
+                .expect("validated polyvariant hash should fit in i32"),
+            comment: None,
+        }
+    } else {
+        Constant::String {
+            s: name.to_string(),
+            delim: None,
+        }
+    }
+}
+
+fn is_valid_hash_number(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    match bytes {
+        [] => false,
+        [b'0'..=b'9'] => true,
+        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
+        _ => false,
     }
 }
 
@@ -1431,6 +1465,32 @@ mod tests {
         assert!(matches!(
             lowered,
             Lambda::Lconst(Constant::Pointer(name)) if name == "One"
+        ));
+    }
+
+    #[test]
+    fn lowers_polyvariant_block_payload_tag_from_name() {
+        let lowered = lower_to_lambda(RawLambda::prim(
+            Primitive::Pmakeblock(0, TagInfo::PolyVar("V".to_string()), Mutable::Immutable),
+            vec![
+                RawLambda::const_(Constant::Int {
+                    i: crate::types::btype::hash_variant("V"),
+                    comment: Some(PointerInfo::PolyVariant("V".to_string())),
+                }),
+                RawLambda::const_(Constant::int(1)),
+            ],
+            Location::none(),
+        ));
+
+        let Lambda::Lprim(info) = lowered else {
+            panic!("expected lowered polyvariant block");
+        };
+        assert!(matches!(
+            info.args.as_slice(),
+            [
+                Lambda::Lconst(Constant::String { s, delim: None }),
+                Lambda::Lconst(Constant::Int { i: 1, comment: None }),
+            ] if s == "V"
         ));
     }
 

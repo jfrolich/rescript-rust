@@ -56,7 +56,19 @@ impl Sexp {
 // Helper functions
 
 fn string(s: &str) -> Sexp {
-    Sexp::atom(format!("\"{}\"", s.escape_default()))
+    Sexp::atom(format!("\"{}\"", escape_ocaml_string(s)))
+}
+
+fn escape_ocaml_string(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if ch == '\'' {
+            escaped.push(ch);
+        } else {
+            escaped.extend(ch.escape_default());
+        }
+    }
+    escaped
 }
 
 fn opt_string(s: &Option<String>) -> Sexp {
@@ -715,7 +727,7 @@ fn switch_names_sexp(names: &Option<crate::lambda::SwitchNames>) -> Sexp {
 
 #[cfg(test)]
 mod tests {
-    use super::{constant, switch_names_sexp};
+    use super::{constant, escape_ocaml_string, switch_names_sexp};
     use crate::lambda::constant::{Constant, StringDelim};
     use crate::lambda::SwitchNames;
 
@@ -754,6 +766,12 @@ mod tests {
         .to_string();
 
         assert!(printed.contains("true"));
+    }
+
+    #[test]
+    fn does_not_escape_apostrophes_in_strings() {
+        assert_eq!(escape_ocaml_string("l'"), "l'");
+        assert_eq!(escape_ocaml_string("a'b\"c"), "a'b\\\"c");
     }
 }
 

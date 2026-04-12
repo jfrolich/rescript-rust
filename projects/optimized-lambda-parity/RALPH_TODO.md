@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 537/657 (81.7%), 120 parity failures, 425 hunks
+**Status:** 567/657 (86.3%), 90 parity failures, 264 hunks
 
 ## Goal
 
@@ -23,21 +23,21 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **537/657**
-- Parity hunks: **425**
+- Optimized lambda parity: **567/657**
+- Parity hunks: **264**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
-  - `coercion_module_alias_test.res`: **40** hunks
-  - `bs_unwrap_test.res`: **21** hunks
-  - `inline_map_test.res`: **12** hunks
-  - `inline_map2_test.res`: **12** hunks
+  - `bs_unwrap_test.res`: **19** hunks
   - `record_extension_test.res`: **11** hunks
-  - `exception_raise_test.res`: **10** hunks
-  - `mario_game.res`: **9** hunks
+  - `exception_raise_test.res`: **11** hunks
   - `js_exception_catch_test.res`: **9** hunks
   - `Stdlib_DictTests.res`: **8** hunks
-  - `set_gen.res`: **8** hunks
+  - `recmodule.res`: **8** hunks
+  - `rec_module_test.res`: **8** hunks
+  - `large_record_duplication_test.res`: **7** hunks
+  - `rec_module_opt.res`: **6** hunks
+  - `gpr_3142_test.res`: **6** hunks
 
 ## Working Rules
 
@@ -51,7 +51,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **120** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order can still move whole control-flow clusters.
+There are **90** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order can still move whole control-flow clusters.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -73,6 +73,7 @@ Current frontier characteristics:
 - `big_polyvar_test.res` now also passes exactly on the current authoritative baseline.
 - `LetUnwrap.res` now also passes exactly after preserving named polyvariant hash metadata in raw match tests.
 - `polyvar_test.res` now also passes exactly on the current authoritative baseline.
+- `set_gen.res` now also passes exactly on the current authoritative baseline.
 - export-aware alias retention now keeps OCaml's module-export alias lets, which removed both accessor-file failures.
 - the `Pisout` switch-normalization slice is now landed:
   - `arity_infer.res`: **exact parity**
@@ -84,11 +85,50 @@ Current frontier characteristics:
 - the focused `Lam.if_` assert-failure rewrite is now landed:
   - `stringmatch_test.res`: **exact parity** (down from **1 hunk** on the prior baseline)
   - `js_json_test.res`: **45 hunks** on a focused rerun, so its remaining diffs are no longer dominated by that one rewrite
-- the next visible optimized frontier is the current exact-diff leaders (`coercion_module_alias_test.res`, `bs_unwrap_test.res`, `inline_map_test.res`, `inline_map2_test.res`, `record_extension_test.res`, `exception_raise_test.res`) plus the remaining switch-control-flow files (`set_gen.res`, `test_set.res`, `variant.res`) and the larger JS/backend-facing cluster (`mario_game.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`).
+- the next visible optimized frontier is the current exact-diff leaders (`bs_unwrap_test.res`, `record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`) plus the recursive-module cluster (`recmodule.res`, `rec_module_test.res`, `rec_module_opt.res`) and the remaining switch-facing files (`variant.res`, `UntaggedVariants.res`, `switch_string.res`).
 - a fresh full raw `-drawlambda` rerun reported **656/657** with one exact failure in `coercion_module_alias_test.res`; that looks separate from the assert-failure lowering slice and should be handled in a dedicated raw-parity session.
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### polyvariant block-tag lowering plus OCaml string escaping moved the set frontier
+`compiler/core/lam_convert.ml` special-cases `Pmakeblock` for `Blk_poly_var s`:
+it discards the raw hash payload and rebuilds the first block field from `s`
+itself, using `Const_string` unless `s` is already a valid hash number. Rust
+`compiler-rust/src/raw_lambda/lower.rs` was still forwarding the lowered raw
+hash (`86` for `` `V ``), so optimized lambda kept emitting the wrong block
+payload even when the raw lambda already matched structurally.
+
+At the same time, `compiler-rust/src/lambda/sexp_lambda.rs` was still rendering
+quoted atoms with `escape_default()`, which escaped apostrophes and produced
+printer-only diffs like `"l\\'"` where OCaml prints `"l'"`.
+
+Rust now:
+
+- ports the `Blk_poly_var` `Pmakeblock` rewrite in `raw_lambda/lower.rs`
+- preserves apostrophes in quoted sexp atoms while keeping the existing escapes
+- covers both slices with focused unit tests:
+  - `raw_lambda::lower::tests::lowers_polyvariant_block_payload_tag_from_name`
+  - `lambda::sexp_lambda::tests::does_not_escape_apostrophes_in_strings`
+
+Verified focused check:
+
+- `set_gen.res`: **exact parity** (down from **8 hunks**)
+
+Authoritative repo-wide baseline moved from:
+
+- **537/657**, **425** hunks
+
+to:
+
+- **567/657**, **264** hunks
+
+That is a gain of **30 files** and **161 hunks**. The polyvariant/set frontier
+is materially smaller now; the remaining optimized work is concentrated in the
+current leaders (`bs_unwrap_test.res`, `record_extension_test.res`,
+`exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`)
+plus the recursive-module cluster and the raw-parity outlier
+`coercion_module_alias_test.res`.
 
 ### raw sequence traversal order moved the exception frontier
 `compiler/ml/translcore.ml` builds sequences as:
