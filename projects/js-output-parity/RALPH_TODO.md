@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 88 / 657 JS snapshots passing, 0 compile errors, 569 output diffs
+**Status:** 89 / 657 JS snapshots passing, 0 compile errors, 568 output diffs
 
 ## Goal
 
@@ -35,9 +35,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **88 / 657**
+- JS snapshot parity: **89 / 657**
 - Compile errors: **0**
-- Output diffs: **569**
+- Output diffs: **568**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -114,6 +114,20 @@ Interpretation:
   path: record / variant / module constants cannot be substituted through
   `let` bindings the way scalar constants can, or the backend duplicates
   literals that OCaml keeps as shared bindings
+- the JS-backend post-lowering simplifier now also ports the OCaml
+  `lam_pass_deep_flatten.ml` named immutable-module-block rule for
+  `match` / `include` / `param` bindings:
+  projected `Pfield` aliases are flattened back out of those temporary module
+  blocks before later simplification, which removes a real backend-shaping gap
+  instead of papering over the emitted JS text
+- `tests/tests/src/DerivingAccessorsCurried.res` and
+  `tests/tests/src/DerivingAccessorsUncurried.res` both narrowed to a single
+  remaining diff hunk after the deep-flatten change:
+  the nested `include`-module block churn is gone, and the remaining drift has
+  moved on to later alias/export shaping and final byte-shape cleanup
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the deep-flatten change, which keeps this slice isolated to lowered
+  module-block simplification rather than broader module emission behavior
 - `tests/tests/src/AsInUncurriedExternals.res` is now fully resolved in the
   checked-in snapshot set; `tests/tests/src/Import.res` narrowed further after
   the simplifier removed some dead-let churn, but its remaining drift is still
@@ -205,6 +219,40 @@ Remaining internal compile errors under the measured wrapper baseline:
 - none
 
 ## Latest Session Findings
+
+- `compiler-rust/src/lambda/simplify.rs` now ports the OCaml
+  `lam_pass_deep_flatten.ml` named immutable-module-block rule onto the Rust
+  JS backend path:
+  lowered `match` / `include` / `param` bindings that build immutable module
+  blocks are flattened back into projected field bindings before the existing
+  JS-path simplifier runs, so later beta-reduction and alias cleanup see the
+  same shape OCaml produces instead of getting stuck behind nested block churn
+- Verified focused guards for this cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::simplify::tests::deep_flattens_nested_include_blocks_before_beta_reducing_field_accessors -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::simplify::tests::flattens_immutable_module_block_field_aliases -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsCurried.res -o /tmp/DerivingAccessorsCurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsUncurried.res -o /tmp/DerivingAccessorsUncurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/DerivingAccessorsCurried.res` narrowed materially:
+  the nested `include`-module block wrappers are gone, and the remaining drift
+  is now one later-stage hunk around alias/export naming and final literal byte
+  shape instead of this earlier backend-shaping mismatch.
+- `tests/tests/src/DerivingAccessorsUncurried.res` narrowed materially in the
+  same way:
+  one remaining later-stage hunk is left after the nested immutable module
+  block churn was flattened out of the lowered lambda.
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the deep-flatten change.
+- The authoritative JS snapshot baseline now reports **89 / 657** passing, **0**
+  compile errors, and **568** output diffs.
+- Interpretation:
+  this resolves one real OCaml backend-pass gap after lowering and moves the
+  current accessors cluster forward without reopening earlier frontend or
+  lambda-parity stages. The next signal in `DerivingAccessors*.res`,
+  `Coercion.res`, and `ExternalArity.res` is now later alias/export shaping and
+  final byte-shape cleanup, not the old nested immutable module-block shape.
 
 - `compiler-rust/src/driver.rs` and `compiler-rust/src/js_ir/printer.rs` now
   port the OCaml file-directive path from `frontend/ast_config.ml` and

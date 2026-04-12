@@ -8,7 +8,7 @@ use crate::lambda::beta_reduce;
 use crate::lambda::compat::{FieldDbgInfo, LetKind};
 use crate::lambda::constant::Constant;
 use crate::lambda::free_variables::free_variables;
-use crate::lambda::primitive::Primitive;
+use crate::lambda::primitive::{Mutable, Primitive};
 use crate::lambda::{Apply, LFunction, Lambda, LambdaSwitch, TagInfo};
 
 #[derive(Clone, Default)]
@@ -28,6 +28,13 @@ enum BlockElement {
 struct ImmutableBlockInfo {
     tag_info: TagInfo,
     elements: Vec<BlockElement>,
+}
+
+#[derive(Clone)]
+enum FlattenGroup {
+    Single(LetKind, Ident, Lambda),
+    Recursive(Vec<(Ident, Lambda)>),
+    Nop(Lambda),
 }
 
 impl SimplifyEnv {
@@ -52,8 +59,267 @@ impl SimplifyEnv {
 
 /// Simplify lowered lambda before JS IR lowering.
 pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
-    let exports = collect_exported_idents(lam);
-    simplify_with_env(lam, &SimplifyEnv::default(), &exports)
+    let flattened = deep_flatten_for_js_backend(lam);
+    let exports = collect_exported_idents(&flattened);
+    simplify_with_env(&flattened, &SimplifyEnv::default(), &exports)
+}
+
+fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
+    fn lambda_of_groups(rev_bindings: Vec<FlattenGroup>, result: Lambda) -> Lambda {
+        rev_bindings
+            .into_iter()
+            .fold(result, |acc, group| match group {
+                FlattenGroup::Single(kind, ident, lam) => Lambda::let_(kind, ident, lam, acc),
+                FlattenGroup::Recursive(bindings) => Lambda::letrec(bindings, acc),
+                FlattenGroup::Nop(lam) => Lambda::seq(lam, acc),
+            })
+    }
+
+    fn hit_variable(target: &Ident, lam: &Lambda) -> bool {
+        match lam {
+            Lambda::Lvar(id) => id.same(target),
+            Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            Lambda::Lapply(apply) => {
+                hit_variable(target, &apply.ap_func)
+                    || apply.ap_args.iter().any(|arg| hit_variable(target, arg))
+            }
+            Lambda::Lfunction(func) => hit_variable(target, &func.body),
+            Lambda::Llet(_, _, value, body) => {
+                hit_variable(target, value) || hit_variable(target, body)
+            }
+            Lambda::Lletrec(bindings, body) => {
+                hit_variable(target, body)
+                    || bindings.iter().any(|(_, lam)| hit_variable(target, lam))
+            }
+            Lambda::Lprim(info) => info.args.iter().any(|arg| hit_variable(target, arg)),
+            Lambda::Lswitch(arg, switch) => {
+                hit_variable(target, arg)
+                    || switch
+                        .sw_consts
+                        .iter()
+                        .any(|(_, lam)| hit_variable(target, lam))
+                    || switch
+                        .sw_blocks
+                        .iter()
+                        .any(|(_, lam)| hit_variable(target, lam))
+                    || switch
+                        .sw_failaction
+                        .as_deref()
+                        .is_some_and(|lam| hit_variable(target, lam))
+            }
+            Lambda::LstringSwitch(arg, cases, default) => {
+                hit_variable(target, arg)
+                    || cases.iter().any(|(_, lam)| hit_variable(target, lam))
+                    || default
+                        .as_deref()
+                        .is_some_and(|lam| hit_variable(target, lam))
+            }
+            Lambda::LstaticRaise(_, args) => args.iter().any(|arg| hit_variable(target, arg)),
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                hit_variable(target, body) || hit_variable(target, handler)
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                hit_variable(target, cond)
+                    || hit_variable(target, then_)
+                    || hit_variable(target, else_)
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                hit_variable(target, first) || hit_variable(target, second)
+            }
+            Lambda::Lfor(_, start, end, _, body) => {
+                hit_variable(target, start)
+                    || hit_variable(target, end)
+                    || hit_variable(target, body)
+            }
+            Lambda::Lassign(id, value) => id.same(target) || hit_variable(target, value),
+        }
+    }
+
+    fn eliminate_tuple(
+        id: &Ident,
+        lam: &Lambda,
+        tuple_mapping: HashMap<i32, Ident>,
+    ) -> Option<(HashMap<i32, Ident>, Lambda)> {
+        match lam {
+            Lambda::Llet(LetKind::Alias, projected, value, body)
+                if matches!(
+                    &**value,
+                    Lambda::Lprim(crate::lambda::PrimInfo {
+                        primitive: Primitive::Pfield(index, _),
+                        args,
+                        ..
+                    }) if matches!(args.as_slice(), [Lambda::Lvar(tuple)] if tuple.same(id))
+                ) =>
+            {
+                let Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Pfield(index, _),
+                    ..
+                }) = &**value
+                else {
+                    unreachable!();
+                };
+                let mut tuple_mapping = tuple_mapping;
+                tuple_mapping.insert(*index, projected.clone());
+                eliminate_tuple(id, body, tuple_mapping)
+            }
+            _ => {
+                if hit_variable(id, lam) {
+                    None
+                } else {
+                    Some((tuple_mapping, lam.clone()))
+                }
+            }
+        }
+    }
+
+    fn flatten(acc: Vec<FlattenGroup>, lam: &Lambda) -> (Lambda, Vec<FlattenGroup>) {
+        match lam {
+            Lambda::Llet(kind, id, arg, body) => {
+                let (res, accux) = flatten(acc, arg);
+                let flatten_named_module_block = matches!(
+                    (id.name(), *kind, &res),
+                    (
+                        "match" | "include" | "param",
+                        LetKind::Alias | LetKind::Strict | LetKind::StrictOpt,
+                        Lambda::Lprim(crate::lambda::PrimInfo {
+                            primitive: Primitive::Pmakeblock(_, _, Mutable::Immutable),
+                            ..
+                        })
+                    )
+                );
+                if flatten_named_module_block {
+                    let Lambda::Lprim(crate::lambda::PrimInfo { args, .. }) = &res else {
+                        unreachable!();
+                    };
+                    if let Some((tuple_mapping, stripped_body)) =
+                        eliminate_tuple(id, body, HashMap::new())
+                    {
+                        let mut flattened_args = args
+                            .iter()
+                            .enumerate()
+                            .map(|(index, arg)| match tuple_mapping.get(&(index as i32)) {
+                                Some(projected) => {
+                                    FlattenGroup::Single(*kind, projected.clone(), arg.clone())
+                                }
+                                None => FlattenGroup::Nop(arg.clone()),
+                            })
+                            .collect::<Vec<_>>();
+                        flattened_args.reverse();
+                        flattened_args.extend(accux);
+                        return flatten(flattened_args, &stripped_body);
+                    }
+                }
+
+                let mut next_acc = Vec::with_capacity(accux.len() + 1);
+                next_acc.push(FlattenGroup::Single(*kind, id.clone(), res));
+                next_acc.extend(accux);
+                flatten(next_acc, body)
+            }
+            Lambda::Lletrec(bindings, body) => {
+                let bindings = bindings
+                    .iter()
+                    .map(|(id, expr)| (id.clone(), aux(expr)))
+                    .collect();
+                let mut next_acc = Vec::with_capacity(acc.len() + 1);
+                next_acc.push(FlattenGroup::Recursive(bindings));
+                next_acc.extend(acc);
+                flatten(next_acc, body)
+            }
+            Lambda::Lsequence(first, second) => {
+                let (res, first_acc) = flatten(acc, first);
+                let mut next_acc = Vec::with_capacity(first_acc.len() + 1);
+                next_acc.push(FlattenGroup::Nop(res));
+                next_acc.extend(first_acc);
+                flatten(next_acc, second)
+            }
+            _ => (aux(lam), acc),
+        }
+    }
+
+    fn aux(lam: &Lambda) -> Lambda {
+        match lam {
+            Lambda::Llet(_, _, _, _) => {
+                let (result, groups) = flatten(Vec::new(), lam);
+                lambda_of_groups(groups, result)
+            }
+            Lambda::Lletrec(bindings, body) => Lambda::letrec(
+                bindings
+                    .iter()
+                    .map(|(id, expr)| (id.clone(), aux(expr)))
+                    .collect(),
+                aux(body),
+            ),
+            Lambda::Lsequence(first, second) => Lambda::seq(aux(first), aux(second)),
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
+            Lambda::Lapply(apply) => Lambda::Lapply(Apply {
+                ap_func: Box::new(aux(&apply.ap_func)),
+                ap_args: apply.ap_args.iter().map(aux).collect(),
+                ap_info: apply.ap_info.clone(),
+                ap_transformed_jsx: apply.ap_transformed_jsx,
+            }),
+            Lambda::Lfunction(func) => Lambda::function_(
+                func.arity,
+                func.params.clone(),
+                aux(&func.body),
+                func.attr.clone(),
+            ),
+            Lambda::Lprim(info) => Lambda::prim(
+                info.primitive.clone(),
+                info.args.iter().map(aux).collect(),
+                info.loc.clone(),
+            ),
+            Lambda::Lswitch(scrutinee, switch) => Lambda::Lswitch(
+                Box::new(aux(scrutinee)),
+                LambdaSwitch {
+                    sw_consts_full: switch.sw_consts_full,
+                    sw_consts: switch
+                        .sw_consts
+                        .iter()
+                        .map(|(tag, lam)| (*tag, aux(lam)))
+                        .collect(),
+                    sw_blocks_full: switch.sw_blocks_full,
+                    sw_blocks: switch
+                        .sw_blocks
+                        .iter()
+                        .map(|(tag, lam)| (*tag, aux(lam)))
+                        .collect(),
+                    sw_failaction: switch.sw_failaction.as_ref().map(|lam| Box::new(aux(lam))),
+                    sw_names: switch.sw_names.clone(),
+                },
+            ),
+            Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
+                Box::new(aux(scrutinee)),
+                cases
+                    .iter()
+                    .map(|(tag, lam)| (tag.clone(), aux(lam)))
+                    .collect(),
+                default.as_ref().map(|lam| Box::new(aux(lam))),
+            ),
+            Lambda::LstaticRaise(id, args) => {
+                Lambda::LstaticRaise(*id, args.iter().map(aux).collect())
+            }
+            Lambda::LstaticCatch(body, ids, handler) => {
+                Lambda::LstaticCatch(Box::new(aux(body)), ids.clone(), Box::new(aux(handler)))
+            }
+            Lambda::LtryWith(body, exn, handler) => {
+                Lambda::LtryWith(Box::new(aux(body)), exn.clone(), Box::new(aux(handler)))
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                Lambda::if_(aux(cond), aux(then_), aux(else_))
+            }
+            Lambda::Lwhile(cond, body) => Lambda::Lwhile(Box::new(aux(cond)), Box::new(aux(body))),
+            Lambda::Lfor(id, start, end, direction, body) => Lambda::Lfor(
+                id.clone(),
+                Box::new(aux(start)),
+                Box::new(aux(end)),
+                *direction,
+                Box::new(aux(body)),
+            ),
+            Lambda::Lassign(id, value) => Lambda::Lassign(id.clone(), Box::new(aux(value))),
+        }
+    }
+
+    aux(lam)
 }
 
 fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) -> Lambda {
@@ -755,6 +1021,105 @@ mod tests {
         assert!(matches!(*kept_value, Lambda::Lfunction(_)));
         let Lambda::Lvar(body_id) = *kept_body else {
             panic!("expected the body to reference the original function");
+        };
+        assert_eq!(body_id, kept_id);
+    }
+
+    #[test]
+    fn deep_flattens_nested_include_blocks_before_beta_reducing_field_accessors() {
+        let field_fn = Ident::create_local("myField");
+        let include_inner = Ident::create_local("include");
+        let projected_inner = Ident::create_local("myField");
+        let include_outer = Ident::create_local("include");
+        let exported = Ident::create_local("myField");
+        let param = Ident::create_local("param");
+
+        let accessor = Lambda::function_(
+            1,
+            vec![param.clone()],
+            Lambda::prim(
+                Primitive::Pfield(
+                    0,
+                    FieldDbgInfo::Record {
+                        name: "myField".to_string(),
+                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                    },
+                ),
+                vec![Lambda::var(param)],
+                Location::none(),
+            ),
+            FunctionAttribute::default(),
+        );
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            include_outer.clone(),
+            Lambda::let_(
+                LetKind::Strict,
+                include_inner.clone(),
+                Lambda::let_(
+                    LetKind::Strict,
+                    field_fn.clone(),
+                    accessor,
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::module(vec!["myField".to_string()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(field_fn.clone())],
+                        Location::none(),
+                    ),
+                ),
+                Lambda::let_(
+                    LetKind::Alias,
+                    projected_inner.clone(),
+                    Lambda::prim(
+                        Primitive::Pfield(
+                            0,
+                            FieldDbgInfo::Module {
+                                name: "myField".to_string(),
+                            },
+                        ),
+                        vec![Lambda::var(include_inner)],
+                        Location::none(),
+                    ),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::module(vec!["myField".to_string()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(projected_inner.clone())],
+                        Location::none(),
+                    ),
+                ),
+            ),
+            Lambda::let_(
+                LetKind::Alias,
+                exported.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: "myField".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(include_outer)],
+                    Location::none(),
+                ),
+                Lambda::var(exported),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(_, kept_id, kept_value, kept_body) = simplified else {
+            panic!("expected the flattened accessor binding to remain");
+        };
+        assert_eq!(kept_id, field_fn);
+        assert!(matches!(*kept_value, Lambda::Lfunction(_)));
+        let Lambda::Lvar(body_id) = *kept_body else {
+            panic!("expected the body to reference the original accessor binding");
         };
         assert_eq!(body_id, kept_id);
     }
