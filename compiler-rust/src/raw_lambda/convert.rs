@@ -242,12 +242,14 @@ fn raw_subst_lambda(subst: &HashMap<Ident, RawLambda>, lam: &RawLambda) -> RawLa
         RawLambda::Lswitch(arg, sw, loc) => RawLambda::Lswitch(
             Box::new(raw_subst_lambda(subst, arg)),
             crate::raw_lambda::RawLambdaSwitch {
+                sw_numconsts: sw.sw_numconsts,
                 sw_consts_full: sw.sw_consts_full,
                 sw_consts: sw
                     .sw_consts
                     .iter()
                     .map(|(tag, lam)| (*tag, raw_subst_lambda(subst, lam)))
                     .collect(),
+                sw_numblocks: sw.sw_numblocks,
                 sw_blocks_full: sw.sw_blocks_full,
                 sw_blocks: sw
                     .sw_blocks
@@ -1234,8 +1236,10 @@ impl<'a> RawLambdaConverter<'a> {
                 Some(RawLambda::Lswitch(
                     Box::new(scrut_norm),
                     crate::raw_lambda::RawLambdaSwitch {
+                        sw_numconsts: sw.sw_numconsts,
                         sw_consts_full: sw.sw_consts_full,
                         sw_consts: consts,
+                        sw_numblocks: sw.sw_numblocks,
                         sw_blocks_full: sw.sw_blocks_full,
                         sw_blocks: blocks,
                         sw_failaction: fail,
@@ -1423,8 +1427,10 @@ impl<'a> RawLambdaConverter<'a> {
                 let switch = RawLambda::Lswitch(
                     Box::new(scrut),
                     crate::raw_lambda::RawLambdaSwitch {
+                        sw_numconsts: const_cases.len(),
                         sw_consts_full: false,
                         sw_consts: const_cases,
+                        sw_numblocks: block_cases.len(),
                         sw_blocks_full: false,
                         sw_blocks: block_cases,
                         sw_failaction: Some(Box::new(RawLambda::LstaticRaise(exit_id, Vec::new()))),
@@ -1436,8 +1442,10 @@ impl<'a> RawLambdaConverter<'a> {
             }
             None => {
                 let mut sw = crate::raw_lambda::RawLambdaSwitch {
+                    sw_numconsts: const_cases.len(),
                     sw_consts_full: false,
                     sw_consts: const_cases,
+                    sw_numblocks: block_cases.len(),
                     sw_blocks_full: false,
                     sw_blocks: block_cases,
                     sw_failaction: None,
@@ -6621,8 +6629,10 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::Lswitch(
                         Box::new(scrut_var.clone()),
                         crate::raw_lambda::RawLambdaSwitch {
+                            sw_numconsts: sorted_consts.len(),
                             sw_consts_full: false,
                             sw_consts: sorted_consts,
+                            sw_numblocks: 0,
                             sw_blocks_full: false,
                             sw_blocks: Vec::new(),
                             sw_failaction: None,
@@ -8285,8 +8295,10 @@ impl<'a> RawLambdaConverter<'a> {
         Some(RawLambda::Lswitch(
             Box::new(RawLambda::var(ids[idx].clone())),
             crate::raw_lambda::RawLambdaSwitch {
+                sw_numconsts: sw_consts.len(),
                 sw_consts_full: false,
                 sw_consts,
+                sw_numblocks: sw_blocks.len(),
                 sw_blocks_full: false,
                 sw_blocks,
                 sw_failaction: failaction,

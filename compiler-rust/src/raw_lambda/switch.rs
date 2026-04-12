@@ -233,8 +233,10 @@ fn build_lswitch(
     RawLambda::Lswitch(
         Box::new(arg),
         RawLambdaSwitch {
+            sw_numconsts: tbl.len(),
             sw_consts_full: false,
             sw_consts: cases,
+            sw_numblocks: 0,
             sw_blocks_full: false,
             sw_blocks: Vec::new(),
             sw_failaction: None,

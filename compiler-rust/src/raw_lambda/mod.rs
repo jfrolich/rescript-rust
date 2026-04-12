@@ -22,10 +22,14 @@ use crate::location::Location;
 /// Raw-lambda switch construct.
 #[derive(Debug, Clone)]
 pub struct RawLambdaSwitch {
+    /// Number of integer cases in the source switch table.
+    pub sw_numconsts: usize,
     /// Are all constant cases covered?
     pub sw_consts_full: bool,
     /// Constant case branches (tag -> lambda).
     pub sw_consts: Vec<(i32, RawLambda)>,
+    /// Number of block-tag cases in the source switch table.
+    pub sw_numblocks: usize,
     /// Are all block cases covered?
     pub sw_blocks_full: bool,
     /// Block case branches (tag -> lambda).
@@ -235,12 +239,14 @@ impl RawLambda {
             Lambda::Lswitch(arg, sw) => RawLambda::Lswitch(
                 Box::new(RawLambda::from_lowered(*arg)),
                 RawLambdaSwitch {
+                    sw_numconsts: sw.sw_consts.len(),
                     sw_consts_full: sw.sw_consts_full,
                     sw_consts: sw
                         .sw_consts
                         .into_iter()
                         .map(|(tag, lam)| (tag, RawLambda::from_lowered(lam)))
                         .collect(),
+                    sw_numblocks: sw.sw_blocks.len(),
                     sw_blocks_full: sw.sw_blocks_full,
                     sw_blocks: sw
                         .sw_blocks

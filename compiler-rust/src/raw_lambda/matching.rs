@@ -1719,8 +1719,10 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
         }
         let fail = tr_opt(env, sw.sw_failaction.as_deref(), count, next_id)?;
         Some(RawLambdaSwitch {
+            sw_numconsts: sw.sw_numconsts,
             sw_consts_full: sw.sw_consts_full,
             sw_consts: consts,
+            sw_numblocks: sw.sw_numblocks,
             sw_blocks_full: sw.sw_blocks_full,
             sw_blocks: blocks,
             sw_failaction: fail.map(Box::new),
@@ -5499,8 +5501,10 @@ fn sarg_make_switch(
     RawLambda::Lswitch(
         Box::new(arg),
         RawLambdaSwitch {
+            sw_numconsts: cases.len(),
             sw_consts_full: false,
             sw_consts: l,
+            sw_numblocks: 0,
             sw_blocks_full: false,
             sw_blocks: Vec::new(),
             sw_failaction: None,
@@ -5577,11 +5581,13 @@ pub fn share_actions_sw(
     };
 
     let new_sw = RawLambdaSwitch {
+        sw_numconsts: sw.sw_numconsts,
         sw_consts_full: sw.sw_consts_full,
         sw_consts: consts
             .into_iter()
             .map(|(i, j)| (i, resolved_acts[j].clone()))
             .collect(),
+        sw_numblocks: sw.sw_numblocks,
         sw_blocks_full: sw.sw_blocks_full,
         sw_blocks: blocks
             .into_iter()
@@ -5638,8 +5644,10 @@ pub fn reintroduce_fail(sw: RawLambdaSwitch) -> RawLambdaSwitch {
                 .collect()
         };
         RawLambdaSwitch {
+            sw_numconsts: sw.sw_numconsts,
             sw_consts_full: sw.sw_consts_full,
             sw_consts: remove(sw.sw_consts),
+            sw_numblocks: sw.sw_numblocks,
             sw_blocks_full: sw.sw_blocks_full,
             sw_blocks: remove(sw.sw_blocks),
             sw_failaction: Some(Box::new(make_exit(default))),
@@ -6813,8 +6821,10 @@ fn combine_constructor(
                         // Emit a switch
                         let _ = act0; // OCaml has dead code paths here (false guards)
                         let sw = RawLambdaSwitch {
+                            sw_numconsts: cstr.cstr_consts as usize,
                             sw_consts_full: false,
                             sw_consts: consts,
+                            sw_numblocks: cstr.cstr_nonconsts as usize,
                             sw_blocks_full: false,
                             sw_blocks: nonconsts,
                             sw_failaction: fail_opt.map(Box::new),

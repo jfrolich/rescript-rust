@@ -413,8 +413,8 @@ impl LoweringContext {
 
     fn lower_switch(&mut self, scrutinee: RawLambda, switch: RawLambdaSwitch) -> Lambda {
         let lowered_scrutinee = self.lower_lambda(scrutinee);
-        let simple_const_only_switch =
-            switch.sw_failaction.is_none() && switch.sw_blocks.is_empty();
+        let const_only_switch =
+            switch.sw_failaction.is_none() && switch.sw_blocks.is_empty() && switch.sw_numblocks == 0;
         let lowered_consts = switch
             .sw_consts
             .into_iter()
@@ -429,7 +429,7 @@ impl LoweringContext {
             .sw_failaction
             .map(|lam| Box::new(self.lower_lambda(*lam)));
 
-        if lowered_failaction.is_none() && lowered_blocks.is_empty() {
+        if const_only_switch {
             if let Some(diff) = happens_to_be_diff(&lowered_consts, switch.sw_names.as_ref()) {
                 if diff == 0 {
                     return lowered_scrutinee;
@@ -448,26 +448,31 @@ impl LoweringContext {
             }
         }
 
-        Lambda::Lswitch(
-            Box::new(lowered_scrutinee),
-            LambdaSwitch {
-                sw_consts_full: switch.sw_consts_full
-                    || switch
-                        .sw_names
-                        .as_ref()
-                        .is_some_and(|names| names.consts.len() == lowered_consts.len()),
-                sw_consts: lowered_consts,
-                sw_blocks_full: simple_const_only_switch
-                    || switch.sw_blocks_full
-                    || switch
-                        .sw_names
-                        .as_ref()
-                        .is_some_and(|names| names.blocks.len() == lowered_blocks.len()),
-                sw_blocks: lowered_blocks,
-                sw_failaction: lowered_failaction,
-                sw_names: switch.sw_names,
-            },
-        )
+        if const_only_switch {
+            Lambda::Lswitch(
+                Box::new(lowered_scrutinee),
+                LambdaSwitch {
+                    sw_consts_full: lowered_consts.len() >= switch.sw_numconsts,
+                    sw_consts: lowered_consts,
+                    sw_blocks_full: true,
+                    sw_blocks: lowered_blocks,
+                    sw_failaction: lowered_failaction,
+                    sw_names: switch.sw_names,
+                },
+            )
+        } else {
+            Lambda::Lswitch(
+                Box::new(lowered_scrutinee),
+                LambdaSwitch {
+                    sw_consts_full: lowered_consts.len() >= switch.sw_numconsts,
+                    sw_consts: lowered_consts,
+                    sw_blocks_full: lowered_blocks.len() >= switch.sw_numblocks,
+                    sw_blocks: lowered_blocks,
+                    sw_failaction: lowered_failaction,
+                    sw_names: switch.sw_names,
+                },
+            )
+        }
     }
 
     fn lower_try_with(&mut self, body: RawLambda, id: Ident, handler: RawLambda) -> Lambda {
@@ -2325,8 +2330,10 @@ mod tests {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::var(Ident::create_local("v"))),
             RawLambdaSwitch {
+                sw_numconsts: 1,
                 sw_consts_full: false,
                 sw_consts: vec![(0, RawLambda::const_(Constant::int(0)))],
+                sw_numblocks: 0,
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
@@ -2350,11 +2357,13 @@ mod tests {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::var(Ident::create_local("v"))),
             RawLambdaSwitch {
+                sw_numconsts: 3,
                 sw_consts_full: false,
                 sw_consts: vec![
                     (0, RawLambda::const_(Constant::int(7))),
                     (1, RawLambda::const_(Constant::int(9))),
                 ],
+                sw_numblocks: 0,
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
@@ -2474,11 +2483,13 @@ mod tests {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::var(scrutinee.clone())),
             RawLambdaSwitch {
+                sw_numconsts: 2,
                 sw_consts_full: true,
                 sw_consts: vec![
                     (0, RawLambda::const_(Constant::int(0))),
                     (1, RawLambda::const_(Constant::int(1))),
                 ],
+                sw_numblocks: 0,
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
@@ -2519,12 +2530,14 @@ mod tests {
             Box::new(RawLambda::Lswitch(
                 Box::new(RawLambda::var(scrutinee.clone())),
                 RawLambdaSwitch {
+                    sw_numconsts: 3,
                     sw_consts_full: false,
                     sw_consts: vec![
                         (1, RawLambda::const_(Constant::Char(97))),
                         (2, RawLambda::const_(Constant::Char(98))),
                         (3, RawLambda::const_(Constant::Char(99))),
                     ],
+                    sw_numblocks: 0,
                     sw_blocks_full: false,
                     sw_blocks: Vec::new(),
                     sw_failaction: None,
