@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 26 / 657 JS snapshots passing, 0 compile errors, 631 output diffs
+**Status:** 28 / 657 JS snapshots passing, 0 compile errors, 629 output diffs
 
 ## Goal
 
@@ -35,9 +35,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **26 / 657**
+- JS snapshot parity: **28 / 657**
 - Compile errors: **0**
-- Output diffs: **631**
+- Output diffs: **629**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -46,9 +46,12 @@ Interpretation:
 - the authoritative wrapper is now scoped to the canonical in-repo 657-file set
 - all current internal JS snapshot files now compile under the wrapper baseline
 - the former `Import.res` timeout is now exposed as a normal output-diff case
-- the current high-impact backend gap is module emission after lowering:
-  export recovery, top-level function declaration shape, local JS-name mangling,
-  and purity trailer emission
+- preserving OCaml external-spec metadata through `PjsCall` is necessary for
+  backend parity after optimized lambda: `@val`, `@new`, `@get`, and related
+  externals cannot be lowered as a generic `primName(...)` call
+- the current focused residual drift in `ExternalShadow.res` is now printer-only:
+  top-level function declaration order still differs after the external-call and
+  global-shadow semantics align
 - external-corpus sweeps remain secondary; the in-repo backend frontier still has
   ample signal
 
@@ -113,7 +116,7 @@ Remaining internal compile errors under the measured wrapper baseline:
 - `compiler-rust/src/driver.rs` now normalizes CLI `-I` load-path entries against the current working directory and expands `+stdlib`-relative includes before building the persistent load path, matching the wrapper's per-project `lib/bs` invocation model.
 - `compiler-rust/src/bin/bsc.rs` now enables a CLI-only post-emit fast-exit path so short-lived snapshot runs do not spend the harness timeout tearing down large typechecking arenas after the JS output is already produced.
 - The former `tests/tests/src/Import.res` compile-error guard now completes under the measured wrapper invocation and has moved into the normal output-diff cluster.
-- The canonical in-repo wrapper baseline now reports **26 / 657** passing, **0** compile errors, and **631** output diffs.
+- The canonical in-repo wrapper baseline now reports **28 / 657** passing, **0** compile errors, and **629** output diffs.
 - A printer/module-emission pass is now wired through `DepsProgram` metadata in Rust:
   - recover `program.exports` from the lowered `module/exports` block instead of printing a trailing array
   - print the ReScript version header, ES module export block, and module purity trailer
@@ -124,6 +127,13 @@ Remaining internal compile errors under the measured wrapper baseline:
 - Verified focused checks under the new project-context invocation:
   - `tests/tests/src/keep_uncurry_attribute.res` now matches its checked-in `.mjs` snapshot exactly
   - `tests/tests/src/ident_mangles.res` now matches its checked-in `.mjs` snapshot exactly
-  - `tests/tests/src/ExternalShadow.res` now collapses to the remaining external-call/global-shadow semantics:
-    `globalThis.process`, `new URL`, and raw external value vs call lowering
+  - `tests/tests/src/ExternalShadow.res` now collapses from multiple semantic diffs to a single top-level declaration-order diff
+- `compiler-rust/src/raw_lambda/convert.rs` and `compiler-rust/src/lambda/convert.rs` now preserve OCaml external-spec shape inside `PjsCall` instead of collapsing it to a lossy `prim_name` summary.
+- `compiler-rust/src/lambda/compile.rs` now lowers preserved no-module external specs with OCaml-aligned JS semantics for:
+  - `Js_var` value vs call
+  - `Js_new`
+  - `Js_get` / `Js_set`
+  - `Js_get_index` / `Js_set_index`
+  - `Js_send`
+- `compiler-rust/src/lambda/compile.rs` now applies a port of `js_pass_external_shadow.ml`, so lexical shadowing of JS globals rewrites initializer/self-property reads through `globalThis` without rewriting unrelated uses like `parseInt`.
 - Typedtree parity and both lambda parity stages are considered complete for this project and are not part of the remaining frontier.

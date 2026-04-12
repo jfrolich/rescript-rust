@@ -5,9 +5,12 @@
 //! clarity over aggressive optimization; it is intended as a correct baseline
 //! that can be extended with more advanced codegen passes.
 
+use std::collections::HashSet;
+
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Kind, LengthObject, MutableFlag, Number};
+use crate::js_ir::printer::is_js_keyword_or_global;
 use crate::js_ir::{
     BinOp, Block, CallInfo, Delim, DepsProgram, Expression, ExpressionDesc, ForDirection, ModuleId,
     Program, Statement, StatementDesc, VariableDeclaration,
@@ -15,7 +18,7 @@ use crate::js_ir::{
 use crate::lambda::analysis;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
 use crate::lambda::constant::{Constant, StringDelim};
-use crate::lambda::primitive::{Mutable, Primitive};
+use crate::lambda::primitive::{ExternalModuleName, ExternalSpec, Mutable, Primitive};
 use crate::lambda::{Apply, Lambda, LambdaSwitch, TagInfo};
 
 /// Compilation result for an expression: prelude statements plus a value expression.
@@ -62,11 +65,11 @@ impl LambdaCompiler {
             }
         };
 
-        DepsProgram {
+        apply_external_shadow_pass(DepsProgram {
             program: Program::new(block, exports),
             modules: vec![],
             side_effect: module_side_effect_reason(lam),
-        }
+        })
     }
 
     fn compile_expr(&mut self, lam: &Lambda) -> Compiled {
@@ -577,11 +580,7 @@ impl LambdaCompiler {
                 compiled_args,
                 CallInfo::default(),
             ),
-            PjsCall { prim_name, .. } => Expression::call(
-                Expression::var(Ident::create_persistent(prim_name)),
-                compiled_args,
-                CallInfo::default(),
-            ),
+            PjsCall { prim_name, ffi, .. } => self.compile_js_call(prim_name, ffi, compiled_args),
             Pnull => Expression::null(),
             Pundefined => Expression::undefined(false),
             _ => Expression::undefined(false),
@@ -698,6 +697,180 @@ impl LambdaCompiler {
         Expression::bin(BinOp::Eq, field, value.clone())
     }
 
+    fn compile_js_call(
+        &self,
+        prim_name: &str,
+        ffi: &crate::lambda::primitive::ExternalFfiSpec,
+        args: Vec<Expression>,
+    ) -> Expression {
+        match ffi.spec.as_ref() {
+            Some(ExternalSpec::JsVar {
+                name,
+                external_module_name: None,
+                scopes,
+            }) => {
+                let value = self.translate_scoped_global_value(name, scopes);
+                if args.is_empty() {
+                    value
+                } else {
+                    Expression::call(value, args, CallInfo::default())
+                }
+            }
+            Some(ExternalSpec::JsCall {
+                name,
+                external_module_name: None,
+                scopes,
+                tagged_template: false,
+                ..
+            }) => Expression::call(
+                self.translate_scoped_global_value(name, scopes),
+                args,
+                CallInfo::default(),
+            ),
+            Some(ExternalSpec::JsNew {
+                name,
+                external_module_name: None,
+                scopes,
+                ..
+            }) => Expression::new(ExpressionDesc::New(
+                Box::new(self.translate_scoped_global_value(name, scopes)),
+                Some(args),
+            )),
+            Some(ExternalSpec::JsSend {
+                name,
+                js_send_scopes,
+                ..
+            }) => match args.split_first() {
+                Some((receiver, rest)) => Expression::call(
+                    self.static_index(
+                        self.apply_scoped_access(receiver.clone(), js_send_scopes),
+                        name,
+                    ),
+                    rest.to_vec(),
+                    CallInfo::default(),
+                ),
+                None => self.compile_plain_js_call(prim_name, args),
+            },
+            Some(ExternalSpec::JsGet {
+                js_get_name,
+                js_get_scopes,
+            }) => match args.as_slice() {
+                [receiver] => self.static_index(
+                    self.apply_scoped_access(receiver.clone(), js_get_scopes),
+                    js_get_name,
+                ),
+                _ => self.compile_plain_js_call(prim_name, args),
+            },
+            Some(ExternalSpec::JsSet {
+                js_set_name,
+                js_set_scopes,
+            }) => match args.as_slice() {
+                [receiver, value] => Expression::bin(
+                    BinOp::Eq,
+                    self.static_index(
+                        self.apply_scoped_access(receiver.clone(), js_set_scopes),
+                        js_set_name,
+                    ),
+                    value.clone(),
+                ),
+                _ => self.compile_plain_js_call(prim_name, args),
+            },
+            Some(ExternalSpec::JsGetIndex {
+                js_get_index_scopes,
+            }) => match args.as_slice() {
+                [receiver, index] => Expression::new(ExpressionDesc::ArrayIndex(
+                    Box::new(self.apply_scoped_access(receiver.clone(), js_get_index_scopes)),
+                    Box::new(index.clone()),
+                )),
+                _ => self.compile_plain_js_call(prim_name, args),
+            },
+            Some(ExternalSpec::JsSetIndex {
+                js_set_index_scopes,
+            }) => match args.as_slice() {
+                [receiver, index, value] => Expression::bin(
+                    BinOp::Eq,
+                    Expression::new(ExpressionDesc::ArrayIndex(
+                        Box::new(self.apply_scoped_access(receiver.clone(), js_set_index_scopes)),
+                        Box::new(index.clone()),
+                    )),
+                    value.clone(),
+                ),
+                _ => self.compile_plain_js_call(prim_name, args),
+            },
+            Some(ExternalSpec::JsModuleAsVar(module_name)) => {
+                self.compile_module_external_fallback(prim_name, module_name, args, false)
+            }
+            Some(ExternalSpec::JsModuleAsFn {
+                external_module_name,
+                ..
+            }) => {
+                self.compile_module_external_fallback(prim_name, external_module_name, args, false)
+            }
+            Some(ExternalSpec::JsModuleAsClass(module_name)) => {
+                self.compile_module_external_fallback(prim_name, module_name, args, true)
+            }
+            _ => self.compile_plain_js_call(prim_name, args),
+        }
+    }
+
+    fn compile_plain_js_call(&self, prim_name: &str, args: Vec<Expression>) -> Expression {
+        Expression::call(
+            Expression::var(Ident::create_persistent(prim_name)),
+            args,
+            CallInfo::default(),
+        )
+    }
+
+    fn translate_scoped_global_value(&self, name: &str, scopes: &[String]) -> Expression {
+        let mut expr = match scopes.split_first() {
+            Some((head, rest)) => {
+                let mut expr = Expression::var(Ident::create_persistent(head));
+                for scope in rest {
+                    expr = self.static_index(expr, scope);
+                }
+                expr
+            }
+            None => Expression::var(Ident::create_persistent(name)),
+        };
+        if !scopes.is_empty() {
+            expr = self.static_index(expr, name);
+        }
+        expr
+    }
+
+    fn apply_scoped_access(&self, mut expr: Expression, scopes: &[String]) -> Expression {
+        for scope in scopes {
+            expr = self.static_index(expr, scope);
+        }
+        expr
+    }
+
+    fn static_index(&self, target: Expression, field: &str) -> Expression {
+        Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(target),
+            field.to_string(),
+            None,
+        ))
+    }
+
+    fn compile_module_external_fallback(
+        &self,
+        prim_name: &str,
+        module_name: &ExternalModuleName,
+        args: Vec<Expression>,
+        is_new: bool,
+    ) -> Expression {
+        let _ = module_name;
+        if is_new {
+            Expression::new(ExpressionDesc::New(
+                Box::new(Expression::var(Ident::create_persistent(prim_name))),
+                Some(args),
+            ))
+        } else {
+            self.compile_plain_js_call(prim_name, args)
+        }
+    }
+
     fn fresh_ident(&self, prefix: &str) -> Ident {
         self.id_gen.create(prefix)
     }
@@ -743,11 +916,320 @@ fn comparison_to_binop(cmp: Comparison) -> BinOp {
     }
 }
 
+fn apply_external_shadow_pass(mut deps: DepsProgram) -> DepsProgram {
+    let shadowed_globals = deps
+        .program
+        .block
+        .iter()
+        .filter_map(|stmt| match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident, property, ..
+            }) if is_lexical_binding_kind(*property) && should_rewrite_binding(ident) => {
+                Some(ident.name().to_string())
+            }
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+
+    if shadowed_globals.is_empty() {
+        return deps;
+    }
+
+    deps.program.block = rewrite_block(&deps.program.block, &shadowed_globals);
+    deps
+}
+
+fn is_lexical_binding_kind(property: LetKind) -> bool {
+    matches!(
+        property,
+        LetKind::Strict | LetKind::StrictOpt | LetKind::Alias
+    )
+}
+
+fn should_rewrite_binding(ident: &Ident) -> bool {
+    !ident.is_global() && !is_js_keyword_or_global(ident.name())
+}
+
+fn rewrite_block(block: &Block, shadowed_globals: &HashSet<String>) -> Block {
+    block
+        .iter()
+        .map(|stmt| rewrite_statement(stmt, shadowed_globals))
+        .collect()
+}
+
+fn rewrite_statement(stmt: &Statement, shadowed_globals: &HashSet<String>) -> Statement {
+    let desc = match &stmt.desc {
+        StatementDesc::Block(block) => StatementDesc::Block(rewrite_block(block, shadowed_globals)),
+        StatementDesc::Variable(decl) => {
+            let value = decl.value.as_ref().map(|value| {
+                let value = if is_lexical_binding_kind(decl.property)
+                    && should_rewrite_binding(&decl.ident)
+                {
+                    rewrite_shadowed_global_in_expr(value, decl.ident.name())
+                } else {
+                    value.clone()
+                };
+                rewrite_global_static_index_expr(&value, shadowed_globals)
+            });
+            StatementDesc::Variable(VariableDeclaration {
+                ident: decl.ident.clone(),
+                value,
+                property: decl.property,
+                ident_info: decl.ident_info.clone(),
+            })
+        }
+        StatementDesc::Exp(expr) => {
+            StatementDesc::Exp(rewrite_global_static_index_expr(expr, shadowed_globals))
+        }
+        StatementDesc::If(cond, then_block, else_block) => StatementDesc::If(
+            rewrite_global_static_index_expr(cond, shadowed_globals),
+            rewrite_block(then_block, shadowed_globals),
+            rewrite_block(else_block, shadowed_globals),
+        ),
+        StatementDesc::While(cond, body) => StatementDesc::While(
+            rewrite_global_static_index_expr(cond, shadowed_globals),
+            rewrite_block(body, shadowed_globals),
+        ),
+        StatementDesc::ForRange(init, end, id, direction, body) => StatementDesc::ForRange(
+            init.as_ref()
+                .map(|expr| rewrite_global_static_index_expr(expr, shadowed_globals)),
+            rewrite_global_static_index_expr(end, shadowed_globals),
+            id.clone(),
+            *direction,
+            rewrite_block(body, shadowed_globals),
+        ),
+        StatementDesc::Continue => StatementDesc::Continue,
+        StatementDesc::Break => StatementDesc::Break,
+        StatementDesc::Return(expr) => {
+            StatementDesc::Return(rewrite_global_static_index_expr(expr, shadowed_globals))
+        }
+        StatementDesc::IntSwitch(expr, clauses, default) => StatementDesc::IntSwitch(
+            rewrite_global_static_index_expr(expr, shadowed_globals),
+            clauses
+                .iter()
+                .map(|(value, clause)| (*value, rewrite_case_clause(clause, shadowed_globals)))
+                .collect(),
+            default
+                .as_ref()
+                .map(|block| rewrite_block(block, shadowed_globals)),
+        ),
+        StatementDesc::StringSwitch(expr, clauses, default) => StatementDesc::StringSwitch(
+            rewrite_global_static_index_expr(expr, shadowed_globals),
+            clauses
+                .iter()
+                .map(|clause| crate::js_ir::StringClause {
+                    tag_type: clause.tag_type.clone(),
+                    clause: rewrite_case_clause(&clause.clause, shadowed_globals),
+                })
+                .collect(),
+            default
+                .as_ref()
+                .map(|block| rewrite_block(block, shadowed_globals)),
+        ),
+        StatementDesc::Throw(expr) => {
+            StatementDesc::Throw(rewrite_global_static_index_expr(expr, shadowed_globals))
+        }
+        StatementDesc::Try(body, catch, finally) => StatementDesc::Try(
+            rewrite_block(body, shadowed_globals),
+            catch
+                .as_ref()
+                .map(|(ident, block)| (ident.clone(), rewrite_block(block, shadowed_globals))),
+            finally
+                .as_ref()
+                .map(|block| rewrite_block(block, shadowed_globals)),
+        ),
+        StatementDesc::Debugger => StatementDesc::Debugger,
+    };
+
+    Statement {
+        desc,
+        comment: stmt.comment.clone(),
+    }
+}
+
+fn rewrite_case_clause(
+    clause: &crate::js_ir::CaseClause,
+    shadowed_globals: &HashSet<String>,
+) -> crate::js_ir::CaseClause {
+    crate::js_ir::CaseClause {
+        body: rewrite_block(&clause.body, shadowed_globals),
+        should_break: clause.should_break,
+        comment: clause.comment.clone(),
+    }
+}
+
+fn rewrite_shadowed_global_in_expr(expr: &Expression, name: &str) -> Expression {
+    let expr = rewrite_expr_children(expr, &|child| rewrite_shadowed_global_in_expr(child, name));
+    match &expr.desc {
+        ExpressionDesc::Var(crate::js_ir::VIdent::Id(id))
+            if id.is_global() && id.name() == name =>
+        {
+            global_this_field(name)
+        }
+        _ => expr,
+    }
+}
+
+fn rewrite_global_static_index_expr(
+    expr: &Expression,
+    shadowed_globals: &HashSet<String>,
+) -> Expression {
+    let expr = rewrite_expr_children(expr, &|child| {
+        rewrite_global_static_index_expr(child, shadowed_globals)
+    });
+    match &expr.desc {
+        ExpressionDesc::StaticIndex(obj, field, pos) => match &obj.desc {
+            ExpressionDesc::Var(crate::js_ir::VIdent::Id(id))
+                if id.is_global() && shadowed_globals.contains(id.name()) =>
+            {
+                Expression::new(ExpressionDesc::StaticIndex(
+                    Box::new(global_this_field(id.name())),
+                    field.clone(),
+                    *pos,
+                ))
+            }
+            _ => expr,
+        },
+        _ => expr,
+    }
+}
+
+fn rewrite_expr_children(
+    expr: &Expression,
+    rewrite: &impl Fn(&Expression) -> Expression,
+) -> Expression {
+    let desc = match &expr.desc {
+        ExpressionDesc::Length(inner, kind) => {
+            ExpressionDesc::Length(Box::new(rewrite(inner)), kind.clone())
+        }
+        ExpressionDesc::IsNullOrUndefined(inner) => {
+            ExpressionDesc::IsNullOrUndefined(Box::new(rewrite(inner)))
+        }
+        ExpressionDesc::StringAppend(left, right) => {
+            ExpressionDesc::StringAppend(Box::new(rewrite(left)), Box::new(rewrite(right)))
+        }
+        ExpressionDesc::Bool(value) => ExpressionDesc::Bool(*value),
+        ExpressionDesc::Typeof(inner) => ExpressionDesc::Typeof(Box::new(rewrite(inner))),
+        ExpressionDesc::In(left, right) => {
+            ExpressionDesc::In(Box::new(rewrite(left)), Box::new(rewrite(right)))
+        }
+        ExpressionDesc::JsNot(inner) => ExpressionDesc::JsNot(Box::new(rewrite(inner))),
+        ExpressionDesc::JsBnot(inner) => ExpressionDesc::JsBnot(Box::new(rewrite(inner))),
+        ExpressionDesc::Seq(first, second) => {
+            ExpressionDesc::Seq(Box::new(rewrite(first)), Box::new(rewrite(second)))
+        }
+        ExpressionDesc::Cond(cond, then_, else_) => ExpressionDesc::Cond(
+            Box::new(rewrite(cond)),
+            Box::new(rewrite(then_)),
+            Box::new(rewrite(else_)),
+        ),
+        ExpressionDesc::Bin(op, left, right) => {
+            ExpressionDesc::Bin(*op, Box::new(rewrite(left)), Box::new(rewrite(right)))
+        }
+        ExpressionDesc::FlatCall(func, args) => {
+            ExpressionDesc::FlatCall(Box::new(rewrite(func)), Box::new(rewrite(args)))
+        }
+        ExpressionDesc::Call(func, args, info) => ExpressionDesc::Call(
+            Box::new(rewrite(func)),
+            args.iter().map(rewrite).collect(),
+            info.clone(),
+        ),
+        ExpressionDesc::StringIndex(value, index) => {
+            ExpressionDesc::StringIndex(Box::new(rewrite(value)), Box::new(rewrite(index)))
+        }
+        ExpressionDesc::ArrayIndex(value, index) => {
+            ExpressionDesc::ArrayIndex(Box::new(rewrite(value)), Box::new(rewrite(index)))
+        }
+        ExpressionDesc::TaggedTemplate(func, strings, values) => ExpressionDesc::TaggedTemplate(
+            Box::new(rewrite(func)),
+            strings.iter().map(rewrite).collect(),
+            values.iter().map(rewrite).collect(),
+        ),
+        ExpressionDesc::StaticIndex(obj, field, pos) => {
+            ExpressionDesc::StaticIndex(Box::new(rewrite(obj)), field.clone(), *pos)
+        }
+        ExpressionDesc::New(ctor, args) => ExpressionDesc::New(
+            Box::new(rewrite(ctor)),
+            args.as_ref()
+                .map(|items| items.iter().map(rewrite).collect()),
+        ),
+        ExpressionDesc::Var(vident) => ExpressionDesc::Var(vident.clone()),
+        ExpressionDesc::Fun {
+            is_method,
+            params,
+            body,
+            env,
+            return_unit,
+            async_,
+            directive,
+        } => ExpressionDesc::Fun {
+            is_method: *is_method,
+            params: params.clone(),
+            body: rewrite_block(body, &HashSet::new()),
+            env: env.clone(),
+            return_unit: *return_unit,
+            async_: *async_,
+            directive: directive.clone(),
+        },
+        ExpressionDesc::Str { delim, txt } => ExpressionDesc::Str {
+            delim: *delim,
+            txt: txt.clone(),
+        },
+        ExpressionDesc::RawJsCode(info) => ExpressionDesc::RawJsCode(info.clone()),
+        ExpressionDesc::Array(items, mutable_flag) => {
+            ExpressionDesc::Array(items.iter().map(rewrite).collect(), *mutable_flag)
+        }
+        ExpressionDesc::OptionalBlock(value, flag) => {
+            ExpressionDesc::OptionalBlock(Box::new(rewrite(value)), *flag)
+        }
+        ExpressionDesc::CamlBlock(values, mutable_flag, tag, tag_info) => {
+            ExpressionDesc::CamlBlock(
+                values.iter().map(rewrite).collect(),
+                *mutable_flag,
+                Box::new(rewrite(tag)),
+                tag_info.clone(),
+            )
+        }
+        ExpressionDesc::CamlBlockTag(value, tag) => {
+            ExpressionDesc::CamlBlockTag(Box::new(rewrite(value)), tag.clone())
+        }
+        ExpressionDesc::Number(number) => ExpressionDesc::Number(number.clone()),
+        ExpressionDesc::Object(proto, props) => ExpressionDesc::Object(
+            proto.as_ref().map(|expr| Box::new(rewrite(expr))),
+            props
+                .iter()
+                .map(|(name, value)| (name.clone(), rewrite(value)))
+                .collect(),
+        ),
+        ExpressionDesc::Undefined { is_unit } => ExpressionDesc::Undefined { is_unit: *is_unit },
+        ExpressionDesc::Null => ExpressionDesc::Null,
+        ExpressionDesc::Await(inner) => ExpressionDesc::Await(Box::new(rewrite(inner))),
+        ExpressionDesc::Spread(inner) => ExpressionDesc::Spread(Box::new(rewrite(inner))),
+    };
+
+    Expression {
+        desc,
+        comment: expr.comment.clone(),
+    }
+}
+
+fn global_this_field(name: &str) -> Expression {
+    Expression::new(ExpressionDesc::StaticIndex(
+        Box::new(Expression::var(Ident::create_persistent("globalThis"))),
+        name.to_string(),
+        None,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lambda::Lambda;
     use crate::lambda::constant::Constant;
+    use crate::lambda::primitive::{
+        ExternalFfiKind, ExternalFfiSpec, ExternalReturnWrapper, ExternalSpec,
+    };
+    use crate::lambda::Lambda;
+    use crate::location::Location;
 
     #[test]
     fn test_compile_constant_int() {
@@ -755,5 +1237,158 @@ mod tests {
         let lam = Lambda::const_(Constant::int(7));
         let program = compiler.compile_program(&lam);
         assert!(!program.block.is_empty());
+    }
+
+    #[test]
+    fn lowers_js_var_without_args_to_a_value() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "process".to_string(),
+                arg_types: vec![],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsVar {
+                        name: "process".to_string(),
+                        external_module_name: None,
+                        scopes: vec![],
+                    }),
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![],
+            Location::none(),
+        );
+
+        let program = compiler.compile_program(&lam);
+        let [stmt] = program.block.as_slice() else {
+            panic!("expected a single expression statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            }) => assert_eq!(id.name(), "process"),
+            other => panic!("expected a plain global value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_js_new_to_new_expression() {
+        let mut compiler = LambdaCompiler::new();
+        let arg = Ident::create_local("prim");
+        let lam = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "URL".to_string(),
+                arg_types: vec![],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsNew {
+                        name: "URL".to_string(),
+                        external_module_name: None,
+                        splice: false,
+                        scopes: vec![],
+                    }),
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![Lambda::var(arg.clone())],
+            Location::none(),
+        );
+
+        let program = compiler.compile_program(&lam);
+        let [stmt] = program.block.as_slice() else {
+            panic!("expected a single expression statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::New(ctor, Some(args)),
+                ..
+            }) => {
+                assert!(matches!(
+                    ctor.desc,
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(ref id)) if id.name() == "URL"
+                ));
+                assert!(matches!(
+                    args.as_slice(),
+                    [Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    }] if id.same(&arg)
+                ));
+            }
+            other => panic!("expected a new expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn external_shadow_pass_rewrites_only_shadowed_initializer_reads() {
+        let process = Ident::create_local("process");
+        let proc = Ident::create_local("proc");
+        let global_process = Ident::create_persistent("process");
+        let deps = DepsProgram {
+            program: Program::new(
+                vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: process.clone(),
+                        value: Some(Expression::var(global_process.clone())),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }),
+                    Statement::variable(VariableDeclaration {
+                        ident: proc,
+                        value: Some(Expression::var(global_process.clone())),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }),
+                ],
+                vec![],
+            ),
+            modules: vec![],
+            side_effect: None,
+        };
+
+        let rewritten = apply_external_shadow_pass(deps);
+        let [first, second] = rewritten.program.block.as_slice() else {
+            panic!("expected two variable declarations");
+        };
+
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::StaticIndex(target, field, _),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert_eq!(field, "process");
+                assert!(matches!(
+                    target.desc,
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(ref id)) if id.name() == "globalThis"
+                ));
+            }
+            other => panic!("expected first initializer to read globalThis.process, got {other:?}"),
+        }
+
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    }),
+                ..
+            }) => assert_eq!(id.name(), "process"),
+            other => {
+                panic!("expected second initializer to remain a plain process read, got {other:?}")
+            }
+        }
     }
 }

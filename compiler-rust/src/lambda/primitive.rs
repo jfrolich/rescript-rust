@@ -38,13 +38,79 @@ pub struct ExternalArgSpec {
     pub label: Option<String>,
 }
 
+/// Import attributes attached to an external module binding.
+pub type ImportAttributes = Vec<(String, String)>;
+
+/// Module bind name hint for imported externals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalModuleBindName {
+    HintName(String),
+    Nothing,
+}
+
+/// Imported external module metadata preserved from marshaled FFI info.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalModuleName {
+    pub bundle: String,
+    pub module_bind_name: ExternalModuleBindName,
+    pub import_attributes: Option<ImportAttributes>,
+}
+
+/// OCaml external-spec metadata preserved for JS lowering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalSpec {
+    JsVar {
+        name: String,
+        external_module_name: Option<ExternalModuleName>,
+        scopes: Vec<String>,
+    },
+    JsModuleAsVar(ExternalModuleName),
+    JsModuleAsFn {
+        external_module_name: ExternalModuleName,
+        splice: bool,
+    },
+    JsModuleAsClass(ExternalModuleName),
+    JsCall {
+        name: String,
+        external_module_name: Option<ExternalModuleName>,
+        splice: bool,
+        scopes: Vec<String>,
+        tagged_template: bool,
+    },
+    JsSend {
+        name: String,
+        splice: bool,
+        js_send_scopes: Vec<String>,
+    },
+    JsNew {
+        name: String,
+        external_module_name: Option<ExternalModuleName>,
+        splice: bool,
+        scopes: Vec<String>,
+    },
+    JsSet {
+        js_set_name: String,
+        js_set_scopes: Vec<String>,
+    },
+    JsGet {
+        js_get_name: String,
+        js_get_scopes: Vec<String>,
+    },
+    JsGetIndex {
+        js_get_index_scopes: Vec<String>,
+    },
+    JsSetIndex {
+        js_set_index_scopes: Vec<String>,
+    },
+}
+
 /// External FFI specification
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternalFfiSpec {
-    // Placeholder - actual structure from External_ffi_types
-    pub module_name: Option<String>,
     /// Minimal raw-ffi classification kept for optimized-lambda lowering.
     pub kind: ExternalFfiKind,
+    /// OCaml external-spec metadata used by the backend after optimized lambda.
+    pub spec: Option<ExternalSpec>,
     /// How the fully applied call result should be wrapped.
     pub return_wrapper: ExternalReturnWrapper,
     /// Optional inline constant preserved from marshaled external ffi metadata.

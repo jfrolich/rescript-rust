@@ -92,11 +92,7 @@ impl LoweringContext {
                     .map(|(name, lam)| (name, self.lower_lambda(lam)))
                     .collect();
                 let lowered_scrutinee = self.lower_lambda(*scrutinee);
-                Lambda::LstringSwitch(
-                    Box::new(lowered_scrutinee),
-                    lowered_cases,
-                    lowered_default,
-                )
+                Lambda::LstringSwitch(Box::new(lowered_scrutinee), lowered_cases, lowered_default)
             }
             RawLambda::LstaticRaise(id, args) if args.is_empty() => {
                 Lambda::static_raise(self.remap_exit(id), Vec::new())
@@ -314,9 +310,7 @@ impl LoweringContext {
                 let arg = args.into_iter().next().unwrap_or_else(Lambda::unit);
                 Lambda::seq(arg, Lambda::unit())
             }
-            Primitive::PjsCall { ffi, .. }
-                if args.is_empty() && ffi.inline_constant.is_some() =>
-            {
+            Primitive::PjsCall { ffi, .. } if args.is_empty() && ffi.inline_constant.is_some() => {
                 Lambda::const_(ffi.inline_constant.expect("guarded inline constant"))
             }
             Primitive::PjsCall {
@@ -416,8 +410,9 @@ impl LoweringContext {
         // scrutinee to `Lam.switch`, so OCaml's right-to-left evaluation keeps
         // case/failaction exit-alias updates visible to the scrutinee, not the
         // other way around.
-        let const_only_switch =
-            switch.sw_failaction.is_none() && switch.sw_blocks.is_empty() && switch.sw_numblocks == 0;
+        let const_only_switch = switch.sw_failaction.is_none()
+            && switch.sw_blocks.is_empty()
+            && switch.sw_numblocks == 0;
         let lowered_consts = switch
             .sw_consts
             .into_iter()
@@ -1415,10 +1410,7 @@ fn rebuild_recursive_bindings(bindings: Vec<(Ident, Lambda)>, body: Lambda) -> L
             }
         }
         _ => {
-            if bindings
-                .iter()
-                .all(|(id, bind)| hit_variable(id, bind))
-            {
+            if bindings.iter().all(|(id, bind)| hit_variable(id, bind)) {
                 return Lambda::letrec(bindings, body);
             }
             let deps = binding_dependencies(&bindings);
@@ -1663,11 +1655,11 @@ pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lambda::FunctionAttribute;
-    use crate::lambda::InlineAttribute;
     use crate::lambda::compat::LetKind;
     use crate::lambda::constant::{ConstructorRuntimeTag, ConstructorTag, StringDelim};
     use crate::lambda::primitive::{JsRawInfo, Mutable};
+    use crate::lambda::FunctionAttribute;
+    use crate::lambda::InlineAttribute;
 
     #[test]
     fn lowers_unit_constructor_pointer_to_unit_constant() {
@@ -1861,8 +1853,8 @@ mod tests {
                     label: Some("name".to_string()),
                 }],
                 ffi: crate::lambda::primitive::ExternalFfiSpec {
-                    module_name: None,
                     kind: ExternalFfiKind::ObjCreate,
+                    spec: None,
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
                 },
@@ -1889,8 +1881,8 @@ mod tests {
                     label: Some("name".to_string()),
                 }],
                 ffi: crate::lambda::primitive::ExternalFfiSpec {
-                    module_name: None,
                     kind: ExternalFfiKind::Default,
+                    spec: None,
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
                 },
@@ -1959,8 +1951,8 @@ mod tests {
                     crate::lambda::primitive::ExternalArgSpec { label: None },
                 ],
                 ffi: crate::lambda::primitive::ExternalFfiSpec {
-                    module_name: None,
                     kind: ExternalFfiKind::Default,
+                    spec: None,
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
                 },
@@ -1988,8 +1980,8 @@ mod tests {
                 prim_name: String::new(),
                 arg_types: Vec::new(),
                 ffi: crate::lambda::primitive::ExternalFfiSpec {
-                    module_name: None,
                     kind: ExternalFfiKind::Default,
+                    spec: None,
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: Some(Constant::String {
                         s: "hello".to_string(),
@@ -2016,8 +2008,8 @@ mod tests {
                 prim_name: "get".to_string(),
                 arg_types: vec![crate::lambda::primitive::ExternalArgSpec { label: None }],
                 ffi: crate::lambda::primitive::ExternalFfiSpec {
-                    module_name: None,
                     kind: ExternalFfiKind::Default,
+                    spec: None,
                     return_wrapper: ExternalReturnWrapper::NullToOpt,
                     inline_constant: None,
                 },
@@ -2048,8 +2040,8 @@ mod tests {
                 prim_name: "get".to_string(),
                 arg_types: vec![crate::lambda::primitive::ExternalArgSpec { label: None }],
                 ffi: crate::lambda::primitive::ExternalFfiSpec {
-                    module_name: None,
                     kind: ExternalFfiKind::Default,
+                    spec: None,
                     return_wrapper: ExternalReturnWrapper::NullUndefinedToOpt,
                     inline_constant: None,
                 },
@@ -2691,10 +2683,7 @@ mod tests {
             vec![Lambda::function_(
                 1,
                 vec![end_param],
-                Lambda::seq(
-                    Lambda::var(find_end.clone()),
-                    Lambda::var(find_beg.clone()),
-                ),
+                Lambda::seq(Lambda::var(find_end.clone()), Lambda::var(find_beg.clone())),
                 function_attr.clone(),
             )],
             Location::none(),
@@ -2767,8 +2756,8 @@ mod tests {
                     prim_name: "default".to_string(),
                     arg_types: Vec::new(),
                     ffi: ExternalFfiSpec {
-                        module_name: None,
                         kind: ExternalFfiKind::Default,
+                        spec: None,
                         return_wrapper: ExternalReturnWrapper::Identity,
                         inline_constant: None,
                     },

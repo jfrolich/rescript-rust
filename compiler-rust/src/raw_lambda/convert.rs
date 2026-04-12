@@ -10,16 +10,17 @@ use std::sync::{Mutex, OnceLock};
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::context::IdGenerator;
 use crate::ident::{Ident, IdentFlags};
-use crate::lambda::Constant;
 use crate::lambda::compat::LetKind;
 use crate::lambda::constant::{
     ConstructorRuntimeTag, ConstructorTag as PointerConstructorTag, PointerInfo, StringDelim,
 };
 use crate::lambda::convert::LambdaConverter;
 use crate::lambda::primitive::{
-    ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, ExternalReturnWrapper, Mutable,
+    ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
+    ExternalReturnWrapper, ExternalSpec, ImportAttributes, Mutable,
 };
 use crate::lambda::tag_info::TagInfo;
+use crate::lambda::Constant;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
     Lambda, LambdaSwitch, Primitive, SetFieldDbgInfo,
@@ -33,8 +34,6 @@ use crate::raw_lambda::typeopt::{
     type_cannot_contain_undefined_no_env, type_is_builtin_object,
 };
 use crate::raw_lambda::{RawLambda, RawPrimInfo};
-use crate::types::ConstructorTag;
-use crate::types::SignatureItem;
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
 use crate::types::context::TypeContext;
 use crate::types::decl::{LabelDescription, RecordRepresentation, ValueKind};
@@ -45,6 +44,8 @@ use crate::types::typedtree::{
     Partial, Pattern, PatternDesc, RecordLabelDefinition, Structure, StructureItem,
     StructureItemDesc, ValueBinding,
 };
+use crate::types::ConstructorTag;
+use crate::types::SignatureItem;
 
 const PREDEF_MATCH_FAILURE_STAMP: i32 = 17;
 const PREDEF_ASSERT_FAILURE_STAMP: i32 = 27;
@@ -2586,8 +2587,8 @@ impl<'a> RawLambdaConverter<'a> {
                 }
             });
         ExternalFfiSpec {
-            module_name: None,
             kind,
+            spec: ffi_marshaled.as_ref().and_then(ffi_marshaled_external_spec),
             return_wrapper,
             inline_constant: ffi_marshaled
                 .as_ref()
@@ -8636,10 +8637,10 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> RawLambda {
         match rec_flag {
             crate::parser::ast::RecFlag::Nonrecursive => {
-                if bindings
-                    .iter()
-                    .any(|binding| simple_let_binding_id(binding).is_none() && !Self::is_irrefutable_pattern(&binding.vb_pat))
-                {
+                if bindings.iter().any(|binding| {
+                    simple_let_binding_id(binding).is_none()
+                        && !Self::is_irrefutable_pattern(&binding.vb_pat)
+                }) {
                     // Use OCaml's simple_for_let / for_let approach via full matching compiler
                     let converted_bindings = bindings
                         .iter()
@@ -8771,7 +8772,10 @@ impl<'a> RawLambdaConverter<'a> {
                             let inline_attr =
                                 Self::get_inline_attribute_from(&binding.vb_attributes, self.arena);
                             value = Self::apply_inline_attribute_raw(value, inline_attr);
-                            (simple_let_binding_id(binding).expect("checked above"), value)
+                            (
+                                simple_let_binding_id(binding).expect("checked above"),
+                                value,
+                            )
                         })
                         .collect();
                     RawLambda::letrec(lam_bindings, body)
@@ -9699,6 +9703,133 @@ fn ffi_marshaled_return_wrapper(value: &OcamlValue) -> Option<ExternalReturnWrap
     }
 }
 
+fn ffi_marshaled_external_spec(value: &OcamlValue) -> Option<ExternalSpec> {
+    let (tag, fields) = value.as_block_opt()?;
+    if tag != 0 || fields.len() != 3 {
+        return None;
+    }
+    decode_external_spec(&fields[2])
+}
+
+fn decode_external_spec(value: &OcamlValue) -> Option<ExternalSpec> {
+    let (tag, fields) = value.as_block_opt()?;
+    match (tag, fields) {
+        (0, [name, external_module_name, scopes]) => Some(ExternalSpec::JsVar {
+            name: name.as_string().to_string(),
+            external_module_name: external_module_name
+                .as_option()
+                .and_then(decode_external_module_name),
+            scopes: decode_string_list(scopes),
+        }),
+        (1, [external_module_name]) => Some(ExternalSpec::JsModuleAsVar(
+            decode_external_module_name(external_module_name)?,
+        )),
+        (2, [external_module_name, splice]) => Some(ExternalSpec::JsModuleAsFn {
+            external_module_name: decode_external_module_name(external_module_name)?,
+            splice: splice.as_bool(),
+        }),
+        (3, [external_module_name]) => Some(ExternalSpec::JsModuleAsClass(
+            decode_external_module_name(external_module_name)?,
+        )),
+        (4, [name, external_module_name, splice, scopes, tagged_template]) => {
+            Some(ExternalSpec::JsCall {
+                name: name.as_string().to_string(),
+                external_module_name: external_module_name
+                    .as_option()
+                    .and_then(decode_external_module_name),
+                splice: splice.as_bool(),
+                scopes: decode_string_list(scopes),
+                tagged_template: tagged_template.as_bool(),
+            })
+        }
+        (5, [name, splice, scopes]) => Some(ExternalSpec::JsSend {
+            name: name.as_string().to_string(),
+            splice: splice.as_bool(),
+            js_send_scopes: decode_string_list(scopes),
+        }),
+        (6, [name, external_module_name, splice, scopes]) => Some(ExternalSpec::JsNew {
+            name: name.as_string().to_string(),
+            external_module_name: external_module_name
+                .as_option()
+                .and_then(decode_external_module_name),
+            splice: splice.as_bool(),
+            scopes: decode_string_list(scopes),
+        }),
+        (7, [name, scopes]) => Some(ExternalSpec::JsSet {
+            js_set_name: name.as_string().to_string(),
+            js_set_scopes: decode_string_list(scopes),
+        }),
+        (8, [name, scopes]) => Some(ExternalSpec::JsGet {
+            js_get_name: name.as_string().to_string(),
+            js_get_scopes: decode_string_list(scopes),
+        }),
+        (9, [scopes]) => Some(ExternalSpec::JsGetIndex {
+            js_get_index_scopes: decode_string_list(scopes),
+        }),
+        (10, [scopes]) => Some(ExternalSpec::JsSetIndex {
+            js_set_index_scopes: decode_string_list(scopes),
+        }),
+        _ => None,
+    }
+}
+
+fn decode_external_module_name(value: &OcamlValue) -> Option<ExternalModuleName> {
+    let (tag, fields) = value.as_block_opt()?;
+    if tag != 0 || fields.len() != 3 {
+        return None;
+    }
+    Some(ExternalModuleName {
+        bundle: fields[0].as_string().to_string(),
+        module_bind_name: decode_module_bind_name(&fields[1])?,
+        import_attributes: fields[2].as_option().and_then(decode_import_attributes),
+    })
+}
+
+fn decode_module_bind_name(value: &OcamlValue) -> Option<ExternalModuleBindName> {
+    match value {
+        OcamlValue::Int(0) => Some(ExternalModuleBindName::Nothing),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => Some(
+            ExternalModuleBindName::HintName(fields[0].as_string().to_string()),
+        ),
+        _ => None,
+    }
+}
+
+fn decode_import_attributes(value: &OcamlValue) -> Option<ImportAttributes> {
+    let (tag, fields) = value.as_block_opt()?;
+    if tag != 0 || fields.len() != 1 {
+        return None;
+    }
+    let (_, buckets) = fields[0].as_block_opt()?;
+    let mut attrs = Vec::new();
+    for bucket in buckets {
+        decode_bucket_list(bucket, &mut attrs)?;
+    }
+    Some(attrs)
+}
+
+fn decode_bucket_list(value: &OcamlValue, out: &mut ImportAttributes) -> Option<()> {
+    match value {
+        OcamlValue::Int(0) => Some(()),
+        OcamlValue::Block(0, fields) if fields.len() == 3 => {
+            out.push((
+                fields[0].as_string().to_string(),
+                fields[1].as_string().to_string(),
+            ));
+            decode_bucket_list(&fields[2], out)
+        }
+        _ => None,
+    }
+}
+
+fn decode_string_list(value: &OcamlValue) -> Vec<String> {
+    value
+        .as_list()
+        .into_iter()
+        .map(|item| item.as_string().to_string())
+        .collect()
+}
+
 fn ffi_marshaled_inline_constant(value: &OcamlValue) -> Option<Constant> {
     let (tag, fields) = value.as_block_opt()?;
     if tag != 2 || fields.len() != 1 {
@@ -9791,7 +9922,7 @@ mod tests {
     use std::borrow::Cow;
 
     use crate::binary_ast::ffi_types::{
-        Delim, ExternalSpec, FfiType, LamConstant, ReturnWrapper, encode_ffi_type,
+        encode_ffi_type, Delim, ExternalSpec, FfiType, LamConstant, ReturnWrapper,
     };
     use crate::context::IdGenerator;
     use crate::parse_arena::ParseArena;
@@ -9946,7 +10077,11 @@ mod tests {
         let RawLambda::LstaticRaise(id, args) = else_.as_ref() else {
             return None;
         };
-        if args.is_empty() { Some(*id) } else { None }
+        if args.is_empty() {
+            Some(*id)
+        } else {
+            None
+        }
     }
 
     fn try_handler_exit_id(raw: &RawLambda) -> Option<i32> {
@@ -9956,7 +10091,11 @@ mod tests {
         let RawLambda::LstaticCatch(_, (id, params), _) = handler.as_ref() else {
             return None;
         };
-        if params.is_empty() { Some(*id) } else { None }
+        if params.is_empty() {
+            Some(*id)
+        } else {
+            None
+        }
     }
 
     fn simple_extension_try(
@@ -10246,7 +10385,10 @@ mod tests {
         let first_id = Ident::create_local("first");
         let second_id = Ident::create_local("second");
         let bindings = vec![
-            simple_value_binding(first_id.clone(), simple_extension_try(&mut arena, "A", 1, 11)),
+            simple_value_binding(
+                first_id.clone(),
+                simple_extension_try(&mut arena, "A", 1, 11),
+            ),
             simple_value_binding(
                 second_id.clone(),
                 simple_extension_try(&mut arena, "B", 2, 22),
@@ -10300,6 +10442,76 @@ mod tests {
 
         let spec = converter.ffi_spec_for_primitive(&prim, false, false);
         assert_eq!(spec.return_wrapper, ExternalReturnWrapper::NullToOpt);
+    }
+
+    #[test]
+    fn ffi_spec_preserves_marshaled_js_var_shape() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let prim = crate::types::PrimitiveDescription {
+            prim_name: "process".to_string(),
+            prim_arity: 0,
+            prim_native_name: encode_ffi_type(&FfiType::FfiBs {
+                params: crate::binary_ast::ffi_types::Params::ParamNumber(0),
+                return_wrapper: ReturnWrapper::ReturnIdentity,
+                external_spec: ExternalSpec::JsVar {
+                    name: "process".to_string(),
+                    external_module_name: None,
+                    scopes: Vec::new(),
+                },
+            }),
+            prim_native_float: false,
+            prim_from_constructor: false,
+        };
+
+        let spec = converter.ffi_spec_for_primitive(&prim, false, false);
+        assert!(matches!(
+            spec.spec,
+            Some(crate::lambda::primitive::ExternalSpec::JsVar {
+                ref name,
+                external_module_name: None,
+                ref scopes,
+            }) if name == "process" && scopes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn ffi_spec_preserves_marshaled_js_new_shape() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let prim = crate::types::PrimitiveDescription {
+            prim_name: "URL".to_string(),
+            prim_arity: 1,
+            prim_native_name: encode_ffi_type(&FfiType::FfiBs {
+                params: crate::binary_ast::ffi_types::Params::ParamNumber(1),
+                return_wrapper: ReturnWrapper::ReturnIdentity,
+                external_spec: ExternalSpec::JsNew {
+                    name: "URL".to_string(),
+                    external_module_name: None,
+                    splice: false,
+                    scopes: Vec::new(),
+                },
+            }),
+            prim_native_float: false,
+            prim_from_constructor: false,
+        };
+
+        let spec = converter.ffi_spec_for_primitive(&prim, false, false);
+        assert!(matches!(
+            spec.spec,
+            Some(crate::lambda::primitive::ExternalSpec::JsNew {
+                ref name,
+                external_module_name: None,
+                splice: false,
+                ref scopes,
+            }) if name == "URL" && scopes.is_empty()
+        ));
     }
 
     #[test]
@@ -10469,8 +10681,11 @@ mod tests {
             },
         );
 
-        let alias_path =
-            crate::types::Path::Pdot(Box::new(crate::types::Path::Pident(original_module.clone())), "N".to_string(), 0);
+        let alias_path = crate::types::Path::Pdot(
+            Box::new(crate::types::Path::Pident(original_module.clone())),
+            "N".to_string(),
+            0,
+        );
         let coercion = ModuleCoercion::Tcoerce_alias(
             EnvRef(0),
             alias_path,

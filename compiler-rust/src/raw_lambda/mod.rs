@@ -99,7 +99,11 @@ pub enum RawLambda {
     /// Switch on integer/block tag.
     Lswitch(Box<RawLambda>, RawLambdaSwitch, Location),
     /// Switch on string value.
-    LstringSwitch(Box<RawLambda>, Vec<(String, RawLambda)>, Option<Box<RawLambda>>),
+    LstringSwitch(
+        Box<RawLambda>,
+        Vec<(String, RawLambda)>,
+        Option<Box<RawLambda>>,
+    ),
     /// Raise a static exception.
     LstaticRaise(i32, Vec<RawLambda>),
     /// Catch a static exception.
@@ -317,7 +321,11 @@ impl RawLambda {
             RawLambda::Lconst(c) => Lambda::Lconst(c),
             RawLambda::Lapply(apply) => Lambda::Lapply(crate::lambda::Apply {
                 ap_func: Box::new(apply.ap_func.into_lowered()),
-                ap_args: apply.ap_args.into_iter().map(RawLambda::into_lowered).collect(),
+                ap_args: apply
+                    .ap_args
+                    .into_iter()
+                    .map(RawLambda::into_lowered)
+                    .collect(),
                 ap_info: apply.ap_info,
                 ap_transformed_jsx: apply.ap_transformed_jsx,
             }),
@@ -327,9 +335,12 @@ impl RawLambda {
                 body: Box::new(func.body.into_lowered()),
                 attr: func.attr,
             }),
-            RawLambda::Llet(kind, id, value, body) => {
-                Lambda::Llet(kind, id, Box::new(value.into_lowered()), Box::new(body.into_lowered()))
-            }
+            RawLambda::Llet(kind, id, value, body) => Lambda::Llet(
+                kind,
+                id,
+                Box::new(value.into_lowered()),
+                Box::new(body.into_lowered()),
+            ),
             RawLambda::Lletrec(bindings, body) => Lambda::Lletrec(
                 bindings
                     .into_iter()
@@ -387,9 +398,10 @@ impl RawLambda {
                 Box::new(then_.into_lowered()),
                 Box::new(else_.into_lowered()),
             ),
-            RawLambda::Lsequence(first, second) => {
-                Lambda::Lsequence(Box::new(first.into_lowered()), Box::new(second.into_lowered()))
-            }
+            RawLambda::Lsequence(first, second) => Lambda::Lsequence(
+                Box::new(first.into_lowered()),
+                Box::new(second.into_lowered()),
+            ),
             RawLambda::Lwhile(cond, body) => {
                 Lambda::Lwhile(Box::new(cond.into_lowered()), Box::new(body.into_lowered()))
             }
@@ -401,33 +413,25 @@ impl RawLambda {
                 Box::new(body.into_lowered()),
             ),
             RawLambda::Lassign(id, value) => Lambda::Lassign(id, Box::new(value.into_lowered())),
-            RawLambda::Lsend(name, obj, loc) => Lambda::Lprim(
-                crate::lambda::PrimInfo {
-                    primitive: Primitive::PjsCall {
-                        prim_name: format!("send{name}"),
-                        arg_types: vec![crate::lambda::primitive::ExternalArgSpec { label: None }],
-                        ffi: crate::lambda::primitive::ExternalFfiSpec {
-                            module_name: None,
-                            kind: crate::lambda::primitive::ExternalFfiKind::Default,
-                            return_wrapper:
-                                crate::lambda::primitive::ExternalReturnWrapper::Identity,
-                            inline_constant: None,
-                        },
-                        dynamic_import: false,
-                        transformed_jsx: false,
+            RawLambda::Lsend(name, obj, loc) => Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::PjsCall {
+                    prim_name: format!("send{name}"),
+                    arg_types: vec![crate::lambda::primitive::ExternalArgSpec { label: None }],
+                    ffi: crate::lambda::primitive::ExternalFfiSpec {
+                        kind: crate::lambda::primitive::ExternalFfiKind::Default,
+                        spec: None,
+                        return_wrapper: crate::lambda::primitive::ExternalReturnWrapper::Identity,
+                        inline_constant: None,
                     },
-                    args: vec![obj.into_lowered()],
-                    loc,
+                    dynamic_import: false,
+                    transformed_jsx: false,
                 },
-            ),
+                args: vec![obj.into_lowered()],
+                loc,
+            }),
         }
     }
 }
 
 #[allow(dead_code)]
-fn _keep_public_types_used(
-    _cmp: Comparison,
-    _field: FieldDbgInfo,
-    _set_field: SetFieldDbgInfo,
-) {
-}
+fn _keep_public_types_used(_cmp: Comparison, _field: FieldDbgInfo, _set_field: SetFieldDbgInfo) {}

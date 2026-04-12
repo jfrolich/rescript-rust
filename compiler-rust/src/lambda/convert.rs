@@ -12,7 +12,8 @@ use crate::ident::{Ident, IdentFlags};
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::constant::{Constant, StringDelim};
 use crate::lambda::primitive::{
-    ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, ExternalReturnWrapper, Mutable, Primitive,
+    ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
+    ExternalReturnWrapper, ExternalSpec, ImportAttributes, Mutable, Primitive,
 };
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::{
@@ -1291,7 +1292,6 @@ fn to_parser_mutable(flag: TypeMutableFlag) -> ParserMutableFlag {
 fn decoded_external_ffi_spec(encoded: &str) -> ExternalFfiSpec {
     let ffi_marshaled = decode_marshaled_ffi_type(encoded);
     ExternalFfiSpec {
-        module_name: None,
         kind: if ffi_marshaled
             .as_ref()
             .is_some_and(ffi_marshaled_is_obj_create)
@@ -1300,6 +1300,7 @@ fn decoded_external_ffi_spec(encoded: &str) -> ExternalFfiSpec {
         } else {
             ExternalFfiKind::Default
         },
+        spec: ffi_marshaled.as_ref().and_then(ffi_marshaled_external_spec),
         return_wrapper: ffi_marshaled
             .as_ref()
             .and_then(ffi_marshaled_return_wrapper)
@@ -1335,10 +1336,137 @@ fn ffi_marshaled_return_wrapper(value: &OcamlValue) -> Option<ExternalReturnWrap
     }
 }
 
+fn ffi_marshaled_external_spec(value: &OcamlValue) -> Option<ExternalSpec> {
+    let (tag, fields) = value.as_block_opt()?;
+    if tag != 0 || fields.len() != 3 {
+        return None;
+    }
+    decode_external_spec(&fields[2])
+}
+
+fn decode_external_spec(value: &OcamlValue) -> Option<ExternalSpec> {
+    let (tag, fields) = value.as_block_opt()?;
+    match (tag, fields) {
+        (0, [name, external_module_name, scopes]) => Some(ExternalSpec::JsVar {
+            name: name.as_string().to_string(),
+            external_module_name: external_module_name
+                .as_option()
+                .and_then(decode_external_module_name),
+            scopes: decode_string_list(scopes),
+        }),
+        (1, [external_module_name]) => Some(ExternalSpec::JsModuleAsVar(
+            decode_external_module_name(external_module_name)?,
+        )),
+        (2, [external_module_name, splice]) => Some(ExternalSpec::JsModuleAsFn {
+            external_module_name: decode_external_module_name(external_module_name)?,
+            splice: splice.as_bool(),
+        }),
+        (3, [external_module_name]) => Some(ExternalSpec::JsModuleAsClass(
+            decode_external_module_name(external_module_name)?,
+        )),
+        (4, [name, external_module_name, splice, scopes, tagged_template]) => {
+            Some(ExternalSpec::JsCall {
+                name: name.as_string().to_string(),
+                external_module_name: external_module_name
+                    .as_option()
+                    .and_then(decode_external_module_name),
+                splice: splice.as_bool(),
+                scopes: decode_string_list(scopes),
+                tagged_template: tagged_template.as_bool(),
+            })
+        }
+        (5, [name, splice, scopes]) => Some(ExternalSpec::JsSend {
+            name: name.as_string().to_string(),
+            splice: splice.as_bool(),
+            js_send_scopes: decode_string_list(scopes),
+        }),
+        (6, [name, external_module_name, splice, scopes]) => Some(ExternalSpec::JsNew {
+            name: name.as_string().to_string(),
+            external_module_name: external_module_name
+                .as_option()
+                .and_then(decode_external_module_name),
+            splice: splice.as_bool(),
+            scopes: decode_string_list(scopes),
+        }),
+        (7, [name, scopes]) => Some(ExternalSpec::JsSet {
+            js_set_name: name.as_string().to_string(),
+            js_set_scopes: decode_string_list(scopes),
+        }),
+        (8, [name, scopes]) => Some(ExternalSpec::JsGet {
+            js_get_name: name.as_string().to_string(),
+            js_get_scopes: decode_string_list(scopes),
+        }),
+        (9, [scopes]) => Some(ExternalSpec::JsGetIndex {
+            js_get_index_scopes: decode_string_list(scopes),
+        }),
+        (10, [scopes]) => Some(ExternalSpec::JsSetIndex {
+            js_set_index_scopes: decode_string_list(scopes),
+        }),
+        _ => None,
+    }
+}
+
+fn decode_external_module_name(value: &OcamlValue) -> Option<ExternalModuleName> {
+    let (tag, fields) = value.as_block_opt()?;
+    if tag != 0 || fields.len() != 3 {
+        return None;
+    }
+    Some(ExternalModuleName {
+        bundle: fields[0].as_string().to_string(),
+        module_bind_name: decode_module_bind_name(&fields[1])?,
+        import_attributes: fields[2].as_option().and_then(decode_import_attributes),
+    })
+}
+
+fn decode_module_bind_name(value: &OcamlValue) -> Option<ExternalModuleBindName> {
+    match value {
+        OcamlValue::Int(0) => Some(ExternalModuleBindName::Nothing),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => Some(
+            ExternalModuleBindName::HintName(fields[0].as_string().to_string()),
+        ),
+        _ => None,
+    }
+}
+
+fn decode_import_attributes(value: &OcamlValue) -> Option<ImportAttributes> {
+    let (tag, fields) = value.as_block_opt()?;
+    if tag != 0 || fields.len() != 1 {
+        return None;
+    }
+    let (_, buckets) = fields[0].as_block_opt()?;
+    let mut attrs = Vec::new();
+    for bucket in buckets {
+        decode_bucket_list(bucket, &mut attrs)?;
+    }
+    Some(attrs)
+}
+
+fn decode_bucket_list(value: &OcamlValue, out: &mut ImportAttributes) -> Option<()> {
+    match value {
+        OcamlValue::Int(0) => Some(()),
+        OcamlValue::Block(0, fields) if fields.len() == 3 => {
+            out.push((
+                fields[0].as_string().to_string(),
+                fields[1].as_string().to_string(),
+            ));
+            decode_bucket_list(&fields[2], out)
+        }
+        _ => None,
+    }
+}
+
+fn decode_string_list(value: &OcamlValue) -> Vec<String> {
+    value
+        .as_list()
+        .into_iter()
+        .map(|item| item.as_string().to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::binary_ast::ffi_types::{ExternalSpec, FfiType, ReturnWrapper, encode_ffi_type};
+    use crate::binary_ast::ffi_types::{encode_ffi_type, ExternalSpec, FfiType, ReturnWrapper};
     use crate::ident::Ident;
     use crate::parse_arena::{Located, ParseArena};
     use crate::parser::longident::Longident;

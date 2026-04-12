@@ -1404,7 +1404,7 @@ fn is_reserved_word(s: &str) -> bool {
     )
 }
 
-fn is_js_keyword_or_global(s: &str) -> bool {
+pub(crate) fn is_js_keyword_or_global(s: &str) -> bool {
     is_reserved_word(s)
         || matches!(
             s,
