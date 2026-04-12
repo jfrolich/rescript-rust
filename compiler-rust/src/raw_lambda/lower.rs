@@ -412,7 +412,10 @@ impl LoweringContext {
     }
 
     fn lower_switch(&mut self, scrutinee: RawLambda, switch: RawLambdaSwitch) -> Lambda {
-        let lowered_scrutinee = self.lower_lambda(scrutinee);
+        // `convert_switch` builds the switch record before passing the
+        // scrutinee to `Lam.switch`, so OCaml's right-to-left evaluation keeps
+        // case/failaction exit-alias updates visible to the scrutinee, not the
+        // other way around.
         let const_only_switch =
             switch.sw_failaction.is_none() && switch.sw_blocks.is_empty() && switch.sw_numblocks == 0;
         let lowered_consts = switch
@@ -428,6 +431,7 @@ impl LoweringContext {
         let lowered_failaction = switch
             .sw_failaction
             .map(|lam| Box::new(self.lower_lambda(*lam)));
+        let lowered_scrutinee = self.lower_lambda(scrutinee);
 
         if const_only_switch {
             if let Some(diff) = happens_to_be_diff(&lowered_consts, switch.sw_names.as_ref()) {
@@ -2481,6 +2485,66 @@ mod tests {
         assert!(matches!(
             apply.ap_args.as_slice(),
             [Lambda::LstaticRaise(8, args)] if args.is_empty()
+        ));
+    }
+
+    #[test]
+    fn lowers_switch_cases_before_scrutinee_for_exit_aliases() {
+        let lowered = lower_to_lambda(RawLambda::Lswitch(
+            Box::new(raw_exit_alias(7, 8)),
+            RawLambdaSwitch {
+                sw_numconsts: 1,
+                sw_consts_full: true,
+                sw_consts: vec![(0, RawLambda::LstaticRaise(7, Vec::new()))],
+                sw_numblocks: 0,
+                sw_blocks_full: false,
+                sw_blocks: Vec::new(),
+                sw_failaction: None,
+                sw_names: None,
+            },
+            Location::none(),
+        ));
+
+        let Lambda::Lswitch(scrutinee, switch) = lowered else {
+            panic!("expected switch");
+        };
+        assert!(matches!(
+            scrutinee.as_ref(),
+            Lambda::LstaticRaise(8, args) if args.is_empty()
+        ));
+        assert!(matches!(
+            switch.sw_consts.as_slice(),
+            [(0, Lambda::LstaticRaise(7, args))] if args.is_empty()
+        ));
+    }
+
+    #[test]
+    fn lowers_switch_failaction_before_scrutinee_for_exit_aliases() {
+        let lowered = lower_to_lambda(RawLambda::Lswitch(
+            Box::new(RawLambda::LstaticRaise(7, Vec::new())),
+            RawLambdaSwitch {
+                sw_numconsts: 0,
+                sw_consts_full: false,
+                sw_consts: Vec::new(),
+                sw_numblocks: 0,
+                sw_blocks_full: false,
+                sw_blocks: Vec::new(),
+                sw_failaction: Some(Box::new(raw_exit_alias(7, 8))),
+                sw_names: None,
+            },
+            Location::none(),
+        ));
+
+        let Lambda::Lswitch(scrutinee, switch) = lowered else {
+            panic!("expected switch");
+        };
+        assert!(matches!(
+            scrutinee.as_ref(),
+            Lambda::LstaticRaise(8, args) if args.is_empty()
+        ));
+        assert!(matches!(
+            switch.sw_failaction.as_deref(),
+            Some(Lambda::LstaticRaise(8, args)) if args.is_empty()
         ));
     }
 

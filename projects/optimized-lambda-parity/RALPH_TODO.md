@@ -155,6 +155,40 @@ Current frontier characteristics:
 
 ## Key Findings from Session 2026-04-12
 
+### `lower_switch` now matches OCaml's `Lam.switch` evaluation order, but the visible frontier in this worktree is still upstream raw exit allocation
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests::lowers_switch_cases_before_scrutinee_for_exit_aliases -- --exact
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests::lowers_switch_failaction_before_scrutinee_for_exit_aliases -- --exact
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests::lowers_const_only_switch_with_full_blocks_for_if_rewrite -- --exact
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 600 ./scripts/test_lambda_parity.sh -j1 'exception_raise_test|large_record_duplication_test|Stdlib_DictTests|Stdlib_TempTests|UntaggedVariants'
+```
+
+Result:
+
+- Focused optimized lambda parity on the current remaining five post-raw files stayed **0/5**
+- Focused exact hunks stayed **34**
+
+This slice fixes one real `Lam_convert.convert` parity rule in
+`compiler-rust/src/raw_lambda/lower.rs`: `lower_switch` now lowers switch
+cases plus `sw_failaction` before the scrutinee, matching OCaml's right-to-left
+evaluation of `Lam.switch e { ... }`. Added focused regression coverage:
+
+- `raw_lambda::lower::tests::lowers_switch_cases_before_scrutinee_for_exit_aliases`
+- `raw_lambda::lower::tests::lowers_switch_failaction_before_scrutinee_for_exit_aliases`
+
+Focused parity did not move on this worktree snapshot. Direct `bsc` repro after
+the slice still shows raw static-exit ID drift on files such as
+`large_record_duplication_test.res` and `Stdlib_DictTests.res`, so the visible
+remaining blocker here is upstream raw exit allocation rather than another
+`raw_lambda::lower` shape mismatch.
+
+Full `649/657` authoritative optimized-lambda baseline was not re-run after
+this slice because the focused frontier stayed unchanged and stage isolation
+showed the active diffs are upstream of `Lam_convert.convert`.
+
 ### fully recursive letrec groups must stay grouped; moved the authoritative baseline to 649/657
 Ran:
 
