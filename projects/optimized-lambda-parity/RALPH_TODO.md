@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 649/657 (98.8%), 8 parity failures, 38 hunks
+**Status:** 647/657 (98.5%), 10 parity failures, 35 hunks
 
 ## Goal
 
@@ -23,19 +23,22 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **649/657**
-- Parity hunks: **38**
+- Optimized lambda parity: **647/657**
+- Parity hunks: **35**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
-  - `exception_raise_test.res`: **11** hunks
-  - `Stdlib_DictTests.res`: **8** hunks
-  - `large_record_duplication_test.res`: **7** hunks
-  - `Stdlib_TempTests.res`: **4** hunks
-  - `UntaggedVariants.res`: **4** hunks
+  - `Import.res`: **21** hunks
+  - `global_module_alias_test.res`: **3** hunks
+  - `async_await.res`: **2** hunks
   - `coercion_module_alias_test.res`: **2** hunks
-  - `gpr_5557.res`: **1** hunk
-  - `option_repr_test.res`: **1** hunk
+  - `test_non_export.res`: **2** hunks
+  - `exception_raise_test.res`: **1** hunk
+  - `module_alias_test.res`: **1** hunk
+  - `module_missing_conversion.res`: **1** hunk
+  - `module_parameter_test.res`: **1** hunk
+  - `test_include.res`: **1** hunk
+- Full raw `-drawlambda` guard on the same worktree is currently **647/657** with **26** exact hunks; the remaining exact raw failures are the same module/import/coercion cluster listed below.
 
 ## Working Rules
 
@@ -49,9 +52,24 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **8** remaining optimized-lambda failures after this slice. The dominant frontier is still split between exact raw static-exit allocation and a smaller number of post-raw lowering mismatches, and stage isolation is still mandatory before taking the next fix.
+There are **10** remaining optimized-lambda failures on the current worktree. The `gpr_5557.res` and `option_repr_test.res` exact-exit pair is now exact under both `-drawlambda` and `-dlambda-sexp`; the visible frontier is now the raw-stage module/import alias cluster plus `exception_raise_test.res`.
 
 Current frontier characteristics:
+- fresh 2026-04-12 reruns on this worktree put both the full raw and full optimized baselines at **647/657**; the older **649/657** note below is historical and no longer authoritative for this checkout.
+- newly exact after the alias-`simple_for_let` static-exit allocation fix:
+  - `gpr_5557.res`
+  - `option_repr_test.res`
+- current remaining optimized failures:
+  - `Import.res`
+  - `async_await.res`
+  - `coercion_module_alias_test.res`
+  - `exception_raise_test.res`
+  - `global_module_alias_test.res`
+  - `module_alias_test.res`
+  - `module_missing_conversion.res`
+  - `module_parameter_test.res`
+  - `test_include.res`
+  - `test_non_export.res`
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
 - `raw_lambda/lower.rs` is no longer an identity shim.
 - raw switch case counts (`sw_numconsts` / `sw_numblocks`) now survive through `RawLambdaSwitch`, so `raw_lambda::lower::lower_switch` can recompute `sw_consts_full` / `sw_blocks_full` the same way `Lam_convert.convert_switch` does; this removed:

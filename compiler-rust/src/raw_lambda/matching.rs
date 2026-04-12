@@ -65,6 +65,11 @@ fn omega_list(l: &[Pattern]) -> Vec<Pattern> {
     l.iter().map(|_| omega()).collect()
 }
 
+fn bump_raise_count(next_raise_count: &mut i32, _label: &str) -> i32 {
+    *next_raise_count += 1;
+    *next_raise_count
+}
+
 // ============================================================================
 // Pattern helper functions — ported from parmatch.ml
 // ============================================================================
@@ -1887,8 +1892,7 @@ pub fn make_catch(
     match &d {
         RawLambda::LstaticRaise(_, args) if args.is_empty() => k(d),
         _ => {
-            *next_raise_count += 1;
-            let e = *next_raise_count;
+            let e = bump_raise_count(next_raise_count, "matching::make_catch");
             RawLambda::LstaticCatch(Box::new(k(make_exit(e))), (e, Vec::new()), Box::new(d))
         }
     }
@@ -1928,8 +1932,7 @@ pub fn make_catch_delayed(
     match as_simple_exit(&handler) {
         Some(i) => (i, Box::new(|act| act)),
         None => {
-            *next_raise_count += 1;
-            let i = *next_raise_count;
+            let i = bump_raise_count(next_raise_count, "matching::make_catch_delayed");
             (
                 i,
                 Box::new(move |body: RawLambda| match &body {
@@ -3085,10 +3088,7 @@ fn cons_next_or(
             def,
             next_raise,
         );
-        let idef = {
-            *next_raise += 1;
-            *next_raise
-        };
+        let idef = bump_raise_count(next_raise, "matching::cons_next_or");
         let PmHalfCompiledInfo {
             me: next,
             matrix,
@@ -3174,10 +3174,8 @@ fn split_exc(
                         k,
                         next_raise,
                     );
-                    let idef = {
-                        *next_raise += 1;
-                        *next_raise
-                    };
+                    let idef =
+                        bump_raise_count(next_raise, "matching::split_exc:constructor");
                     let PmHalfCompiledInfo {
                         me: next,
                         matrix,
@@ -3204,10 +3202,7 @@ fn split_exc(
                 let yes = rev_vec(yes);
                 let (info, nexts) =
                     split_noexc(vec![cl.clone()], rem, args, def.clone(), k, next_raise);
-                let idef = {
-                    *next_raise += 1;
-                    *next_raise
-                };
+                let idef = bump_raise_count(next_raise, "matching::split_exc:nonconstructor");
                 let PmHalfCompiledInfo {
                     me: next,
                     matrix,
@@ -3260,10 +3255,7 @@ fn split_noexc(
                     k,
                     next_raise,
                 );
-                let idef = {
-                    *next_raise += 1;
-                    *next_raise
-                };
+                let idef = bump_raise_count(next_raise, "matching::split_noexc");
                 let PmHalfCompiledInfo {
                     me: next,
                     matrix,
@@ -3391,10 +3383,7 @@ fn split_ex(
                             k,
                             next_raise,
                         );
-                        let idef = {
-                            *next_raise += 1;
-                            *next_raise
-                        };
+                        let idef = bump_raise_count(next_raise, "matching::split_ex");
                         let PmHalfCompiledInfo {
                             me: next,
                             matrix,
@@ -3462,10 +3451,7 @@ fn split_noex(
                         k,
                         next_raise,
                     );
-                    let idef = {
-                        *next_raise += 1;
-                        *next_raise
-                    };
+                    let idef = bump_raise_count(next_raise, "matching::split_noex");
                     let PmHalfCompiledInfo {
                         me: next,
                         matrix,
@@ -3699,10 +3685,7 @@ fn do_cases_or(
                         orp_vars.intersection(&pm_fv).cloned().collect()
                     };
 
-                    let or_num = {
-                        *next_raise += 1;
-                        *next_raise
-                    };
+                    let or_num = bump_raise_count(next_raise, "matching::do_cases_or");
                     let new_patl = omega_list(patl);
 
                     let mk_new_action = |vs: &[Ident]| -> RawLambda {
@@ -5888,8 +5871,7 @@ pub fn call_switcher(
         &action_store,
         sw_names,
         &mut || {
-            *next_raise_count += 1;
-            *next_raise_count
+            bump_raise_count(next_raise_count, "matching::call_switcher")
         },
     )
 }
@@ -8463,8 +8445,7 @@ pub fn compile_matching(
     let partial = check_partial_single(&pat_act_list, partial);
     match partial {
         Partial::Partial => {
-            *next_raise_count += 1;
-            let raise_num = *next_raise_count;
+            let raise_num = bump_raise_count(next_raise_count, "matching::compile_matching");
             let pm = PatternMatching {
                 cases: pat_act_list
                     .into_iter()
@@ -8672,8 +8653,7 @@ pub fn for_tupled_function(
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let partial = check_partial_list(&pats_act_list, partial);
-    *next_raise_count += 1;
-    let raise_num = *next_raise_count;
+    let raise_num = bump_raise_count(next_raise_count, "matching::for_tupled_function");
     let omegas_row: Vec<Vec<Pattern>> = vec![paraml.iter().map(|_| omega()).collect()];
     let pm = PatternMatching {
         cases: pats_act_list,
@@ -8872,8 +8852,7 @@ pub fn do_for_multiple_match(
     let partial = check_partial_single(&pat_act_list, partial);
     let (raise_num, pm1) = match &partial {
         Partial::Partial => {
-            *next_raise_count += 1;
-            let raise_num = *next_raise_count;
+            let raise_num = bump_raise_count(next_raise_count, "matching::do_for_multiple_match");
             (
                 raise_num,
                 PatternMatching {

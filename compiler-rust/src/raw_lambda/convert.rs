@@ -371,6 +371,13 @@ fn simple_let_binding_id(binding: &ValueBinding) -> Option<Ident> {
     }
 }
 
+fn nonrecursive_alias_any_binding(binding: &ValueBinding) -> bool {
+    matches!(
+        &binding.vb_pat.pat_desc,
+        PatternDesc::Tpat_alias(inner, _, _) if matches!(inner.pat_desc, PatternDesc::Tpat_any)
+    )
+}
+
 fn to_parser_mutable(flag: TypeMutableFlag) -> ParserMutableFlag {
     match flag {
         TypeMutableFlag::Mutable => ParserMutableFlag::Mutable,
@@ -3386,40 +3393,15 @@ impl<'a> RawLambdaConverter<'a> {
                 self.transl_primitive_raw(&pc.pc_desc, pc.pc_type, pc.pc_loc)
             }
             ModuleCoercion::Tcoerce_alias(env_ref, path, inner) => {
-                // Flatten nested Tcoerce_alias: if the inner coercion is also Tcoerce_alias,
-                // skip the outer one and use the innermost path (after normalization).
-                // This matches OCaml's behavior where the coercion path is already fully resolved.
-                let (final_env_ref, final_path, final_inner) = {
-                    let mut er = env_ref;
-                    let mut p = path;
-                    let mut i = inner.as_ref();
-                    while let ModuleCoercion::Tcoerce_alias(inner_er, inner_p, inner_i) = i {
-                        er = inner_er;
-                        p = inner_p;
-                        i = inner_i.as_ref();
-                    }
-                    (er, p, i)
-                };
                 self.name_lambda_raw(strict, arg, |this, _| {
-                    // Normalize the alias path to resolve module aliases (e.g., Belt.List -> Belt_List).
-                    let normalized = if let Some(env) = this.type_ctx.get_typed_env(*final_env_ref)
-                    {
-                        this.normalize_module_path_in_env(env.as_ref(), final_path)
-                    } else {
-                        this.normalize_module_path_in_env(this.env, final_path)
-                    };
                     this.apply_coercion_raw(
                         loc.clone(),
                         LetKind::Alias,
-                        final_inner,
-                        if let Some(env) = this.type_ctx.get_typed_env(*final_env_ref) {
-                            this.translate_normal_path_raw_in_env(
-                                env.as_ref(),
-                                &normalized,
-                                loc.clone(),
-                            )
+                        inner,
+                        if let Some(env) = this.type_ctx.get_typed_env(*env_ref) {
+                            this.translate_normal_path_raw_in_env(env.as_ref(), path, loc.clone())
                         } else {
-                            this.translate_normal_path_raw(&normalized, loc.clone())
+                            this.translate_normal_path_raw_in_env(this.env, path, loc.clone())
                         },
                     )
                 })
@@ -8513,10 +8495,10 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> RawLambda {
         match rec_flag {
             crate::parser::ast::RecFlag::Nonrecursive => {
-                if bindings.iter().any(|binding| {
-                    simple_let_binding_id(binding).is_none()
-                        && !Self::is_irrefutable_pattern(&binding.vb_pat)
-                }) {
+                if bindings
+                    .iter()
+                    .any(|binding| simple_let_binding_id(binding).is_none() && !Self::is_irrefutable_pattern(&binding.vb_pat))
+                {
                     // Use OCaml's simple_for_let / for_let approach via full matching compiler
                     let converted_bindings = bindings
                         .iter()
@@ -8531,6 +8513,9 @@ impl<'a> RawLambdaConverter<'a> {
                     let mut acc = body;
                     for (binding, value) in converted_bindings.into_iter().rev() {
                         if let Some(id) = simple_let_binding_id(binding) {
+                            if nonrecursive_alias_any_binding(binding) {
+                                self.next_raise_count();
+                            }
                             let kind = match &binding.vb_pat.pat_desc {
                                 PatternDesc::Tpat_alias(inner, _, _)
                                     if matches!(inner.pat_desc, PatternDesc::Tpat_any)
@@ -8609,10 +8594,9 @@ impl<'a> RawLambdaConverter<'a> {
                 let mut acc = body;
                 for (binding, value) in converted_bindings.into_iter().rev() {
                     if let Some(id) = simple_let_binding_id(binding) {
-                        // OCaml's Matching.for_let uses Strict for Tpat_var(id).
-                        // For Tpat_alias(Tpat_any, id, _), compile_matching produces
-                        // Alias when the RHS is a variable, Strict otherwise (because
-                        // arg_to_var + bind_check wrap non-var args in Strict let).
+                        if nonrecursive_alias_any_binding(binding) {
+                            self.next_raise_count();
+                        }
                         let kind = match &binding.vb_pat.pat_desc {
                             PatternDesc::Tpat_alias(inner, _, _)
                                 if matches!(inner.pat_desc, PatternDesc::Tpat_any)
@@ -8649,10 +8633,7 @@ impl<'a> RawLambdaConverter<'a> {
                             let inline_attr =
                                 Self::get_inline_attribute_from(&binding.vb_attributes, self.arena);
                             value = Self::apply_inline_attribute_raw(value, inline_attr);
-                            (
-                                simple_let_binding_id(binding).expect("checked above"),
-                                value,
-                            )
+                            (simple_let_binding_id(binding).expect("checked above"), value)
                         })
                         .collect();
                     RawLambda::letrec(lam_bindings, body)
@@ -10288,6 +10269,68 @@ mod tests {
         ));
 
         assert_eq!(primitive, Primitive::Pintorder);
+    }
+
+    #[test]
+    fn coercion_alias_keeps_original_path_instead_of_normalizing_through_module_alias() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let mut env = initial_env(&ctx);
+
+        let original_module = Ident::create_local("M'");
+        let local_n = Ident::create_local("N");
+        env.add_module(
+            original_module.clone(),
+            crate::types::decl::ModuleDeclaration {
+                md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                    crate::types::SignatureItem::SigModule(
+                        local_n.clone(),
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: crate::types::decl::ModuleType::MtyAlias(
+                                crate::types::decl::AliasPresence::MtaPresent,
+                                crate::types::Path::Pident(local_n.clone()),
+                            ),
+                            md_attributes: Vec::new(),
+                            md_loc: Location::none(),
+                            md_path: None,
+                        },
+                        crate::types::decl::RecStatus::TrecNot,
+                    ),
+                ]),
+                md_attributes: Vec::new(),
+                md_loc: Location::none(),
+                md_path: None,
+            },
+        );
+
+        let alias_path =
+            crate::types::Path::Pdot(Box::new(crate::types::Path::Pident(original_module.clone())), "N".to_string(), 0);
+        let coercion = ModuleCoercion::Tcoerce_alias(
+            EnvRef(0),
+            alias_path,
+            Box::new(ModuleCoercion::Tcoerce_none),
+        );
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let lowered = converter.apply_coercion_raw(
+            Location::none(),
+            LetKind::Alias,
+            &coercion,
+            RawLambda::var(Ident::create_local("arg")),
+        );
+
+        let RawLambda::Lprim(info) = lowered else {
+            panic!("expected coercion alias to translate to a field access");
+        };
+        assert!(matches!(
+            info.primitive,
+            Primitive::Pfield(0, FieldDbgInfo::Module { ref name }) if name == "N"
+        ));
+        assert!(matches!(
+            info.args.as_slice(),
+            [RawLambda::Lvar(id)] if id.same(&original_module)
+        ));
     }
 
     #[test]
