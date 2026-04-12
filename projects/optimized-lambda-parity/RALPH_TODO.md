@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 501/657 (76.3%), 156 parity failures, 679 hunks
+**Status:** 514/657 (78.2%), 143 parity failures, 610 hunks
 
 ## Goal
 
@@ -23,17 +23,17 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **501/657**
-- Stamp-canonicalized parity: **501/657**
-- Exact hunks: **679**
-- Stamp-canonicalized hunks: **679**
+- Optimized lambda parity: **514/657**
+- Exact hunks: **610**
+- Stamp-canonicalized parity: not re-baselined in this rerun
+- Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
   - `js_json_test.res`: **45** hunks
   - `coercion_module_alias_test.res`: **40** hunks
   - `mario_game.res`: **36** hunks
   - `bs_unwrap_test.res`: **21** hunks
-  - `exception_raise_test.res`: **18** hunks
-  - `test_trywith.res`: **17** hunks
+  - `uncurried_default.args.res`: **16** hunks
+  - `ticker.res`: **13** hunks
 
 ## Working Rules
 
@@ -47,7 +47,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **156** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, not dump-path routing.
+There are **143** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, not dump-path routing.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -73,11 +73,36 @@ Current frontier characteristics:
 - the focused `Lam.if_` assert-failure rewrite is now landed:
   - `stringmatch_test.res`: **exact parity** (down from **1 hunk** on the prior baseline)
   - `js_json_test.res`: **45 hunks** on a focused rerun, so its remaining diffs are no longer dominated by that one rewrite
-- the next visible optimized frontier is the remaining non-constant `Lam.if_` smart-constructor behavior plus the current exact-diff leaders (`js_json_test.res`, `coercion_module_alias_test.res`, `mario_game.res`, `bs_unwrap_test.res`, `exception_raise_test.res`, `test_trywith.res`).
+- the next visible optimized frontier is the current exact-diff leaders (`js_json_test.res`, `coercion_module_alias_test.res`, `mario_game.res`, `bs_unwrap_test.res`, `uncurried_default.args.res`, `ticker.res`) plus the exception static-exit numbering cluster (`test_trywith.res`, `exception_raise_test.res`).
 - a fresh full raw `-drawlambda` rerun reported **656/657** with one exact failure in `coercion_module_alias_test.res`; that looks separate from the assert-failure lowering slice and should be handled in a dedicated raw-parity session.
-- Stamp canonicalization still does not reduce the baseline at all.
+- Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### `Pextension_slot_eq` lowering moved the exception frontier
+`compiler/core/lam_convert.ml` lowers `Pextension_slot_eq` by comparing the
+exception id field (`RE_EXN_ID`) with `Pstringcomp Ceq`; Rust was still leaking
+the raw primitive into optimized lambda dumps.
+
+`compiler-rust/src/raw_lambda/lower.rs` now mirrors that `lam_prim` rule and has
+a unit test covering the lowered `Pfield(0, Fld_record "RE_EXN_ID")` shape.
+
+Verified focused checks:
+
+- `test_trywith.res`: still failing, but now only **10 hunks**, all from static-exit numbering
+- `exception_raise_test.res`: still failing, but now only **12 hunks**, again from static-exit numbering
+
+Authoritative repo-wide baseline moved from:
+
+- **501/657**, **680** hunks
+
+to:
+
+- **514/657**, **610** hunks
+
+That is a gain of **13 files** and **70 hunks**. The next exception-oriented
+lowering frontier is no longer slot comparison shape; it is static-catch /
+static-raise numbering and aliasing.
 
 ### polyvariant constant-match metadata moved the frontier again
 `compiler-rust/src/raw_lambda/convert.rs` and `compiler-rust/src/raw_lambda/matching.rs`

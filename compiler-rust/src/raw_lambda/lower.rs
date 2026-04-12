@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ident::Ident;
-use crate::lambda::compat::LetKind;
+use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
 use crate::lambda::constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 use crate::lambda::free_variables::free_variables;
 use crate::lambda::primitive::ExternalFfiKind;
@@ -15,9 +15,11 @@ use crate::lambda::primitive::Primitive;
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch};
 use crate::location::Location;
+use crate::parser::ast::MutableFlag;
 use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch};
 
 const SETTER_SUFFIX: &str = "#=";
+const EXCEPTION_ID_FIELD: &str = "RE_EXN_ID";
 
 struct LoweringContext {
     alias_tbl: HashMap<Ident, Ident>,
@@ -268,6 +270,27 @@ impl LoweringContext {
             Primitive::Pidentity => args.into_iter().next().unwrap_or_else(Lambda::unit),
             Primitive::Pnull => Lambda::const_(Constant::JsNull),
             Primitive::Pundefined => Lambda::const_(Constant::JsUndefined { is_unit: false }),
+            Primitive::PextensionSlotEq => match args.as_slice() {
+                [lhs, rhs] => Lambda::prim(
+                    Primitive::Pstringcomp(Comparison::Eq),
+                    vec![
+                        Lambda::prim(
+                            Primitive::Pfield(
+                                0,
+                                FieldDbgInfo::Record {
+                                    name: EXCEPTION_ID_FIELD.to_string(),
+                                    mutable_flag: MutableFlag::Immutable,
+                                },
+                            ),
+                            vec![lhs.clone()],
+                            loc,
+                        ),
+                        rhs.clone(),
+                    ],
+                    loc,
+                ),
+                _ => unreachable!("PextensionSlotEq expects exactly two arguments"),
+            },
             Primitive::Pignore => {
                 let arg = args.into_iter().next().unwrap_or_else(Lambda::unit);
                 Lambda::seq(arg, Lambda::unit())
@@ -1022,6 +1045,44 @@ mod tests {
             panic!("expected Lprim");
         };
         assert!(matches!(info.primitive, Primitive::PjsObjectCreate(_)));
+    }
+
+    #[test]
+    fn lowers_extension_slot_eq_via_exception_id_field() {
+        let exn = Ident::create_local("exn");
+        let slot = Ident::create_local("slot");
+        let lowered = lower_to_lambda(RawLambda::prim(
+            Primitive::PextensionSlotEq,
+            vec![RawLambda::var(exn.clone()), RawLambda::var(slot.clone())],
+            Location::none(),
+        ));
+
+        let Lambda::Lprim(info) = lowered else {
+            panic!("expected Lprim");
+        };
+        assert!(matches!(info.primitive, Primitive::Pstringcomp(Comparison::Eq)));
+        let [lhs, Lambda::Lvar(rhs)] = info.args.as_slice() else {
+            panic!("expected string comparison arguments");
+        };
+        assert!(rhs.same(&slot));
+
+        let Lambda::Lprim(field) = lhs else {
+            panic!("expected exception id field access");
+        };
+        assert!(matches!(
+            field.primitive,
+            Primitive::Pfield(
+                0,
+                FieldDbgInfo::Record {
+                    ref name,
+                    mutable_flag: MutableFlag::Immutable,
+                }
+            ) if name == EXCEPTION_ID_FIELD
+        ));
+        let [Lambda::Lvar(field_exn)] = field.args.as_slice() else {
+            panic!("expected exception id field receiver");
+        };
+        assert!(field_exn.same(&exn));
     }
 
     #[test]
