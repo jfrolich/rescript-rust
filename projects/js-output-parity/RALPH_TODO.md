@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 111 / 657 JS snapshots passing, 0 compile errors, 546 output diffs
+**Status:** 110 / 657 JS snapshots passing, 0 compile errors, 547 output diffs
 
 ## Goal
 
@@ -35,13 +35,41 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **111 / 657**
+- JS snapshot parity: **110 / 657**
 - Compile errors: **0**
-- Output diffs: **546**
+- Output diffs: **547**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- `compiler-rust/src/lambda/compile.rs` now ports the core of OCaml
+  `core/js_pass_flatten_and_mark_dead.ml` onto the Rust JS-output path:
+  the missing pass is now threaded after `js_pass_flatten` /
+  `js_pass_external_shadow` and before `Js_shake`, immutable `Caml_block`
+  aliases now substitute simple indexed field reads the way OCaml does, and
+  nested JS bindings are now marked `DeadPure` / `DeadNonPure` / `Used`
+  through the same post-pass dead-marking stage instead of leaving every local
+  declaration at the default status
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_flatten_and_mark_dead_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_tuple.res -o /tmp/test_tuple.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsCurried.res -o /tmp/DerivingAccessorsCurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+- `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after the
+  new pass
+- `tests/tests/src/test_tuple.res` and
+  `tests/tests/src/DerivingAccessorsCurried.res` remain on the same broader
+  backend / printer drift; this pass does not collapse those files by itself
+- The authoritative JS snapshot baseline now reports **110 / 657** passing,
+  **0** compile errors, and **547** output diffs after the
+  `Js_pass_flatten_and_mark_dead` port
+- the pass itself is now present and unit-covered on the Rust path, but this
+  corpus still needs the earlier OCaml JS-pass preconditions, especially
+  `Js_pass_tailcall_inline`, before `flatten_and_mark_dead` starts paying off in
+  the checked-in snapshots; landing it in isolation caused a small temporary
+  parity regression rather than a win
 
 - OCaml `ext_pp_scope.ml` / `core/js_dump.ml` nested-function identifier
   scoping is now matched more closely on the Rust printer path:

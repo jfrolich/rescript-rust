@@ -97,13 +97,13 @@ impl LambdaCompiler {
         let exports = resolve_export_aliases(&block, exports);
         let side_effect = module_side_effect_reason(&simplified);
 
-        let mut deps = apply_js_shake_pass(apply_external_shadow_pass(apply_js_flatten_pass(
-            DepsProgram {
+        let mut deps = apply_js_shake_pass(apply_js_flatten_and_mark_dead_pass(
+            apply_external_shadow_pass(apply_js_flatten_pass(DepsProgram {
                 program: Program::new(block, exports),
                 modules: vec![],
                 side_effect,
-            },
-        )));
+            })),
+        ));
         deps.modules = self.collect_required_modules(&deps.program.block);
         if deps.side_effect.is_none() {
             deps.side_effect = required_module_side_effect_reason(
@@ -2313,6 +2313,895 @@ fn apply_js_flatten_pass(mut deps: DepsProgram) -> DepsProgram {
     deps
 }
 
+fn apply_js_flatten_and_mark_dead_pass(mut deps: DepsProgram) -> DepsProgram {
+    deps.program = flatten_and_mark_dead_program(deps.program);
+    deps
+}
+
+fn flatten_and_mark_dead_program(mut program: Program) -> Program {
+    let mut substitution = HashMap::new();
+    program.block = flatten_and_mark_dead_block(program.block, &mut substitution);
+    mark_dead_code(&mut program);
+    program
+}
+
+fn flatten_and_mark_dead_block(
+    block: Block,
+    substitution: &mut HashMap<Ident, Expression>,
+) -> Block {
+    block
+        .into_iter()
+        .map(|stmt| flatten_and_mark_dead_statement(stmt, substitution))
+        .collect()
+}
+
+fn flatten_and_mark_dead_statement(
+    stmt: Statement,
+    substitution: &mut HashMap<Ident, Expression>,
+) -> Statement {
+    let Statement { desc, comment } = stmt;
+    match desc {
+        StatementDesc::Variable(decl) => {
+            if matches!(decl.ident_info.used_stats, UsedStats::DeadPure) {
+                return Statement {
+                    desc: StatementDesc::Block(vec![]),
+                    comment,
+                };
+            }
+
+            if matches!(decl.ident_info.used_stats, UsedStats::DeadNonPure) {
+                return match decl.value {
+                    None => Statement {
+                        desc: StatementDesc::Block(vec![]),
+                        comment,
+                    },
+                    Some(value) => Statement {
+                        desc: StatementDesc::Exp(value),
+                        comment,
+                    },
+                };
+            }
+
+            if matches!(
+                decl.property,
+                LetKind::Strict | LetKind::StrictOpt | LetKind::Alias
+            ) {
+                if let Some(Expression {
+                    desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, tag, tag_info),
+                    comment: value_comment,
+                }) = decl.value
+                {
+                    if items.len() >= 2 {
+                        let mut rewritten_items = Vec::with_capacity(items.len());
+                        let mut bindings = Vec::new();
+
+                        for (index, item) in items.into_iter().enumerate() {
+                            if is_simple_block_binding_item(&item) {
+                                rewritten_items.push(item);
+                            } else {
+                                let rewritten =
+                                    flatten_and_mark_dead_expression(item, substitution);
+                                let temp = Ident::create_local(block_substitution_name(
+                                    &decl.ident,
+                                    &tag_info,
+                                    index,
+                                ));
+                                rewritten_items.push(Expression::var(temp.clone()));
+                                bindings.push(Statement::variable(VariableDeclaration {
+                                    ident: temp,
+                                    value: Some(rewritten),
+                                    property: LetKind::Strict,
+                                    ident_info: IdentInfo::default(),
+                                }));
+                            }
+                        }
+
+                        let rewritten_value = Expression {
+                            desc: ExpressionDesc::CamlBlock(
+                                rewritten_items,
+                                MutableFlag::Immutable,
+                                tag,
+                                tag_info,
+                            ),
+                            comment: value_comment,
+                        };
+                        substitution.insert(decl.ident.clone(), rewritten_value.clone());
+
+                        let original = Statement {
+                            desc: StatementDesc::Variable(VariableDeclaration {
+                                ident: decl.ident,
+                                value: Some(rewritten_value),
+                                property: decl.property,
+                                ident_info: decl.ident_info,
+                            }),
+                            comment,
+                        };
+
+                        if bindings.is_empty() {
+                            return original;
+                        }
+
+                        bindings.push(original);
+                        return Statement {
+                            desc: StatementDesc::Block(bindings),
+                            comment: None,
+                        };
+                    }
+
+                    return Statement {
+                        desc: StatementDesc::Variable(VariableDeclaration {
+                            ident: decl.ident,
+                            value: Some(Expression {
+                                desc: ExpressionDesc::CamlBlock(
+                                    items,
+                                    MutableFlag::Immutable,
+                                    tag,
+                                    tag_info,
+                                ),
+                                comment: value_comment,
+                            }),
+                            property: decl.property,
+                            ident_info: decl.ident_info,
+                        }),
+                        comment,
+                    };
+                }
+            }
+
+            Statement {
+                desc: StatementDesc::Variable(VariableDeclaration {
+                    ident: decl.ident,
+                    value: decl
+                        .value
+                        .map(|value| flatten_and_mark_dead_expression(value, substitution)),
+                    property: decl.property,
+                    ident_info: decl.ident_info,
+                }),
+                comment,
+            }
+        }
+        StatementDesc::Block(block) => Statement {
+            desc: StatementDesc::Block(flatten_and_mark_dead_block(block, substitution)),
+            comment,
+        },
+        StatementDesc::Exp(expr) => Statement {
+            desc: StatementDesc::Exp(flatten_and_mark_dead_expression(expr, substitution)),
+            comment,
+        },
+        StatementDesc::Return(expr) => Statement {
+            desc: StatementDesc::Return(flatten_and_mark_dead_expression(expr, substitution)),
+            comment,
+        },
+        StatementDesc::If(cond, then_block, else_block) => Statement {
+            desc: StatementDesc::If(
+                flatten_and_mark_dead_expression(cond, substitution),
+                flatten_and_mark_dead_block(then_block, substitution),
+                flatten_and_mark_dead_block(else_block, substitution),
+            ),
+            comment,
+        },
+        StatementDesc::While(cond, body) => Statement {
+            desc: StatementDesc::While(
+                flatten_and_mark_dead_expression(cond, substitution),
+                flatten_and_mark_dead_block(body, substitution),
+            ),
+            comment,
+        },
+        StatementDesc::ForRange(start, finish, ident, direction, body) => Statement {
+            desc: StatementDesc::ForRange(
+                start.map(|expr| flatten_and_mark_dead_expression(expr, substitution)),
+                flatten_and_mark_dead_expression(finish, substitution),
+                ident,
+                direction,
+                flatten_and_mark_dead_block(body, substitution),
+            ),
+            comment,
+        },
+        StatementDesc::IntSwitch(test, clauses, default) => Statement {
+            desc: StatementDesc::IntSwitch(
+                flatten_and_mark_dead_expression(test, substitution),
+                clauses
+                    .into_iter()
+                    .map(|(tag, clause)| {
+                        (
+                            tag,
+                            CaseClause {
+                                body: flatten_and_mark_dead_block(clause.body, substitution),
+                                should_break: clause.should_break,
+                                comment: clause.comment,
+                            },
+                        )
+                    })
+                    .collect(),
+                default.map(|block| flatten_and_mark_dead_block(block, substitution)),
+            ),
+            comment,
+        },
+        StatementDesc::StringSwitch(test, clauses, default) => Statement {
+            desc: StatementDesc::StringSwitch(
+                flatten_and_mark_dead_expression(test, substitution),
+                clauses
+                    .into_iter()
+                    .map(|clause| crate::js_ir::StringClause {
+                        tag_type: clause.tag_type,
+                        clause: CaseClause {
+                            body: flatten_and_mark_dead_block(clause.clause.body, substitution),
+                            should_break: clause.clause.should_break,
+                            comment: clause.clause.comment,
+                        },
+                    })
+                    .collect(),
+                default.map(|block| flatten_and_mark_dead_block(block, substitution)),
+            ),
+            comment,
+        },
+        StatementDesc::Throw(expr) => Statement {
+            desc: StatementDesc::Throw(flatten_and_mark_dead_expression(expr, substitution)),
+            comment,
+        },
+        StatementDesc::Try(body, catch, finally) => Statement {
+            desc: StatementDesc::Try(
+                flatten_and_mark_dead_block(body, substitution),
+                catch.map(|(ident, block)| {
+                    (ident, flatten_and_mark_dead_block(block, substitution))
+                }),
+                finally.map(|block| flatten_and_mark_dead_block(block, substitution)),
+            ),
+            comment,
+        },
+        StatementDesc::Debugger => Statement {
+            desc: StatementDesc::Debugger,
+            comment,
+        },
+        StatementDesc::Break => Statement {
+            desc: StatementDesc::Break,
+            comment,
+        },
+        StatementDesc::Continue => Statement {
+            desc: StatementDesc::Continue,
+            comment,
+        },
+    }
+}
+
+fn flatten_and_mark_dead_expression(
+    expr: Expression,
+    substitution: &mut HashMap<Ident, Expression>,
+) -> Expression {
+    if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution) {
+        return rewritten;
+    }
+
+    let Expression { desc, comment } = expr;
+    let desc = match desc {
+        ExpressionDesc::Length(inner, object) => ExpressionDesc::Length(
+            Box::new(flatten_and_mark_dead_expression(*inner, substitution)),
+            object,
+        ),
+        ExpressionDesc::IsNullOrUndefined(inner) => ExpressionDesc::IsNullOrUndefined(Box::new(
+            flatten_and_mark_dead_expression(*inner, substitution),
+        )),
+        ExpressionDesc::StringAppend(left, right) => ExpressionDesc::StringAppend(
+            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+        ),
+        ExpressionDesc::Bool(value) => ExpressionDesc::Bool(value),
+        ExpressionDesc::Typeof(inner) => ExpressionDesc::Typeof(Box::new(
+            flatten_and_mark_dead_expression(*inner, substitution),
+        )),
+        ExpressionDesc::In(left, right) => ExpressionDesc::In(
+            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+        ),
+        ExpressionDesc::JsNot(inner) => ExpressionDesc::JsNot(Box::new(
+            flatten_and_mark_dead_expression(*inner, substitution),
+        )),
+        ExpressionDesc::JsBnot(inner) => ExpressionDesc::JsBnot(Box::new(
+            flatten_and_mark_dead_expression(*inner, substitution),
+        )),
+        ExpressionDesc::Seq(left, right) => ExpressionDesc::Seq(
+            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+        ),
+        ExpressionDesc::Cond(test, consequent, alternate) => ExpressionDesc::Cond(
+            Box::new(flatten_and_mark_dead_expression(*test, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*consequent, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*alternate, substitution)),
+        ),
+        ExpressionDesc::Bin(op, left, right) => ExpressionDesc::Bin(
+            op,
+            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+        ),
+        ExpressionDesc::FlatCall(func, args) => ExpressionDesc::FlatCall(
+            Box::new(flatten_and_mark_dead_expression(*func, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*args, substitution)),
+        ),
+        ExpressionDesc::Call(func, args, info) => ExpressionDesc::Call(
+            Box::new(flatten_and_mark_dead_expression(*func, substitution)),
+            args.into_iter()
+                .map(|arg| flatten_and_mark_dead_expression(arg, substitution))
+                .collect(),
+            info,
+        ),
+        ExpressionDesc::StringIndex(left, right) => ExpressionDesc::StringIndex(
+            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+        ),
+        ExpressionDesc::ArrayIndex(left, right) => ExpressionDesc::ArrayIndex(
+            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+        ),
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
+            Box::new(flatten_and_mark_dead_expression(*tag, substitution)),
+            strings
+                .into_iter()
+                .map(|value| flatten_and_mark_dead_expression(value, substitution))
+                .collect(),
+            values
+                .into_iter()
+                .map(|value| flatten_and_mark_dead_expression(value, substitution))
+                .collect(),
+        ),
+        ExpressionDesc::StaticIndex(target, field, pos) => ExpressionDesc::StaticIndex(
+            Box::new(flatten_and_mark_dead_expression(*target, substitution)),
+            field,
+            pos,
+        ),
+        ExpressionDesc::New(target, args) => ExpressionDesc::New(
+            Box::new(flatten_and_mark_dead_expression(*target, substitution)),
+            args.map(|items| {
+                items
+                    .into_iter()
+                    .map(|arg| flatten_and_mark_dead_expression(arg, substitution))
+                    .collect()
+            }),
+        ),
+        ExpressionDesc::Var(var) => ExpressionDesc::Var(var),
+        ExpressionDesc::Fun {
+            is_method,
+            params,
+            body,
+            env,
+            return_unit,
+            async_,
+            directive,
+        } => ExpressionDesc::Fun {
+            is_method,
+            params,
+            body: flatten_and_mark_dead_block(body, substitution),
+            env,
+            return_unit,
+            async_,
+            directive,
+        },
+        ExpressionDesc::Str { delim, txt } => ExpressionDesc::Str { delim, txt },
+        ExpressionDesc::RawJsCode(info) => ExpressionDesc::RawJsCode(info),
+        ExpressionDesc::Array(items, mutable_flag) => ExpressionDesc::Array(
+            items
+                .into_iter()
+                .map(|item| flatten_and_mark_dead_expression(item, substitution))
+                .collect(),
+            mutable_flag,
+        ),
+        ExpressionDesc::OptionalBlock(inner, flag) => ExpressionDesc::OptionalBlock(
+            Box::new(flatten_and_mark_dead_expression(*inner, substitution)),
+            flag,
+        ),
+        ExpressionDesc::CamlBlock(items, mutable_flag, tag, tag_info) => ExpressionDesc::CamlBlock(
+            items
+                .into_iter()
+                .map(|item| flatten_and_mark_dead_expression(item, substitution))
+                .collect(),
+            mutable_flag,
+            Box::new(flatten_and_mark_dead_expression(*tag, substitution)),
+            tag_info,
+        ),
+        ExpressionDesc::CamlBlockTag(inner, tag) => ExpressionDesc::CamlBlockTag(
+            Box::new(flatten_and_mark_dead_expression(*inner, substitution)),
+            tag,
+        ),
+        ExpressionDesc::Number(number) => ExpressionDesc::Number(number),
+        ExpressionDesc::Object(dup, props) => ExpressionDesc::Object(
+            dup.map(|expr| Box::new(flatten_and_mark_dead_expression(*expr, substitution))),
+            props
+                .into_iter()
+                .map(|(name, value)| (name, flatten_and_mark_dead_expression(value, substitution)))
+                .collect(),
+        ),
+        ExpressionDesc::Undefined { is_unit } => ExpressionDesc::Undefined { is_unit },
+        ExpressionDesc::Null => ExpressionDesc::Null,
+        ExpressionDesc::Await(inner) => ExpressionDesc::Await(Box::new(
+            flatten_and_mark_dead_expression(*inner, substitution),
+        )),
+        ExpressionDesc::Spread(inner) => ExpressionDesc::Spread(Box::new(
+            flatten_and_mark_dead_expression(*inner, substitution),
+        )),
+    };
+
+    Expression { desc, comment }
+}
+
+fn try_substitute_caml_block_projection(
+    expr: &Expression,
+    substitution: &HashMap<Ident, Expression>,
+) -> Option<Expression> {
+    match &expr.desc {
+        ExpressionDesc::ArrayIndex(left, right) => {
+            let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &left.desc else {
+                return None;
+            };
+            let ExpressionDesc::Number(Number::Int { i, .. }) = right.desc else {
+                return None;
+            };
+            substituted_caml_block_item(substitution, id, i)
+        }
+        ExpressionDesc::StaticIndex(target, _, Some(index)) => {
+            let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &target.desc else {
+                return None;
+            };
+            substituted_caml_block_item(substitution, id, *index)
+        }
+        _ => None,
+    }
+}
+
+fn substituted_caml_block_item(
+    substitution: &HashMap<Ident, Expression>,
+    id: &Ident,
+    index: i32,
+) -> Option<Expression> {
+    let expression = substitution.get(id)?;
+    let ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _) = &expression.desc else {
+        return None;
+    };
+    let item = items.get(usize::try_from(index).ok()?)?;
+    is_simple_substituted_index_value(item).then(|| item.clone())
+}
+
+fn is_simple_block_binding_item(expr: &Expression) -> bool {
+    matches!(
+        expr.desc,
+        ExpressionDesc::Var(_)
+            | ExpressionDesc::Number(_)
+            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Bool(_)
+            | ExpressionDesc::Undefined { .. }
+    )
+}
+
+fn is_simple_substituted_index_value(expr: &Expression) -> bool {
+    matches!(
+        expr.desc,
+        ExpressionDesc::Var(_)
+            | ExpressionDesc::Number(_)
+            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Undefined { .. }
+    )
+}
+
+fn block_substitution_name(ident: &Ident, tag_info: &TagInfo, index: usize) -> String {
+    let suffix = match tag_info {
+        TagInfo::Module(fields) => fields
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| index.to_string()),
+        TagInfo::Record { fields, .. } => fields
+            .get(index)
+            .map(|(field, _)| field.clone())
+            .unwrap_or_else(|| index.to_string()),
+        _ => index.to_string(),
+    };
+    format!("{}_{}", ident.name(), suffix)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MarkDeadInfo {
+    Recursive,
+    Info {
+        pure: bool,
+        used: bool,
+        exported: bool,
+    },
+}
+
+fn mark_dead_code(program: &mut Program) {
+    let mut states = HashMap::new();
+    collect_mark_dead_states_block(&program.block, &program.export_set, &mut states);
+    apply_mark_dead_states_block(&mut program.block, &states);
+}
+
+fn collect_mark_dead_states_block(
+    block: &Block,
+    export_set: &HashSet<Ident>,
+    states: &mut HashMap<Ident, MarkDeadInfo>,
+) {
+    for stmt in block {
+        collect_mark_dead_states_statement(stmt, export_set, states);
+    }
+}
+
+fn collect_mark_dead_states_statement(
+    stmt: &Statement,
+    export_set: &HashSet<Ident>,
+    states: &mut HashMap<Ident, MarkDeadInfo>,
+) {
+    match &stmt.desc {
+        StatementDesc::Block(block) => collect_mark_dead_states_block(block, export_set, states),
+        StatementDesc::Variable(decl) => {
+            collect_mark_dead_states_variable(decl, export_set, states)
+        }
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
+            collect_mark_dead_states_expression(expr, states);
+        }
+        StatementDesc::If(cond, then_block, else_block) => {
+            collect_mark_dead_states_expression(cond, states);
+            collect_mark_dead_states_block(then_block, export_set, states);
+            collect_mark_dead_states_block(else_block, export_set, states);
+        }
+        StatementDesc::While(cond, body) => {
+            collect_mark_dead_states_expression(cond, states);
+            collect_mark_dead_states_block(body, export_set, states);
+        }
+        StatementDesc::ForRange(start, finish, _, _, body) => {
+            if let Some(start) = start {
+                collect_mark_dead_states_expression(start, states);
+            }
+            collect_mark_dead_states_expression(finish, states);
+            collect_mark_dead_states_block(body, export_set, states);
+        }
+        StatementDesc::IntSwitch(test, clauses, default) => {
+            collect_mark_dead_states_expression(test, states);
+            for (_, clause) in clauses {
+                collect_mark_dead_states_block(&clause.body, export_set, states);
+            }
+            if let Some(default) = default {
+                collect_mark_dead_states_block(default, export_set, states);
+            }
+        }
+        StatementDesc::StringSwitch(test, clauses, default) => {
+            collect_mark_dead_states_expression(test, states);
+            for clause in clauses {
+                collect_mark_dead_states_block(&clause.clause.body, export_set, states);
+            }
+            if let Some(default) = default {
+                collect_mark_dead_states_block(default, export_set, states);
+            }
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            collect_mark_dead_states_block(body, export_set, states);
+            if let Some((_, block)) = catch {
+                collect_mark_dead_states_block(block, export_set, states);
+            }
+            if let Some(block) = finally {
+                collect_mark_dead_states_block(block, export_set, states);
+            }
+        }
+        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+    }
+}
+
+fn collect_mark_dead_states_variable(
+    decl: &VariableDeclaration,
+    export_set: &HashSet<Ident>,
+    states: &mut HashMap<Ident, MarkDeadInfo>,
+) {
+    match decl.ident_info.used_stats {
+        UsedStats::DeadPure => return,
+        UsedStats::DeadNonPure => {
+            if let Some(value) = &decl.value {
+                collect_mark_dead_states_expression(value, states);
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    let pure = match &decl.value {
+        None => true,
+        Some(value) => {
+            collect_mark_dead_states_expression(value, states);
+            js_expr_no_side_effects(value)
+        }
+    };
+    let exported = export_set.contains(&decl.ident);
+    match states.get(&decl.ident).copied() {
+        Some(MarkDeadInfo::Recursive) => {
+            states.insert(
+                decl.ident.clone(),
+                MarkDeadInfo::Info {
+                    pure,
+                    used: true,
+                    exported,
+                },
+            );
+        }
+        Some(MarkDeadInfo::Info { .. }) => {}
+        None => {
+            states.insert(
+                decl.ident.clone(),
+                MarkDeadInfo::Info {
+                    pure,
+                    used: false,
+                    exported,
+                },
+            );
+        }
+    }
+}
+
+fn collect_mark_dead_states_expression(
+    expr: &Expression,
+    states: &mut HashMap<Ident, MarkDeadInfo>,
+) {
+    match &expr.desc {
+        ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => mark_dead_ident_use(id, states),
+        ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(_, _))
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::RawJsCode(_)
+        | ExpressionDesc::Number(_) => {}
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::Spread(inner) => collect_mark_dead_states_expression(inner, states),
+        ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::In(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::FlatCall(left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            collect_mark_dead_states_expression(left, states);
+            collect_mark_dead_states_expression(right, states);
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            collect_mark_dead_states_expression(test, states);
+            collect_mark_dead_states_expression(consequent, states);
+            collect_mark_dead_states_expression(alternate, states);
+        }
+        ExpressionDesc::Call(func, args, _) => {
+            collect_mark_dead_states_expression(func, states);
+            for arg in args {
+                collect_mark_dead_states_expression(arg, states);
+            }
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            collect_mark_dead_states_expression(tag, states);
+            for string in strings {
+                collect_mark_dead_states_expression(string, states);
+            }
+            for value in values {
+                collect_mark_dead_states_expression(value, states);
+            }
+        }
+        ExpressionDesc::StaticIndex(target, _, _) => {
+            collect_mark_dead_states_expression(target, states)
+        }
+        ExpressionDesc::New(target, args) => {
+            collect_mark_dead_states_expression(target, states);
+            if let Some(args) = args {
+                for arg in args {
+                    collect_mark_dead_states_expression(arg, states);
+                }
+            }
+        }
+        ExpressionDesc::Fun { body, .. } => {
+            for stmt in body {
+                collect_mark_dead_states_statement(stmt, &HashSet::new(), states);
+            }
+        }
+        ExpressionDesc::Array(items, _) => {
+            for item in items {
+                collect_mark_dead_states_expression(item, states);
+            }
+        }
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            for item in items {
+                collect_mark_dead_states_expression(item, states);
+            }
+            collect_mark_dead_states_expression(tag, states);
+        }
+        ExpressionDesc::Object(dup, props) => {
+            if let Some(dup) = dup {
+                collect_mark_dead_states_expression(dup, states);
+            }
+            for (_, value) in props {
+                collect_mark_dead_states_expression(value, states);
+            }
+        }
+    }
+}
+
+fn mark_dead_ident_use(id: &Ident, states: &mut HashMap<Ident, MarkDeadInfo>) {
+    match states.get_mut(id) {
+        None => {
+            states.insert(id.clone(), MarkDeadInfo::Recursive);
+        }
+        Some(MarkDeadInfo::Recursive) => {}
+        Some(MarkDeadInfo::Info { used, .. }) => {
+            *used = true;
+        }
+    }
+}
+
+fn apply_mark_dead_states_block(block: &mut Block, states: &HashMap<Ident, MarkDeadInfo>) {
+    for stmt in block {
+        apply_mark_dead_states_statement(stmt, states);
+    }
+}
+
+fn apply_mark_dead_states_statement(stmt: &mut Statement, states: &HashMap<Ident, MarkDeadInfo>) {
+    match &mut stmt.desc {
+        StatementDesc::Block(block) => apply_mark_dead_states_block(block, states),
+        StatementDesc::Variable(decl) => {
+            apply_mark_dead_states_variable(decl, states);
+            if let Some(value) = &mut decl.value {
+                apply_mark_dead_states_expression(value, states);
+            }
+        }
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
+            apply_mark_dead_states_expression(expr, states);
+        }
+        StatementDesc::If(_, then_block, else_block) => {
+            apply_mark_dead_states_block(then_block, states);
+            apply_mark_dead_states_block(else_block, states);
+        }
+        StatementDesc::While(_, body) => apply_mark_dead_states_block(body, states),
+        StatementDesc::ForRange(_, _, _, _, body) => apply_mark_dead_states_block(body, states),
+        StatementDesc::IntSwitch(_, clauses, default) => {
+            for (_, clause) in clauses {
+                apply_mark_dead_states_block(&mut clause.body, states);
+            }
+            if let Some(default) = default {
+                apply_mark_dead_states_block(default, states);
+            }
+        }
+        StatementDesc::StringSwitch(_, clauses, default) => {
+            for clause in clauses {
+                apply_mark_dead_states_block(&mut clause.clause.body, states);
+            }
+            if let Some(default) = default {
+                apply_mark_dead_states_block(default, states);
+            }
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            apply_mark_dead_states_block(body, states);
+            if let Some((_, block)) = catch {
+                apply_mark_dead_states_block(block, states);
+            }
+            if let Some(block) = finally {
+                apply_mark_dead_states_block(block, states);
+            }
+        }
+        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+    }
+}
+
+fn apply_mark_dead_states_variable(
+    decl: &mut VariableDeclaration,
+    states: &HashMap<Ident, MarkDeadInfo>,
+) {
+    let Some(MarkDeadInfo::Info {
+        pure,
+        used,
+        exported,
+    }) = states.get(&decl.ident).copied()
+    else {
+        return;
+    };
+
+    let status = if exported {
+        UsedStats::Exported
+    } else if used {
+        UsedStats::Used
+    } else if pure {
+        UsedStats::DeadPure
+    } else {
+        UsedStats::DeadNonPure
+    };
+    update_used_stats(&mut decl.ident_info, status);
+}
+
+fn apply_mark_dead_states_expression(expr: &mut Expression, states: &HashMap<Ident, MarkDeadInfo>) {
+    match &mut expr.desc {
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::Spread(inner) => apply_mark_dead_states_expression(inner, states),
+        ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::In(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::FlatCall(left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            apply_mark_dead_states_expression(left, states);
+            apply_mark_dead_states_expression(right, states);
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            apply_mark_dead_states_expression(test, states);
+            apply_mark_dead_states_expression(consequent, states);
+            apply_mark_dead_states_expression(alternate, states);
+        }
+        ExpressionDesc::Call(func, args, _) => {
+            apply_mark_dead_states_expression(func, states);
+            for arg in args {
+                apply_mark_dead_states_expression(arg, states);
+            }
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            apply_mark_dead_states_expression(tag, states);
+            for string in strings {
+                apply_mark_dead_states_expression(string, states);
+            }
+            for value in values {
+                apply_mark_dead_states_expression(value, states);
+            }
+        }
+        ExpressionDesc::StaticIndex(target, _, _) => {
+            apply_mark_dead_states_expression(target, states)
+        }
+        ExpressionDesc::New(target, args) => {
+            apply_mark_dead_states_expression(target, states);
+            if let Some(args) = args {
+                for arg in args {
+                    apply_mark_dead_states_expression(arg, states);
+                }
+            }
+        }
+        ExpressionDesc::Fun { body, .. } => apply_mark_dead_states_block(body, states),
+        ExpressionDesc::Array(items, _) => {
+            for item in items {
+                apply_mark_dead_states_expression(item, states);
+            }
+        }
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            for item in items {
+                apply_mark_dead_states_expression(item, states);
+            }
+            apply_mark_dead_states_expression(tag, states);
+        }
+        ExpressionDesc::Object(dup, props) => {
+            if let Some(dup) = dup {
+                apply_mark_dead_states_expression(dup, states);
+            }
+            for (_, value) in props {
+                apply_mark_dead_states_expression(value, states);
+            }
+        }
+        ExpressionDesc::Var(_)
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::RawJsCode(_)
+        | ExpressionDesc::Number(_) => {}
+    }
+}
+
+fn update_used_stats(info: &mut IdentInfo, status: UsedStats) {
+    if matches!(
+        info.used_stats,
+        UsedStats::DeadPure | UsedStats::DeadNonPure | UsedStats::Exported
+    ) {
+        return;
+    }
+    info.used_stats = status;
+}
+
 fn flatten_program(mut program: Program) -> Program {
     program.block = flatten_block(program.block);
     program
@@ -4481,6 +5370,265 @@ mod tests {
     }
 
     #[test]
+    fn js_flatten_and_mark_dead_rewrites_pre_marked_dead_bindings() {
+        let dead_pure = Ident::create_local("deadPure");
+        let dead_non_pure = Ident::create_local("deadNonPure");
+        let callback = Ident::create_local("callback");
+        let deps = apply_js_flatten_and_mark_dead_pass(DepsProgram {
+            program: Program::new(
+                vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: dead_pure,
+                        value: Some(Expression::number(Number::int(1))),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo {
+                            used_stats: UsedStats::DeadPure,
+                        },
+                    }),
+                    Statement::variable(VariableDeclaration {
+                        ident: dead_non_pure,
+                        value: Some(Expression::call(
+                            Expression::var(callback.clone()),
+                            vec![],
+                            CallInfo::default(),
+                        )),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo {
+                            used_stats: UsedStats::DeadNonPure,
+                        },
+                    }),
+                ],
+                vec![],
+            ),
+            modules: vec![],
+            side_effect: None,
+        });
+
+        let [first, second] = deps.program.block.as_slice() else {
+            panic!("expected two rewritten statements");
+        };
+        match &first.desc {
+            StatementDesc::Block(block) => assert!(block.is_empty()),
+            other => {
+                panic!("expected the dead pure binding to become an empty block, got {other:?}")
+            }
+        }
+        match &second.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                assert!(args.is_empty());
+                assert!(matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&callback)
+                ));
+            }
+            other => panic!(
+                "expected the dead impure binding to become an effect statement, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn js_flatten_and_mark_dead_substitutes_immutable_caml_block_index_reads() {
+        let tuple = Ident::create_local("tuple");
+        let field = Ident::create_local("field");
+        let callback = Ident::create_local("callback");
+        let deps = apply_js_flatten_and_mark_dead_pass(DepsProgram {
+            program: Program::new(
+                vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: tuple.clone(),
+                        value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                            vec![
+                                Expression::call(
+                                    Expression::var(callback.clone()),
+                                    vec![],
+                                    CallInfo::default(),
+                                ),
+                                Expression::number(Number::int(2)),
+                            ],
+                            MutableFlag::Immutable,
+                            Box::new(Expression::number(Number::int(0))),
+                            TagInfo::tuple(),
+                        ))),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }),
+                    Statement::variable(VariableDeclaration {
+                        ident: field,
+                        value: Some(Expression::new(ExpressionDesc::ArrayIndex(
+                            Box::new(Expression::var(tuple.clone())),
+                            Box::new(Expression::number(Number::int(1))),
+                        ))),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }),
+                ],
+                vec![],
+            ),
+            modules: vec![],
+            side_effect: None,
+        });
+
+        let [tuple_stmt, field_stmt] = deps.program.block.as_slice() else {
+            panic!("expected the tuple binding and the rewritten projection");
+        };
+
+        let StatementDesc::Block(bindings) = &tuple_stmt.desc else {
+            panic!("expected the tuple binding to expand into helper bindings");
+        };
+        let [helper_stmt, original_stmt] = bindings.as_slice() else {
+            panic!("expected one helper binding plus the original tuple binding");
+        };
+
+        match &helper_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Call(func, args, _),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(args.is_empty());
+                assert!(matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&callback)
+                ));
+            }
+            other => {
+                panic!("expected the complex tuple field to become a helper binding, got {other:?}")
+            }
+        }
+        match &original_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&tuple));
+                assert!(matches!(
+                    items.as_slice(),
+                    [
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(_)),
+                            ..
+                        },
+                        Expression {
+                            desc: ExpressionDesc::Number(Number::Int { i: 2, .. }),
+                            ..
+                        }
+                    ]
+                ));
+            }
+            other => panic!(
+                "expected the original tuple binding to remain as a rewritten Caml block, got {other:?}"
+            ),
+        }
+        match &field_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 2, .. }),
+                        ..
+                    }),
+                ..
+            }) => {}
+            other => panic!(
+                "expected the tuple projection to inline to the selected field, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn js_flatten_and_mark_dead_marks_unused_nested_pure_bindings() {
+        let run = Ident::create_local("run");
+        let unused = Ident::create_local("unused");
+        let used = Ident::create_local("used");
+        let deps = apply_js_flatten_and_mark_dead_pass(DepsProgram {
+            program: Program::new(
+                vec![Statement::variable(VariableDeclaration {
+                    ident: run,
+                    value: Some(Expression::new(ExpressionDesc::Fun {
+                        is_method: false,
+                        params: vec![],
+                        body: vec![
+                            Statement::variable(VariableDeclaration {
+                                ident: unused.clone(),
+                                value: Some(Expression::number(Number::int(1))),
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            }),
+                            Statement::variable(VariableDeclaration {
+                                ident: used.clone(),
+                                value: Some(Expression::number(Number::int(2))),
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            }),
+                            Statement::return_(Expression::var(used.clone())),
+                        ],
+                        env: Default::default(),
+                        return_unit: false,
+                        async_: false,
+                        directive: None,
+                    })),
+                    property: LetKind::Strict,
+                    ident_info: IdentInfo::default(),
+                })],
+                vec![],
+            ),
+            modules: vec![],
+            side_effect: None,
+        });
+
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!("expected one top-level function binding");
+        };
+        let StatementDesc::Variable(VariableDeclaration {
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::Fun { body, .. },
+                    ..
+                }),
+            ..
+        }) = &stmt.desc
+        else {
+            panic!("expected a function-valued binding");
+        };
+        let [unused_stmt, used_stmt, _] = body.as_slice() else {
+            panic!("expected two nested bindings followed by a return");
+        };
+        match &unused_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident_info, .. }) => {
+                assert_eq!(ident_info.used_stats, UsedStats::DeadPure);
+            }
+            other => panic!(
+                "expected the first nested binding to remain a variable declaration, got {other:?}"
+            ),
+        }
+        match &used_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident_info, .. }) => {
+                assert_eq!(ident_info.used_stats, UsedStats::Used);
+            }
+            other => panic!(
+                "expected the used nested binding to remain a variable declaration, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
     fn lowers_js_var_without_args_to_a_value() {
         let mut compiler = LambdaCompiler::new();
         let lam = Lambda::prim(
@@ -4537,7 +5685,10 @@ mod tests {
                 dynamic_import: false,
                 transformed_jsx: false,
             },
-            vec![Lambda::Lconst(Constant::Int { i: 10, comment: None })],
+            vec![Lambda::Lconst(Constant::Int {
+                i: 10,
+                comment: None,
+            })],
             Location::none(),
         );
 
