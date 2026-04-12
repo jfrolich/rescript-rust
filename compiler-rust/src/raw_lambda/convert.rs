@@ -48,6 +48,8 @@ use crate::types::SignatureItem;
 
 const PREDEF_MATCH_FAILURE_STAMP: i32 = 17;
 const PREDEF_ASSERT_FAILURE_STAMP: i32 = 27;
+const REC_MODULE_FUNCTION_CSTR_CONST: i32 = 3;
+const REC_MODULE_FUNCTION_CSTR_NON_CONST: i32 = 2;
 
 #[derive(Clone)]
 enum RawFunctionBinding {
@@ -57,6 +59,18 @@ enum RawFunctionBinding {
 
 fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
     Ident::new(name, stamp, IdentFlags::PREDEF_EXN.with_global())
+}
+
+fn recmodule_function_shape_constant() -> Constant {
+    Constant::Int {
+        i: 0,
+        comment: Some(PointerInfo::Constructor(PointerConstructorTag {
+            name: "Function".to_string(),
+            const_: REC_MODULE_FUNCTION_CSTR_CONST,
+            non_const: REC_MODULE_FUNCTION_CSTR_NON_CONST,
+            runtime_tag: None,
+        })),
+    }
 }
 
 fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
@@ -3790,9 +3804,10 @@ impl<'a> RawLambdaConverter<'a> {
                             if !is_function {
                                 return None; // non-function value, can't init
                             }
-                            // Function shape: Const_pointer(0, Pt_constructor{name="Function"...})
-                            // We use ModuleAlias since it also prints as "0a"
-                            let init_v = Constant::ModuleAlias;
+                            // Match OCaml transl_recmodule.init_shape: keep the
+                            // Function constructor metadata even though raw
+                            // printing still renders it as `0a`.
+                            let init_v = recmodule_function_shape_constant();
                             // add_name: wrap with (shape, name) tuple
                             result.push(Constant::Block {
                                 tag: 0,
@@ -9615,5 +9630,54 @@ mod tests {
 
         let spec = converter.ffi_spec_for_primitive(&prim, false, false);
         assert_eq!(spec.kind, ExternalFfiKind::ObjCreate);
+    }
+
+    #[test]
+    fn recmodule_function_init_shape_keeps_function_constructor_metadata() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let converter = RawLambdaConverter::new(&arena, &ctx, &env);
+
+        let param = ctx.new_var(None);
+        let ret = ctx.new_var(None);
+        let func_ty = ctx.new_arrow_simple(param, ret);
+        let sig = vec![crate::types::decl::SignatureItem::SigValue(
+            Ident::create_local("u"),
+            crate::types::decl::ValueDescription {
+                val_type: func_ty,
+                val_kind: crate::types::decl::ValueKind::ValReg,
+                val_loc: Location::none(),
+                val_attributes: Vec::new(),
+                val_path: None,
+            },
+        )];
+
+        let shape = converter
+            .init_shape_struct(&env, &sig)
+            .expect("function signatures should produce recursive-module shapes");
+        let [Constant::Block { elements, .. }] = shape.as_slice() else {
+            panic!("expected named tuple shape");
+        };
+        let [init_v, Constant::String { s, delim }] = elements.as_slice() else {
+            panic!("expected function shape tuple");
+        };
+        assert_eq!(s, "u");
+        assert!(delim.is_none());
+        assert!(matches!(
+            init_v,
+            Constant::Int {
+                i: 0,
+                comment: Some(PointerInfo::Constructor(PointerConstructorTag {
+                    name,
+                    const_,
+                    non_const,
+                    runtime_tag: None,
+                })),
+            } if name == "Function"
+                && *const_ == REC_MODULE_FUNCTION_CSTR_CONST
+                && *non_const == REC_MODULE_FUNCTION_CSTR_NON_CONST
+        ));
     }
 }
