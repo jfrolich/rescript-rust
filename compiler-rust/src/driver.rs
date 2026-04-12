@@ -1222,75 +1222,68 @@ pub fn compile_source_to_js_with_options(
         .current_stamp()
         .max(max_lambda_input_stamp(&typed_structure));
 
-    let needs_raw_lambda =
-        options.dump_lambda || options.dump_lambda_sexp || options.dump_lambda_sexp_locs;
-    let (raw_lambda, raw_lambda_current_stamp) = if needs_raw_lambda {
-        let raw_trace = std::env::var_os("RUST_DRAWLAMBDA_STAGE_TRACE").is_some();
-        if options.dump_lambda && raw_trace {
-            eprintln!("[drawlambda-stage] start");
-        }
-        let unit_name = options
-            .source_filename
-            .as_deref()
-            .map(module_name_from_source_filename)
-            .unwrap_or_default();
-        let implementation_coercion = compute_raw_implementation_coercion(
-            &mut tctx,
+    let raw_trace = std::env::var_os("RUST_DRAWLAMBDA_STAGE_TRACE").is_some();
+    if options.dump_lambda && raw_trace {
+        eprintln!("[drawlambda-stage] start");
+    }
+    let unit_name = options
+        .source_filename
+        .as_deref()
+        .map(module_name_from_source_filename)
+        .unwrap_or_default();
+    let implementation_coercion = compute_raw_implementation_coercion(
+        &mut tctx,
+        &type_ctx,
+        &env,
+        &typed_structure,
+        options,
+    );
+    let mut raw_converter =
+        crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
+            parser.arena(),
             &type_ctx,
             &env,
-            &typed_structure,
-            options,
+            lambda_start_stamp,
+            unit_name,
         );
-        let mut raw_converter =
-            crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
-                parser.arena(),
-                &type_ctx,
-                &env,
-                lambda_start_stamp,
-                unit_name,
-            );
-        if let Some(persistent_env) = tctx.persistent_env.clone() {
-            raw_converter.set_persistent_env(persistent_env);
+    if let Some(persistent_env) = tctx.persistent_env.clone() {
+        raw_converter.set_persistent_env(persistent_env);
+    }
+    if options.dump_lambda && raw_trace {
+        eprintln!("[drawlambda-stage] before-convert");
+    }
+    let raw_lambda =
+        raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+    let raw_lambda_current_stamp = raw_converter.current_stamp();
+    if options.dump_lambda {
+        if raw_trace {
+            eprintln!("[drawlambda-stage] after-convert");
+            eprintln!("[drawlambda-stage] before-print");
         }
-        if options.dump_lambda && raw_trace {
-            eprintln!("[drawlambda-stage] before-convert");
+        use std::io::Write;
+        let mut stderr = std::io::stderr();
+        let mut raw_buf = Vec::new();
+        crate::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut raw_buf);
+        raw_buf.push(b'\n');
+        let _ = stderr.write_all(&raw_buf);
+        if raw_trace {
+            eprintln!("[drawlambda-stage] after-print");
         }
-        let raw_lambda = raw_converter
-            .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
-        let raw_lambda_current_stamp = raw_converter.current_stamp();
-        if options.dump_lambda {
-            if raw_trace {
-                eprintln!("[drawlambda-stage] after-convert");
-                eprintln!("[drawlambda-stage] before-print");
-            }
-            use std::io::Write;
-            let mut stderr = std::io::stderr();
-            let mut raw_buf = Vec::new();
-            crate::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut raw_buf);
-            raw_buf.push(b'\n');
-            let _ = stderr.write_all(&raw_buf);
-            if raw_trace {
-                eprintln!("[drawlambda-stage] after-print");
-            }
-            let raw_only = std::env::var_os("RUST_RAWLAMBDA_ONLY").is_some();
-            if !raw_only {
-                let _ = stderr.flush();
-            }
-            if raw_only {
-                std::process::exit(0);
-            }
+        let raw_only = std::env::var_os("RUST_RAWLAMBDA_ONLY").is_some();
+        if !raw_only {
+            let _ = stderr.flush();
         }
-        (Some(raw_lambda), raw_lambda_current_stamp)
-    } else {
-        (None, lambda_start_stamp)
-    };
+        if raw_only {
+            std::process::exit(0);
+        }
+    }
+
+    let lowered_lambda = crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
+        raw_lambda,
+        raw_lambda_current_stamp,
+    );
 
     if options.dump_lambda_sexp || options.dump_lambda_sexp_locs {
-        let lowered_lambda = crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
-            raw_lambda.clone().expect("raw lambda"),
-            raw_lambda_current_stamp,
-        );
-
         if options.dump_lambda_sexp {
             use std::io::Write;
             let mut stderr = std::io::stderr();
@@ -1313,17 +1306,9 @@ pub fn compile_source_to_js_with_options(
         }
     }
 
-    // Keep the lowered JS path on the existing Lambda converter while the
-    // OCaml-style raw lambda stage is being ported independently.
-    let mut lambda_converter = crate::lambda::convert::LambdaConverter::with_start_stamp(
-        parser.arena(),
-        lambda_start_stamp,
-    );
-    let lambda = lambda_converter.convert_structure(&typed_structure);
-
     // Lambda -> JS IR
     let mut compiler = LambdaCompiler::new();
-    let program = compiler.compile_program(&lambda);
+    let program = compiler.compile_program(&lowered_lambda);
 
     // JS IR -> JS source
     Ok(print_program(&program))

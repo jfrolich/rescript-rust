@@ -1,8 +1,8 @@
 //! Raw Lambda -> lowered Lambda boundary.
 //!
 //! This stage is the Rust port of the first `Lam_convert.convert` slice used
-//! by optimized-lambda parity dumps. It intentionally only feeds the parity
-//! printer path; JS compilation still uses the legacy lowered-lambda route.
+//! by optimized-lambda parity dumps and now also feeds the JS backend entry
+//! point in `driver.rs`.
 
 use std::collections::{HashMap, HashSet};
 

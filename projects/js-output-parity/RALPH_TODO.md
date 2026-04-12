@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 0 / 2784 JS snapshots passing, 1928 compile errors, 856 output diffs
+**Status:** 0 / 2784 JS snapshots passing, 1927 compile errors, 857 output diffs
 
 ## Goal
 
@@ -25,8 +25,8 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 reported:
 
 - JS snapshot parity: **0 / 2784**
-- Compile errors: **1928**
-- Output diffs: **856**
+- Compile errors: **1927**
+- Output diffs: **857**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -34,7 +34,7 @@ Interpretation:
 
 - the current Rust final codegen path is still fundamentally misaligned
 - the first frontier is routing and backend-shape correctness, not last-mile printing
-- compile failures dominate, so crash/error elimination should come before printer cleanup
+- compile failures still dominate, but one Phase 1 routing change already converted a hard failure into a diff
 
 This wrapper baseline included the in-repo snapshots plus the configured
 external corpus under `TELLA_DIR`.
@@ -51,7 +51,7 @@ external corpus under `TELLA_DIR`.
 ## Immediate Frontier
 
 - [x] Run the first dedicated `./scripts/test_js_output_parity.sh` baseline and record the full results here.
-- [ ] Route final JS codegen in `compiler-rust/src/driver.rs` through the raw-lambda / lowering path instead of the legacy typedtree shortcut.
+- [x] Route final JS codegen in `compiler-rust/src/driver.rs` through the raw-lambda / lowering path instead of the legacy typedtree shortcut.
 - [ ] Inventory the current internal compile-error files from `temp/rust-parity/diffs/js_src_*.err`.
 - [ ] Inventory the current internal text-diff files from `temp/rust-parity/diffs/js_src_*.diff`.
 - [ ] Pick one small internal structural file and one internal compile-error guard as the first implementation targets.
@@ -90,3 +90,8 @@ Internal compile errors already observed in the pre-wrapper run:
 - The wrapper keeps Spice enabled by default, but the first authoritative run skipped the Spice guard because the configured external `SPICE_PPX` binary was missing in this environment.
 - The existing JS-output parity check already lived inside `scripts/test_rust_parity.sh`; the new wrapper now gives it a dedicated project entry point.
 - The current measured JS frontier is severe enough that project work should start at backend routing, not printer polish.
+- `compiler-rust/src/driver.rs` now routes final JS generation through `raw_lambda::convert` + `raw_lambda::lower` instead of the legacy `lambda::convert::LambdaConverter` shortcut.
+- The authoritative baseline moved from **1928 compile errors / 856 diffs** to **1927 compile errors / 857 diffs**, which indicates one hard failure turned into an emitted-JS mismatch.
+- Focused checks after the routing change:
+  - `tests/tests/src/ExternalShadow.res` still differs structurally, but it now clearly reflects the raw-lambda-backed path.
+  - `tests/tests/src/js_array_test.res` still fails during type checking with `UndefinedMethod { method: "describe" }`, so that compile-error cluster remains active.
