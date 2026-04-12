@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 638/657 (97.1%), 19 parity failures, 80 hunks
+**Status:** 641/657 (97.6%), 16 parity failures, 64 hunks
 
 ## Goal
 
@@ -23,19 +23,19 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **638/657**
-- Parity hunks: **80**
+- Optimized lambda parity: **641/657**
+- Parity hunks: **64**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
   - `record_extension_test.res`: **11** hunks
   - `exception_raise_test.res`: **11** hunks
-  - `js_exception_catch_test.res`: **9** hunks
   - `Stdlib_DictTests.res`: **8** hunks
   - `large_record_duplication_test.res`: **7** hunks
-  - `UntaggedVariants.res`: **4** hunks
-  - `Stdlib_IntlTests.res`: **4** hunks
   - `Stdlib_TempTests.res`: **4** hunks
+  - `UntaggedVariants.res`: **4** hunks
+  - `variant.res`: **3** hunks
+  - `Stdlib_IntlTests.res`: **3** hunks
 
 ## Working Rules
 
@@ -49,11 +49,15 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **19** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
+There are **16** remaining optimized-lambda failures after this slice. The dominant frontier is still split between raw construction order and post-raw lowering, and stage isolation is mandatory before taking the next fix.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
 - `raw_lambda/lower.rs` is no longer an identity shim.
+- structure-item eval conversion in `raw_lambda::convert` now matches `translmod.ml`: Rust recurses into the remainder of the structure before lowering the current `Tstr_eval`, which restored OCaml's static-exit allocation order on eval-heavy files and removed:
+  - `equal_exception_test.res`
+  - `js_exception_catch_test.res`
+  - `Stdlib_IteratorTests.res`
 - Small structural sanity checks now pass exactly:
   - `AsInUncurriedExternals.res`
   - `DerivingAccessorsCurried.res`
@@ -128,11 +132,60 @@ Current frontier characteristics:
     - `recmodule.res`: **exact parity**
     - `functors.res`: **exact parity**
   - `raw_lambda::lower` now matches OCaml's module-alias collapse rule more closely: only a field-selection prefix starting at slot `0` collapses to the source module; non-prefix slices such as `presentLight` stay materialized as `Blk_module`
-- the next visible optimized frontier is the current exact-diff leaders (`record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`) plus the remaining switch-facing files (`variant.res`, `UntaggedVariants.res`) and the raw-upstream exit-number cluster (`coercion_module_alias_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `record_extension_test.res`, `variant.res`).
-- a fresh full raw `-drawlambda` rerun after this slice reported **653/657** with **5** hunks across `coercion_module_alias_test.res`, `exception_raise_test.res`, `record_extension_test.res`, and `variant.res`; focused raw guards for `UntaggedVariants.res` and `js_exception_catch_test.res` stayed exact, and `variantsMatching.res` no longer crashes, so the remaining raw drift is now concentrated in the existing exit-number files plus the exception path in `exception_raise_test.res`.
+- the next visible optimized frontier is the current exact-diff leaders (`record_extension_test.res`, `exception_raise_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`) plus the remaining switch-facing files (`variant.res`, `UntaggedVariants.res`) and the raw-upstream exit-number cluster (`coercion_module_alias_test.res`, `exception_raise_test.res`, `record_extension_test.res`, `variant.res`).
+- focused raw guards after this slice all went exact:
+  - `equal_exception_test.res`
+  - `js_exception_catch_test.res`
+  - `large_record_duplication_test.res`
+  - `Stdlib_DictTests.res`
+  - `inline_regression_test.res`
+  - `test_seq.res`
+- a fresh full raw `-drawlambda` rerun has not been re-baselined yet after this slice.
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### structure-item evals must recurse into the tail before converting the head
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_structure_eval_converts_tail_before_head_for_raise_counts -- --nocapture
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 300 ./scripts/test_lambda_parity.sh -j1 -r 'js_exception_catch_test|equal_exception_test|large_record_duplication_test|Stdlib_DictTests|inline_regression_test|test_seq'
+timeout 300 ./scripts/test_lambda_parity.sh -j1 'js_exception_catch_test|equal_exception_test|large_record_duplication_test|Stdlib_DictTests|inline_regression_test|test_seq'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- Optimized lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Optimized lambda parity: **641/657**
+  - Exact hunks: **64**
+
+Key checkpoints:
+
+- focused raw parity: **6/6 exact**
+- focused optimized parity:
+  - `equal_exception_test.res`: **exact parity**
+  - `js_exception_catch_test.res`: **exact parity**
+  - `inline_regression_test.res`: still failing
+  - `large_record_duplication_test.res`: still failing
+  - `Stdlib_DictTests.res`: still failing
+  - `test_seq.res`: still failing
+- authoritative optimized baseline moved from **638/657**, **80** hunks to **641/657**, **64** hunks
+
+OCaml's `translmod.transl_structure` computes the tail of the structure before
+translating the current `Tstr_eval`, so static exits allocated inside later
+structure items consume low IDs first. Rust `convert_structure_items_raw` was
+building `RawLambda::seq(self.convert_expr_raw(expr), recurse(rem))`, which
+reversed that allocation order for any file with top-level evals before later
+bindings or tests. That skew surfaced as broad raw and optimized exit-number
+drift, especially in eval-heavy test files.
+
+This slice fixes the raw structure walker to recurse into `rem` first and adds
+a unit test that locks the raise-count ordering at the structure boundary.
 
 ### inline FFI constants now survive the raw-lambda boundary all the way to optimized lambda
 Ran:

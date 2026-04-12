@@ -4231,10 +4231,11 @@ impl<'a> RawLambdaConverter<'a> {
         };
 
         match &item.str_desc {
-            StructureItemDesc::Tstr_eval(expr, _) => RawLambda::seq(
-                self.convert_expr_raw(expr),
-                self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc),
-            ),
+            StructureItemDesc::Tstr_eval(expr, _) => {
+                let body =
+                    self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
+                RawLambda::seq(self.convert_expr_raw(expr), body)
+            }
             StructureItemDesc::Tstr_value(rec_flag, bindings) => {
                 let old_len = fields.len();
                 fields.extend(let_bound_idents(bindings));
@@ -9932,6 +9933,45 @@ mod tests {
         let RawLambda::Lsequence(first, second) = lam else {
             panic!("expected sequence");
         };
+        assert_eq!(try_handler_exit_id(&first), Some(2));
+        assert_eq!(try_handler_exit_id(&second), Some(1));
+    }
+
+    #[test]
+    fn raw_structure_eval_converts_tail_before_head_for_raise_counts() {
+        let mut arena = ParseArena::new();
+        let first_try = simple_extension_try(&mut arena, "A", 1, 11);
+        let second_try = simple_extension_try(&mut arena, "B", 2, 22);
+        let structure = Structure {
+            str_items: vec![
+                StructureItem {
+                    str_desc: StructureItemDesc::Tstr_eval(first_try, Attributes::new()),
+                    str_loc: LocIdx::none(),
+                    str_env: EnvRef(0),
+                },
+                StructureItem {
+                    str_desc: StructureItemDesc::Tstr_eval(second_try, Attributes::new()),
+                    str_loc: LocIdx::none(),
+                    str_env: EnvRef(0),
+                },
+            ],
+            str_type: Vec::new(),
+            str_final_env: EnvRef(0),
+        };
+
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let lam = converter.convert_structure(&structure);
+
+        let RawLambda::Lsequence(first, second) = lam else {
+            panic!("expected outer sequence");
+        };
+        let RawLambda::Lsequence(second, _) = *second else {
+            panic!("expected inner sequence");
+        };
+
         assert_eq!(try_handler_exit_id(&first), Some(2));
         assert_eq!(try_handler_exit_id(&second), Some(1));
     }
