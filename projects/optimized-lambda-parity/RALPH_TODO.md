@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 654/657 (99.5%), 2 parity failures, 5 hunks, 1 Rust timeout (`Import.res`)
+**Status:** 655/657 (99.7%), 1 parity failure, 2 hunks, 1 Rust timeout (`Import.res`)
 
 ## Goal
 
@@ -23,19 +23,18 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **656/657**
-- Optimized lambda parity: **654/657**
-- Parity hunks: **5**
+- Optimized lambda parity: **655/657**
+- Parity hunks: **2**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
-  - `inner_call.res`: **3** hunks
   - `coercion_module_alias_test.res`: **2** hunks
 - Rust timeout in the current authoritative run:
   - `Import.res`
 - Full raw `-drawlambda` baseline has not been re-run across all 657 files after this slice.
 - Focused raw guard after this slice on the remaining exception/control-flow cluster:
   - `exception_raise_test.res`: **exact parity**
-  - `inner_call.res`: **1** hunk
+  - `inner_call.res`: **exact parity**
 
 ## Working Rules
 
@@ -49,16 +48,17 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **2** remaining optimized-lambda parity failures on the current worktree, plus **1** Rust timeout on `Import.res`.
+There is **1** remaining optimized-lambda parity failure on the current worktree, plus **1** Rust timeout on `Import.res`.
 
 Current frontier characteristics:
-- fresh 2026-04-12 reruns on this worktree put the full optimized baseline at **654/657**, **5** hunks, with a Rust timeout on `Import.res`; older `647/657`, `649/657`, and `653/657` notes below are historical.
+- fresh 2026-04-12 reruns on this worktree put the full optimized baseline at **655/657**, **2** hunks, with a Rust timeout on `Import.res`; older `647/657`, `649/657`, `653/657`, and `654/657` notes below are historical.
 - newly exact after the alias-`simple_for_let` static-exit allocation fix:
   - `gpr_5557.res`
   - `option_repr_test.res`
+- newly exact after the constrained-persistent-submodule normalization fix:
+  - `inner_call.res`
 - current remaining optimized failures:
   - `coercion_module_alias_test.res`
-  - `inner_call.res`
 - current Rust timeout:
   - `Import.res`
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -95,7 +95,6 @@ Current frontier characteristics:
   - `DictPatternMatchingOptimization.res`
   - `DynamicImportModuleWithAlias.res`
   - `ExternalExtension.res`
-  - `Import.res`
   - `VariantCoercion.res`
   - `minimal_test.res`
 - `conditional/cond_a.res` now also passes exactly as a minimal assert-failure guard.
@@ -163,8 +162,7 @@ Current frontier characteristics:
     - `recmodule.res`: **exact parity**
     - `functors.res`: **exact parity**
   - `raw_lambda::lower` now matches OCaml's module-alias collapse rule more closely: only a field-selection prefix starting at slot `0` collapses to the source module; non-prefix slices such as `presentLight` stay materialized as `Blk_module`
-- the next visible optimized frontier is now just the two remaining exact-diff leaders:
-  - `inner_call.res`: **3** hunks on the current authoritative baseline
+- the next visible optimized frontier is now just:
   - `coercion_module_alias_test.res`: **2** hunks on the current authoritative baseline
 - focused raw guards after this slice all went exact:
   - `equal_exception_test.res`
@@ -177,6 +175,51 @@ Current frontier characteristics:
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Latest Session Findings
+
+### constrained persistent submodules must not normalize through module-type paths
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::translate_module_path_raw_follows_mty_ident_flattened_submodule_aliases -- --exact
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::translate_value_path_raw_keeps_local_unpack_prefixes -- --exact
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::translate_value_path_raw_follows_persistent_mty_ident_flattened_submodule_aliases -- --exact
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::translate_value_path_raw_keeps_constrained_persistent_submodule_prefixes -- --exact
+cargo build --release --manifest-path compiler-rust/Cargo.toml
+timeout 900 ./scripts/test_lambda_parity.sh -j1 --raw 'inner_call|DynamicImportModuleWithAlias|Import|coercion_module_alias_test|global_module_alias_test|module_alias_test|test_include|test_non_export'
+timeout 900 ./scripts/test_lambda_parity.sh -j1 'inner_call|DynamicImportModuleWithAlias|Import|coercion_module_alias_test|global_module_alias_test|module_alias_test|test_include|test_non_export'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- Focused raw alias/module subset: **8/10 exact**, with only `coercion_module_alias_test.res` failing (**2** hunks) and `Import.res` timing out
+- Focused optimized alias/module subset: **8/10 exact**, with only `coercion_module_alias_test.res` failing (**2** hunks) and `Import.res` timing out
+- Full optimized baseline:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **656/657**
+  - Optimized lambda parity: **655/657**
+  - Exact hunks: **2**
+  - Rust timeout: `Import.res`
+
+This slice fixes the remaining raw/optimized drift in `inner_call.res`.
+OCaml's `Env.normalize_path_prefix` only follows paths that still denote runtime
+modules. Rust `compiler-rust/src/raw_lambda/convert.rs` was still following
+`MtyIdent` blindly for persistent/global heads, so a constrained submodule path
+like `Inner_define.N0.f1` got rewritten to the module-type path
+`Inner_define.S0.f1`. That produced the visible wrong raw/optimized shape:
+
+- `field:N0/1 (global Inner_define!)`
+  became
+- `field:S0/-1 (global Inner_define!)`
+
+The raw-path normalizer now only follows `MtyIdent`/alias targets when the
+target resolves to an actual runtime module. That keeps genuine flattened
+aliases such as `Belt.List -> Belt_List`, preserves local unpack/functor
+binders, and stops constrained submodules from collapsing onto module-type
+paths. The new regression test
+`translate_value_path_raw_keeps_constrained_persistent_submodule_prefixes`
+locks the `Inner_define.N0: S0` shape, and `inner_call.res` is now exact in
+both raw and optimized parity.
 
 ### matching/raw-lambda stamp sources must stay synchronized across the lowering boundary
 Ran:

@@ -3151,6 +3151,25 @@ impl<'a> RawLambdaConverter<'a> {
         head.is_persistent() || head.is_global()
     }
 
+    fn module_path_resolves_to_runtime_module(
+        &mut self,
+        env: &crate::types::env::Env,
+        path: &crate::types::Path,
+    ) -> bool {
+        if env.lookup_module(path).is_ok() {
+            return true;
+        }
+
+        match path {
+            crate::types::Path::Pident(id) if id.is_persistent() || id.is_global() => self
+                .persistent_env
+                .as_mut()
+                .and_then(|pers| pers.find_pers_struct(id.name(), self.type_ctx))
+                .is_some(),
+            _ => false,
+        }
+    }
+
     fn normalize_module_path_in_env(
         &mut self,
         env: &crate::types::env::Env,
@@ -3177,7 +3196,9 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 }
                 crate::types::decl::ModuleType::MtyIdent(alias_path)
-                    if Self::path_may_follow_mty_ident(&path) && !alias_path.same(&path) =>
+                    if Self::path_may_follow_mty_ident(&path)
+                        && !alias_path.same(&path)
+                        && self.module_path_resolves_to_runtime_module(env, alias_path) =>
                 {
                     return self.normalize_module_path_in_env(env, alias_path);
                 }
@@ -3192,7 +3213,9 @@ impl<'a> RawLambdaConverter<'a> {
                 &mut self.persistent_env,
                 self.type_ctx,
             ) {
-                if !alias_target.same(&path) {
+                if !alias_target.same(&path)
+                    && self.module_path_resolves_to_runtime_module(env, &alias_target)
+                {
                     return self.normalize_module_path_in_env(env, &alias_target);
                 }
             }
@@ -3226,7 +3249,9 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 }
                 crate::types::decl::ModuleType::MtyIdent(alias_path)
-                    if Self::path_may_follow_mty_ident(&path) && !alias_path.same(&path) =>
+                    if Self::path_may_follow_mty_ident(&path)
+                        && !alias_path.same(&path)
+                        && self.module_path_resolves_to_runtime_module(env, alias_path) =>
                 {
                     return self.normalize_value_prefix_path_in_env(env, alias_path);
                 }
@@ -3241,7 +3266,9 @@ impl<'a> RawLambdaConverter<'a> {
                 &mut self.persistent_env,
                 self.type_ctx,
             ) {
-                if !alias_target.same(&path) {
+                if !alias_target.same(&path)
+                    && self.module_path_resolves_to_runtime_module(env, &alias_target)
+                {
                     return self.normalize_value_prefix_path_in_env(env, &alias_target);
                 }
             }
@@ -10537,6 +10564,15 @@ mod tests {
                 md_path: None,
             },
         );
+        env.add_module(
+            pkg_list.clone(),
+            crate::types::decl::ModuleDeclaration {
+                md_type: crate::types::decl::ModuleType::MtySignature(vec![]),
+                md_attributes: Vec::new(),
+                md_loc: Location::none(),
+                md_path: None,
+            },
+        );
 
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lowered = converter.translate_module_path_raw(
@@ -10663,6 +10699,118 @@ mod tests {
         assert!(matches!(
             info.args.as_slice(),
             [RawLambda::LglobalModule(id, false)] if id.same(&pkg_list)
+        ));
+    }
+
+    #[test]
+    fn translate_value_path_raw_keeps_constrained_persistent_submodule_prefixes() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let mut env = initial_env(&ctx);
+
+        let inner_define = Ident::create_persistent("Inner_define");
+        let runtime_n = Ident::create_local("N");
+        let constrained_n0 = Ident::create_local("N0");
+        let runtime_n1 = Ident::create_local("N1");
+        let modtype_s0 = Ident::create_local("S0");
+        env.add_module(
+            inner_define.clone(),
+            crate::types::decl::ModuleDeclaration {
+                md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                    crate::types::SignatureItem::SigModule(
+                        runtime_n,
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: crate::types::decl::ModuleType::MtySignature(vec![]),
+                            md_attributes: Vec::new(),
+                            md_loc: Location::none(),
+                            md_path: None,
+                        },
+                        crate::types::decl::RecStatus::TrecNot,
+                    ),
+                    crate::types::SignatureItem::SigModtype(
+                        modtype_s0,
+                        crate::types::decl::ModtypeDeclaration {
+                            mtd_type: Some(crate::types::decl::ModuleType::MtySignature(vec![
+                                crate::types::SignatureItem::SigValue(
+                                    Ident::create_local("f1"),
+                                    crate::types::decl::ValueDescription {
+                                        val_type: ctx.new_var(None),
+                                        val_kind: crate::types::decl::ValueKind::ValReg,
+                                        val_loc: Location::none(),
+                                        val_attributes: Vec::new(),
+                                        val_path: None,
+                                    },
+                                ),
+                            ])),
+                            mtd_attributes: Vec::new(),
+                            mtd_loc: Location::none(),
+                        },
+                    ),
+                    crate::types::SignatureItem::SigModule(
+                        constrained_n0,
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: crate::types::decl::ModuleType::MtyIdent(
+                                crate::types::Path::pdot(
+                                    crate::types::Path::Pident(inner_define.clone()),
+                                    "S0",
+                                ),
+                            ),
+                            md_attributes: Vec::new(),
+                            md_loc: Location::none(),
+                            md_path: None,
+                        },
+                        crate::types::decl::RecStatus::TrecNot,
+                    ),
+                    crate::types::SignatureItem::SigModule(
+                        runtime_n1,
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: crate::types::decl::ModuleType::MtySignature(vec![]),
+                            md_attributes: Vec::new(),
+                            md_loc: Location::none(),
+                            md_path: None,
+                        },
+                        crate::types::decl::RecStatus::TrecNot,
+                    ),
+                ]),
+                md_attributes: Vec::new(),
+                md_loc: Location::none(),
+                md_path: None,
+            },
+        );
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let lowered = converter.translate_value_path_raw_in_env(
+            &env,
+            &crate::types::Path::Pdot(
+                Box::new(crate::types::Path::Pdot(
+                    Box::new(crate::types::Path::Pident(inner_define.clone())),
+                    "N0".to_string(),
+                    1,
+                )),
+                "f1".to_string(),
+                0,
+            ),
+            Location::none(),
+        );
+
+        let RawLambda::Lprim(info) = lowered else {
+            panic!("expected constrained value path to lower to a field access");
+        };
+        assert!(matches!(
+            info.primitive,
+            Primitive::Pfield(0, FieldDbgInfo::Module { ref name }) if name == "f1"
+        ));
+        assert!(matches!(
+            info.args.as_slice(),
+            [RawLambda::Lprim(prefix_info)]
+                if matches!(
+                    prefix_info.primitive,
+                    Primitive::Pfield(1, FieldDbgInfo::Module { ref name }) if name == "N0"
+                ) && matches!(
+                    prefix_info.args.as_slice(),
+                    [RawLambda::LglobalModule(id, false)] if id.same(&inner_define)
+                )
         ));
     }
 
