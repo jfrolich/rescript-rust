@@ -865,7 +865,16 @@ impl JsPrinter {
                 }
 
                 self.write_char('(');
-                for (i, arg) in args.iter().enumerate() {
+                let printed_args = match args.as_slice() {
+                    // OCaml's js_dump.ml omits the synthetic unit argument so `f(())`
+                    // prints as `f()`, while plain `undefined` stays explicit.
+                    [Expression {
+                        desc: ExpressionDesc::Undefined { is_unit: true },
+                        ..
+                    }] => &[][..],
+                    _ => args.as_slice(),
+                };
+                for (i, arg) in printed_args.iter().enumerate() {
                     if i > 0 {
                         self.write(", ");
                     }
@@ -2058,6 +2067,20 @@ mod tests {
         let args = vec![Expression::number(Number::int(42))];
         let expr = Expression::call(func, args, CallInfo::default());
         assert!(print_expression(&expr).contains("(42)"));
+    }
+
+    #[test]
+    fn test_print_call_omits_single_unit_undefined_argument() {
+        let func = Expression::var(Ident::create_local("foo"));
+        let expr = Expression::call(func, vec![Expression::undefined(true)], CallInfo::default());
+        assert_eq!(print_expression(&expr), "foo()");
+    }
+
+    #[test]
+    fn test_print_call_keeps_plain_undefined_argument() {
+        let func = Expression::var(Ident::create_local("foo"));
+        let expr = Expression::call(func, vec![Expression::undefined(false)], CallInfo::default());
+        assert_eq!(print_expression(&expr), "foo(undefined)");
     }
 
     #[test]

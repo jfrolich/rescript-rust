@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 121 / 657 JS snapshots passing, 0 compile errors, 536 output diffs
+**Status:** 122 / 657 JS snapshots passing, 0 compile errors, 535 output diffs
 
 ## Goal
 
@@ -35,13 +35,43 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **121 / 657**
+- JS snapshot parity: **122 / 657**
 - Compile errors: **0**
-- Output diffs: **536**
+- Output diffs: **535**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- `compiler-rust/src/js_ir/printer.rs` now matches the corresponding
+  OCaml `core/js_dump.ml` call-printing rule more closely:
+  when a JS call has exactly one synthetic unit argument
+  (`Undefined {is_unit = true}`), Rust now omits that printed argument so the
+  emitted JS is `f()` instead of `f(undefined)`, while plain
+  `undefined` arguments still stay explicit
+- Added focused printer coverage for this slice in
+  `test_print_call_omits_single_unit_undefined_argument` and
+  `test_print_call_keeps_plain_undefined_argument`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UncurriedAlways.res -o /tmp/UncurriedAlways.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ../../../../compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/boolean_test.ast -o /tmp/boolean_test.mjs`
+- `tests/tests/src/boolean_test.res` now matches its checked-in `.mjs`
+  snapshot exactly after the unit-call printer fix
+- `tests/tests/src/UncurriedAlways.res` narrowed materially:
+  the old `a(undefined)` and `cb(undefined)` drift is gone, and the remaining
+  mismatch there has moved on to later IIFE / tailcall-cleanup shaping rather
+  than unit-call printing
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the unit-call printer change
+- the cached explicit `(...undefined)` unit-call motif collapsed sharply after
+  the authoritative rerun:
+  broad `call(undefined)` diffs dropped from **87** files to **24**, and the
+  `)(undefined)` callback-IIFE variant dropped from **5** files to **0**
+- The authoritative JS snapshot baseline now reports **122 / 657** passing,
+  **0** compile errors, and **535** output diffs after the unit-call printer
+  fix
 
 - OCaml `core/lam_pass_alpha_conversion.ml` / `core/lam_compile.ml` /
   `core/js_exp_make.ml` one-unit-argument lowering is now matched more closely
