@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 82 / 657 JS snapshots passing, 0 compile errors, 575 output diffs
+**Status:** 84 / 657 JS snapshots passing, 0 compile errors, 573 output diffs
 
 ## Goal
 
@@ -35,23 +35,40 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **82 / 657**
+- JS snapshot parity: **84 / 657**
 - Compile errors: **0**
-- Output diffs: **575**
+- Output diffs: **573**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
+- OCaml `lam_compile.ml` continuation handling is now matched more closely on
+  the Rust backend path for one important slice:
+  function bodies and effect blocks no longer lower every `Lsequence` through a
+  single context-free `compile_expr`; instead, sequence prefixes recurse through
+  effect-context blocks while tails recurse through return-context blocks,
+  matching OCaml's `EffectCall Not_tail` vs `Maybe_tail_is_return` split more
+  closely
+- that backend change removed a large chunk of spurious pure `undefined;`
+  statements from callback and function bodies, shrinking the explicit
+  `undefined;` diff motif from **270** files to **170** files
+- `tests/tests/src/test_ffi.res` now matches its checked-in `.mjs` snapshot
+  exactly after the continuation-sensitive lowering fix
+- `tests/tests/src/epsilon_test.res` narrowed materially:
+  the bogus callback-body `undefined;` statements are gone, and its remaining
+  drift has moved on to later backend shaping around callback parameters and the
+  final export / purity trailer
 - the OCaml `js_pass_flatten.ml` stage is now on the Rust JS path ahead of the
   already-ported `external_shadow` pass, so effectful sequence callbacks now
   lower as statement blocks instead of giant comma expressions
 - the old `, undefined,` comma-sequence motif collapsed from **185** diff files
   to **56** files after the flatten pass
-- the next cleanup frontier exposed by that port is later JS-pass work:
-  explicit dead `undefined;` statement noise now appears in **270** diff files,
-  which points directly at the still-missing `Js_pass_flatten_and_mark_dead`
-  / shake cleanup stages
+- the next cleanup frontier is now split:
+  some of the old `undefined;` noise really was missing continuation-sensitive
+  backend lowering in `lam_compile`, while the remaining **170** files still
+  point at later cleanup stages such as `Js_pass_flatten_and_mark_dead` /
+  `Js_shake`
 - the authoritative wrapper is now scoped to the canonical in-repo 657-file set
 - all current internal JS snapshot files now compile under the wrapper baseline
 - the former `Import.res` timeout is now exposed as a normal output-diff case

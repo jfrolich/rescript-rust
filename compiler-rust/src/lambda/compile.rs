@@ -151,13 +151,10 @@ impl LambdaCompiler {
             }
             Lambda::Lfunction(func) => {
                 let params = func.params.clone();
-                let body_compiled = self.compile_expr(&func.body);
-                let mut body_block = body_compiled.prelude;
-                body_block.push(Statement::return_(body_compiled.expr));
                 let expr = Expression::new(ExpressionDesc::Fun {
                     is_method: false,
                     params,
-                    body: body_block,
+                    body: self.compile_return_block(&func.body),
                     env: Default::default(),
                     return_unit: func.attr.return_unit,
                     async_: func.attr.async_,
@@ -326,12 +323,39 @@ impl LambdaCompiler {
     }
 
     fn compile_block(&mut self, lam: &Lambda) -> Block {
-        let compiled = self.compile_expr(lam);
-        let mut block = compiled.prelude;
-        if !matches!(compiled.expr.desc, ExpressionDesc::Undefined { .. }) {
-            block.push(Statement::exp(compiled.expr));
+        self.compile_effect_block(lam)
+    }
+
+    fn compile_effect_block(&mut self, lam: &Lambda) -> Block {
+        match lam {
+            Lambda::Lsequence(first, second) => {
+                let mut block = self.compile_effect_block(first);
+                block.extend(self.compile_effect_block(second));
+                block
+            }
+            _ => {
+                let compiled = self.compile_expr(lam);
+                let mut block = compiled.prelude;
+                push_effect_expression(&mut block, compiled.expr);
+                block
+            }
         }
-        block
+    }
+
+    fn compile_return_block(&mut self, lam: &Lambda) -> Block {
+        match lam {
+            Lambda::Lsequence(first, second) => {
+                let mut block = self.compile_effect_block(first);
+                block.extend(self.compile_return_block(second));
+                block
+            }
+            _ => {
+                let compiled = self.compile_expr(lam);
+                let mut block = compiled.prelude;
+                block.push(Statement::return_(compiled.expr));
+                block
+            }
+        }
     }
 
     fn append_effect_output(&self, first: Compiled, second: Compiled) -> Compiled {
@@ -2788,6 +2812,83 @@ mod tests {
             other => {
                 panic!("expected top-level sequence to flatten to a call statement, got {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn function_bodies_drop_pure_undefined_sequence_suffixes() {
+        let mut compiler = LambdaCompiler::new();
+        let callback = Ident::create_local("callback");
+        let value = Ident::create_local("value");
+        let call = || {
+            Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::var(callback.clone())),
+                ap_args: vec![],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            })
+        };
+        let body = Lambda::Lsequence(
+            Box::new(Lambda::Lsequence(
+                Box::new(call()),
+                Box::new(Lambda::const_(Constant::none())),
+            )),
+            Box::new(Lambda::Lsequence(
+                Box::new(Lambda::Lsequence(
+                    Box::new(call()),
+                    Box::new(Lambda::const_(Constant::none())),
+                )),
+                Box::new(Lambda::var(value.clone())),
+            )),
+        );
+        let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+            arity: 1,
+            params: vec![value.clone()],
+            body: Box::new(body),
+            attr: crate::lambda::FunctionAttribute::default(),
+        }));
+
+        let Expression {
+            desc: ExpressionDesc::Fun { body, .. },
+            ..
+        } = compiled.expr
+        else {
+            panic!("expected a function expression");
+        };
+
+        let [first, second, third] = body.as_slice() else {
+            panic!("expected two effect statements followed by a return");
+        };
+
+        for stmt in [first, second] {
+            match &stmt.desc {
+                StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Call(func, args, _),
+                    ..
+                }) => {
+                    assert!(args.is_empty());
+                    assert!(matches!(
+                        func.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                            ..
+                        } if id.same(&callback)
+                    ));
+                }
+                other => panic!("expected a callback call statement, got {other:?}"),
+            }
+        }
+
+        match &third.desc {
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            }) => assert!(id.same(&value)),
+            other => panic!("expected a return of the original value, got {other:?}"),
         }
     }
 
