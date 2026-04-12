@@ -11,8 +11,8 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use crate::ident::{Ident, IdentFlags};
-use crate::lambda::constant::PointerInfo;
 use crate::lambda::LetKind;
+use crate::lambda::constant::PointerInfo;
 use crate::lambda::primitive::Mutable;
 use crate::lambda::{Comparison, FieldDbgInfo, Primitive, SwitchNames, TagInfo};
 use crate::location::Location;
@@ -94,7 +94,10 @@ fn const_compare(c1: &Constant, c2: &Constant) -> std::cmp::Ordering {
 
         let digits1 = normalize_bigint_digits(digits1);
         let digits2 = normalize_bigint_digits(digits2);
-        let abs_cmp = digits1.len().cmp(&digits2.len()).then_with(|| digits1.cmp(digits2));
+        let abs_cmp = digits1
+            .len()
+            .cmp(&digits2.len())
+            .then_with(|| digits1.cmp(digits2));
         if positive1 {
             abs_cmp
         } else {
@@ -108,9 +111,7 @@ fn const_compare(c1: &Constant, c2: &Constant) -> std::cmp::Ordering {
             let v2: f64 = f2.parse().unwrap_or(0.0);
             v1.partial_cmp(&v2).unwrap_or(Ordering::Equal)
         }
-        (Constant::BigInt(s1, b1), Constant::BigInt(s2, b2)) => {
-            compare_bigint(*s1, b1, *s2, b2)
-        }
+        (Constant::BigInt(s1, b1), Constant::BigInt(s2, b2)) => compare_bigint(*s1, b1, *s2, b2),
         (Constant::String(s1, _), Constant::String(s2, _)) => s1.cmp(s2),
         (Constant::Int(i1), Constant::Int(i2)) => i1.cmp(i2),
         (Constant::Char(c1), Constant::Char(c2)) => c1.cmp(c2),
@@ -545,23 +546,23 @@ fn strip_optional_record_pattern_wrapper(
     }
 
     match &pat.pat_desc {
-        PatternDesc::Tpat_construct(_, cstr, args) if cstr.cstr_name == "Some" && args.len() == 1 => {
+        PatternDesc::Tpat_construct(_, cstr, args)
+            if cstr.cstr_name == "Some" && args.len() == 1 =>
+        {
             match &args[0].pat_desc {
                 PatternDesc::Tpat_constant(_) => args[0].clone(),
-                PatternDesc::Tpat_construct(_, inner_cstr, _) => {
-                    match ctx_ref {
-                        Some(ctx_ref)
-                            if can_strip_optional_construct_wrapper(
-                                ctx_ref,
-                                args[0].pat_env,
-                                inner_cstr,
-                            ) =>
-                        {
-                            args[0].clone()
-                        }
-                        _ => pat.clone(),
+                PatternDesc::Tpat_construct(_, inner_cstr, _) => match ctx_ref {
+                    Some(ctx_ref)
+                        if can_strip_optional_construct_wrapper(
+                            ctx_ref,
+                            args[0].pat_env,
+                            inner_cstr,
+                        ) =>
+                    {
+                        args[0].clone()
                     }
-                }
+                    _ => pat.clone(),
+                },
                 _ => pat.clone(),
             }
         }
@@ -639,25 +640,13 @@ fn all_record_args(
             };
             let mut result: Vec<_> = all_labels
                 .iter()
-                .map(|lbl| {
-                    (
-                        dummy_loc.clone(),
-                        lbl.clone(),
-                        omega(),
-                        first_opt,
-                    )
-                })
+                .map(|lbl| (dummy_loc.clone(), lbl.clone(), omega(), first_opt))
                 .collect();
             // Fill in the actual patterns from the provided fields
             for (id, lbl, pat, opt) in lbls {
                 if (lbl.lbl_pos as usize) < result.len() {
                     let rewritten_pat = strip_optional_record_pattern_wrapper(ctx_ref, lbl, pat);
-                    result[lbl.lbl_pos as usize] = (
-                        id.clone(),
-                        lbl.clone(),
-                        rewritten_pat,
-                        *opt,
-                    );
+                    result[lbl.lbl_pos as usize] = (id.clone(), lbl.clone(), rewritten_pat, *opt);
                 }
             }
             result
@@ -1175,11 +1164,7 @@ pub fn ctx_matcher<'a>(
 
 /// Filter contexts using a matcher built from pattern q.
 /// Equivalent to OCaml's `filter_ctx`.
-pub fn filter_ctx<'a>(
-    ctx_ref: Option<&'a TypeContext<'a>>,
-    q: &Pattern,
-    ctx: &[Ctx],
-) -> Vec<Ctx> {
+pub fn filter_ctx<'a>(ctx_ref: Option<&'a TypeContext<'a>>, q: &Pattern, ctx: &[Ctx]) -> Vec<Ctx> {
     let matcher = ctx_matcher(ctx_ref, q);
 
     fn filter_rec(
@@ -1633,7 +1618,11 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
             RawLambda::Lswitch(scrut, sw, loc) => {
                 let scrut_norm = tr_rec(env, scrut, count, next_id)?;
                 let sw_norm = tr_sw(env, sw, count, next_id)?;
-                Some(RawLambda::Lswitch(Box::new(scrut_norm), sw_norm, loc.clone()))
+                Some(RawLambda::Lswitch(
+                    Box::new(scrut_norm),
+                    sw_norm,
+                    loc.clone(),
+                ))
             }
             RawLambda::LstringSwitch(scrut, cases, default) => {
                 let scrut_norm = tr_rec(env, scrut, count, next_id)?;
@@ -2337,6 +2326,7 @@ pub struct CannotFlatten;
 /// Raises `CannotFlatten` if an alias id has no argument.
 /// Equivalent to OCaml's `mk_alpha_env`.
 pub fn mk_alpha_env(
+    ctx_ref: Option<&TypeContext<'_>>,
     arg: &Option<Ident>,
     aliases: &[Ident],
     ids: &IdentSet,
@@ -2349,7 +2339,9 @@ pub fn mk_alpha_env(
                     None => return Err(CannotFlatten),
                 }
             } else {
-                Ident::create_local(id.name())
+                ctx_ref
+                    .map(|ctx_ref| ctx_ref.create_ident(id.name()))
+                    .unwrap_or_else(|| Ident::create_local(id.name()))
             };
             Ok((id.clone(), new_id))
         })
@@ -2458,6 +2450,7 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
 ///
 /// Equivalent to OCaml's `explode_or_pat`.
 pub fn explode_or_pat<F>(
+    ctx_ref: Option<&TypeContext<'_>>,
     arg: &Option<Ident>,
     patl: &[Pattern],
     mk_action: &F,
@@ -2471,18 +2464,18 @@ where
 {
     match &pat.pat_desc {
         PatternDesc::Tpat_or(p1, p2, _) => {
-            let rem = explode_or_pat(arg, patl, mk_action, rem, vars, aliases, p2)?;
-            explode_or_pat(arg, patl, mk_action, rem, vars, aliases, p1)
+            let rem = explode_or_pat(ctx_ref, arg, patl, mk_action, rem, vars, aliases, p2)?;
+            explode_or_pat(ctx_ref, arg, patl, mk_action, rem, vars, aliases, p1)
         }
         PatternDesc::Tpat_alias(p, id, _) => {
             let mut new_aliases = vec![id.clone()];
             new_aliases.extend_from_slice(aliases);
-            explode_or_pat(arg, patl, mk_action, rem, vars, &new_aliases, p)
+            explode_or_pat(ctx_ref, arg, patl, mk_action, rem, vars, &new_aliases, p)
         }
         PatternDesc::Tpat_var(x, _) => {
             let mut x_aliases = vec![x.clone()];
             x_aliases.extend_from_slice(aliases);
-            let env = mk_alpha_env(arg, &x_aliases, vars)?;
+            let env = mk_alpha_env(ctx_ref, arg, &x_aliases, vars)?;
             let new_ids: Vec<Ident> = env.iter().map(|(_, id)| id.clone()).collect();
             let mut row = vec![omega()];
             row.extend_from_slice(patl);
@@ -2491,7 +2484,7 @@ where
             Ok(result)
         }
         _ => {
-            let env = mk_alpha_env(arg, aliases, vars)?;
+            let env = mk_alpha_env(ctx_ref, arg, aliases, vars)?;
             let new_ids: Vec<Ident> = env.iter().map(|(_, id)| id.clone()).collect();
             let mut row = vec![alpha_pat(&env, pat)];
             row.extend_from_slice(patl);
@@ -2984,6 +2977,7 @@ fn split_or(
     let cls = simplify_cases(ctx_ref, args, cls);
 
     do_split_or(
+        ctx_ref,
         argo,
         Vec::new(),
         Vec::new(),
@@ -2997,6 +2991,7 @@ fn split_or(
 
 /// Inner do_split for split_or.
 fn do_split_or(
+    ctx_ref: Option<&TypeContext<'_>>,
     argo: &Option<Ident>,
     before: Vec<(Vec<Pattern>, RawLambda)>,
     ors: Vec<(Vec<Pattern>, RawLambda)>,
@@ -3011,7 +3006,7 @@ fn do_split_or(
             let before = rev_vec(before);
             let ors = rev_vec(ors);
             let no = rev_vec(no);
-            cons_next_or(argo, before, ors, &no, args, def, next_raise)
+            cons_next_or(ctx_ref, argo, before, ors, &no, args, def, next_raise)
         }
         Some((cl, rem)) => match cl.0.split_first() {
             Some((p, ps)) => {
@@ -3019,24 +3014,34 @@ fn do_split_or(
                 if up_ok(&cl.0, act, &no) {
                     if is_or(p) {
                         let (new_ors, new_no) = insert_or_append(p, ps, act, ors, no);
-                        do_split_or(argo, before, new_ors, new_no, rem, args, def, next_raise)
+                        do_split_or(
+                            ctx_ref, argo, before, new_ors, new_no, rem, args, def, next_raise,
+                        )
                     } else if up_ok(&cl.0, act, &ors) {
                         let mut new_before = before;
                         new_before.insert(0, cl.clone());
-                        do_split_or(argo, new_before, ors, no, rem, args, def, next_raise)
+                        do_split_or(
+                            ctx_ref, argo, new_before, ors, no, rem, args, def, next_raise,
+                        )
                     } else if or_ok(p, ps, &ors) {
                         let mut new_ors = ors;
                         new_ors.insert(0, cl.clone());
-                        do_split_or(argo, before, new_ors, no, rem, args, def, next_raise)
+                        do_split_or(
+                            ctx_ref, argo, before, new_ors, no, rem, args, def, next_raise,
+                        )
                     } else {
                         let mut new_no = no;
                         new_no.insert(0, cl.clone());
-                        do_split_or(argo, before, ors, new_no, rem, args, def, next_raise)
+                        do_split_or(
+                            ctx_ref, argo, before, ors, new_no, rem, args, def, next_raise,
+                        )
                     }
                 } else {
                     let mut new_no = no;
                     new_no.insert(0, cl.clone());
-                    do_split_or(argo, before, ors, new_no, rem, args, def, next_raise)
+                    do_split_or(
+                        ctx_ref, argo, before, ors, new_no, rem, args, def, next_raise,
+                    )
                 }
             }
             None => panic!("split_or: empty pattern row"),
@@ -3046,6 +3051,7 @@ fn do_split_or(
 
 /// cons_next helper for split_or.
 fn cons_next_or(
+    ctx_ref: Option<&TypeContext<'_>>,
     argo: &Option<Ident>,
     yes: Vec<(Vec<Pattern>, RawLambda)>,
     yesor: Vec<(Vec<Pattern>, RawLambda)>,
@@ -3055,9 +3061,19 @@ fn cons_next_or(
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
     if no.is_empty() {
-        precompile_or(argo, yes, yesor, args, def.clone(), Vec::new(), next_raise)
+        precompile_or(
+            ctx_ref,
+            argo,
+            yes,
+            yesor,
+            args,
+            def.clone(),
+            Vec::new(),
+            next_raise,
+        )
     } else {
         let (info, nexts) = do_split_or(
+            ctx_ref,
             argo,
             Vec::new(),
             Vec::new(),
@@ -3079,7 +3095,9 @@ fn cons_next_or(
         let new_def = cons_default(matrix, idef, top_default);
         let mut new_nexts = vec![(idef, next)];
         new_nexts.extend(nexts);
-        precompile_or(argo, yes, yesor, args, new_def, new_nexts, next_raise)
+        precompile_or(
+            ctx_ref, argo, yes, yesor, args, new_def, new_nexts, next_raise,
+        )
     }
 }
 
@@ -3596,6 +3614,7 @@ fn dont_precompile_var(
 /// Precompile or-patterns.
 /// Equivalent to OCaml's `precompile_or`.
 fn precompile_or(
+    ctx_ref: Option<&TypeContext<'_>>,
     argo: &Option<Ident>,
     cls: Vec<(Vec<Pattern>, RawLambda)>,
     ors: Vec<(Vec<Pattern>, RawLambda)>,
@@ -3609,7 +3628,7 @@ fn precompile_or(
     }
 
     // do_cases processes the or-pattern list
-    let (end_body, handlers) = do_cases_or(argo, &ors, args, &def, next_raise);
+    let (end_body, handlers) = do_cases_or(ctx_ref, argo, &ors, args, &def, next_raise);
 
     let matrix = as_matrix(&[cls.as_slice(), ors.as_slice()].concat());
     let body = PatternMatching {
@@ -3634,6 +3653,7 @@ fn precompile_or(
 /// Process or-pattern cases for precompile_or.
 /// Equivalent to the inner `do_cases` in OCaml's `precompile_or`.
 fn do_cases_or(
+    ctx_ref: Option<&TypeContext<'_>>,
     argo: &Option<Ident>,
     ors: &[(Vec<Pattern>, RawLambda)],
     args: &[(RawLambda, LetKind)],
@@ -3690,9 +3710,11 @@ fn do_cases_or(
                         )
                     };
 
-                    let (body, handlers) = do_cases_or(argo, &rem, args, def, next_raise);
+                    let (body, handlers) =
+                        do_cases_or(ctx_ref, argo, &rem, args, def, next_raise);
 
                     let exploded = explode_or_pat(
+                        ctx_ref,
                         argo,
                         &new_patl,
                         &mk_new_action,
@@ -3714,7 +3736,8 @@ fn do_cases_or(
                 }
                 _ => {
                     // Not an or-pattern head
-                    let (mut new_ord, new_to_catch) = do_cases_or(argo, rem, args, def, next_raise);
+                    let (mut new_ord, new_to_catch) =
+                        do_cases_or(ctx_ref, argo, rem, args, def, next_raise);
                     new_ord.insert(0, cl.clone());
                     (new_ord, new_to_catch)
                 }
@@ -4909,11 +4932,15 @@ const STRINGS_TEST_THRESHOLD: usize = 8;
 
 /// Bind a switch argument to a variable if it's not already a variable.
 /// Equivalent to OCaml's `bind_sw`.
-fn bind_sw(arg: RawLambda, k: impl FnOnce(RawLambda) -> RawLambda) -> RawLambda {
+fn bind_sw(
+    ctx_ref: &TypeContext<'_>,
+    arg: RawLambda,
+    k: impl FnOnce(RawLambda) -> RawLambda,
+) -> RawLambda {
     match &arg {
         RawLambda::Lvar(_) => k(arg),
         _ => {
-            let id = Ident::create_local("switch");
+            let id = ctx_ref.create_ident("switch");
             let var = RawLambda::Lvar(id.clone());
             let body = k(var);
             RawLambda::Llet(LetKind::Strict, id, Box::new(arg), Box::new(body))
@@ -4924,6 +4951,7 @@ fn bind_sw(arg: RawLambda, k: impl FnOnce(RawLambda) -> RawLambda) -> RawLambda 
 /// Build a sequential string equality test sequence.
 /// Equivalent to OCaml's `make_string_test_sequence`.
 fn make_string_test_sequence(
+    ctx_ref: &TypeContext<'_>,
     loc: Location,
     arg: RawLambda,
     sw: Vec<(String, RawLambda)>,
@@ -4938,7 +4966,7 @@ fn make_string_test_sequence(
         }
         Some(d) => (d, sw),
     };
-    bind_sw(arg, |arg| {
+    bind_sw(ctx_ref, arg, |arg| {
         // fold_right: iterate from the end
         let mut result = d;
         for (s, lam) in sw.into_iter().rev() {
@@ -5014,6 +5042,7 @@ fn tree_way_test(
 /// Build a dichotomic string test tree.
 /// Equivalent to OCaml's `do_make_string_test_tree`.
 fn do_make_string_test_tree(
+    ctx_ref: &TypeContext<'_>,
     loc: Location,
     arg: RawLambda,
     sw: Vec<(String, RawLambda)>,
@@ -5022,10 +5051,11 @@ fn do_make_string_test_tree(
 ) -> RawLambda {
     let len = sw.len();
     if len <= STRINGS_TEST_THRESHOLD + delta {
-        make_string_test_sequence(loc, arg, sw, d)
+        make_string_test_sequence(ctx_ref, loc, arg, sw, d)
     } else {
         let (lt, (s, act), gt) = split(len, sw);
         bind_sw(
+            ctx_ref,
             RawLambda::Lprim(RawPrimInfo {
                 primitive: Primitive::Pstringcomp(Comparison::Eq),
                 args: vec![
@@ -5038,9 +5068,23 @@ fn do_make_string_test_tree(
                 tree_way_test(
                     loc.clone(),
                     r,
-                    do_make_string_test_tree(loc.clone(), arg.clone(), lt, delta, d.clone()),
+                    do_make_string_test_tree(
+                        ctx_ref,
+                        loc.clone(),
+                        arg.clone(),
+                        lt,
+                        delta,
+                        d.clone(),
+                    ),
                     act,
-                    do_make_string_test_tree(loc.clone(), arg.clone(), gt, delta, d.clone()),
+                    do_make_string_test_tree(
+                        ctx_ref,
+                        loc.clone(),
+                        arg.clone(),
+                        gt,
+                        delta,
+                        d.clone(),
+                    ),
                 )
             },
         )
@@ -5051,6 +5095,7 @@ fn do_make_string_test_tree(
 /// Entry point for string matching.
 /// Equivalent to OCaml's `expand_stringswitch`.
 pub fn expand_stringswitch(
+    ctx_ref: &TypeContext<'_>,
     loc: Location,
     arg: RawLambda,
     sw: Vec<(String, RawLambda)>,
@@ -5058,10 +5103,12 @@ pub fn expand_stringswitch(
     next_raise_count: &mut i32,
 ) -> RawLambda {
     match d {
-        None => bind_sw(arg, |arg| do_make_string_test_tree(loc, arg, sw, 0, None)),
-        Some(e) => bind_sw(arg, |arg| {
+        None => bind_sw(ctx_ref, arg, |arg| {
+            do_make_string_test_tree(ctx_ref, loc, arg, sw, 0, None)
+        }),
+        Some(e) => bind_sw(ctx_ref, arg, |arg| {
             make_catch(e, next_raise_count, |d| {
-                do_make_string_test_tree(loc, arg, sw, 1, Some(d))
+                do_make_string_test_tree(ctx_ref, loc, arg, sw, 1, Some(d))
             })
         }),
     }
@@ -5833,8 +5880,8 @@ pub fn call_switcher(
         &action_store,
         sw_names,
         &mut || {
-        *next_raise_count += 1;
-        *next_raise_count
+            *next_raise_count += 1;
+            *next_raise_count
         },
     )
 }
@@ -6652,7 +6699,7 @@ fn combine_constructor(
             if extension_cases.is_empty() {
                 default
             } else {
-                let tag = Ident::create_local("tag");
+                let tag = ctx_ref.create_ident("tag");
                 let tests = extension_cases
                     .iter()
                     .rev()
@@ -6845,7 +6892,10 @@ fn or_list_polyvar(arg: &RawLambda, hash_names: &[(i32, String)]) -> RawLambda {
     let (first_hash, first_name) = &hash_names[0];
     let init = RawLambda::Lprim(RawPrimInfo {
         primitive: Primitive::Pintcomp(Comparison::Eq),
-        args: vec![arg.clone(), raw_polyvariant_hash_const(*first_hash, first_name)],
+        args: vec![
+            arg.clone(),
+            raw_polyvariant_hash_const(*first_hash, first_name),
+        ],
         loc: Location::none(),
     });
     hash_names[1..].iter().fold(init, |acc, (hash, name)| {
@@ -6931,6 +6981,7 @@ fn call_switcher_variant_constant(
 /// Call switcher for variant non-constant (block) matching.
 /// Equivalent to OCaml's `Polyvar_pattern_match.call_switcher_variant_constr`.
 fn call_switcher_variant_constr(
+    ctx_ref: &TypeContext<'_>,
     loc: Location,
     fail: Option<RawLambda>,
     arg: RawLambda,
@@ -6938,7 +6989,7 @@ fn call_switcher_variant_constr(
     names: Option<SwitchNames>,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let v = Ident::create_local("variant");
+    let v = ctx_ref.create_ident("variant");
     RawLambda::Llet(
         LetKind::Alias,
         v.clone(),
@@ -7029,6 +7080,7 @@ fn combine_variant(
             }
             ([], _) => {
                 let lam = call_switcher_variant_constr(
+                    ctx_ref,
                     loc.clone(),
                     fail.clone(),
                     arg.clone(),
@@ -7052,6 +7104,7 @@ fn combine_variant(
                     next_raise_count,
                 );
                 let lam_nonconst = call_switcher_variant_constr(
+                    ctx_ref,
                     loc.clone(),
                     fail,
                     arg.clone(),
@@ -7069,6 +7122,7 @@ fn combine_variant(
 /// Combine array matching results.
 /// Equivalent to OCaml's `combine_array`.
 fn combine_array(
+    ctx_ref: &TypeContext<'_>,
     names: Option<SwitchNames>,
     loc: Location,
     arg: RawLambda,
@@ -7081,7 +7135,7 @@ fn combine_array(
     let (len_lambda_list, total1, _pats) = c_div;
     let (fail, local_jumps) = mk_failaction_neg(partial, ctx, def);
     let lambda1 = {
-        let newvar = Ident::create_local("len");
+        let newvar = ctx_ref.create_ident("len");
         let int_lambda_list: Vec<(i32, RawLambda)> = len_lambda_list
             .into_iter()
             .map(|(len, act)| (len as i32, act))
@@ -7731,6 +7785,7 @@ fn do_compile_matching(
                         &|ctx, pm| divide_array(ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_array(
+                                ctx_ref,
                                 names.clone(),
                                 loc.clone(),
                                 arg_clone.clone(),
@@ -8231,7 +8286,9 @@ fn extract_row_from_type(ctx_ref: &TypeContext<'_>, ty: TypeExprRef) -> RowDesc 
 /// Placeholder for names_from_construct_pattern.
 /// Matches `compiler/core/matching_polyfill.ml`.
 fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Option<SwitchNames> {
-    fn switch_names_from_variant(cstrs: &[crate::types::decl::ConstructorDeclaration]) -> SwitchNames {
+    fn switch_names_from_variant(
+        cstrs: &[crate::types::decl::ConstructorDeclaration],
+    ) -> SwitchNames {
         let mut consts = Vec::new();
         let mut blocks = Vec::new();
         for cstr in cstrs {
@@ -8247,11 +8304,7 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Opt
         SwitchNames { consts, blocks }
     }
 
-    fn resolve_type(
-        ctx_ref: &TypeContext<'_>,
-        ty: TypeExprRef,
-        env: &Env,
-    ) -> Option<SwitchNames> {
+    fn resolve_type(ctx_ref: &TypeContext<'_>, ty: TypeExprRef, env: &Env) -> Option<SwitchNames> {
         match &*ctx_ref.get_desc(ctx_ref.repr(ty)) {
             TypeDesc::Tconstr { path, .. } => resolve_path(ctx_ref, path, env),
             TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => resolve_type(ctx_ref, *next, env),
@@ -8585,7 +8638,15 @@ pub fn for_let(
             // Fast path
             RawLambda::Llet(LetKind::Strict, id.clone(), Box::new(param), Box::new(body))
         }
-        _ => simple_for_let(ctx_ref, arena, loc, param, pat.clone(), body, next_raise_count),
+        _ => simple_for_let(
+            ctx_ref,
+            arena,
+            loc,
+            param,
+            pat.clone(),
+            body,
+            next_raise_count,
+        ),
     }
 }
 
@@ -8844,14 +8905,14 @@ pub fn do_for_multiple_match(
 
     // Try flatten optimization first
     let result = (|| -> Result<RawLambda, CannotFlattenExn> {
-        let (next, nexts) = split_precompile(None, &None, &pm1, next_raise_count);
+        let (next, nexts) = split_precompile(Some(ctx_ref), &None, &pm1, next_raise_count);
 
         let size = paraml.len();
 
         // Debug: print what split_precompile produced
         let idl: Vec<Ident> = paraml
             .iter()
-            .map(|_| Ident::create_local("match"))
+            .map(|_| ctx_ref.create_ident("match"))
             .collect();
         let args: Vec<(RawLambda, LetKind)> = idl
             .iter()
@@ -8937,10 +8998,10 @@ pub fn do_for_multiple_match(
 
 /// Extract a variable from a param, binding if needed.
 /// Equivalent to OCaml's `param_to_var`.
-fn param_to_var(param: &RawLambda) -> (Ident, Option<RawLambda>) {
+fn param_to_var(ctx_ref: &TypeContext<'_>, param: &RawLambda) -> (Ident, Option<RawLambda>) {
     match param {
         RawLambda::Lvar(v) => (v.clone(), None),
-        _ => (Ident::create_local("match"), Some(param.clone())),
+        _ => (ctx_ref.create_ident("match"), Some(param.clone())),
     }
 }
 
@@ -8964,7 +9025,8 @@ pub fn for_multiple_match(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let v_paraml: Vec<(Ident, Option<RawLambda>)> = paraml.iter().map(param_to_var).collect();
+    let v_paraml: Vec<(Ident, Option<RawLambda>)> =
+        paraml.iter().map(|param| param_to_var(ctx_ref, param)).collect();
     let new_paraml: Vec<RawLambda> = v_paraml
         .iter()
         .map(|(v, _)| RawLambda::Lvar(v.clone()))
@@ -8997,8 +9059,10 @@ mod tests {
         let ctx = TypeContext::new(&id_gen);
         let env = initial_env(&ctx);
         let env_ref = ctx.store_typed_env(&env);
-        let pat_type =
-            ctx.new_generic_constr(predef::path_result(), vec![ctx.new_var(None), ctx.new_var(None)]);
+        let pat_type = ctx.new_generic_constr(
+            predef::path_result(),
+            vec![ctx.new_var(None), ctx.new_var(None)],
+        );
         let pat = make_pat(PatternDesc::Tpat_any, pat_type, env_ref);
 
         let names = names_from_construct_pattern(&ctx, &pat).expect("result switch names");
@@ -9026,9 +9090,13 @@ mod tests {
             panic!("expected two equality tests");
         };
 
-        assert!(matches!(first_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::constant::Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
-            if *i == btype::hash_variant("A") && name == "A"));
-        assert!(matches!(second_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::constant::Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
-            if *i == btype::hash_variant("B") && name == "B"));
+        assert!(
+            matches!(first_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::constant::Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
+            if *i == btype::hash_variant("A") && name == "A")
+        );
+        assert!(
+            matches!(second_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::constant::Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
+            if *i == btype::hash_variant("B") && name == "B")
+        );
     }
 }

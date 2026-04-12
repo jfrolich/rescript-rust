@@ -125,10 +125,72 @@ Current frontier characteristics:
   - focused optimized recursive-module diffs are now down to **1** hunk total, all in `recmodule.res`, and that remaining hunk is identifier-stamp drift rather than shape construction
 - the next visible optimized frontier is the current exact-diff leaders (`record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`) plus the remaining switch-facing files (`variant.res`, `UntaggedVariants.res`, `switch_string.res`) and the stamp-heavy exception / `recmodule.res` residuals.
 - the next visible optimized frontier is the current exact-diff leaders (`record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`) plus the remaining raw-upstream exit-number files (`coercion_module_alias_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `record_extension_test.res`, `variant.res`) and the stamp-heavy exception / `recmodule.res` residuals.
-- a fresh full raw `-drawlambda` rerun after this slice reported **654/657** with **4** hunks across `coercion_module_alias_test.res`, `record_extension_test.res`, and `variant.res`; the focused recursive-module raw slice still stayed exact, so those raw failures look separate from this metadata change and need their own session.
+- a fresh full raw `-drawlambda` rerun after this slice reported **653/657** with **5** hunks across `coercion_module_alias_test.res`, `exception_raise_test.res`, `record_extension_test.res`, and `variant.res`; focused raw guards for `UntaggedVariants.res` and `js_exception_catch_test.res` stayed exact, and `variantsMatching.res` no longer crashes, so the remaining raw drift is now concentrated in the existing exit-number files plus the exception path in `exception_raise_test.res`.
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### matching-generated ids now continue from the shared raw-lambda stamp stream
+Ran:
+
+```bash
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 300 ./scripts/test_lambda_parity.sh -j1 --raw 'UntaggedVariants|exception_raise_test'
+timeout 300 ./scripts/test_lambda_parity.sh -j1 'UntaggedVariants|exception_raise_test'
+timeout 300 ./scripts/test_lambda_parity.sh -j1 --raw js_exception_catch_test
+timeout 300 ./scripts/test_lambda_parity.sh -j1 js_exception_catch_test
+timeout 300 ./scripts/test_lambda_parity.sh -j1 variantsMatching
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+timeout 1800 ./scripts/test_lambda_parity.sh -j1 --raw
+```
+
+Result:
+
+- Optimized lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Optimized lambda parity: **632/657**
+  - Exact hunks: **91**
+- Raw lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Raw lambda parity: **653/657**
+  - Exact hunks: **5**
+
+Key checkpoints:
+
+- authoritative optimized baseline stayed flat at **632/657**, **91** hunks
+- focused raw guards now behave as expected:
+  - `UntaggedVariants.res`: **exact parity**
+  - `js_exception_catch_test.res`: **exact parity**
+  - `exception_raise_test.res`: still fails in both raw and optimized parity
+- `variantsMatching.res` now completes its focused optimized parity run without the earlier or-pattern precompile panic
+- the remaining authoritative raw failures are now:
+  - `coercion_module_alias_test.res`
+  - `exception_raise_test.res`
+  - `record_extension_test.res`
+  - `variant.res`
+
+OCaml `compiler/ml/matching.ml` keeps using the current `Ident` stamp stream
+when it synthesizes binders for split-or expansion, string-switch helpers,
+variant-switch temporaries, array-length lets, and flattened multi-match
+parameters. Rust `compiler-rust/src/raw_lambda/matching.rs` still created those
+ids with `Ident::create_local`, which pulled from an unrelated global counter
+instead of the shared raw-lambda `IdGenerator`.
+
+The matching compiler now threads `TypeContext` through those fresh-id helpers
+and allocates with `ctx_ref.create_ident(...)` whenever the type context is
+available, matching OCaml's stamp source instead of introducing a parallel id
+stream. A narrow fallback to `Ident::create_local(...)` remains only for the
+legacy precompile paths that still legitimately lack a `TypeContext`, which
+also avoids the temporary `variantsMatching.res` panic from forcing context
+where OCaml does not require it.
+
+This slice fixed a real raw-lambda stamp-source bug and removed the
+`variantsMatching.res` crash, but it did **not** move the authoritative
+optimized baseline on its own. The remaining raw exception drift is now more
+clearly isolated to `exception_raise_test.res` plus the existing
+exit-number-heavy files.
 
 ### lowerer-generated ids now continue from the raw-lambda stamp stream
 Ran:
