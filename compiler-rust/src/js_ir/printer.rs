@@ -10,8 +10,14 @@ use super::{
     VariableDeclaration,
 };
 use crate::ident::Ident;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
+
+#[derive(Clone, Default)]
+struct NameScope {
+    ident_names: HashMap<Ident, String>,
+    next_suffix: HashMap<String, usize>,
+}
 
 /// JavaScript printer state
 pub struct JsPrinter {
@@ -21,10 +27,8 @@ pub struct JsPrinter {
     indent: usize,
     /// Indentation string (2 spaces)
     indent_str: &'static str,
-    /// Assigned printable names for identifiers.
-    ident_names: HashMap<Ident, String>,
-    /// Next suffix per mangled base name.
-    next_suffix: HashMap<String, usize>,
+    /// Assigned printable names for identifiers in the active lexical scopes.
+    name_scopes: Vec<NameScope>,
     /// Module-path resolver used for printing import declarations.
     module_path_resolver: Option<ModulePathResolver>,
 }
@@ -42,8 +46,7 @@ impl JsPrinter {
             output: String::new(),
             indent: 0,
             indent_str: "  ",
-            ident_names: HashMap::new(),
-            next_suffix: HashMap::new(),
+            name_scopes: vec![NameScope::default()],
             module_path_resolver: None,
         }
     }
@@ -103,25 +106,50 @@ impl JsPrinter {
         self.indent = self.indent.saturating_sub(1);
     }
 
+    fn current_name_scope_mut(&mut self) -> &mut NameScope {
+        self.name_scopes
+            .last_mut()
+            .expect("printer must always have a name scope")
+    }
+
+    fn lookup_visible_name(&self, id: &Ident) -> Option<String> {
+        self.name_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.ident_names.get(id).cloned())
+    }
+
+    fn reserve_printed_name(scope: &mut NameScope, printed: &str) {
+        let (base, next_suffix) = printed_name_base_and_next_suffix(printed);
+        let next = scope.next_suffix.entry(base).or_insert(0);
+        *next = (*next).max(next_suffix);
+    }
+
     /// Get a unique name for an identifier
     fn ident_name(&mut self, id: &Ident) -> String {
         if id.stamp() == 0 {
             return id.name().to_string();
         }
 
-        if let Some(name) = self.ident_names.get(id) {
-            return name.clone();
+        if let Some(name) = self.lookup_visible_name(id) {
+            return name;
         }
 
         let base = convert_ident_name(id.name());
-        let next = self.next_suffix.entry(base.clone()).or_insert(0);
+        let next = self
+            .current_name_scope_mut()
+            .next_suffix
+            .entry(base.clone())
+            .or_insert(0);
         let printed = if *next == 0 {
             base.clone()
         } else {
             format!("{base}${next}")
         };
         *next += 1;
-        self.ident_names.insert(id.clone(), printed.clone());
+        self.current_name_scope_mut()
+            .ident_names
+            .insert(id.clone(), printed.clone());
         printed
     }
 
@@ -515,13 +543,44 @@ impl JsPrinter {
         self.semi();
     }
 
-    fn with_local_ident_scope<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        let saved_names = self.ident_names.clone();
-        let saved_suffix = self.next_suffix.clone();
+    fn with_local_ident_scope<T>(
+        &mut self,
+        reserved_printed_names: &[String],
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let mut scope = NameScope::default();
+        for printed in reserved_printed_names {
+            Self::reserve_printed_name(&mut scope, printed);
+        }
+        self.name_scopes.push(scope);
         let out = f(self);
-        self.ident_names = saved_names;
-        self.next_suffix = saved_suffix;
+        self.name_scopes.pop();
         out
+    }
+
+    fn with_function_ident_scope<T>(
+        &mut self,
+        params: &[Ident],
+        body: &Block,
+        function_ident: Option<&Ident>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let mut reserved_idents: Vec<Ident> =
+            free_variables_of_block_with_defined(body, params.iter().cloned())
+                .into_iter()
+                .collect();
+        if let Some(function_ident) = function_ident {
+            reserved_idents.push(function_ident.clone());
+        }
+        reserved_idents.sort();
+        reserved_idents.dedup();
+
+        let reserved_printed_names = reserved_idents
+            .into_iter()
+            .map(|ident| self.ident_name(&ident))
+            .collect::<Vec<_>>();
+
+        self.with_local_ident_scope(&reserved_printed_names, f)
     }
 
     fn print_function_declaration(
@@ -538,7 +597,7 @@ impl JsPrinter {
         self.write("function ");
         let fn_name = self.ident_name(ident);
         self.write(&fn_name);
-        self.with_local_ident_scope(|this| {
+        self.with_function_ident_scope(params, body, Some(ident), |this| {
             this.write_char('(');
             for (i, param) in params.iter().enumerate() {
                 if i > 0 {
@@ -929,7 +988,7 @@ impl JsPrinter {
                 ..
             } => {
                 let use_arrow = !*is_method;
-                self.with_local_ident_scope(|this| {
+                self.with_function_ident_scope(params, body, None, |this| {
                     // Collect param names upfront to avoid borrow issues
                     let param_names: Vec<String> =
                         params.iter().map(|p| this.ident_name(p)).collect();
@@ -1480,6 +1539,217 @@ fn mangle_ident_char(c: char, op: bool) -> &'static str {
     }
 }
 
+fn printed_name_base_and_next_suffix(printed: &str) -> (String, usize) {
+    match printed.rsplit_once('$') {
+        Some((base, suffix))
+            if !base.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            (base.to_string(), suffix.parse::<usize>().unwrap_or(0) + 1)
+        }
+        _ => (printed.to_string(), 1),
+    }
+}
+
+#[derive(Default)]
+struct JsIdentStats {
+    defined_idents: HashSet<Ident>,
+    used_idents: HashSet<Ident>,
+}
+
+impl JsIdentStats {
+    fn with_defined(defined: impl IntoIterator<Item = Ident>) -> Self {
+        let mut stats = Self::default();
+        stats.defined_idents.extend(defined);
+        stats
+    }
+
+    fn add_defined_ident(&mut self, ident: &Ident) {
+        self.defined_idents.insert(ident.clone());
+    }
+
+    fn add_used_ident(&mut self, ident: &Ident) {
+        if !self.defined_idents.contains(ident) {
+            self.used_idents.insert(ident.clone());
+        }
+    }
+
+    fn extend_free_idents(&mut self, other: HashSet<Ident>) {
+        self.used_idents.extend(other);
+    }
+
+    fn free_variables(mut self) -> HashSet<Ident> {
+        self.used_idents
+            .retain(|ident| !self.defined_idents.contains(ident));
+        self.used_idents
+    }
+}
+
+fn free_variables_of_block_with_defined(
+    block: &Block,
+    defined: impl IntoIterator<Item = Ident>,
+) -> HashSet<Ident> {
+    let mut stats = JsIdentStats::with_defined(defined);
+    collect_block_idents(block, &mut stats);
+    stats.free_variables()
+}
+
+fn collect_block_idents(block: &Block, stats: &mut JsIdentStats) {
+    for stmt in block {
+        collect_statement_idents(stmt, stats);
+    }
+}
+
+fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
+    match &stmt.desc {
+        StatementDesc::Block(block) => collect_block_idents(block, stats),
+        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
+            stats.add_defined_ident(ident);
+            if let Some(value) = value {
+                collect_expression_idents(value, stats);
+            }
+        }
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
+            collect_expression_idents(expr, stats);
+        }
+        StatementDesc::If(cond, then_block, else_block) => {
+            collect_expression_idents(cond, stats);
+            collect_block_idents(then_block, stats);
+            collect_block_idents(else_block, stats);
+        }
+        StatementDesc::While(cond, body) => {
+            collect_expression_idents(cond, stats);
+            collect_block_idents(body, stats);
+        }
+        StatementDesc::ForRange(start, finish, loop_ident, _, body) => {
+            if let Some(start) = start {
+                collect_expression_idents(start, stats);
+            }
+            collect_expression_idents(finish, stats);
+            stats.extend_free_idents(free_variables_of_block_with_defined(
+                body,
+                std::iter::once(loop_ident.clone()),
+            ));
+        }
+        StatementDesc::IntSwitch(test, clauses, default) => {
+            collect_expression_idents(test, stats);
+            for (_, clause) in clauses {
+                collect_block_idents(&clause.body, stats);
+            }
+            if let Some(default) = default {
+                collect_block_idents(default, stats);
+            }
+        }
+        StatementDesc::StringSwitch(test, clauses, default) => {
+            collect_expression_idents(test, stats);
+            for clause in clauses {
+                collect_block_idents(&clause.clause.body, stats);
+            }
+            if let Some(default) = default {
+                collect_block_idents(default, stats);
+            }
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            collect_block_idents(body, stats);
+            if let Some((catch_ident, catch_block)) = catch {
+                stats.extend_free_idents(free_variables_of_block_with_defined(
+                    catch_block,
+                    std::iter::once(catch_ident.clone()),
+                ));
+            }
+            if let Some(finally) = finally {
+                collect_block_idents(finally, stats);
+            }
+        }
+        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+    }
+}
+
+fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
+    match &expr.desc {
+        ExpressionDesc::Var(VIdent::Id(ident)) => stats.add_used_ident(ident),
+        ExpressionDesc::Var(VIdent::Qualified(module, _)) => stats.add_used_ident(&module.id),
+        ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::RawJsCode(_)
+        | ExpressionDesc::Number(_) => {}
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::Spread(inner) => collect_expression_idents(inner, stats),
+        ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::In(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::FlatCall(left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            collect_expression_idents(left, stats);
+            collect_expression_idents(right, stats);
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            collect_expression_idents(test, stats);
+            collect_expression_idents(consequent, stats);
+            collect_expression_idents(alternate, stats);
+        }
+        ExpressionDesc::Call(func, args, _) => {
+            collect_expression_idents(func, stats);
+            for arg in args {
+                collect_expression_idents(arg, stats);
+            }
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            collect_expression_idents(tag, stats);
+            for string in strings {
+                collect_expression_idents(string, stats);
+            }
+            for value in values {
+                collect_expression_idents(value, stats);
+            }
+        }
+        ExpressionDesc::StaticIndex(target, _, _) => collect_expression_idents(target, stats),
+        ExpressionDesc::New(target, args) => {
+            collect_expression_idents(target, stats);
+            if let Some(args) = args {
+                for arg in args {
+                    collect_expression_idents(arg, stats);
+                }
+            }
+        }
+        ExpressionDesc::Fun { params, body, .. } => {
+            stats.extend_free_idents(free_variables_of_block_with_defined(
+                body,
+                params.iter().cloned(),
+            ));
+        }
+        ExpressionDesc::Array(items, _) => {
+            for item in items {
+                collect_expression_idents(item, stats);
+            }
+        }
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            for item in items {
+                collect_expression_idents(item, stats);
+            }
+            collect_expression_idents(tag, stats);
+        }
+        ExpressionDesc::Object(dup, props) => {
+            if let Some(dup) = dup {
+                collect_expression_idents(dup, stats);
+            }
+            for (_, value) in props {
+                collect_expression_idents(value, stats);
+            }
+        }
+    }
+}
+
 /// Get operator precedence (output_level, left_level, right_level)
 fn op_precedence(op: BinOp) -> (u8, u8, u8) {
     match op {
@@ -1857,6 +2127,76 @@ mod tests {
         let after_idx = rendered.find("let after").unwrap();
         assert!(before_idx < fun_idx);
         assert!(fun_idx < after_idx);
+    }
+
+    #[test]
+    fn test_print_function_scope_allows_shadowing_uncaptured_outer_name() {
+        let outer = Ident::create_local("x");
+        let foo = Ident::create_local("foo");
+        let param = Ident::create_local("x");
+        let rendered = print_block(&vec![
+            Statement::variable(VariableDeclaration {
+                ident: outer,
+                value: Some(Expression::number(Number::int(1))),
+                property: crate::lambda::compat::LetKind::Strict,
+                ident_info: Default::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: foo,
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![param.clone()],
+                    body: vec![Statement::return_(Expression::var(param))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: crate::lambda::compat::LetKind::Strict,
+                ident_info: Default::default(),
+            }),
+        ]);
+
+        assert!(rendered.contains("let x = 1;"));
+        assert!(rendered.contains("function foo(x) {"));
+        assert!(rendered.contains("return x;"));
+        assert!(!rendered.contains("function foo(x$1) {"));
+    }
+
+    #[test]
+    fn test_print_function_scope_preserves_captured_outer_name() {
+        let outer = Ident::create_local("value");
+        let foo = Ident::create_local("foo");
+        let param = Ident::create_local("arg");
+        let rendered = print_block(&vec![
+            Statement::variable(VariableDeclaration {
+                ident: outer.clone(),
+                value: Some(Expression::number(Number::int(1))),
+                property: crate::lambda::compat::LetKind::Strict,
+                ident_info: Default::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: foo,
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![param.clone()],
+                    body: vec![Statement::return_(Expression::bin(
+                        BinOp::Plus,
+                        Expression::var(outer),
+                        Expression::var(param),
+                    ))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: crate::lambda::compat::LetKind::Strict,
+                ident_info: Default::default(),
+            }),
+        ]);
+
+        assert!(rendered.contains("function foo(arg) {"));
+        assert!(rendered.contains("return value + arg;"));
     }
 
     #[test]

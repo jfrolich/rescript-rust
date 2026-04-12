@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 108 / 657 JS snapshots passing, 0 compile errors, 549 output diffs
+**Status:** 111 / 657 JS snapshots passing, 0 compile errors, 546 output diffs
 
 ## Goal
 
@@ -35,14 +35,34 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **108 / 657**
+- JS snapshot parity: **111 / 657**
 - Compile errors: **0**
-- Output diffs: **549**
+- Output diffs: **546**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
+- OCaml `ext_pp_scope.ml` / `core/js_dump.ml` nested-function identifier
+  scoping is now matched more closely on the Rust printer path:
+  function params and local bindings no longer inherit every outer printable
+  name by default, while captured outer ids are still reserved ahead of the
+  function body the way OCaml's `merge` / `sub_scope` path does
+- that printer change removed a large chunk of spurious nested-function suffix
+  drift:
+  cached JS diffs containing `\$1` / `\$2`-style identifier renames dropped
+  from **326** files to **180** files after the authoritative rerun
+- `tests/tests/src/Coercion.res` narrowed materially:
+  the bogus `x$1` parameter rename is gone, and the remaining drift there is
+  now just the earlier top-level function-order mismatch rather than nested
+  identifier scoping
+- `tests/tests/src/UncurriedAlways.res` also narrowed materially:
+  the old nested-function suffix churn like `z$1`, `w$1`, `a$1`, and `b$1`
+  is gone, so the remaining diffs there are now later backend shaping and
+  printer byte shape instead of scope renaming noise
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the printer scope change, which confirms this slice stays isolated to
+  nested lexical naming rather than the existing external-shadow/import path
 - OCaml `core/lam_stats_export.ml` / `lam_compile_env.ml` purity fallback is
   now matched more closely on the Rust JS-output path:
   when the lowered module body itself is pure, Rust no longer stops at
