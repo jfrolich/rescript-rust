@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 463/657 (70.5%), 194 parity failures, 1853 hunks
+**Status:** 493/657 (75.0%), 164 parity failures, 733 hunks
 
 ## Goal
 
@@ -23,17 +23,17 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **463/657**
-- Stamp-canonicalized parity: **463/657**
-- Exact hunks: **1853**
-- Stamp-canonicalized hunks: **1853**
+- Optimized lambda parity: **493/657**
+- Stamp-canonicalized parity: **493/657**
+- Exact hunks: **733**
+- Stamp-canonicalized hunks: **733**
 - Largest current exact diffs:
-  - `big_polyvar_test.res`: **601** hunks
-  - `stringmatch_test.res`: **284** hunks
-  - `bs_queue_test.res`: **81** hunks
-  - `js_json_test.res`: **48** hunks
-  - `coercion_module_alias_test.res`: **40** hunks
-  - `mario_game.res`: **37** hunks
+  - `belt_list_test.res`: **72** hunks
+  - `bs_queue_test.res`: **61** hunks
+  - `test_set.res`: **51** hunks
+  - `bs_set_int_test.res`: **42** hunks
+  - `set_gen.res`: **37** hunks
+  - `caml_compare_test.res`: **33** hunks
 
 ## Working Rules
 
@@ -42,12 +42,12 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 3. **Commit immediately after each verified improvement.** Do not accumulate uncommitted work.
 4. **Use hunk count as a navigation signal.** File count alone hides structural progress.
 5. **Fix lowering, not the sexp printer.** `sexp_lambda.rs` should reflect produced lambda, not normalize it.
-6. **Raw lambda parity is already complete.** All remaining differences are after the raw stage.
+6. **Optimized work is still mostly post-raw.** Keep `-drawlambda` as a guardrail when changing raw-lambda construction; the end-of-session raw rerun below surfaced one residual exact raw failure outside this slice.
 7. **Do not confuse `-dlambda-sexp` with later backend passes.** The parity target is the output printed immediately after `Lam_convert.convert`.
 
 ## Remaining Parity Failures
 
-All **194** remaining failures are now after the raw-lambda stage, not a dump-path mismatch.
+There are **164** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, not dump-path routing.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -64,12 +64,15 @@ Current frontier characteristics:
   - `Import.res`
   - `VariantCoercion.res`
   - `minimal_test.res`
+- `conditional/cond_a.res` now also passes exactly as a minimal assert-failure guard.
 - `js_array_test.res` now also passes exactly as a large-file guard.
 - export-aware alias retention now keeps OCaml's module-export alias lets, which removed both accessor-file failures.
-- direct-ident constructor switch names now come through `pat.pat_env`; `LetUnwrap.res` remains at **1 hunk**, isolated to the `InvalidNext` constructor-literal mismatch.
-- `coercion_module_alias_test.res` remains at **40** hunks and now looks concentrated in quoted-identifier sexp rendering (`C'` vs `C\'`) rather than the earlier alias/module-export shape.
-- the broad `Lam.if_` frontier still remains on the larger files (`js_json_test.res`, `stringmatch_test.res`, `caml_compare_test.res`).
-- `big_polyvar_test.res` dropped from **1202** hunks to **601** hunks.
+- the assert-failure / match-failure lowering mismatch is no longer a broad frontier:
+  - `stringmatch_test.res`: **1 hunk** remaining (down from **284**)
+  - `js_json_test.res`: **8 hunks** remaining (down from **48**)
+  - `big_polyvar_test.res`: **2 hunks** remaining (down from **601**)
+- the next visible optimized frontier is the remaining non-constant `Lam.if_` smart-constructor behavior plus the still-large collection files (`belt_list_test.res`, `bs_queue_test.res`, `test_set.res`, `bs_set_int_test.res`, `set_gen.res`, `caml_compare_test.res`).
+- a fresh full raw `-drawlambda` rerun reported **656/657** with one exact failure in `coercion_module_alias_test.res`; that looks separate from the assert-failure lowering slice and should be handled in a dedicated raw-parity session.
 - Stamp canonicalization still does not reduce the baseline at all.
 
 ## Key Findings from Session 2026-04-12
@@ -324,6 +327,57 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 6. Commit immediately after the next verified OCaml-aligned improvement.
 
 ## Session Log
+
+### 2026-04-12 (predef-exception lowering and plain loc strings)
+
+Ran:
+
+```bash
+cargo build --release --manifest-path compiler-rust/Cargo.toml
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests::lowers_predef_exception_global_module_to_string_constant -- --exact
+timeout 300 ./scripts/test_lambda_parity.sh -j1 tests/tests/src/conditional/cond_a.res
+timeout 300 ./scripts/test_lambda_parity.sh -j1 stringmatch_test
+timeout 300 ./scripts/test_lambda_parity.sh -j1 --raw tests/tests/src/conditional/cond_a.res
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+timeout 1800 ./scripts/test_lambda_parity.sh -j1 --raw
+```
+
+Result:
+
+- Optimized lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Optimized lambda parity: **493/657**
+  - Stamp-canonicalized parity: **493/657**
+  - Exact hunks: **733**
+  - Stamp-canonicalized hunks: **733**
+- Raw lambda guardrail:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Raw lambda parity: **656/657**
+  - Raw parity hunks: **2**
+
+Key checkpoints:
+
+- `conditional/cond_a.res`: passes
+- `stringmatch_test.res`: **1 hunk** remaining
+- focused `--raw tests/tests/src/conditional/cond_a.res`: passes
+- `js_json_test.res`: **8 hunks**
+- `big_polyvar_test.res`: **2 hunks**
+
+This slice ports the `Lam_convert.convert` rule that treats predefined exceptions
+like `Assert_failure` as string constants at the optimized-lambda boundary instead
+of leaving them as `Lglobal_module`. The same pass also now preserves OCaml's plain
+`DNone` delimiter on file-name strings threaded through assert-failure, match-failure,
+and recursive-module location payloads. That combination removed the broad
+`Assert_failure` / location-string shape mismatch across the suite and collapsed
+`stringmatch_test.res` to a single remaining `Lam.if_` hunk.
+
+The end-of-session full raw rerun reported one exact raw failure in
+`coercion_module_alias_test.res`. The saved diff does not touch the new
+predef-exception or location-string branches, so this commit keeps the session
+scoped to the verified optimized-lambda improvement and leaves that raw exact-diff
+drift for a separate follow-up.
 
 ### 2026-04-12 (export-aware alias retention for module exports)
 

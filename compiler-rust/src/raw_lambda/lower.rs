@@ -46,7 +46,14 @@ impl LoweringContext {
         match raw {
             RawLambda::Lvar(id) => Lambda::var(self.alias_target(id)),
             RawLambda::LglobalModule(id, imported) => {
-                Lambda::global_module(id, dynamic_import || imported)
+                if id.is_predef_exn() {
+                    Lambda::const_(Constant::String {
+                        s: id.name().to_string(),
+                        delim: None,
+                    })
+                } else {
+                    Lambda::global_module(id, dynamic_import || imported)
+                }
             }
             RawLambda::Lconst(c) => Lambda::const_(lower_constant(c)),
             RawLambda::Lapply(apply) => self.lower_apply(apply),
@@ -1063,6 +1070,19 @@ mod tests {
         assert!(matches!(
             lower_to_lambda(raw),
             Lambda::Lconst(Constant::JsUndefined { is_unit: false })
+        ));
+    }
+
+    #[test]
+    fn lowers_predef_exception_global_module_to_string_constant() {
+        let lowered = lower_to_lambda(RawLambda::global_module(
+            crate::types::predef::ident_assert_failure(),
+            false,
+        ));
+
+        assert!(matches!(
+            lowered,
+            Lambda::Lconst(Constant::String { ref s, delim: None }) if s == "Assert_failure"
         ));
     }
 

@@ -1689,7 +1689,7 @@ impl<'a> RawLambdaConverter<'a> {
             tag: 0,
             tag_info: TagInfo::Tuple,
             elements: vec![
-                Constant::string(self.basename_for_loc(loc)),
+                Constant::string_with_delim(self.basename_for_loc(loc), StringDelim::Plain),
                 Constant::int(loc.loc_start.line),
                 Constant::int(loc.loc_start.column()),
             ],
@@ -3614,7 +3614,7 @@ impl<'a> RawLambdaConverter<'a> {
             tag: 0,
             tag_info: TagInfo::Tuple,
             elements: vec![
-                Constant::string(fname),
+                Constant::string_with_delim(fname, StringDelim::Plain),
                 Constant::int(loc.loc_start.line),
                 Constant::int(loc.loc_start.column()),
             ],
@@ -5130,7 +5130,7 @@ impl<'a> RawLambdaConverter<'a> {
                 tag: 0,
                 tag_info: TagInfo::Tuple,
                 elements: vec![
-                    Constant::string(fname.clone()),
+                    Constant::string_with_delim(fname.clone(), StringDelim::Plain),
                     Constant::int(line),
                     Constant::int(char_pos),
                 ],
@@ -5204,7 +5204,7 @@ impl<'a> RawLambdaConverter<'a> {
                     tag: 0,
                     tag_info: TagInfo::Tuple,
                     elements: vec![
-                        Constant::string(fname.clone()),
+                        Constant::string_with_delim(fname.clone(), StringDelim::Plain),
                         Constant::int(line),
                         Constant::int(char_pos),
                     ],
@@ -8412,7 +8412,10 @@ impl<'a> RawLambdaConverter<'a> {
                                     tag: 0,
                                     tag_info: TagInfo::Tuple,
                                     elements: vec![
-                                        Constant::string(fname.clone()),
+                                        Constant::string_with_delim(
+                                            fname.clone(),
+                                            StringDelim::Plain,
+                                        ),
                                         Constant::int(line),
                                         Constant::int(char_pos),
                                     ],
