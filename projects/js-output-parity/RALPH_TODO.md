@@ -62,6 +62,10 @@ Interpretation:
   lowered lambda body, pure `Lsequence` noise is removed, and constant
   `Pstringadd` chains are folded after substitution while still preserving
   exported bindings needed by the final module export block
+- allocating constant blocks still need OCaml-style sharing on the JS backend
+  path: record / variant / module constants cannot be substituted through
+  `let` bindings the way scalar constants can, or the backend duplicates
+  literals that OCaml keeps as shared bindings
 - `tests/tests/src/AsInUncurriedExternals.res` is now fully resolved in the
   checked-in snapshot set; `tests/tests/src/Import.res` narrowed further after
   the simplifier removed some dead-let churn, but its remaining drift is still
@@ -213,3 +217,20 @@ Remaining internal compile errors under the measured wrapper baseline:
     `tests/tests/src/keep_uncurry_attribute.res` still match exactly
 - The authoritative JS snapshot baseline now reports **49 / 657** passing, **0**
   compile errors, and **608** output diffs.
+- A follow-up authoritative wrapper rerun after tightening allocating-constant
+  substitution remained **49 / 657** passing, **0** compile errors, and **608**
+  output diffs.
+- `compiler-rust/src/lambda/simplify.rs` now keeps allocating `Lconst` values
+  shared instead of substituting them through later `let` bindings on the JS
+  backend path, matching the OCaml `Lam_pass_lets_dce` distinction between
+  scalar constants and allocating blocks.
+- Verified focused guards for this cluster:
+  - `cargo test --manifest-path compiler-rust/Cargo.toml lambda::simplify::tests::keeps_allocating_constant_bindings_shared --lib`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml lambda::simplify::tests::keeps_exported_alias_binding_but_inlines_constant_rhs --lib`
+  - `tests/tests/src/keep_uncurry_attribute.res` still matches its checked-in
+    `.mjs` snapshot exactly
+- `tests/tests/src/RecordCoercion.res` now keeps the shared record binding
+  shape (`let a = ...; let name = a.name; ...`) instead of duplicating the same
+  record literal into both the projected field and the exported module record;
+  the remaining drift there is the later coercion/grouping naming shape
+  (`TestInlining_a` / direct `"a"` propagation), not duplicated allocation.
