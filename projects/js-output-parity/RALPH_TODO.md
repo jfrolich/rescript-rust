@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 0 / 657 JS snapshots passing, 1 compile error, 656 output diffs
+**Status:** 0 / 2784 JS snapshots passing, 90 compile errors, 2694 output diffs
 
 ## Goal
 
@@ -35,23 +35,23 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **0 / 657**
-- Compile errors: **1**
-- Output diffs: **656**
+- JS snapshot parity: **0 / 2784**
+- Compile errors: **90**
+- Output diffs: **2694**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
-- the current wrapper now measures the same canonical in-repo 657-file set as
+- the current wrapper is now measuring project-context JS output instead of mostly standalone-file compile failures
+- remaining compile failures are a much smaller, more targeted cluster
+- the canonical JS baseline should still be rescoped to the same in-repo 657-file set as
   the typedtree and lambda parity projects
-- remaining compile failures are down to a single targeted file
-- almost the entire frontier is now emitted-JS diffs rather than compile noise
-- external-corpus runs remain useful, but only as an explicit secondary sweep
+- external-corpus runs remain useful, but should become an explicit secondary sweep after that rescope
 - typedtree/raw/optimized-lambda are not part of the active frontier
 
-The previous external-corpus baseline remains useful as a stress sweep, but it
-is no longer the default project metric.
+This measured baseline still includes the external corpus under `TELLA_DIR`.
+Rescoping the wrapper to the canonical in-repo set remains pending.
 
 ## Working Rules
 
@@ -66,7 +66,7 @@ is no longer the default project metric.
 ## Immediate Frontier
 
 - [x] Run the first dedicated `./scripts/test_js_output_parity.sh` baseline and record the full results here.
-- [x] Re-run the wrapper after rescoping it to the canonical 657-file in-repo set and record the new baseline.
+- [ ] Re-run the wrapper after rescoping it to the canonical 657-file in-repo set and record the new baseline.
 - [x] Route final JS codegen in `compiler-rust/src/driver.rs` through the raw-lambda / lowering path instead of the legacy typedtree shortcut.
 - [x] Inventory the current internal compile-error files from `temp/rust-parity/diffs/js_src_*.err`.
 - [x] Inventory the current internal text-diff files from `temp/rust-parity/diffs/js_src_*.diff`.
@@ -100,7 +100,7 @@ Internal text diffs already observed in the pre-wrapper run:
 - `tests/tests/src/test_other_exn.res`
 - `tests/tests/src/test_unsafe_cmp.res`
 
-Current internal compile error:
+Current internal compile error under the measured wrapper baseline:
 
 - `tests/tests/src/Import.res`
 
@@ -113,9 +113,8 @@ Current internal compile error:
 - `scripts/test_rust_parity.sh` now compiles JS snapshots with each file's owning ReScript project's `compiler-args` and runs `bsc` from that project's `lib/bs`.
 - This removed the largest source of false compile-error noise:
   - the measured wrapper baseline moved from **1927 compile errors / 857 diffs** to **90 compile errors / 2694 diffs**
-  - the canonical in-repo baseline is now **1 compile error / 656 diffs** across **657** files
-  - the lone remaining compile error is `js_src_Import.res.err`
-  - internal text diffs now account for the other **656** files
+  - internal compile errors dropped to **1 file**: `js_src_Import.res.err`
+  - internal text diffs now account for **656 files**
 - Verified focused checks under the new project-context invocation:
   - `tests/tests/src/js_array_test.res` now compiles and lands in JS diff territory instead of failing with `UndefinedMethod { method: "describe" }`
   - `/Users/jake/dev/tella-fusion/packages/core/webapp/src/backend/Service__PublicVideo.res` now compiles and lands in JS diff territory instead of a missing-binding failure
