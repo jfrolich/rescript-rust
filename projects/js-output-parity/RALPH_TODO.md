@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 89 / 657 JS snapshots passing, 0 compile errors, 568 output diffs
+**Status:** 90 / 657 JS snapshots passing, 0 compile errors, 567 output diffs
 
 ## Goal
 
@@ -35,9 +35,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **89 / 657**
+- JS snapshot parity: **90 / 657**
 - Compile errors: **0**
-- Output diffs: **568**
+- Output diffs: **567**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -219,6 +219,37 @@ Remaining internal compile errors under the measured wrapper baseline:
 - none
 
 ## Latest Session Findings
+
+- `compiler-rust/src/lambda/compile.rs` now matches one more slice of
+  OCaml `lam_coercion.ml` / `handle_exports` on the Rust JS backend path:
+  final export selection follows same-name alias bindings only when the target
+  is another declared top-level binding, which reuses real local bindings like
+  OCaml's `Lvar`/same-name export case without collapsing aliases that preserve
+  unbound-global shadowing behavior
+- Verified focused guards for this cluster:
+  - `RUSTFLAGS='-Awarnings' timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::compile::tests::compile_deps_program -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsCurried.res -o /tmp/DerivingAccessorsCurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsUncurried.res -o /tmp/DerivingAccessorsUncurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/DerivingAccessorsCurried.res` narrowed materially again:
+  the redundant exported alias layer is gone, so the remaining drift is now the
+  later constant-constructor representation / printer-shape slice rather than
+  this earlier rebound-export mismatch
+- `tests/tests/src/DerivingAccessorsUncurried.res` narrowed in the same way:
+  the export block now reuses the real local bindings, and the remaining hunk
+  is the later constructor/printer slice instead of alias/export churn
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  narrowing the rule to declared bindings only, which confirms the export
+  remap does not break the `parseInt` global-shadowing case
+- The authoritative JS snapshot baseline now reports **90 / 657** passing, **0**
+  compile errors, and **567** output diffs.
+- Interpretation:
+  this resolves one more real post-lowering export/coercion gap on the Rust JS
+  path and moves the remaining `DerivingAccessors*` drift fully past redundant
+  rebound exports. The next signal in that cluster is the constant-constructor
+  runtime representation and final printer byte shape, not export-id selection.
 
 - `compiler-rust/src/lambda/simplify.rs` now ports the OCaml
   `lam_pass_deep_flatten.ml` named immutable-module-block rule onto the Rust

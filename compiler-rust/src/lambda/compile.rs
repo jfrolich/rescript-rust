@@ -5,7 +5,7 @@
 //! clarity over aggressive optimization; it is intended as a correct baseline
 //! that can be extended with more advanced codegen passes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
@@ -17,7 +17,7 @@ use crate::js_ir::printer::is_js_keyword_or_global;
 use crate::js_ir::{
     BinOp, Block, CallInfo, CaseClause, Delim, DepsProgram, Expression, ExpressionDesc,
     ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc, StringClause,
-    VariableDeclaration,
+    VIdent, VariableDeclaration,
 };
 use crate::lambda::analysis;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
@@ -94,6 +94,7 @@ impl LambdaCompiler {
                 vec![]
             }
         };
+        let exports = resolve_export_aliases(&block, exports);
 
         let mut deps = apply_js_shake_pass(apply_external_shadow_pass(apply_js_flatten_pass(
             DepsProgram {
@@ -2067,6 +2068,78 @@ fn js_id_name_of_hint_name(module_name: &str) -> String {
     }
 }
 
+fn resolve_export_aliases(block: &Block, exports: Vec<Ident>) -> Vec<Ident> {
+    let mut declared = HashSet::new();
+    collect_declared_idents(block, &mut declared);
+    let mut aliases = HashMap::new();
+    collect_export_aliases(block, &mut aliases);
+    exports
+        .into_iter()
+        .map(|export| resolve_export_alias(&export, &aliases, &declared))
+        .collect()
+}
+
+fn collect_declared_idents(block: &Block, declared: &mut HashSet<Ident>) {
+    for stmt in block {
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                declared.insert(ident.clone());
+            }
+            StatementDesc::Block(inner) => collect_declared_idents(inner, declared),
+            StatementDesc::If(_, then_block, else_block) => {
+                collect_declared_idents(then_block, declared);
+                collect_declared_idents(else_block, declared);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_export_aliases(block: &Block, aliases: &mut HashMap<Ident, Ident>) {
+    for stmt in block {
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(target)),
+                        ..
+                    }),
+                ..
+            }) => {
+                aliases.insert(ident.clone(), target.clone());
+            }
+            StatementDesc::Block(inner) => collect_export_aliases(inner, aliases),
+            StatementDesc::If(_, then_block, else_block) => {
+                collect_export_aliases(then_block, aliases);
+                collect_export_aliases(else_block, aliases);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn resolve_export_alias(
+    export: &Ident,
+    aliases: &HashMap<Ident, Ident>,
+    declared: &HashSet<Ident>,
+) -> Ident {
+    let mut current = export.clone();
+    let mut seen = HashSet::new();
+
+    while let Some(target) = aliases.get(&current) {
+        if target.name() != export.name()
+            || !declared.contains(target)
+            || !seen.insert(current.clone())
+        {
+            break;
+        }
+        current = target.clone();
+    }
+
+    current
+}
+
 fn push_effect_expression(block: &mut Block, expr: Expression) {
     match expr.desc {
         ExpressionDesc::Seq(left, right) => {
@@ -3449,6 +3522,96 @@ mod tests {
         let lam = Lambda::const_(Constant::int(7));
         let program = compiler.compile_program(&lam);
         assert!(!program.block.is_empty());
+    }
+
+    #[test]
+    fn compile_deps_program_reuses_same_name_export_targets() {
+        let mut compiler = LambdaCompiler::new();
+        let source = Ident::create_local("value");
+        let rebound_export = Ident::create_local("value");
+        let param = Ident::create_local("arg");
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            source.clone(),
+            Lambda::function_(
+                1,
+                vec![param.clone()],
+                Lambda::var(param),
+                crate::lambda::FunctionAttribute::default(),
+            ),
+            Lambda::let_(
+                LetKind::Alias,
+                rebound_export.clone(),
+                Lambda::var(source.clone()),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::ModuleExport(vec![rebound_export]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(source.clone())],
+                    Location::none(),
+                ),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        let [exported] = deps.program.exports.as_slice() else {
+            panic!("expected a single export");
+        };
+        assert!(
+            exported.same(&source),
+            "expected export {:?}, got {:?}",
+            source,
+            exported
+        );
+
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!("expected the rebound export alias to be shaken away");
+        };
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => assert!(ident.same(&source)),
+            other => panic!("expected only the original exported binding to remain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_deps_program_keeps_same_name_export_aliases_for_unbound_globals() {
+        let mut compiler = LambdaCompiler::new();
+        let global = Ident::create_persistent("parseInt");
+        let rebound_export = Ident::create_local("parseInt");
+        let lam = Lambda::let_(
+            LetKind::Alias,
+            rebound_export.clone(),
+            Lambda::var(global.clone()),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::ModuleExport(vec![rebound_export.clone()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::var(rebound_export.clone())],
+                Location::none(),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        let [exported] = deps.program.exports.as_slice() else {
+            panic!("expected a single export");
+        };
+        assert!(exported.same(&rebound_export));
+
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!("expected the rebound alias to stay as a real binding");
+        };
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&rebound_export));
+            }
+            other => panic!("expected the rebound export binding to remain, got {other:?}"),
+        }
     }
 
     #[test]
