@@ -540,6 +540,23 @@ impl LambdaCompiler {
                 Box::new(compiled_args[0].clone()),
                 Box::new(compiled_args[1].clone()),
             )),
+            PnullToOpt => Expression::cond(
+                self.is_null_expr(compiled_args[0].clone()),
+                Expression::undefined(false),
+                self.optional_block(compiled_args[0].clone(), false),
+            ),
+            PnullUndefinedToOpt => Expression::cond(
+                Expression::new(ExpressionDesc::IsNullOrUndefined(Box::new(
+                    compiled_args[0].clone(),
+                ))),
+                Expression::undefined(false),
+                self.optional_block(compiled_args[0].clone(), false),
+            ),
+            PisNotNone => self.is_not_none_expr(compiled_args[0].clone()),
+            PvalFromOption => self.val_from_option_expr(compiled_args[0].clone()),
+            PvalFromOptionNotNest => compiled_args[0].clone(),
+            Psome => self.some_expr(compiled_args[0].clone()),
+            PsomeNotNest => self.optional_block(compiled_args[0].clone(), true),
             Pfield(idx, info) => self.compile_field_access(*idx, info, &compiled_args[0]),
             Psetfield(idx, info) => {
                 let target =
@@ -775,6 +792,66 @@ impl LambdaCompiler {
                     txt: s.clone(),
                 })
             }
+        }
+    }
+
+    fn runtime_member_expr(&self, module_name: &str, member: &str) -> Expression {
+        Expression::qualified(
+            ModuleId {
+                id: Ident::create_persistent(module_name),
+                kind: Kind::Runtime,
+                dynamic_import: false,
+            },
+            Some(member.to_string()),
+        )
+    }
+
+    fn runtime_call_expr(
+        &self,
+        module_name: &str,
+        member: &str,
+        args: Vec<Expression>,
+    ) -> Expression {
+        Expression::call(
+            self.runtime_member_expr(module_name, member),
+            args,
+            CallInfo::default(),
+        )
+    }
+
+    fn optional_block(&self, value: Expression, identity: bool) -> Expression {
+        Expression::new(ExpressionDesc::OptionalBlock(Box::new(value), identity))
+    }
+
+    fn is_null_expr(&self, expr: Expression) -> Expression {
+        Expression::bin(BinOp::EqEqEq, expr, Expression::null())
+    }
+
+    fn some_expr(&self, value: Expression) -> Expression {
+        let identity = matches!(
+            value.desc,
+            ExpressionDesc::Null
+                | ExpressionDesc::Object(_, _)
+                | ExpressionDesc::Number(_)
+                | ExpressionDesc::CamlBlock(_, _, _, _)
+                | ExpressionDesc::Array(_, _)
+                | ExpressionDesc::Str { .. }
+        );
+        self.optional_block(value, identity)
+    }
+
+    fn val_from_option_expr(&self, arg: Expression) -> Expression {
+        match arg.desc {
+            ExpressionDesc::OptionalBlock(inner, _) => *inner,
+            _ => self.runtime_call_expr("Caml_option", "valFromOption", vec![arg]),
+        }
+    }
+
+    fn is_not_none_expr(&self, arg: Expression) -> Expression {
+        match arg.desc {
+            ExpressionDesc::Undefined { .. } => Expression::bool(false),
+            ExpressionDesc::OptionalBlock(_, _) => Expression::bool(true),
+            _ => Expression::bin(BinOp::NotEqEq, arg, Expression::undefined(false)),
         }
     }
 
@@ -2275,6 +2352,62 @@ mod tests {
                 ));
             }
             other => panic!("expected `value >>> shift | 0`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_psome_not_nest_to_identity_optional_block() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let program = compiler.compile_program(&Lambda::prim(
+            Primitive::PsomeNotNest,
+            vec![Lambda::var(value.clone())],
+            Location::none(),
+        ));
+
+        let [stmt] = program.block.as_slice() else {
+            panic!("expected a single expression statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::OptionalBlock(inner, true),
+                ..
+            }) => {
+                assert!(matches!(
+                    inner.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&value)
+                ));
+            }
+            other => panic!("expected identity optional block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_pval_from_option_optional_block_to_inner_value() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let program = compiler.compile_program(&Lambda::prim(
+            Primitive::PvalFromOption,
+            vec![Lambda::prim(
+                Primitive::PsomeNotNest,
+                vec![Lambda::var(value.clone())],
+                Location::none(),
+            )],
+            Location::none(),
+        ));
+
+        let [stmt] = program.block.as_slice() else {
+            panic!("expected a single expression statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            }) => assert!(id.same(&value)),
+            other => panic!("expected optional unwrap to lower to the inner value, got {other:?}"),
         }
     }
 

@@ -258,6 +258,27 @@ Remaining internal compile errors under the measured wrapper baseline:
   - `cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::simplify::tests::flattens_constant_record_block_bindings_by_name --lib`
   - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/RecordCoercion.res -o /tmp/RecordCoercion.mjs`
   - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+- `compiler-rust/src/lambda/compile.rs` now lowers the OCaml option-wrapper
+  primitive family on the JS backend path instead of dropping those cases to
+  `undefined`:
+  - `Psome`
+  - `PsomeNotNest`
+  - `PvalFromOption`
+  - `PvalFromOptionNotNest`
+  - `PnullToOpt`
+  - `PnullUndefinedToOpt`
+  - `PisNotNone`
+- Verified focused guards for this cluster:
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release lowers_psome_not_nest_to_identity_optional_block --lib`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release lowers_pval_from_option_optional_block_to_inner_value --lib`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Equality_over_optimization.res -o /tmp/Equality_over_optimization.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+- `tests/tests/src/Equality_over_optimization.res` now keeps the option payload
+  shape (`[undefined]`) instead of collapsing the whole `Some` branch to bare
+  `undefined`; the remaining drift there is now the still-missing
+  continuation-sensitive sequence lowering for `(console.log("hello"), undefined)`.
+- A follow-up authoritative wrapper rerun after the option-wrapper port remained
+  **70 / 657** passing, **0** compile errors, and **587** output diffs.
 - A follow-up authoritative wrapper rerun after the immutable-block field
   flattening slice remained **49 / 657** passing, **0** compile errors, and
   **608** output diffs.
