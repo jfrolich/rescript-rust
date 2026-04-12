@@ -592,6 +592,21 @@ fn lower_constant(constant: Constant) -> Constant {
                 TagInfo::Some | TagInfo::SomeNotNested if elements.len() == 1 => {
                     Constant::Some(Box::new(elements.remove(0)))
                 }
+                TagInfo::PolyVar(name) => match elements.len() {
+                    2 => {
+                        let value = elements.pop().expect("polyvariant block payload");
+                        Constant::Block {
+                            tag,
+                            tag_info: TagInfo::PolyVar(name.clone()),
+                            elements: vec![polyvar_block_tag_constant(&name), value],
+                        }
+                    }
+                    _ => Constant::Block {
+                        tag,
+                        tag_info: TagInfo::PolyVar(name),
+                        elements,
+                    },
+                },
                 other => Constant::Block {
                     tag,
                     tag_info: other,
@@ -1968,6 +1983,53 @@ mod tests {
                 Lambda::Lconst(Constant::String { s, delim: None }),
                 Lambda::Lconst(Constant::Int { i: 1, comment: None }),
             ] if s == "V"
+        ));
+    }
+
+    #[test]
+    fn lowers_constant_polyvariant_block_payload_tag_from_name() {
+        let lowered = lower_to_lambda(RawLambda::const_(Constant::Block {
+            tag: 0,
+            tag_info: TagInfo::PolyVar("Pair".to_string()),
+            elements: vec![
+                Constant::Int {
+                    i: crate::types::btype::hash_variant("Pair"),
+                    comment: Some(PointerInfo::PolyVariant("Pair".to_string())),
+                },
+                Constant::Block {
+                    tag: 0,
+                    tag_info: TagInfo::Tuple,
+                    elements: vec![
+                        Constant::Int {
+                            i: 1,
+                            comment: None,
+                        },
+                        Constant::Int {
+                            i: 2,
+                            comment: None,
+                        },
+                    ],
+                },
+            ],
+        }));
+
+        assert!(matches!(
+            lowered,
+            Lambda::Lconst(Constant::Block { elements, .. })
+                if matches!(
+                    elements.as_slice(),
+                    [
+                        Constant::String { s, delim: None },
+                        Constant::Block { tag: 0, tag_info: TagInfo::Tuple, elements }
+                    ] if s == "Pair"
+                        && matches!(
+                            elements.as_slice(),
+                            [
+                                Constant::Int { i: 1, comment: None },
+                                Constant::Int { i: 2, comment: None },
+                            ]
+                        )
+                )
         ));
     }
 

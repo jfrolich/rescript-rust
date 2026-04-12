@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 594/657 (90.4%), 63 parity failures, 206 hunks
+**Status:** 602/657 (91.6%), 55 parity failures, 172 hunks
 
 ## Goal
 
@@ -23,14 +23,13 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **594/657**
-- Parity hunks: **206**
+- Optimized lambda parity: **602/657**
+- Parity hunks: **172**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
-  - `bs_unwrap_test.res`: **19** hunks
-  - `exception_raise_test.res`: **11** hunks
   - `record_extension_test.res`: **11** hunks
+  - `exception_raise_test.res`: **11** hunks
   - `js_exception_catch_test.res`: **9** hunks
   - `rec_module_test.res`: **8** hunks
   - `Stdlib_DictTests.res`: **8** hunks
@@ -38,6 +37,8 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
   - `recmodule.res`: **7** hunks
   - `gpr_3142_test.res`: **6** hunks
   - `rec_module_opt.res`: **6** hunks
+  - `chn_test.res`: **5** hunks
+  - `UntaggedVariants.res`: **5** hunks
 
 ## Working Rules
 
@@ -51,7 +52,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **63** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
+There are **55** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -75,6 +76,16 @@ Current frontier characteristics:
 - `polyvar_test.res` now also passes exactly on the current authoritative baseline.
 - `set_gen.res` now also passes exactly on the current authoritative baseline.
 - `ari_regress_test.res`, `big_enum.res`, `equal_test.res`, `reasonReact.res`, and `reasonReactOptimizedCreateClass.res` now also pass exactly on the current authoritative baseline.
+- the constant `Blk_poly_var` conversion slice is now landed:
+  - `bs_unwrap_test.res`: **exact parity**
+  - `gpr_4280_test.res`: **exact parity**
+  - `gpr_5218_test.res`: **exact parity**
+  - `hash_collision_test.res`: **exact parity**
+  - `pipe_syntax.res`: **exact parity**
+  - `record_debug_test.res`: **exact parity**
+  - `record_type_spread.res`: **exact parity**
+  - `unboxed_use_case.res`: **exact parity**
+  - `poly_variant_test.res`: **2 hunks** on the current authoritative baseline
 - export-aware alias retention now keeps OCaml's module-export alias lets, which removed both accessor-file failures.
 - the `Pisout` switch-normalization slice is now landed:
   - `arity_infer.res`: **exact parity**
@@ -85,7 +96,7 @@ Current frontier characteristics:
   - `mario_game.res`: **2 hunks** on the current authoritative baseline (down from **36** across later slices)
 - the focused `Lam.if_` assert-failure rewrite is now landed:
   - `stringmatch_test.res`: **exact parity** (down from **1 hunk** on the prior baseline)
-  - `js_json_test.res`: **45 hunks** on a focused rerun, so its remaining diffs are no longer dominated by that one rewrite
+  - `js_json_test.res`: **3 hunks** on the current authoritative baseline, so its remaining diffs are no longer dominated by that one rewrite
 - the external-return-wrapper slice is now landed:
   - `bs_splice_partial.res`: **exact parity**
   - `js_nullable_test.res`: **exact parity**
@@ -94,11 +105,71 @@ Current frontier characteristics:
   - `reactDOM.res`: **exact parity**
   - `return_check.res`: **exact parity**
   - `Stdlib_TempTests.res`: **4 hunks**, so its remaining diffs are now in static-exit numbering rather than nullable/unit FFI wrapping
-- the next visible optimized frontier is the current exact-diff leaders (`bs_unwrap_test.res`, `record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`) plus the recursive-module cluster (`recmodule.res`, `rec_module_test.res`, `rec_module_opt.res`) and the remaining switch-facing files (`variant.res`, `UntaggedVariants.res`, `switch_string.res`).
+- the next visible optimized frontier is the current exact-diff leaders (`record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`, `rec_module_test.res`) plus the recursive-module cluster (`recmodule.res`, `rec_module_opt.res`) and the remaining switch-facing files (`variant.res`, `UntaggedVariants.res`, `switch_string.res`).
 - a fresh full raw `-drawlambda` rerun reported **656/657** with one exact failure in `coercion_module_alias_test.res`; that looks separate from the assert-failure lowering slice and should be handled in a dedicated raw-parity session.
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### constant `Blk_poly_var` conversion moved the polyvariant frontier again
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests::lowers_polyvariant_block_payload_tag_from_name -- --exact
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests::lowers_constant_polyvariant_block_payload_tag_from_name -- --exact
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 600 ./scripts/test_lambda_parity.sh -j1 'bs_unwrap_test|big_polyvar_test'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- OCaml compile coverage: **657/657**
+- Rust compile coverage: **657/657**
+- Optimized lambda parity: **602/657**
+- Stamp-canonicalized parity: not re-baselined in this rerun
+- Exact hunks: **172**
+- Stamp-canonicalized hunks: not re-baselined in this rerun
+
+Key checkpoints:
+
+- `bs_unwrap_test.res`: passes
+- `big_polyvar_test.res`: passes
+- `poly_variant_test.res`: **2 hunks**
+- `UntaggedVariants.res`: **5 hunks**
+- next visible frontier from this slice: the remaining polyvariant/unit frontier in `poly_variant_test.res` / `UntaggedVariants.res`, plus the existing exception and recursive-module clusters
+
+`compiler/core/lam_constant_convert.ml` does the `Blk_poly_var` payload rewrite
+for constants as well as for `Pmakeblock`: it discards the hashed raw first field
+and rebuilds the block payload from the symbolic tag name, using `Const_string`
+unless the tag is already a valid hash-number literal.
+
+Rust `compiler-rust/src/raw_lambda/lower.rs` already mirrored that rule for
+`Primitive::Pmakeblock(_, TagInfo::PolyVar(_), _)`, but it was still forwarding
+raw constant polyvariant blocks unchanged. That left optimized lambda dumps full
+of hashed `Const_int` payload tags in places where OCaml had already recovered
+the source-level names.
+
+Rust now mirrors the OCaml constant branch too:
+
+- `Constant::Block { tag_info: TagInfo::PolyVar(name), ... }` now rebuilds its
+  first element from `name` during optimized lowering
+- the value payload is still recursively lowered the same way as before
+- the new unit test covers the constant-form path directly, alongside the
+  existing primitive-form test
+
+Authoritative repo-wide baseline moved from:
+
+- **594/657**, **206** hunks
+
+to:
+
+- **602/657**, **172** hunks
+
+That is a gain of **8 files** and **34 hunks**. The dropped exact failures were:
+`bs_unwrap_test.res`, `gpr_4280_test.res`, `gpr_5218_test.res`,
+`hash_collision_test.res`, `pipe_syntax.res`, `record_debug_test.res`,
+`record_type_spread.res`, and `unboxed_use_case.res`.
 
 ### external-call return wrappers and CMI byte preservation moved the FFI frontier
 Ran:
