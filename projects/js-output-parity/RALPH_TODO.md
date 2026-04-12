@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 64 / 657 JS snapshots passing, 0 compile errors, 593 output diffs
+**Status:** 72 / 657 JS snapshots passing, 0 compile errors, 585 output diffs
 
 ## Goal
 
@@ -35,9 +35,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **64 / 657**
+- JS snapshot parity: **72 / 657**
 - Compile errors: **0**
-- Output diffs: **593**
+- Output diffs: **585**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -84,6 +84,11 @@ Interpretation:
   Rust printer path:
   non-empty import-free modules keep the extra blank line after the ReScript
   header, and ES-module imports keep the blank line before the first statement
+- OCaml `js_dump_program.ml` / `js_dump_import_export.ml` / `js_dump.ml` now
+  match more closely on another byte-shape printer slice:
+  function directives emit raw directive prologues, non-export modules keep the
+  separator line before the purity trailer, and `default` exports alias the
+  local `$$default` binding back to the public `default` name
 
 ## Working Rules
 
@@ -389,3 +394,31 @@ Remaining internal compile errors under the measured wrapper baseline:
   but the change is kept because the OCaml-aligned `Lsequence` behavior is now
   correct on focused files and exposes remaining downstream effect-context / JS
   pass mismatches elsewhere in the backend.
+- `compiler-rust/src/js_ir/printer.rs` now ports another OCaml-aligned printer
+  slice from `js_dump_program.ml`, `js_dump_import_export.ml`, and
+  `js_dump.ml`:
+  - non-export modules keep the blank separator line before the final
+    `/* ... Not a pure module */` / `/* No side effect */` trailer
+  - ES-module exports print `$$default as default` when the exported binding is
+    the internal default identifier
+  - function directives print the stored raw directive text (`'use memo'`,
+    `'use server'`, etc.) instead of wrapping it in an extra quoted JS string
+  - function expressions with directives no longer collapse to arrow-expression
+    shorthand, matching OCaml's `directive == None` gate for the short form
+- Verified focused guards for this printer slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests -- --test-threads=1`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/function_directives.res -o /tmp/function_directives.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/default_export_test.res -o /tmp/default_export_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/debug_keep_test.res -o /tmp/debug_keep_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+- The authoritative JS snapshot baseline now reports **72 / 657** passing, **0**
+  compile errors, and **585** output diffs.
+- Resolved checked-in snapshot files for this cluster:
+  `debug_keep_test.res`, `hello.foo.res`, `side_effect.res`,
+  `function_directives.res`, `function_directives_no_inline.res`,
+  `default_export_test.res`, `es6_export.res`, and `escape_esmodule.res`.
+- The remaining directive-specific frontier is no longer function-directive
+  quoting; `tests/tests/src/directives.res` still needs the separate top-level
+  `@@directive(...)` / `Js_config.directives` path to be threaded through the
+  Rust JS printer.
