@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 493/657 (75.0%), 164 parity failures, 733 hunks
+**Status:** 496/657 (75.5%), 161 parity failures, 724 hunks
 
 ## Goal
 
@@ -23,17 +23,17 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **493/657**
-- Stamp-canonicalized parity: **493/657**
-- Exact hunks: **733**
-- Stamp-canonicalized hunks: **733**
+- Optimized lambda parity: **496/657**
+- Stamp-canonicalized parity: **496/657**
+- Exact hunks: **724**
+- Stamp-canonicalized hunks: **724**
 - Largest current exact diffs:
-  - `belt_list_test.res`: **72** hunks
-  - `bs_queue_test.res`: **61** hunks
-  - `test_set.res`: **51** hunks
-  - `bs_set_int_test.res`: **42** hunks
-  - `set_gen.res`: **37** hunks
-  - `caml_compare_test.res`: **33** hunks
+  - `js_json_test.res`: **45** hunks
+  - `coercion_module_alias_test.res`: **40** hunks
+  - `mario_game.res`: **36** hunks
+  - `bs_unwrap_test.res`: **21** hunks
+  - `exception_raise_test.res`: **18** hunks
+  - `test_trywith.res`: **17** hunks
 
 ## Working Rules
 
@@ -47,7 +47,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **164** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, not dump-path routing.
+There are **161** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, not dump-path routing.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -66,16 +66,50 @@ Current frontier characteristics:
   - `minimal_test.res`
 - `conditional/cond_a.res` now also passes exactly as a minimal assert-failure guard.
 - `js_array_test.res` now also passes exactly as a large-file guard.
+- `big_polyvar_test.res` now also passes exactly on the current authoritative baseline.
 - export-aware alias retention now keeps OCaml's module-export alias lets, which removed both accessor-file failures.
-- the assert-failure / match-failure lowering mismatch is no longer a broad frontier:
-  - `stringmatch_test.res`: **1 hunk** remaining (down from **284**)
-  - `js_json_test.res`: **8 hunks** remaining (down from **48**)
-  - `big_polyvar_test.res`: **2 hunks** remaining (down from **601**)
-- the next visible optimized frontier is the remaining non-constant `Lam.if_` smart-constructor behavior plus the still-large collection files (`belt_list_test.res`, `bs_queue_test.res`, `test_set.res`, `bs_set_int_test.res`, `set_gen.res`, `caml_compare_test.res`).
+- the focused `Lam.if_` assert-failure rewrite is now landed:
+  - `stringmatch_test.res`: **exact parity** (down from **1 hunk** on the prior baseline)
+  - `js_json_test.res`: **45 hunks** on a focused rerun, so its remaining diffs are no longer dominated by that one rewrite
+- the next visible optimized frontier is the remaining non-constant `Lam.if_` smart-constructor behavior plus the current exact-diff leaders (`js_json_test.res`, `coercion_module_alias_test.res`, `mario_game.res`, `bs_unwrap_test.res`, `exception_raise_test.res`, `test_trywith.res`).
 - a fresh full raw `-drawlambda` rerun reported **656/657** with one exact failure in `coercion_module_alias_test.res`; that looks separate from the assert-failure lowering slice and should be handled in a dedicated raw-parity session.
 - Stamp canonicalization still does not reduce the baseline at all.
 
 ## Key Findings from Session 2026-04-12
+
+### `Lam.if_` smart-constructor parity moved again
+`compiler-rust/src/lambda/mod.rs` now mirrors the OCaml `Lam.seq` / `Lam.if_`
+smart-constructor branches that were still missing for:
+
+- `Pt_assertfalse` branches lowering to `seq`
+- boolean `if a then true else false` / `if a then false else true`
+- raise-then / non-constant-else lowering to `seq (if ... raise ... ()) else_`
+- `Pisout` switch-failaction folding
+- `Pisint` rewrites that reuse or invert nested integer predicates
+
+That slice is covered by new unit tests in `lambda::tests` for:
+
+- assert-false sequencing
+- boolean-condition reuse and negation
+- raise-then sequencing
+- `Pisint` branch reuse
+
+Verified focused checks:
+
+- `stringmatch_test.res`: **exact parity**
+- `js_json_test.res`: **45 hunks** unchanged
+
+Authoritative repo-wide baseline moved from:
+
+- **493/657**, **733** hunks
+
+to:
+
+- **496/657**, **724** hunks
+
+This confirms the OCaml-aligned `Lam.if_` slice was real and useful, but also
+confirms the remaining `js_json_test.res` / exception-control-flow cluster is no
+longer explained by this single smart-constructor gap.
 
 ### dump routing is now correct
 `compiler-rust/src/driver.rs` no longer prints `-dlambda-sexp` from the legacy typedtree-to-lambda shortcut.

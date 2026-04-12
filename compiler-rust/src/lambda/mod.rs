@@ -293,7 +293,32 @@ impl Lambda {
 
     /// Create a sequence
     pub fn seq(first: Lambda, second: Lambda) -> Self {
-        Lambda::Lsequence(Box::new(first), Box::new(second))
+        match first {
+            Lambda::Lprim(PrimInfo {
+                primitive: primitive @ Primitive::Pmakeblock(_, _, _),
+                args,
+                loc,
+            }) => {
+                let mut args = args.into_iter();
+                let Some(first_arg) = args.next() else {
+                    return Lambda::Lsequence(
+                        Box::new(Lambda::Lprim(PrimInfo {
+                            primitive,
+                            args: Vec::new(),
+                            loc,
+                        })),
+                        Box::new(second),
+                    );
+                };
+                Lambda::seq(args.fold(first_arg, Lambda::seq), second)
+            }
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
+                mut args,
+                ..
+            }) if args.len() == 1 => Lambda::seq(args.remove(0), second),
+            first => Lambda::Lsequence(Box::new(first), Box::new(second)),
+        }
     }
 
     /// Create an if-then-else
@@ -306,7 +331,229 @@ impl Lambda {
                     else_
                 }
             }
-            cond => Lambda::LifThenElse(Box::new(cond), Box::new(then_), Box::new(else_)),
+            cond => {
+                if is_assertfalse(&else_) {
+                    return Lambda::seq(cond, then_);
+                }
+                if is_assertfalse(&then_) {
+                    return Lambda::seq(cond, else_);
+                }
+
+                if matches!(
+                    (&then_, &else_),
+                    (
+                        Lambda::Lconst(Constant::JsTrue),
+                        Lambda::Lconst(Constant::JsFalse)
+                    )
+                ) {
+                    return if has_boolean_type(&cond).is_some() {
+                        cond
+                    } else {
+                        make_if(cond, then_, else_)
+                    };
+                }
+
+                if matches!(
+                    (&then_, &else_),
+                    (
+                        Lambda::Lconst(Constant::JsFalse),
+                        Lambda::Lconst(Constant::JsTrue)
+                    )
+                ) {
+                    return match has_boolean_type(&cond) {
+                        Some(loc) => lambda_not(loc, cond),
+                        None => make_if(cond, then_, else_),
+                    };
+                }
+
+                if matches!(
+                    &then_,
+                    Lambda::Lprim(PrimInfo {
+                        primitive: Primitive::Praise,
+                        ..
+                    })
+                ) {
+                    return if matches!(&else_, Lambda::Lconst(_)) {
+                        make_if(cond, then_, else_)
+                    } else {
+                        Lambda::seq(make_if(cond, then_, Lambda::unit()), else_)
+                    };
+                }
+
+                match cond {
+                    Lambda::Lprim(prim_info) => match prim_info {
+                        PrimInfo {
+                            primitive: Primitive::Pisout(offset),
+                            args,
+                            loc,
+                        } => {
+                            if let [Lambda::Lconst(Constant::Int { i: range, .. }), Lambda::Lvar(xx)] =
+                                args.as_slice()
+                            {
+                                if let Lambda::Lswitch(switch_arg, body) = &else_ {
+                                    if let Lambda::Lvar(yy) = switch_arg.as_ref() {
+                                        if body.sw_blocks.is_empty()
+                                            && body.sw_blocks_full
+                                            && body.sw_failaction.is_none()
+                                            && xx.same(yy)
+                                            && complete_range(
+                                                &body.sw_consts,
+                                                -offset,
+                                                *range - offset,
+                                            )
+                                        {
+                                            let mut body = body.clone();
+                                            body.sw_failaction = Some(Box::new(then_));
+                                            body.sw_consts_full = false;
+                                            return Lambda::Lswitch(switch_arg.clone(), body);
+                                        }
+                                    }
+                                }
+                            }
+                            make_if(
+                                Lambda::Lprim(PrimInfo {
+                                    primitive: Primitive::Pisout(offset),
+                                    args,
+                                    loc,
+                                }),
+                                then_,
+                                else_,
+                            )
+                        }
+                        PrimInfo {
+                            primitive: Primitive::Pisint,
+                            args,
+                            loc,
+                        } => {
+                            let [Lambda::Lvar(i)] = args.as_slice() else {
+                                return make_if(
+                                    Lambda::Lprim(PrimInfo {
+                                        primitive: Primitive::Pisint,
+                                        args,
+                                        loc,
+                                    }),
+                                    then_,
+                                    else_,
+                                );
+                            };
+
+                            if let Lambda::LifThenElse(pred, _, branch_false) = &then_ {
+                                if let Lambda::Lprim(PrimInfo {
+                                    primitive: Primitive::Pintcomp(Comparison::Eq),
+                                    args: pred_args,
+                                    ..
+                                }) = pred.as_ref()
+                                {
+                                    if let [Lambda::Lvar(j), Lambda::Lconst(_)] =
+                                        pred_args.as_slice()
+                                    {
+                                        if i.same(j) && lambda_eq_approx(branch_false, &else_) {
+                                            return then_;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let Lambda::Lprim(PrimInfo {
+                                primitive: Primitive::Pintcomp(Comparison::Eq),
+                                args: pred_args,
+                                ..
+                            }) = &then_
+                            {
+                                if let [Lambda::Lvar(j), Lambda::Lconst(_)] = pred_args.as_slice() {
+                                    if i.same(j) && lambda_eq_approx(&Lambda::false_(), &else_) {
+                                        return then_;
+                                    }
+                                }
+                            }
+
+                            if let Lambda::LifThenElse(pred, branch_true, branch_false) = &then_ {
+                                if let Lambda::Lprim(PrimInfo {
+                                    primitive: Primitive::Pintcomp(Comparison::Neq),
+                                    args: pred_args,
+                                    loc,
+                                }) = pred.as_ref()
+                                {
+                                    if let [Lambda::Lvar(j), Lambda::Lconst(_)] =
+                                        pred_args.as_slice()
+                                    {
+                                        if i.same(j) && lambda_eq_approx(branch_true, &else_) {
+                                            return Lambda::LifThenElse(
+                                                Box::new(Lambda::Lprim(PrimInfo {
+                                                    primitive: Primitive::Pintcomp(Comparison::Eq),
+                                                    args: pred_args.clone(),
+                                                    loc: loc.clone(),
+                                                })),
+                                                branch_false.clone(),
+                                                branch_true.clone(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            match &then_ {
+                                Lambda::Lprim(PrimInfo {
+                                    primitive: Primitive::Pintcomp(Comparison::Neq),
+                                    args: pred_args,
+                                    loc,
+                                }) => {
+                                    if let [Lambda::Lvar(j), Lambda::Lconst(_)] =
+                                        pred_args.as_slice()
+                                    {
+                                        if i.same(j) && lambda_eq_approx(&Lambda::true_(), &else_) {
+                                            return Lambda::Lprim(PrimInfo {
+                                                primitive: Primitive::Pintcomp(Comparison::Neq),
+                                                args: pred_args.clone(),
+                                                loc: loc.clone(),
+                                            });
+                                        }
+                                    }
+                                }
+                                Lambda::Lprim(PrimInfo {
+                                    primitive: Primitive::Pnot,
+                                    args: outer_args,
+                                    ..
+                                }) => {
+                                    if let [Lambda::Lprim(PrimInfo {
+                                        primitive: Primitive::Pintcomp(Comparison::Eq),
+                                        args: pred_args,
+                                        loc,
+                                    })] = outer_args.as_slice()
+                                    {
+                                        if let [Lambda::Lvar(j), Lambda::Lconst(_)] =
+                                            pred_args.as_slice()
+                                        {
+                                            if i.same(j)
+                                                && lambda_eq_approx(&Lambda::true_(), &else_)
+                                            {
+                                                return Lambda::Lprim(PrimInfo {
+                                                    primitive: Primitive::Pintcomp(Comparison::Neq),
+                                                    args: pred_args.clone(),
+                                                    loc: loc.clone(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+
+                            make_if(
+                                Lambda::Lprim(PrimInfo {
+                                    primitive: Primitive::Pisint,
+                                    args,
+                                    loc,
+                                }),
+                                then_,
+                                else_,
+                            )
+                        }
+                        prim_info => make_if(Lambda::Lprim(prim_info), then_, else_),
+                    },
+                    cond => make_if(cond, then_, else_),
+                }
+            }
         }
     }
 
@@ -366,6 +613,126 @@ impl Lambda {
             self,
             Lambda::Lconst(Constant::JsUndefined { is_unit: true })
         )
+    }
+}
+
+fn make_if(cond: Lambda, then_: Lambda, else_: Lambda) -> Lambda {
+    Lambda::LifThenElse(Box::new(cond), Box::new(then_), Box::new(else_))
+}
+
+fn is_assertfalse(lam: &Lambda) -> bool {
+    matches!(
+        lam,
+        Lambda::Lconst(Constant::Int {
+            comment: Some(constant::PointerInfo::AssertFalse),
+            ..
+        })
+    )
+}
+
+fn lambda_not(loc: Location, lam: Lambda) -> Lambda {
+    match lam {
+        Lambda::Lprim(PrimInfo {
+            primitive: Primitive::Pintcomp(Comparison::Neq),
+            args,
+            loc,
+        }) => Lambda::Lprim(PrimInfo {
+            primitive: Primitive::Pintcomp(Comparison::Eq),
+            args,
+            loc,
+        }),
+        lam => Lambda::prim(Primitive::Pnot, vec![lam], loc),
+    }
+}
+
+fn has_boolean_type(lam: &Lambda) -> Option<Location> {
+    match lam {
+        Lambda::Lprim(PrimInfo {
+            primitive:
+                Primitive::Pnot
+                | Primitive::Psequand
+                | Primitive::Psequor
+                | Primitive::Pisout(_)
+                | Primitive::PisNotNone
+                | Primitive::Pobjcomp(_)
+                | Primitive::Pboolcomp(_)
+                | Primitive::Pintcomp(_)
+                | Primitive::Pfloatcomp(_)
+                | Primitive::Pbigintcomp(_)
+                | Primitive::Pstringcomp(_),
+            loc,
+            ..
+        }) => Some(loc.clone()),
+        _ => None,
+    }
+}
+
+fn complete_range(sw_consts: &[(i32, Lambda)], start: i32, finish: i32) -> bool {
+    match sw_consts.split_first() {
+        None => finish < start,
+        Some(((i, _), rest)) => {
+            start <= finish && *i == start && complete_range(rest, start + 1, finish)
+        }
+    }
+}
+
+fn lambda_eq_approx(lhs: &Lambda, rhs: &Lambda) -> bool {
+    match (lhs, rhs) {
+        (Lambda::LglobalModule(i1, b1), Lambda::LglobalModule(i2, b2)) => i1.same(i2) && b1 == b2,
+        (Lambda::Lvar(i1), Lambda::Lvar(i2)) => i1.same(i2),
+        (Lambda::Lconst(c1), Lambda::Lconst(c2)) => c1.eq_approx(c2),
+        (Lambda::Lapply(app1), Lambda::Lapply(app2)) => {
+            lambda_eq_approx(&app1.ap_func, &app2.ap_func)
+                && lambda_list_eq_approx(&app1.ap_args, &app2.ap_args)
+        }
+        (Lambda::LifThenElse(a1, b1, c1), Lambda::LifThenElse(a2, b2, c2)) => {
+            lambda_eq_approx(a1, a2) && lambda_eq_approx(b1, b2) && lambda_eq_approx(c1, c2)
+        }
+        (Lambda::Lsequence(a1, b1), Lambda::Lsequence(a2, b2))
+        | (Lambda::Lwhile(a1, b1), Lambda::Lwhile(a2, b2)) => {
+            lambda_eq_approx(a1, a2) && lambda_eq_approx(b1, b2)
+        }
+        (Lambda::Lassign(v1, l1), Lambda::Lassign(v2, l2)) => {
+            v1.same(v2) && lambda_eq_approx(l1, l2)
+        }
+        (Lambda::LstaticRaise(id1, args1), Lambda::LstaticRaise(id2, args2)) => {
+            id1 == id2 && lambda_list_eq_approx(args1, args2)
+        }
+        (Lambda::Lprim(info1), Lambda::Lprim(info2)) => {
+            info1.primitive.eq_approx(&info2.primitive)
+                && lambda_list_eq_approx(&info1.args, &info2.args)
+        }
+        (
+            Lambda::LstringSwitch(arg1, cases1, default1),
+            Lambda::LstringSwitch(arg2, cases2, default2),
+        ) => {
+            lambda_eq_approx(arg1, arg2)
+                && lambda_option_eq_approx(default1, default2)
+                && cases1.len() == cases2.len()
+                && cases1
+                    .iter()
+                    .zip(cases2.iter())
+                    .all(|((name1, lam1), (name2, lam2))| {
+                        name1 == name2 && lambda_eq_approx(lam1, lam2)
+                    })
+        }
+        _ => false,
+    }
+}
+
+fn lambda_list_eq_approx(lhs: &[Lambda], rhs: &[Lambda]) -> bool {
+    lhs.len() == rhs.len()
+        && lhs
+            .iter()
+            .zip(rhs.iter())
+            .all(|(lhs, rhs)| lambda_eq_approx(lhs, rhs))
+}
+
+fn lambda_option_eq_approx(lhs: &Option<Box<Lambda>>, rhs: &Option<Box<Lambda>>) -> bool {
+    match (lhs, rhs) {
+        (None, None) => true,
+        (Some(lhs), Some(rhs)) => lambda_eq_approx(lhs, rhs),
+        _ => false,
     }
 }
 
@@ -471,6 +838,129 @@ mod tests {
             if_expr,
             Lambda::Lconst(Constant::JsUndefined { is_unit: true })
         ));
+    }
+
+    #[test]
+    fn test_if_then_else_assertfalse_sequences_then_branch() {
+        let cond_id = Ident::create_local("cond");
+        let cond = Lambda::var(cond_id.clone());
+        let then_ = Lambda::const_(Constant::int(1));
+        let assertfalse = Lambda::const_(Constant::Int {
+            i: 0,
+            comment: Some(constant::PointerInfo::AssertFalse),
+        });
+
+        let if_expr = Lambda::if_(cond.clone(), then_.clone(), assertfalse);
+
+        match if_expr {
+            Lambda::Lsequence(first, second) => {
+                assert!(matches!(*first, Lambda::Lvar(ref id) if id.same(&cond_id)));
+                assert!(lambda_eq_approx(&second, &then_));
+            }
+            _ => panic!("Expected assertfalse branch to lower to sequence"),
+        }
+    }
+
+    #[test]
+    fn test_if_then_else_true_false_returns_boolean_condition() {
+        let x = Ident::create_local("x");
+        let cond = Lambda::prim(
+            Primitive::Pintcomp(Comparison::Eq),
+            vec![Lambda::var(x.clone()), Lambda::const_(Constant::int(0))],
+            Location::none(),
+        );
+
+        let if_expr = Lambda::if_(cond.clone(), Lambda::true_(), Lambda::false_());
+        assert!(lambda_eq_approx(&if_expr, &cond));
+    }
+
+    #[test]
+    fn test_if_then_else_false_true_negates_boolean_condition() {
+        let x = Ident::create_local("x");
+        let if_expr = Lambda::if_(
+            Lambda::prim(
+                Primitive::Pintcomp(Comparison::Neq),
+                vec![Lambda::var(x.clone()), Lambda::const_(Constant::int(0))],
+                Location::none(),
+            ),
+            Lambda::false_(),
+            Lambda::true_(),
+        );
+
+        match if_expr {
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::Pintcomp(Comparison::Eq),
+                ..
+            }) => {}
+            _ => panic!("Expected negated integer comparison"),
+        }
+    }
+
+    #[test]
+    fn test_if_then_else_raise_then_sequences_non_constant_else() {
+        let x = Ident::create_local("x");
+        let if_expr = Lambda::if_(
+            Lambda::prim(
+                Primitive::Pintcomp(Comparison::Eq),
+                vec![Lambda::var(x.clone()), Lambda::const_(Constant::int(0))],
+                Location::none(),
+            ),
+            Lambda::prim(
+                Primitive::Praise,
+                vec![Lambda::var(Ident::create_local("exn"))],
+                Location::none(),
+            ),
+            Lambda::static_raise(1, Vec::new()),
+        );
+
+        match if_expr {
+            Lambda::Lsequence(first, second) => {
+                assert!(matches!(*second, Lambda::LstaticRaise(1, ref args) if args.is_empty()));
+                match *first {
+                    Lambda::LifThenElse(_, then_, else_) => {
+                        assert!(matches!(
+                            *then_,
+                            Lambda::Lprim(PrimInfo {
+                                primitive: Primitive::Praise,
+                                ..
+                            })
+                        ));
+                        assert!(matches!(
+                            *else_,
+                            Lambda::Lconst(Constant::JsUndefined { is_unit: true })
+                        ));
+                    }
+                    _ => panic!("Expected rewritten if inside sequence"),
+                }
+            }
+            _ => panic!("Expected raise-then if to lower to sequence"),
+        }
+    }
+
+    #[test]
+    fn test_if_then_else_pisint_reuses_eq_branch() {
+        let value = Ident::create_local("value");
+        let inner_if = Lambda::LifThenElse(
+            Box::new(Lambda::prim(
+                Primitive::Pintcomp(Comparison::Eq),
+                vec![Lambda::var(value.clone()), Lambda::const_(Constant::int(0))],
+                Location::none(),
+            )),
+            Box::new(Lambda::const_(Constant::int(1))),
+            Box::new(Lambda::false_()),
+        );
+
+        let if_expr = Lambda::if_(
+            Lambda::prim(
+                Primitive::Pisint,
+                vec![Lambda::var(value)],
+                Location::none(),
+            ),
+            inner_if.clone(),
+            Lambda::false_(),
+        );
+
+        assert!(lambda_eq_approx(&if_expr, &inner_if));
     }
 
     #[test]
