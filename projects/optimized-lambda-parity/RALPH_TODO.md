@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 461/657 (70.2%), 196 parity failures, 1858 hunks
+**Status:** 463/657 (70.5%), 194 parity failures, 1853 hunks
 
 ## Goal
 
@@ -23,14 +23,15 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **461/657**
-- Stamp-canonicalized parity: **461/657**
-- Exact hunks: **1858**
-- Stamp-canonicalized hunks: **1858**
+- Optimized lambda parity: **463/657**
+- Stamp-canonicalized parity: **463/657**
+- Exact hunks: **1853**
+- Stamp-canonicalized hunks: **1853**
 - Largest current exact diffs:
   - `big_polyvar_test.res`: **601** hunks
   - `stringmatch_test.res`: **284** hunks
   - `bs_queue_test.res`: **81** hunks
+  - `js_json_test.res`: **48** hunks
   - `coercion_module_alias_test.res`: **40** hunks
   - `mario_game.res`: **37** hunks
 
@@ -46,13 +47,15 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-All **196** remaining failures are now real optimized-lambda lowering gaps, not a dump-path mismatch.
+All **194** remaining failures are now after the raw-lambda stage, not a dump-path mismatch.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
 - `raw_lambda/lower.rs` is no longer an identity shim.
 - Small structural sanity checks now pass exactly:
   - `AsInUncurriedExternals.res`
+  - `DerivingAccessorsCurried.res`
+  - `DerivingAccessorsUncurried.res`
   - `DictInternalRepresentation.res`
   - `DictInference.res`
   - `DictPatternMatchingOptimization.res`
@@ -62,8 +65,10 @@ Current frontier characteristics:
   - `VariantCoercion.res`
   - `minimal_test.res`
 - `js_array_test.res` now also passes exactly as a large-file guard.
-- direct-ident constructor switch names now come through `pat.pat_env`; `LetUnwrap.res` dropped from **19 hunks** to **1 hunk**, leaving only the `InvalidNext` constructor-literal mismatch there.
-- the remaining `Lam.if_` frontier is still the non-constant smart-constructor behavior from `compiler/core/lam.ml`, but `LetUnwrap.res` is no longer the main switch-shape example.
+- export-aware alias retention now keeps OCaml's module-export alias lets, which removed both accessor-file failures.
+- direct-ident constructor switch names now come through `pat.pat_env`; `LetUnwrap.res` remains at **1 hunk**, isolated to the `InvalidNext` constructor-literal mismatch.
+- `coercion_module_alias_test.res` remains at **40** hunks and now looks concentrated in quoted-identifier sexp rendering (`C'` vs `C\'`) rather than the earlier alias/module-export shape.
+- the broad `Lam.if_` frontier still remains on the larger files (`js_json_test.res`, `stringmatch_test.res`, `caml_compare_test.res`).
 - `big_polyvar_test.res` dropped from **1202** hunks to **601** hunks.
 - Stamp canonicalization still does not reduce the baseline at all.
 
@@ -279,8 +284,8 @@ literal / exception-tail regressions it exposes.
    - module/coercion lowering forms
 2. **Use smallest failures for quick structural validation**
    - `LetUnwrap.res`
-   - `DerivingAccessorsCurried.res`
-   - `DerivingAccessorsUncurried.res`
+   - `coercion_module_alias_test.res`
+   - `UncurriedExternals.res`
 3. **Use large files to validate that a rule generalizes**
    - `big_polyvar_test.res`
    - `js_json_test.res`
@@ -293,25 +298,66 @@ literal / exception-tail regressions it exposes.
 
 ## Immediate Next Milestone
 
-1. Port the next `Lam.if_` smart-constructor slices that OCaml applies during lowering after constant-condition folding.
-2. Re-test:
-   - `LetUnwrap.res`
-   - `DerivingAccessorsCurried.res`
-   - `DerivingAccessorsUncurried.res`
-3. Validate the same rule on:
+1. Finish the next focused optimized-lambda gaps revealed by the small-file frontier:
+   - constructor-literal recovery for `LetUnwrap.res`
+   - quoted-identifier output parity in `coercion_module_alias_test.res`
+2. Keep the larger-file watchlist on the remaining broad lowering frontier:
    - `big_polyvar_test.res`
    - `js_json_test.res`
    - `caml_compare_test.res`
    - `stringmatch_test.res`
-4. Re-run:
+3. Re-test:
+   - `LetUnwrap.res`
+   - `coercion_module_alias_test.res`
+   - `UncurriedExternals.res`
+4. Validate the same rule on:
+   - `big_polyvar_test.res`
+   - `js_json_test.res`
+   - `caml_compare_test.res`
+   - `stringmatch_test.res`
+5. Re-run:
 
 ```bash
 timeout 1800 ./scripts/test_lambda_parity.sh -j1
 ```
 
-5. Commit immediately after the next verified OCaml-aligned improvement.
+6. Commit immediately after the next verified OCaml-aligned improvement.
 
 ## Session Log
+
+### 2026-04-12 (export-aware alias retention for module exports)
+
+Ran:
+
+```bash
+cargo test --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests -- --nocapture
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 600 ./scripts/test_lambda_parity.sh -j1 'DerivingAccessorsCurried|DerivingAccessorsUncurried|coercion_module_alias_test|LetUnwrap'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- OCaml compile coverage: **657/657**
+- Rust compile coverage: **657/657**
+- Optimized lambda parity: **463/657**
+- Stamp-canonicalized parity: **463/657**
+- Exact hunks: **1853**
+- Stamp-canonicalized hunks: **1853**
+
+Key checkpoints:
+
+- `DerivingAccessorsCurried.res`: passes
+- `DerivingAccessorsUncurried.res`: passes
+- `LetUnwrap.res`: **1 hunk**
+- `coercion_module_alias_test.res`: **40** hunks
+- next visible frontier: `LetUnwrap` constructor-literal recovery plus the quoted-identifier output mismatch in `coercion_module_alias_test.res`
+
+This slice ports the `Lam_convert.convert` rule that keeps `Alias = Lvar`
+bindings when the alias identifier is exported. Rust now discovers exported
+idents from `Blk_module_export` metadata before lowering, keeps those alias lets,
+and still rewrites downstream uses through the alias table the same way OCaml does.
+That is what removed the accessor-file module-export tail mismatch.
 
 ### 2026-04-12 (constant-condition folding in `Lam.if_`)
 

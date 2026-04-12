@@ -4,7 +4,7 @@
 //! by optimized-lambda parity dumps. It intentionally only feeds the parity
 //! printer path; JS compilation still uses the legacy lowered-lambda route.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ident::Ident;
 use crate::lambda::compat::LetKind;
@@ -22,13 +22,15 @@ const SETTER_SUFFIX: &str = "#=";
 struct LoweringContext {
     alias_tbl: HashMap<Ident, Ident>,
     exit_map: HashMap<i32, i32>,
+    exported_idents: HashSet<Ident>,
 }
 
 impl LoweringContext {
-    fn new() -> Self {
+    fn new(exported_idents: HashSet<Ident>) -> Self {
         Self {
             alias_tbl: HashMap::new(),
             exit_map: HashMap::new(),
+            exported_idents,
         }
     }
 
@@ -193,8 +195,13 @@ impl LoweringContext {
     fn lower_let(&mut self, kind: LetKind, id: Ident, value: RawLambda, body: RawLambda) -> Lambda {
         if kind == LetKind::Alias {
             if let RawLambda::Lvar(target) = value {
-                self.alias_tbl.insert(id, self.alias_target(target));
-                return self.lower_lambda(body);
+                let target = self.alias_target(target);
+                self.alias_tbl.insert(id.clone(), target.clone());
+                let lowered_body = self.lower_lambda(body);
+                if self.exported_idents.contains(&id) {
+                    return Lambda::let_(kind, id, Lambda::var(target), lowered_body);
+                }
+                return lowered_body;
             }
         }
 
@@ -398,6 +405,83 @@ impl LoweringContext {
             Lambda::try_(lowered_body, raw_id, wrapped)
         } else {
             Lambda::try_(lowered_body, id, lowered_handler)
+        }
+    }
+}
+
+fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
+    match raw {
+        RawLambda::Lvar(_) | RawLambda::LglobalModule(_, _) | RawLambda::Lconst(_) => {}
+        RawLambda::Lapply(apply) => {
+            collect_exported_idents(&apply.ap_func, exports);
+            for arg in &apply.ap_args {
+                collect_exported_idents(arg, exports);
+            }
+        }
+        RawLambda::Lfunction(func) => collect_exported_idents(&func.body, exports),
+        RawLambda::Llet(_, _, value, body) => {
+            collect_exported_idents(value, exports);
+            collect_exported_idents(body, exports);
+        }
+        RawLambda::Lletrec(bindings, body) => {
+            for (_, lam) in bindings {
+                collect_exported_idents(lam, exports);
+            }
+            collect_exported_idents(body, exports);
+        }
+        RawLambda::Lprim(info) => {
+            if let Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _) = &info.primitive {
+                exports.extend(ids.iter().cloned());
+            }
+            for arg in &info.args {
+                collect_exported_idents(arg, exports);
+            }
+        }
+        RawLambda::Lswitch(scrutinee, switch, _) => {
+            collect_exported_idents(scrutinee, exports);
+            for (_, lam) in &switch.sw_consts {
+                collect_exported_idents(lam, exports);
+            }
+            for (_, lam) in &switch.sw_blocks {
+                collect_exported_idents(lam, exports);
+            }
+            if let Some(failaction) = &switch.sw_failaction {
+                collect_exported_idents(failaction, exports);
+            }
+        }
+        RawLambda::LstringSwitch(scrutinee, cases, default) => {
+            collect_exported_idents(scrutinee, exports);
+            for (_, lam) in cases {
+                collect_exported_idents(lam, exports);
+            }
+            if let Some(default) = default {
+                collect_exported_idents(default, exports);
+            }
+        }
+        RawLambda::LstaticRaise(_, args) => {
+            for arg in args {
+                collect_exported_idents(arg, exports);
+            }
+        }
+        RawLambda::LstaticCatch(body, (_, _), handler)
+        | RawLambda::LtryWith(body, _, handler)
+        | RawLambda::Lsequence(body, handler)
+        | RawLambda::Lwhile(body, handler) => {
+            collect_exported_idents(body, exports);
+            collect_exported_idents(handler, exports);
+        }
+        RawLambda::LifThenElse(cond, then_, else_) => {
+            collect_exported_idents(cond, exports);
+            collect_exported_idents(then_, exports);
+            collect_exported_idents(else_, exports);
+        }
+        RawLambda::Lfor(_, start, end, _, body) => {
+            collect_exported_idents(start, exports);
+            collect_exported_idents(end, exports);
+            collect_exported_idents(body, exports);
+        }
+        RawLambda::Lassign(_, value) | RawLambda::Lsend(_, value, _) => {
+            collect_exported_idents(value, exports);
         }
     }
 }
@@ -853,7 +937,9 @@ fn strongly_connected_binding_components(deps: &[Vec<usize>]) -> Vec<Vec<usize>>
 
 /// Lower raw lambda into the existing JS-facing Lambda IR.
 pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
-    LoweringContext::new().lower_lambda(raw)
+    let mut exported_idents = HashSet::new();
+    collect_exported_idents(&raw, &mut exported_idents);
+    LoweringContext::new(exported_idents).lower_lambda(raw)
 }
 
 #[cfg(test)]
@@ -861,7 +947,7 @@ mod tests {
     use super::*;
     use crate::lambda::compat::LetKind;
     use crate::lambda::constant::{ConstructorRuntimeTag, ConstructorTag, StringDelim};
-    use crate::lambda::primitive::JsRawInfo;
+    use crate::lambda::primitive::{JsRawInfo, Mutable};
     use crate::lambda::InlineAttribute;
 
     #[test]
@@ -996,6 +1082,43 @@ mod tests {
             panic!("expected alias to collapse");
         };
         assert!(id.same(&source));
+    }
+
+    #[test]
+    fn keeps_exported_alias_binding_while_rewriting_export_uses() {
+        let source = Ident::create_local("source");
+        let alias = Ident::create_local("alias");
+        let raw = RawLambda::let_(
+            LetKind::Alias,
+            alias.clone(),
+            RawLambda::var(source.clone()),
+            RawLambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::ModuleExport(vec![alias.clone()]),
+                    Mutable::Immutable,
+                ),
+                vec![RawLambda::var(alias.clone())],
+                Location::none(),
+            ),
+        );
+
+        let lowered = lower_to_lambda(raw);
+        let Lambda::Llet(LetKind::Alias, kept_alias, value, body) = lowered else {
+            panic!("expected exported alias let to remain");
+        };
+        assert!(kept_alias.same(&alias));
+        let Lambda::Lvar(id) = value.as_ref() else {
+            panic!("expected alias value to stay a variable");
+        };
+        assert!(id.same(&source));
+        let Lambda::Lprim(info) = body.as_ref() else {
+            panic!("expected module export block");
+        };
+        let [Lambda::Lvar(exported)] = info.args.as_slice() else {
+            panic!("expected rewritten export argument");
+        };
+        assert!(exported.same(&source));
     }
 
     #[test]
