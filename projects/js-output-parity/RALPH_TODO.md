@@ -220,6 +220,43 @@ Remaining internal compile errors under the measured wrapper baseline:
 
 ## Latest Session Findings
 
+- `compiler-rust/src/lambda/compile.rs` now matches OCaml
+  `lam_compile_const.ml` more closely for constructor-tagged integer
+  constants on the JS backend path:
+  `Const_int` values carrying `Pt_constructor` metadata no longer drop that
+  metadata when Rust lowers them into JS IR, so named nullary constructors now
+  emit their constructor runtime representation (`"NoParam"`, `@as("...")`,
+  `@as(null)`, etc.) instead of falling back to raw numeric tags
+- Verified focused guards for this cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::compile::tests::compile_constant_ -- --test-threads=1`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsCurried.res -o /tmp/DerivingAccessorsCurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsUncurried.res -o /tmp/DerivingAccessorsUncurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/VariantSpreads.res -o /tmp/VariantSpreads.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/DerivingAccessorsCurried.res` and
+  `tests/tests/src/DerivingAccessorsUncurried.res` both moved off the wrong
+  constant-constructor runtime shape:
+  `noParam` and `_noParamAlias` now emit `"NoParam"` instead of `0`, so the
+  remaining drift in those files is later declaration ordering and printer byte
+  shape rather than this constructor-representation mismatch
+- `tests/tests/src/VariantSpreads.res` also moved forward on the same slice:
+  constant constructors such as `"Two"` / `"Six"` no longer fall back to `0`,
+  and the remaining drift there is now in later block/object lowering and final
+  printer shape
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the constant-constructor change, which confirms this slice stays isolated to
+  constructor-constant translation rather than perturbing external/global
+  lowering
+- The authoritative JS snapshot baseline remains **90 / 657** passing, **0**
+  compile errors, and **567** output diffs after the `lam_compile_const` port
+- Interpretation:
+  this resolves one real backend gap between optimized lambda and final JS
+  emission even though the wrapper totals stayed flat. The unchanged totals mean
+  the affected files still carry later backend / printer drift, not that the
+  constructor-constant fix was spurious.
+
 - `compiler-rust/src/lambda/compile.rs` now matches one more slice of
   OCaml `lam_coercion.ml` / `handle_exports` on the Rust JS backend path:
   final export selection follows same-name alias bindings only when the target

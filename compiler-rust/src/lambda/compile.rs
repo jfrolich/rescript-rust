@@ -21,7 +21,7 @@ use crate::js_ir::{
 };
 use crate::lambda::analysis;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
-use crate::lambda::constant::{Constant, StringDelim};
+use crate::lambda::constant::{Constant, ConstructorRuntimeTag, PointerInfo, StringDelim};
 use crate::lambda::primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
     ExternalModuleBindName, ExternalModuleName, ExternalObjLabel, ExternalObjSpec, ExternalSpec,
@@ -1125,6 +1125,26 @@ impl LambdaCompiler {
             Constant::JsUndefined { is_unit } => Expression::undefined(*is_unit),
             Constant::JsTrue => Expression::bool(true),
             Constant::JsFalse => Expression::bool(false),
+            Constant::Int {
+                i,
+                comment: Some(PointerInfo::Constructor(tag)),
+            } => match &tag.runtime_tag {
+                Some(ConstructorRuntimeTag::Int(value)) => {
+                    Expression::number(Number::int(*value))
+                }
+                Some(ConstructorRuntimeTag::String(value)) => Expression::string(value.clone()),
+                Some(ConstructorRuntimeTag::Float(value)) => {
+                    Expression::number(Number::float(value.clone()))
+                }
+                Some(ConstructorRuntimeTag::BigInt(value)) => {
+                    Expression::number(Number::bigint(true, value.clone()))
+                }
+                Some(ConstructorRuntimeTag::Bool(value)) => Expression::bool(*value),
+                Some(ConstructorRuntimeTag::Null) => Expression::null(),
+                Some(ConstructorRuntimeTag::Undefined) => Expression::undefined(false),
+                None if tag.name != "[]" => Expression::string(tag.name.clone()),
+                None => Expression::number(Number::int(*i)),
+            },
             Constant::Int { i, comment } => {
                 let _ = comment;
                 Expression::number(Number::int(*i))
@@ -3489,7 +3509,7 @@ mod tests {
     use super::*;
     use crate::cmi::persistent_env::PersistentEnv;
     use crate::js_ir::{ModulePathResolver, print_block};
-    use crate::lambda::constant::Constant;
+    use crate::lambda::constant::{Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo};
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
         ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
@@ -3522,6 +3542,69 @@ mod tests {
         let lam = Lambda::const_(Constant::int(7));
         let program = compiler.compile_program(&lam);
         assert!(!program.block.is_empty());
+    }
+
+    #[test]
+    fn compile_constant_named_constructor_uses_string_runtime_name() {
+        let compiled = LambdaCompiler::compile_constant(&Constant::Int {
+            i: 0,
+            comment: Some(PointerInfo::Constructor(ConstructorTag {
+                name: "NoParam".to_string(),
+                const_: 1,
+                non_const: 2,
+                runtime_tag: None,
+            })),
+        });
+
+        assert!(matches!(
+            compiled,
+            Expression {
+                desc: ExpressionDesc::Str { ref txt, .. },
+                ..
+            } if txt == "NoParam"
+        ));
+    }
+
+    #[test]
+    fn compile_constant_constructor_runtime_tag_uses_runtime_literal() {
+        let compiled = LambdaCompiler::compile_constant(&Constant::Int {
+            i: 0,
+            comment: Some(PointerInfo::Constructor(ConstructorTag {
+                name: "Three".to_string(),
+                const_: 1,
+                non_const: 0,
+                runtime_tag: Some(ConstructorRuntimeTag::String("three".to_string())),
+            })),
+        });
+
+        assert!(matches!(
+            compiled,
+            Expression {
+                desc: ExpressionDesc::Str { ref txt, .. },
+                ..
+            } if txt == "three"
+        ));
+    }
+
+    #[test]
+    fn compile_constant_empty_list_keeps_numeric_zero() {
+        let compiled = LambdaCompiler::compile_constant(&Constant::Int {
+            i: 0,
+            comment: Some(PointerInfo::Constructor(ConstructorTag {
+                name: "[]".to_string(),
+                const_: 1,
+                non_const: 1,
+                runtime_tag: None,
+            })),
+        });
+
+        assert!(matches!(
+            compiled,
+            Expression {
+                desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
+                ..
+            }
+        ));
     }
 
     #[test]
