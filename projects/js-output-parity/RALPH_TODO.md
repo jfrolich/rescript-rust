@@ -1,6 +1,6 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-12
+**Last Updated:** 2026-04-13
 **Status:** 108 / 657 JS snapshots passing, 0 compile errors, 549 output diffs
 
 ## Goal
@@ -27,7 +27,7 @@ JS backend only.
 
 ## Current Baseline
 
-Latest authoritative wrapper run on **2026-04-12** using:
+Latest authoritative wrapper run on **2026-04-13** using:
 
 ```bash
 timeout 1800 ./scripts/test_js_output_parity.sh
@@ -894,3 +894,33 @@ Remaining internal compile errors under the measured wrapper baseline:
   quoting; `tests/tests/src/directives.res` still needs the separate top-level
   `@@directive(...)` / `Js_config.directives` path to be threaded through the
   Rust JS printer.
+- `compiler-rust/src/lambda/compile.rs` now matches the OCaml
+  `lam_compile_external_call.ml` `Js_var` path more closely on the Rust
+  backend path:
+  Rust no longer routes `Js_var` applications through
+  `assemble_external_args_no_splice`, so runtime call arguments are preserved
+  even when the preserved external metadata has `arg_types = []`
+  (the OCaml backend ignores `arg_types` for `Js_var` and calls the value with
+  the raw runtime argument list whenever arguments are present).
+- Verified focused guards for this external-arity cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lowers_js_var_`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalArity.res -o /tmp/ExternalArity.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/ExternalArity.res` no longer drops the runtime call
+  arguments on `v1(x, x)` and `foo1(10)`:
+  the old backend bug that lowered those `Js_var` calls to bare values (`v`
+  and `foo1`) is gone, and the remaining diff there has narrowed to later
+  module-import ordering (`react-intl` vs `react/jsx-runtime`) rather than
+  function/application lowering.
+- `tests/tests/src/ExternalShadow.res` still matches its checked-in `.mjs`
+  snapshot exactly after the `Js_var` change, which keeps this slice isolated
+  to external-value application lowering rather than broader shadow/import
+  behavior.
+- The authoritative JS snapshot baseline remains **108 / 657** passing, **0**
+  compile errors, and **549** output diffs after the `Js_var` argument fix.
+- Interpretation:
+  this is a real OCaml-aligned backend improvement in `Js_var` application
+  lowering after optimized lambda. The wrapper totals stay flat because the
+  affected checked-in files still carry later import-order or printer drift,
+  not because the function-call fix was spurious.

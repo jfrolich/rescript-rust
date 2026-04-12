@@ -1581,7 +1581,6 @@ impl LambdaCompiler {
                     scopes,
                     dynamic_import,
                 );
-                let args = self.assemble_external_args_no_splice(arg_types, args);
                 if args.is_empty() {
                     value
                 } else {
@@ -4506,16 +4505,68 @@ mod tests {
             Location::none(),
         );
 
+        let compiled = compiler.compile_expr(&lam);
+        assert!(compiled.prelude.is_empty());
+        assert!(matches!(
+            compiled.expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(ref id)),
+                ..
+            } if id.name() == "process"
+        ));
+    }
+
+    #[test]
+    fn lowers_js_var_calls_with_runtime_args_even_without_external_arg_metadata() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "foo1".to_string(),
+                arg_types: vec![],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsVar {
+                        name: "foo1".to_string(),
+                        external_module_name: None,
+                        scopes: vec![],
+                    }),
+                    obj_params: None,
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![Lambda::Lconst(Constant::Int { i: 10, comment: None })],
+            Location::none(),
+        );
+
         let program = compiler.compile_program(&lam);
         let [stmt] = program.block.as_slice() else {
             panic!("expected a single expression statement");
         };
         match &stmt.desc {
             StatementDesc::Exp(Expression {
-                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                desc: ExpressionDesc::Call(func, args, _),
                 ..
-            }) => assert_eq!(id.name(), "process"),
-            other => panic!("expected a plain global value, got {other:?}"),
+            }) => {
+                assert_eq!(args.len(), 1);
+                assert!(matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.name() == "foo1"
+                ));
+                assert!(matches!(
+                    args[0],
+                    Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 10, .. }),
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected a direct js-var call, got {other:?}"),
         }
     }
 
