@@ -3812,7 +3812,13 @@ impl<'a> RawLambdaConverter<'a> {
                             result.push(Constant::Block {
                                 tag: 0,
                                 tag_info: TagInfo::Tuple,
-                                elements: vec![init_v, Constant::string(id.name())],
+                                elements: vec![
+                                    init_v,
+                                    Constant::string_with_delim(
+                                        id.name(),
+                                        StringDelim::Plain,
+                                    ),
+                                ],
                             });
                         }
                     }
@@ -3829,7 +3835,10 @@ impl<'a> RawLambdaConverter<'a> {
                     result.push(Constant::Block {
                         tag: 0,
                         tag_info: TagInfo::Tuple,
-                        elements: vec![sub_shape, Constant::string(id.name())],
+                        elements: vec![
+                            sub_shape,
+                            Constant::string_with_delim(id.name(), StringDelim::Plain),
+                        ],
                     });
                     env.add_module(id.clone(), md.clone());
                 }
@@ -9664,7 +9673,7 @@ mod tests {
             panic!("expected function shape tuple");
         };
         assert_eq!(s, "u");
-        assert!(delim.is_none());
+        assert!(matches!(delim, Some(StringDelim::Plain)));
         assert!(matches!(
             init_v,
             Constant::Int {

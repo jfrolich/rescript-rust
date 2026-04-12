@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 606/657 (92.2%), 51 parity failures, 174 hunks
+**Status:** 613/657 (93.3%), 44 parity failures, 132 hunks
 
 ## Goal
 
@@ -23,22 +23,21 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **606/657**
-- Parity hunks: **174**
+- Optimized lambda parity: **613/657**
+- Parity hunks: **132**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
-  - `rec_module_test.res`: **12** hunks
   - `record_extension_test.res`: **11** hunks
-  - `recmodule.res`: **11** hunks
   - `exception_raise_test.res`: **11** hunks
   - `js_exception_catch_test.res`: **9** hunks
   - `Stdlib_DictTests.res`: **8** hunks
   - `large_record_duplication_test.res`: **7** hunks
   - `gpr_3142_test.res`: **6** hunks
-  - `rec_module_opt.res`: **6** hunks
   - `chn_test.res`: **5** hunks
   - `UntaggedVariants.res`: **5** hunks
+  - `Stdlib_IntlTests.res`: **4** hunks
+  - `Stdlib_TempTests.res`: **4** hunks
 
 ## Working Rules
 
@@ -52,7 +51,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **51** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
+There are **44** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -105,15 +104,72 @@ Current frontier characteristics:
   - `reactDOM.res`: **exact parity**
   - `return_check.res`: **exact parity**
   - `Stdlib_TempTests.res`: **4 hunks**, so its remaining diffs are now in static-exit numbering rather than nullable/unit FFI wrapping
-- the recursive-module init-shape metadata slice is now landed:
+- the recursive-module init-shape metadata slices are now mostly landed:
   - focused raw guardrail for `recursive_module.res`, `recursive_module_test.res`, `rec_module_test.res`, `rec_module_opt.res`, and `recmodule.res`: **5/5 exact**
-  - those optimized focused diffs are now stamp-only after replacing the `Const_module_alias` shortcut with OCaml's `Pt_constructor("Function", 3, 2)` metadata from `transl_recmodule.ml`
-  - the full exact baseline still counts that cluster and moved up to **174** hunks because the exposed remaining difference is stamp drift, not missing recursive-module shape structure
-- the next visible optimized frontier is the current exact-diff leaders (`record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`, `rec_module_test.res`) plus the recursive-module cluster (`recmodule.res`, `rec_module_opt.res`) and the remaining switch-facing files (`variant.res`, `UntaggedVariants.res`, `switch_string.res`).
+  - the function-slot metadata slice kept OCaml's `Pt_constructor("Function", 3, 2)` behavior from `transl_recmodule.ml`
+  - the recursive-module shape-name delimiter slice now also matches OCaml's `Const_base (Const_string (_, None)) -> Some DNone` lowering path
+  - focused optimized recursive-module diffs are now down to **1** hunk total, all in `recmodule.res`, and that remaining hunk is identifier-stamp drift rather than shape construction
+- the next visible optimized frontier is the current exact-diff leaders (`record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`) plus the remaining switch-facing files (`variant.res`, `UntaggedVariants.res`, `switch_string.res`) and the stamp-heavy exception / `recmodule.res` residuals.
 - a fresh full raw `-drawlambda` rerun after this slice reported **654/657** with **4** hunks across `coercion_module_alias_test.res`, `record_extension_test.res`, and `variant.res`; the focused recursive-module raw slice still stayed exact, so those raw failures look separate from this metadata change and need their own session.
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### recursive-module init-shape names now preserve `Some DNone`
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::recmodule_function_init_shape_keeps_function_constructor_metadata -- --exact
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 600 ./scripts/test_lambda_parity.sh -j1 'recursive_module|recursive_module_test|rec_module_test|rec_module_opt|recmodule'
+timeout 600 ./scripts/test_lambda_parity.sh -j1 --raw 'recursive_module|recursive_module_test|rec_module_test|rec_module_opt|recmodule'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- Optimized lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Optimized lambda parity: **613/657**
+  - Exact hunks: **132**
+- Focused recursive-module optimized slice:
+  - `recursive_module.res`: **exact parity**
+  - `recursive_module_test.res`: **exact parity**
+  - `rec_module_test.res`: **exact parity**
+  - `rec_module_opt.res`: **exact parity**
+  - `recmodule.res`: **1 hunk**
+- Focused recursive-module raw slice: **5/5 exact**
+
+`compiler/ml/transl_recmodule.ml` builds recursive-module init-shape names as
+`Const_base (Const_string (Ident.name id, None))`. `compiler/core/lam_constant_convert.ml`
+then lowers those names through `parse_processed_delim`, so the optimized sexp
+printer sees `Const_string ... (Some DNone)`.
+
+Rust `compiler-rust/src/raw_lambda/convert.rs` was still constructing those
+shape-name strings with `Constant::string(id.name())`, which preserved `delim:
+None` all the way into the optimized lambda dump. Raw `-drawlambda` stayed exact
+because the raw printer ignores delimiter metadata, but optimized sexps kept
+showing the whole recursive-module cluster as mismatched.
+
+Rust now mirrors the OCaml path directly for recursive-module shape names:
+
+- function-value shape tuples use `Constant::string_with_delim(..., StringDelim::Plain)`
+- submodule shape tuples use the same `StringDelim::Plain` construction
+- the existing raw unit test now locks that init-shape metadata to `Some(StringDelim::Plain)`
+
+Authoritative repo-wide baseline moved from:
+
+- **606/657**, **174** hunks
+
+to:
+
+- **613/657**, **132** hunks
+
+This removed the focused failures in `recursive_module.res`,
+`recursive_module_test.res`, `rec_module_test.res`, and `rec_module_opt.res`.
+`recmodule.res` is now down to a single exact hunk that is only identifier-stamp
+drift, so the remaining recursive-module work is no longer shape construction.
 
 ### recursive-module init shapes now keep `Function` constructor metadata
 Ran:
