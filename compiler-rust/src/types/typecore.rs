@@ -11087,7 +11087,6 @@ fn type_record(
             let some_lid = Located::mknoloc(tctx.arena.some_lid());
             let wrapped_loc = typed_expr.exp_loc;
             let wrapped_env = typed_expr.exp_env;
-            label_desc.lbl_optional = false;
             Expression::new(
                 ExpressionDesc::Texp_construct(some_lid.clone(), some_cstr, vec![typed_expr]),
                 wrapped_loc,
@@ -11278,16 +11277,14 @@ fn type_record(
                 );
                 // Build label desc using the raw label's lbl_arg (not instanced)
                 let label_desc = if let Some(env_label) = disambiguated {
-                    let mut desc = env_label.clone();
-                    desc.lbl_optional = false;
-                    desc
+                    env_label.clone()
                 } else {
                     crate::types::LabelDescription {
                         lbl_name: label_name.clone(),
                         lbl_res: record_ty,
                         lbl_arg: option_ty,
                         lbl_mut: label_decl.ld_mutable.clone(),
-                        lbl_optional: false,
+                        lbl_optional: true,
                         lbl_pos: lbl_idx as i32,
                         lbl_all: crate::types::LabelArrayRef(0),
                         lbl_repres: crate::types::RecordRepresentation::RecordRegular,

@@ -1061,29 +1061,46 @@ impl JsPrinter {
                 // Check if this is a record with field names
                 match tag_info {
                     TagInfo::Record { fields, .. } if fields.len() == elements.len() => {
-                        // Output as JS object
-                        self.write_char('{');
-                        for (i, (elem, (field_name, _optional))) in
-                            elements.iter().zip(fields.iter()).enumerate()
-                        {
-                            if i > 0 {
-                                self.write(", ");
+                        if record_uses_array_syntax(fields) {
+                            self.write_char('[');
+                            for (i, elem) in elements.iter().enumerate() {
+                                if i > 0 {
+                                    self.write(", ");
+                                }
+                                self.print_expression(elem, 1);
                             }
-                            self.write(field_name);
-                            self.write(": ");
-                            self.print_expression(elem, 1);
+                            self.write_char(']');
+                        } else {
+                            self.write_char('{');
+                            let mut first = true;
+                            for (elem, (field_name, optional)) in elements.iter().zip(fields.iter())
+                            {
+                                if *optional && is_undefined_literal(elem) {
+                                    continue;
+                                }
+                                if !first {
+                                    self.write(", ");
+                                }
+                                first = false;
+                                self.write(field_name);
+                                self.write(": ");
+                                self.print_expression(elem, 1);
+                            }
+                            self.write_char('}');
                         }
-                        self.write_char('}');
                     }
                     TagInfo::RecordInlined { fields, .. } if fields.len() == elements.len() => {
                         // Output as JS object for inlined records
                         self.write_char('{');
-                        for (i, (elem, (field_name, _optional))) in
-                            elements.iter().zip(fields.iter()).enumerate()
-                        {
-                            if i > 0 {
+                        let mut first = true;
+                        for (elem, (field_name, optional)) in elements.iter().zip(fields.iter()) {
+                            if *optional && is_undefined_literal(elem) {
+                                continue;
+                            }
+                            if !first {
                                 self.write(", ");
                             }
+                            first = false;
                             self.write(field_name);
                             self.write(": ");
                             self.print_expression(elem, 1);
@@ -1338,6 +1355,18 @@ fn deps_program_is_empty(program: &DepsProgram) -> bool {
         && program.side_effect.is_none()
         && program.program.block.is_empty()
         && program.program.exports.is_empty()
+}
+
+fn is_undefined_literal(expr: &Expression) -> bool {
+    matches!(expr.desc, ExpressionDesc::Undefined { .. })
+}
+
+fn record_uses_array_syntax(fields: &[(String, bool)]) -> bool {
+    !fields.is_empty()
+        && fields
+            .iter()
+            .enumerate()
+            .all(|(i, (field_name, _))| field_name == &i.to_string())
 }
 
 fn convert_ident_name(name: &str) -> String {
@@ -1864,5 +1893,41 @@ mod tests {
         ));
 
         assert_eq!(print_expression(&expr), "{TAG: \"Some\", _0: 1}");
+    }
+
+    #[test]
+    fn test_print_record_omits_optional_undefined_fields() {
+        let expr = Expression::new(ExpressionDesc::CamlBlock(
+            vec![
+                Expression::number(Number::int(10)),
+                Expression::undefined(false),
+            ],
+            MutableFlag::Immutable,
+            Box::new(Expression::number(Number::int(0))),
+            TagInfo::record(
+                vec![("x".to_string(), false), ("i".to_string(), true)],
+                crate::parser::ast::MutableFlag::Immutable,
+            ),
+        ));
+
+        assert_eq!(print_expression(&expr), "{x: 10}");
+    }
+
+    #[test]
+    fn test_print_numeric_named_record_as_array() {
+        let expr = Expression::new(ExpressionDesc::CamlBlock(
+            vec![
+                Expression::number(Number::int(1)),
+                Expression::number(Number::int(2)),
+            ],
+            MutableFlag::Immutable,
+            Box::new(Expression::number(Number::int(0))),
+            TagInfo::record(
+                vec![("0".to_string(), false), ("1".to_string(), false)],
+                crate::parser::ast::MutableFlag::Immutable,
+            ),
+        ));
+
+        assert_eq!(print_expression(&expr), "[1, 2]");
     }
 }

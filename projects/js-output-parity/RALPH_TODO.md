@@ -258,6 +258,35 @@ Remaining internal compile errors under the measured wrapper baseline:
   - `cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::simplify::tests::flattens_constant_record_block_bindings_by_name --lib`
   - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/RecordCoercion.res -o /tmp/RecordCoercion.mjs`
   - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+- `compiler-rust/src/types/typecore.rs` now keeps `LabelDescription.lbl_optional`
+  intact for optional record fields after wrapping them in `Some(...)` and after
+  synthesizing omitted optional fields as `None`, matching OCaml's
+  `typecore.ml` behavior. The JS backend can now still see which record fields
+  are optional after type checking instead of treating them as required fields
+  with explicit `undefined` values.
+- `compiler-rust/src/js_ir/printer.rs` now matches the corresponding OCaml
+  `js_dump.ml` record-dump rules more closely:
+  - optional record and inlined-record fields with `undefined` values are
+    omitted from printed object literals
+  - numeric-name records dump with array syntax instead of object-property
+    syntax
+- Verified focused guards for this cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_record_omits_optional_undefined_fields -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_numeric_named_record_as_array -- --exact`
+  - `tests/tests/src/RecordOrObject.res` now emits `let xxi = {x: 10};` instead
+    of `let xxi = {x: 10, i: undefined};`; the remaining drift there is printer
+    formatting only
+  - `tests/tests/src/EmptyRecord.res` now emits `return b ? {n: 0} : {};`
+    instead of `return b ? {n: 0, s: undefined} : {};`; the remaining drift
+    there is later control-flow / formatting shaping, not optional-field
+    presence
+  - previously exact `tests/tests/src/ExternalShadow.res` still matches its
+    checked-in `.mjs` snapshot exactly
+- A follow-up authoritative wrapper rerun after the optional-record metadata fix
+  remained **70 / 657** passing, **0** compile errors, and **587** output
+  diffs. This change is still verified OCaml-aligned because it moves the
+  affected files in the correct direction without regressing the global
+  baseline.
 - `compiler-rust/src/lambda/compile.rs` now lowers the OCaml option-wrapper
   primitive family on the JS backend path instead of dropping those cases to
   `undefined`:
