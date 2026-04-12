@@ -775,6 +775,72 @@ impl<'a> RawLambdaConverter<'a> {
             .max(self.lowered.current_stamp())
     }
 
+    fn sync_matching_stamps(&mut self) {
+        let shared_stamp = self.current_stamp().max(self.type_ctx.current_stamp());
+        self.type_ctx.set_current_time(shared_stamp);
+        self.id_gen.set_current_stamp(shared_stamp);
+        self.lowered.set_current_stamp(shared_stamp);
+    }
+
+    fn compile_matching_with_synced_stamps(
+        &mut self,
+        handler_fun: impl FnOnce() -> RawLambda,
+        arg: RawLambda,
+        pat_act_list: Vec<(Pattern, RawLambda)>,
+        partial: Partial,
+    ) -> RawLambda {
+        self.sync_matching_stamps();
+        let lambda = full_matching::compile_matching(
+            self.type_ctx,
+            self.arena,
+            handler_fun,
+            arg,
+            pat_act_list,
+            partial,
+            &mut self.next_static_raise,
+        );
+        self.sync_matching_stamps();
+        lambda
+    }
+
+    fn for_trywith_with_synced_stamps(
+        &mut self,
+        param: RawLambda,
+        pat_act_list: Vec<(Pattern, RawLambda)>,
+    ) -> RawLambda {
+        self.sync_matching_stamps();
+        let lambda = full_matching::for_trywith(
+            self.type_ctx,
+            self.arena,
+            param,
+            pat_act_list,
+            &mut self.next_static_raise,
+        );
+        self.sync_matching_stamps();
+        lambda
+    }
+
+    fn for_multiple_match_with_synced_stamps(
+        &mut self,
+        loc: Location,
+        paraml: Vec<RawLambda>,
+        pat_act_list: Vec<(Pattern, RawLambda)>,
+        partial: Partial,
+    ) -> RawLambda {
+        self.sync_matching_stamps();
+        let lambda = full_matching::for_multiple_match(
+            self.type_ctx,
+            self.arena,
+            loc,
+            paraml,
+            pat_act_list,
+            partial,
+            &mut self.next_static_raise,
+        );
+        self.sync_matching_stamps();
+        lambda
+    }
+
     #[inline]
     fn loc(&self, idx: LocIdx) -> Location {
         self.arena.to_location(idx)
@@ -5359,15 +5425,7 @@ impl<'a> RawLambdaConverter<'a> {
         // (See OCaml's translcore.ml lines 1259-1260)
         if let ExpressionDesc::Texp_tuple(argl) = &scrut.exp_desc {
             let paraml: Vec<RawLambda> = argl.iter().map(|a| self.convert_expr_raw(a)).collect();
-            return full_matching::for_multiple_match(
-                self.type_ctx,
-                self.arena,
-                loc,
-                paraml,
-                pat_act_list,
-                partial,
-                &mut self.next_static_raise,
-            );
+            return self.for_multiple_match_with_synced_stamps(loc, paraml, pat_act_list, partial);
         }
 
         let scrut_lam = self.convert_expr_raw(scrut);
@@ -5399,15 +5457,7 @@ impl<'a> RawLambdaConverter<'a> {
                 loc: loc_for_handler,
             })
         };
-        full_matching::compile_matching(
-            self.type_ctx,
-            self.arena,
-            handler_fun,
-            scrut_lam,
-            pat_act_list,
-            partial,
-            &mut self.next_static_raise,
-        )
+        self.compile_matching_with_synced_stamps(handler_fun, scrut_lam, pat_act_list, partial)
     }
 
     /// Compile a Texp_match with exception cases.
@@ -5473,14 +5523,11 @@ impl<'a> RawLambdaConverter<'a> {
                     loc: loc_for_handler,
                 })
             };
-            full_matching::compile_matching(
-                self.type_ctx,
-                self.arena,
+            self.compile_matching_with_synced_stamps(
                 handler_fun,
                 RawLambda::var(val_id.clone()),
                 pat_act_list,
                 partial,
-                &mut self.next_static_raise,
             )
         };
 
@@ -5505,13 +5552,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Matches OCaml's Matching.for_trywith.
     fn compile_trywith_handler_raw(&mut self, exn_id: &Ident, exn_cases: &[Case]) -> RawLambda {
         let pat_act_list = self.cases_to_pat_act_list(exn_cases);
-        full_matching::for_trywith(
-            self.type_ctx,
-            self.arena,
-            RawLambda::var(exn_id.clone()),
-            pat_act_list,
-            &mut self.next_static_raise,
-        )
+        self.for_trywith_with_synced_stamps(RawLambda::var(exn_id.clone()), pat_act_list)
     }
 
     fn compile_irrefutable_match_raw(
@@ -8639,14 +8680,11 @@ impl<'a> RawLambdaConverter<'a> {
                                     loc: Location::none(),
                                 })
                             };
-                            acc = full_matching::compile_matching(
-                                self.type_ctx,
-                                self.arena,
+                            acc = self.compile_matching_with_synced_stamps(
                                 handler_fun,
                                 value,
                                 pat_act_list,
                                 Partial::Partial,
-                                &mut self.next_static_raise,
                             );
                         }
                     }
@@ -10081,6 +10119,33 @@ mod tests {
         assert!(second_params.is_empty());
         assert_eq!(else_exit_id(&second_case), Some(2));
         assert_eq!(else_exit_id(&last_case), Some(1));
+    }
+
+    #[test]
+    fn sync_matching_stamps_advances_raw_converter_after_matching_allocations() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::with_start_stamp(100);
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let mut converter = RawLambdaConverter::with_start_stamp(&arena, &ctx, &env, 10);
+
+        let pre_match_raw = converter.id_gen.create("raw_pre");
+        assert_eq!(pre_match_raw.stamp(), 11);
+
+        ctx.set_current_time(200);
+        converter.sync_matching_stamps();
+
+        let first_match_id = ctx.create_ident("match");
+        let second_match_id = ctx.create_ident("match");
+        assert_eq!(first_match_id.stamp(), 201);
+        assert_eq!(second_match_id.stamp(), 202);
+
+        converter.sync_matching_stamps();
+        assert_eq!(converter.current_stamp(), 202);
+        assert_eq!(converter.lowered.current_stamp(), 202);
+
+        let post_match_raw = converter.id_gen.create("raw_post");
+        assert_eq!(post_match_raw.stamp(), 203);
     }
 
     #[test]

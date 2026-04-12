@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 653/657 (99.4%), 3 parity failures, 6 hunks, 1 Rust timeout (`Import.res`)
+**Status:** 654/657 (99.5%), 2 parity failures, 5 hunks, 1 Rust timeout (`Import.res`)
 
 ## Goal
 
@@ -23,26 +23,19 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **656/657**
-- Optimized lambda parity: **653/657**
-- Parity hunks: **6**
+- Optimized lambda parity: **654/657**
+- Parity hunks: **5**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
+  - `inner_call.res`: **3** hunks
   - `coercion_module_alias_test.res`: **2** hunks
-  - `test_non_export.res`: **2** hunks
-  - `exception_raise_test.res`: **2** hunks
-  - `inner_call.res`: **2** hunks
 - Rust timeout in the current authoritative run:
   - `Import.res`
 - Full raw `-drawlambda` baseline has not been re-run across all 657 files after this slice.
-- Focused raw guard after this slice on the module/import alias cluster:
-  - `DynamicImportModuleWithAlias.res`
-  - `Import.res`
-  - `global_module_alias_test.res`
-  - `module_alias_test.res`
-  - `test_include.res`
-  - `test_non_export.res`
-  - **8/9 exact**, with only `coercion_module_alias_test.res` still failing (**2** hunks)
+- Focused raw guard after this slice on the remaining exception/control-flow cluster:
+  - `exception_raise_test.res`: **exact parity**
+  - `inner_call.res`: **1** hunk
 
 ## Working Rules
 
@@ -56,16 +49,15 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **3** remaining optimized-lambda parity failures on the current worktree, plus **1** Rust timeout on `Import.res`.
+There are **2** remaining optimized-lambda parity failures on the current worktree, plus **1** Rust timeout on `Import.res`.
 
 Current frontier characteristics:
-- fresh 2026-04-12 reruns on this worktree put the full optimized baseline at **653/657**, **6** hunks, with a Rust timeout on `Import.res`; older `647/657` and `649/657` notes below are historical.
+- fresh 2026-04-12 reruns on this worktree put the full optimized baseline at **654/657**, **5** hunks, with a Rust timeout on `Import.res`; older `647/657`, `649/657`, and `653/657` notes below are historical.
 - newly exact after the alias-`simple_for_let` static-exit allocation fix:
   - `gpr_5557.res`
   - `option_repr_test.res`
 - current remaining optimized failures:
   - `coercion_module_alias_test.res`
-  - `exception_raise_test.res`
   - `inner_call.res`
 - current Rust timeout:
   - `Import.res`
@@ -171,7 +163,9 @@ Current frontier characteristics:
     - `recmodule.res`: **exact parity**
     - `functors.res`: **exact parity**
   - `raw_lambda::lower` now matches OCaml's module-alias collapse rule more closely: only a field-selection prefix starting at slot `0` collapses to the source module; non-prefix slices such as `presentLight` stay materialized as `Blk_module`
-- the next visible optimized frontier is the current exact-diff leaders (`exception_raise_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`, `Stdlib_TempTests.res`, `UntaggedVariants.res`) plus the remaining raw-upstream exact-exit cluster (`gpr_5557.res`, `option_repr_test.res`) and the remaining raw-stage outlier (`coercion_module_alias_test.res`).
+- the next visible optimized frontier is now just the two remaining exact-diff leaders:
+  - `inner_call.res`: **3** hunks on the current authoritative baseline
+  - `coercion_module_alias_test.res`: **2** hunks on the current authoritative baseline
 - focused raw guards after this slice all went exact:
   - `equal_exception_test.res`
   - `js_exception_catch_test.res`
@@ -183,6 +177,52 @@ Current frontier characteristics:
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Latest Session Findings
+
+### matching/raw-lambda stamp sources must stay synchronized across the lowering boundary
+Ran:
+
+```bash
+cargo test --manifest-path compiler-rust/Cargo.toml driver::tests::max_lambda_input_stamp_includes_typed_paths_and_signature_items -- --exact
+timeout 180 ./scripts/test_lambda_parity.sh -j1 --raw 'exception_raise_test|inner_call'
+timeout 180 ./scripts/test_lambda_parity.sh -j1 'exception_raise_test|inner_call'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- Focused raw exception/control-flow subset: **1/2 exact**, with only `inner_call.res` still failing (**1** hunk)
+- Focused optimized exception/control-flow subset: **1/2 exact**, with only `inner_call.res` still failing (**3** hunks)
+- Full optimized baseline:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **656/657**
+  - Optimized lambda parity: **654/657**
+  - Exact hunks: **5**
+  - Rust timeout: `Import.res`
+
+This slice fixed the hidden stamp-collision bug behind
+`exception_raise_test.res`:
+
+- `driver.rs` now computes the maximum stamp already present in the typed
+  lambda input and seeds lambda lowering from that floor instead of only
+  trusting `TypeContext`'s current stamp
+- `raw_lambda::convert::RawLambdaConverter` now synchronizes the fresh-id
+  streams used by:
+  - raw-lambda conversion
+  - the nested `LambdaConverter`
+  - `full_matching` / `Matching.for_trywith`, which allocate through
+    `TypeContext`
+
+Without that synchronization, matcher-generated binders and raw-converter
+binders could reuse the same numeric stamp, which broke `Ident.same`
+comparisons inside exception lowering. The visible symptom in
+`exception_raise_test.res` was the wrong `field:ext/1` vs `field:ext/2`
+binder order in the raw lambda and the optimized lambda tail. Keeping those
+stamp sources monotonic removed `exception_raise_test.res` from both raw and
+optimized parity, leaving the authoritative frontier at:
+
+- `coercion_module_alias_test.res`
+- `inner_call.res`
+- `Import.res` timeout
 
 ### module-path normalization must distinguish persistent flattened aliases from local alias binders
 Ran:

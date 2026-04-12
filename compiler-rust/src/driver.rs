@@ -62,6 +62,685 @@ fn has_react_component_with_props_attr(
     })
 }
 
+fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structure) -> i32 {
+    use crate::ident::Ident;
+    use crate::types::decl::{
+        ConstructorArguments as DeclConstructorArguments, ModuleType as DeclModuleType,
+        SignatureItem as DeclSignatureItem, TypeKind as DeclTypeKind,
+    };
+    use crate::types::path::Path;
+    use crate::types::typedtree::{
+        Case, ConstructorArgument, ExpExtra, Expression, ExpressionDesc, ExtensionConstructor,
+        ExtensionConstructorKind, FunctionParam, FunctionParamPattern, IncludeDescription,
+        MethKind, ModuleBinding, ModuleCoercion, ModuleExpr, ModuleExprDesc, ModuleType,
+        ModuleTypeConstraint, ModuleTypeDeclaration, ModuleTypeDesc, OpenDeclaration, PatExtra,
+        Pattern, PatternDesc, RowFieldDesc, Structure, StructureItemDesc,
+        TypedConstructorArguments, TypedCoreType, TypedCoreTypeDesc, TypedSignature,
+        TypedSignatureItemDesc, TypedTypeDeclaration, TypedTypeKind, TypedValueDescription,
+        ValueBinding, WithConstraint,
+    };
+
+    fn visit_ident(max_stamp: &mut i32, id: &Ident) {
+        *max_stamp = (*max_stamp).max(id.stamp());
+    }
+
+    fn visit_path(max_stamp: &mut i32, path: &Path) {
+        match path {
+            Path::Pident(id) => visit_ident(max_stamp, id),
+            Path::Pdot(prefix, _, _) => visit_path(max_stamp, prefix),
+            Path::Papply(functor, arg) => {
+                visit_path(max_stamp, functor);
+                visit_path(max_stamp, arg);
+            }
+        }
+    }
+
+    fn visit_typed_core_type(max_stamp: &mut i32, core_type: &TypedCoreType) {
+        match &core_type.ctyp_desc {
+            TypedCoreTypeDesc::Ttyp_var(_) => {}
+            TypedCoreTypeDesc::Ttyp_arrow(arg, ret, _) => {
+                visit_typed_core_type(max_stamp, &arg.typ);
+                visit_typed_core_type(max_stamp, ret);
+            }
+            TypedCoreTypeDesc::Ttyp_tuple(items) => {
+                for item in items {
+                    visit_typed_core_type(max_stamp, item);
+                }
+            }
+            TypedCoreTypeDesc::Ttyp_constr(path, _, args) => {
+                visit_path(max_stamp, path);
+                for arg in args {
+                    visit_typed_core_type(max_stamp, arg);
+                }
+            }
+            TypedCoreTypeDesc::Ttyp_object(fields, _) => {
+                for field in fields {
+                    match &field.of_desc {
+                        crate::types::typedtree::ObjectFieldDesc::OTtag(_, ty)
+                        | crate::types::typedtree::ObjectFieldDesc::OTinherit(ty) => {
+                            visit_typed_core_type(max_stamp, ty);
+                        }
+                    }
+                }
+            }
+            TypedCoreTypeDesc::Ttyp_poly(_, inner)
+            | TypedCoreTypeDesc::Ttyp_alias(inner, _) => {
+                visit_typed_core_type(max_stamp, inner);
+            }
+            TypedCoreTypeDesc::Ttyp_variant(fields, _, _) => {
+                for field in fields {
+                    match &field.rf_desc {
+                        RowFieldDesc::Rtag(_, _, tys) => {
+                            for ty in tys {
+                                visit_typed_core_type(max_stamp, ty);
+                            }
+                        }
+                        RowFieldDesc::Rinherit(ty) => visit_typed_core_type(max_stamp, ty),
+                    }
+                }
+            }
+            TypedCoreTypeDesc::Ttyp_package(pkg) => {
+                visit_path(max_stamp, &pkg.pack_path);
+                for (_, ty) in &pkg.pack_fields {
+                    visit_typed_core_type(max_stamp, ty);
+                }
+            }
+        }
+    }
+
+    fn visit_pattern(max_stamp: &mut i32, pattern: &Pattern) {
+        match &pattern.pat_desc {
+            PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => {}
+            PatternDesc::Tpat_var(id, _) => visit_ident(max_stamp, id),
+            PatternDesc::Tpat_alias(inner, id, _) => {
+                visit_pattern(max_stamp, inner);
+                visit_ident(max_stamp, id);
+            }
+            PatternDesc::Tpat_tuple(items)
+            | PatternDesc::Tpat_construct(_, _, items)
+            | PatternDesc::Tpat_array(items) => {
+                for item in items {
+                    visit_pattern(max_stamp, item);
+                }
+            }
+            PatternDesc::Tpat_variant(_, inner, _) => {
+                if let Some(inner) = inner {
+                    visit_pattern(max_stamp, inner);
+                }
+            }
+            PatternDesc::Tpat_record(fields, _) => {
+                for (_, _, pattern, _) in fields {
+                    visit_pattern(max_stamp, pattern);
+                }
+            }
+            PatternDesc::Tpat_or(left, right, _) => {
+                visit_pattern(max_stamp, left);
+                visit_pattern(max_stamp, right);
+            }
+        }
+
+        for (extra, _, _) in &pattern.pat_extra {
+            match extra {
+                PatExtra::Tpat_constraint(core_type) => {
+                    visit_typed_core_type(max_stamp, core_type);
+                }
+                PatExtra::Tpat_type(path, _) | PatExtra::Tpat_open(path, _, _) => {
+                    visit_path(max_stamp, path);
+                }
+                PatExtra::Tpat_unpack => {}
+            }
+        }
+    }
+
+    fn visit_case(max_stamp: &mut i32, case: &Case) {
+        visit_pattern(max_stamp, &case.c_lhs);
+        if let Some(guard) = &case.c_guard {
+            visit_expression(max_stamp, guard);
+        }
+        visit_expression(max_stamp, &case.c_rhs);
+    }
+
+    fn visit_function_param(max_stamp: &mut i32, param: &FunctionParam) {
+        visit_ident(max_stamp, &param.param_id);
+        if let Some(default) = &param.default {
+            visit_expression(max_stamp, default);
+        }
+        match &param.pat {
+            FunctionParamPattern::Simple(pattern) => visit_pattern(max_stamp, pattern),
+            FunctionParamPattern::Nested(params) => {
+                for nested in params {
+                    visit_function_param(max_stamp, nested);
+                }
+            }
+        }
+    }
+
+    fn visit_expression(max_stamp: &mut i32, expr: &Expression) {
+        match &expr.exp_desc {
+            ExpressionDesc::Texp_ident(path, _, _) => visit_path(max_stamp, path),
+            ExpressionDesc::Texp_constant(_) => {}
+            ExpressionDesc::Texp_let(_, bindings, body) => {
+                for binding in bindings {
+                    visit_value_binding(max_stamp, binding);
+                }
+                visit_expression(max_stamp, body);
+            }
+            ExpressionDesc::Texp_function { params, body, .. } => {
+                for param in params {
+                    visit_function_param(max_stamp, param);
+                }
+                for case in body {
+                    visit_case(max_stamp, case);
+                }
+            }
+            ExpressionDesc::Texp_apply { funct, args, .. } => {
+                visit_expression(max_stamp, funct);
+                for arg in args {
+                    if let Some(expr) = &arg.expression {
+                        visit_expression(max_stamp, expr);
+                    }
+                }
+            }
+            ExpressionDesc::Texp_match(scrutinee, cases, exn_cases, _) => {
+                visit_expression(max_stamp, scrutinee);
+                for case in cases {
+                    visit_case(max_stamp, case);
+                }
+                for case in exn_cases {
+                    visit_case(max_stamp, case);
+                }
+            }
+            ExpressionDesc::Texp_try(body, cases) => {
+                visit_expression(max_stamp, body);
+                for case in cases {
+                    visit_case(max_stamp, case);
+                }
+            }
+            ExpressionDesc::Texp_tuple(items)
+            | ExpressionDesc::Texp_construct(_, _, items)
+            | ExpressionDesc::Texp_array(items) => {
+                for item in items {
+                    visit_expression(max_stamp, item);
+                }
+            }
+            ExpressionDesc::Texp_variant(_, arg) => {
+                if let Some(arg) = arg {
+                    visit_expression(max_stamp, arg);
+                }
+            }
+            ExpressionDesc::Texp_record {
+                fields,
+                extended_expression,
+            } => {
+                for (_, _, field, _) in fields {
+                    match field {
+                        crate::types::typedtree::RecordLabelDefinition::Kept(_) => {}
+                        crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
+                            visit_expression(max_stamp, expr);
+                        }
+                    }
+                }
+                if let Some(base) = extended_expression {
+                    visit_expression(max_stamp, base);
+                }
+            }
+            ExpressionDesc::Texp_field(expr, _, _) | ExpressionDesc::Texp_assert(expr) => {
+                visit_expression(max_stamp, expr);
+            }
+            ExpressionDesc::Texp_setfield(lhs, _, _, rhs)
+            | ExpressionDesc::Texp_sequence(lhs, rhs) => {
+                visit_expression(max_stamp, lhs);
+                visit_expression(max_stamp, rhs);
+            }
+            ExpressionDesc::Texp_ifthenelse(cond, then_, else_) => {
+                visit_expression(max_stamp, cond);
+                visit_expression(max_stamp, then_);
+                if let Some(else_) = else_ {
+                    visit_expression(max_stamp, else_);
+                }
+            }
+            ExpressionDesc::Texp_while(cond, body) => {
+                visit_expression(max_stamp, cond);
+                visit_expression(max_stamp, body);
+            }
+            ExpressionDesc::Texp_for(id, pattern, lo, hi, _, body) => {
+                visit_ident(max_stamp, id);
+                visit_pattern(max_stamp, pattern);
+                visit_expression(max_stamp, lo);
+                visit_expression(max_stamp, hi);
+                visit_expression(max_stamp, body);
+            }
+            ExpressionDesc::Texp_send(expr, meth, maybe_arg) => {
+                visit_expression(max_stamp, expr);
+                if let MethKind::Tmeth_val(id) = meth {
+                    visit_ident(max_stamp, id);
+                }
+                if let Some(arg) = maybe_arg {
+                    visit_expression(max_stamp, arg);
+                }
+            }
+            ExpressionDesc::Texp_letmodule(id, _, module_expr, body) => {
+                visit_ident(max_stamp, id);
+                visit_module_expr(max_stamp, module_expr);
+                visit_expression(max_stamp, body);
+            }
+            ExpressionDesc::Texp_letexception(ext, body) => {
+                visit_extension_constructor(max_stamp, ext);
+                visit_expression(max_stamp, body);
+            }
+            ExpressionDesc::Texp_pack(module_expr) => visit_module_expr(max_stamp, module_expr),
+            ExpressionDesc::Texp_extension_constructor(_, path) => visit_path(max_stamp, path),
+        }
+
+        for (extra, _, _) in &expr.exp_extra {
+            match extra {
+                ExpExtra::Texp_constraint(core_type) | ExpExtra::Texp_coerce(core_type) => {
+                    visit_typed_core_type(max_stamp, core_type);
+                }
+                ExpExtra::Texp_open(_, path, _, _) => visit_path(max_stamp, path),
+                ExpExtra::Texp_newtype(_) => {}
+            }
+        }
+    }
+
+    fn visit_extension_constructor(max_stamp: &mut i32, ext: &ExtensionConstructor) {
+        visit_ident(max_stamp, &ext.ext_id);
+        match &ext.ext_kind {
+            ExtensionConstructorKind::Text_decl(args, result) => {
+                match args {
+                    ConstructorArgument::Cstr_tuple(types) => {
+                        for ty in types {
+                            visit_typed_core_type(max_stamp, ty);
+                        }
+                    }
+                    ConstructorArgument::Cstr_record(labels) => {
+                        for label in labels {
+                            visit_ident(max_stamp, &label.ld_id);
+                            visit_typed_core_type(max_stamp, &label.ld_type);
+                        }
+                    }
+                }
+                if let Some(result) = result {
+                    visit_typed_core_type(max_stamp, result);
+                }
+            }
+            ExtensionConstructorKind::Text_rebind(path, _) => visit_path(max_stamp, path),
+        }
+    }
+
+    fn visit_typed_type_decl(max_stamp: &mut i32, decl: &TypedTypeDeclaration) {
+        visit_ident(max_stamp, &decl.typ_id);
+        for (param, _) in &decl.typ_params {
+            visit_typed_core_type(max_stamp, param);
+        }
+        for (lhs, rhs, _) in &decl.typ_cstrs {
+            visit_typed_core_type(max_stamp, lhs);
+            visit_typed_core_type(max_stamp, rhs);
+        }
+        if let Some(manifest) = &decl.typ_manifest {
+            visit_typed_core_type(max_stamp, manifest);
+        }
+        match &decl.typ_kind {
+            TypedTypeKind::Ttype_abstract | TypedTypeKind::Ttype_open => {}
+            TypedTypeKind::Ttype_variant(constructors) => {
+                for constructor in constructors {
+                    visit_ident(max_stamp, &constructor.cd_id);
+                    match &constructor.cd_args {
+                        TypedConstructorArguments::Cstr_tuple(types) => {
+                            for ty in types {
+                                visit_typed_core_type(max_stamp, ty);
+                            }
+                        }
+                        TypedConstructorArguments::Cstr_record(labels) => {
+                            for label in labels {
+                                visit_ident(max_stamp, &label.ld_id);
+                                visit_typed_core_type(max_stamp, &label.ld_type);
+                            }
+                        }
+                    }
+                    if let Some(result) = &constructor.cd_res {
+                        visit_typed_core_type(max_stamp, result);
+                    }
+                }
+            }
+            TypedTypeKind::Ttype_record(labels) => {
+                for label in labels {
+                    visit_ident(max_stamp, &label.ld_id);
+                    visit_typed_core_type(max_stamp, &label.ld_type);
+                }
+            }
+        }
+    }
+
+    fn visit_open_decl(max_stamp: &mut i32, open_decl: &OpenDeclaration) {
+        visit_path(max_stamp, &open_decl.open_path);
+    }
+
+    fn visit_typed_value_desc(max_stamp: &mut i32, value_desc: &TypedValueDescription) {
+        visit_ident(max_stamp, &value_desc.val_id);
+        visit_typed_core_type(max_stamp, &value_desc.val_desc);
+    }
+
+    fn visit_module_type_constraint(max_stamp: &mut i32, constraint_: &ModuleTypeConstraint) {
+        match constraint_ {
+            ModuleTypeConstraint::Tmodtype_explicit(module_type) => {
+                visit_module_type(max_stamp, module_type);
+            }
+            ModuleTypeConstraint::Tmodtype_implicit => {}
+        }
+    }
+
+    fn visit_module_coercion(max_stamp: &mut i32, coercion: &ModuleCoercion) {
+        match coercion {
+            ModuleCoercion::Tcoerce_none => {}
+            ModuleCoercion::Tcoerce_structure(pos_cc_list, id_pos_list, _) => {
+                for (_, coercion) in pos_cc_list {
+                    visit_module_coercion(max_stamp, coercion);
+                }
+                for (id, _, coercion) in id_pos_list {
+                    visit_ident(max_stamp, id);
+                    visit_module_coercion(max_stamp, coercion);
+                }
+            }
+            ModuleCoercion::Tcoerce_functor(arg, result) => {
+                visit_module_coercion(max_stamp, arg);
+                visit_module_coercion(max_stamp, result);
+            }
+            ModuleCoercion::Tcoerce_primitive(primitive) => {
+                visit_ident(max_stamp, &primitive.pc_id);
+            }
+            ModuleCoercion::Tcoerce_alias(_, path, coercion) => {
+                visit_path(max_stamp, path);
+                visit_module_coercion(max_stamp, coercion);
+            }
+        }
+    }
+
+    fn visit_module_type(max_stamp: &mut i32, module_type: &ModuleType) {
+        match &module_type.mty_desc {
+            ModuleTypeDesc::Tmty_ident(path, _) | ModuleTypeDesc::Tmty_alias(path, _) => {
+                visit_path(max_stamp, path);
+            }
+            ModuleTypeDesc::Tmty_signature(signature) => {
+                visit_typed_signature(max_stamp, signature);
+            }
+            ModuleTypeDesc::Tmty_functor(param, _, param_type, result) => {
+                visit_ident(max_stamp, param);
+                if let Some(param_type) = param_type {
+                    visit_module_type(max_stamp, param_type);
+                }
+                visit_module_type(max_stamp, result);
+            }
+            ModuleTypeDesc::Tmty_with(module_type, constraints) => {
+                visit_module_type(max_stamp, module_type);
+                for (path, _, constraint_) in constraints {
+                    visit_path(max_stamp, path);
+                    match constraint_ {
+                        WithConstraint::Twith_type(type_decl)
+                        | WithConstraint::Twith_typesubst(type_decl) => {
+                            visit_typed_type_decl(max_stamp, type_decl);
+                        }
+                        WithConstraint::Twith_module(path, _)
+                        | WithConstraint::Twith_modsubst(path, _) => {
+                            visit_path(max_stamp, path);
+                        }
+                    }
+                }
+            }
+            ModuleTypeDesc::Tmty_typeof(module_expr) => visit_module_expr(max_stamp, module_expr),
+            ModuleTypeDesc::Tmty_placeholder => {}
+        }
+    }
+
+    fn visit_typed_module_decl(
+        max_stamp: &mut i32,
+        module_decl: &crate::types::typedtree::TypedModuleDeclaration,
+    ) {
+        visit_ident(max_stamp, &module_decl.md_id);
+        visit_module_type(max_stamp, &module_decl.md_type);
+    }
+
+    fn visit_module_binding(max_stamp: &mut i32, binding: &ModuleBinding) {
+        visit_ident(max_stamp, &binding.mb_id);
+        visit_module_expr(max_stamp, &binding.mb_expr);
+    }
+
+    fn visit_include_description(max_stamp: &mut i32, include_desc: &IncludeDescription) {
+        visit_module_type(max_stamp, &include_desc.incl_mod);
+        visit_decl_signature(max_stamp, &include_desc.incl_type);
+    }
+
+    fn visit_module_type_decl(max_stamp: &mut i32, module_type_decl: &ModuleTypeDeclaration) {
+        visit_ident(max_stamp, &module_type_decl.mtd_id);
+        if let Some(module_type) = &module_type_decl.mtd_type {
+            visit_module_type(max_stamp, module_type);
+        }
+    }
+
+    fn visit_typed_signature(max_stamp: &mut i32, signature: &TypedSignature) {
+        for item in &signature.sig_items {
+            match &item.sig_desc {
+                TypedSignatureItemDesc::Tsig_value(value_desc) => {
+                    visit_typed_value_desc(max_stamp, value_desc);
+                }
+                TypedSignatureItemDesc::Tsig_type(_, decls) => {
+                    for decl in decls {
+                        visit_typed_type_decl(max_stamp, decl);
+                    }
+                }
+                TypedSignatureItemDesc::Tsig_typext(type_ext) => {
+                    visit_path(max_stamp, &type_ext.tyext_path);
+                    for (param, _) in &type_ext.tyext_params {
+                        visit_typed_core_type(max_stamp, param);
+                    }
+                    for ext in &type_ext.tyext_constructors {
+                        visit_extension_constructor(max_stamp, ext);
+                    }
+                }
+                TypedSignatureItemDesc::Tsig_exception(ext) => {
+                    visit_extension_constructor(max_stamp, ext);
+                }
+                TypedSignatureItemDesc::Tsig_module(module_decl) => {
+                    visit_typed_module_decl(max_stamp, module_decl);
+                }
+                TypedSignatureItemDesc::Tsig_recmodule(module_decls) => {
+                    for module_decl in module_decls {
+                        visit_typed_module_decl(max_stamp, module_decl);
+                    }
+                }
+                TypedSignatureItemDesc::Tsig_modtype(module_type_decl) => {
+                    visit_module_type_decl(max_stamp, module_type_decl);
+                }
+                TypedSignatureItemDesc::Tsig_open(open_decl) => visit_open_decl(max_stamp, open_decl),
+                TypedSignatureItemDesc::Tsig_include(include_desc) => {
+                    visit_include_description(max_stamp, include_desc);
+                }
+                TypedSignatureItemDesc::Tsig_attribute(_) => {}
+            }
+        }
+    }
+
+    fn visit_module_expr(max_stamp: &mut i32, module_expr: &ModuleExpr) {
+        match &module_expr.mod_desc {
+            ModuleExprDesc::Tmod_ident(path, _) => visit_path(max_stamp, path),
+            ModuleExprDesc::Tmod_structure(structure) => visit_structure(max_stamp, structure),
+            ModuleExprDesc::Tmod_apply(functor, arg, coercion) => {
+                visit_module_expr(max_stamp, functor);
+                visit_module_expr(max_stamp, arg);
+                visit_module_coercion(max_stamp, coercion);
+            }
+            ModuleExprDesc::Tmod_functor(param, _, param_type, body) => {
+                visit_ident(max_stamp, param);
+                if let Some(param_type) = param_type {
+                    visit_module_type(max_stamp, param_type);
+                }
+                visit_module_expr(max_stamp, body);
+            }
+            ModuleExprDesc::Tmod_constraint(module_expr, module_type, constraint_, coercion) => {
+                visit_module_expr(max_stamp, module_expr);
+                visit_module_type(max_stamp, module_type);
+                visit_module_type_constraint(max_stamp, constraint_);
+                visit_module_coercion(max_stamp, coercion);
+            }
+            ModuleExprDesc::Tmod_unpack(expr, module_type) => {
+                visit_expression(max_stamp, expr);
+                visit_module_type(max_stamp, module_type);
+            }
+        }
+    }
+
+    fn visit_value_binding(max_stamp: &mut i32, binding: &ValueBinding) {
+        visit_pattern(max_stamp, &binding.vb_pat);
+        visit_expression(max_stamp, &binding.vb_expr);
+    }
+
+    fn visit_decl_module_type(max_stamp: &mut i32, module_type: &DeclModuleType) {
+        match module_type {
+            DeclModuleType::MtyIdent(path) | DeclModuleType::MtyAlias(_, path) => {
+                visit_path(max_stamp, path);
+            }
+            DeclModuleType::MtySignature(signature) => visit_decl_signature(max_stamp, signature),
+            DeclModuleType::MtyFunctor {
+                param,
+                param_type,
+                result,
+            } => {
+                visit_ident(max_stamp, param);
+                if let Some(param_type) = param_type {
+                    visit_decl_module_type(max_stamp, param_type);
+                }
+                visit_decl_module_type(max_stamp, result);
+            }
+        }
+    }
+
+    fn visit_decl_type_decl(
+        max_stamp: &mut i32,
+        type_decl: &crate::types::decl::TypeDeclaration,
+    ) {
+        if let Some(path) = &type_decl.type_path {
+            visit_path(max_stamp, path);
+        }
+        match &type_decl.type_kind {
+            DeclTypeKind::TypeAbstract | DeclTypeKind::TypeOpen => {}
+            DeclTypeKind::TypeRecord(labels, _) => {
+                for label in labels {
+                    visit_ident(max_stamp, &label.ld_id);
+                }
+            }
+            DeclTypeKind::TypeVariant(constructors) => {
+                for constructor in constructors {
+                    visit_ident(max_stamp, &constructor.cd_id);
+                    if let DeclConstructorArguments::CstrRecord(labels) = &constructor.cd_args {
+                        for label in labels {
+                            visit_ident(max_stamp, &label.ld_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn visit_decl_extension_constructor(
+        max_stamp: &mut i32,
+        ext: &crate::types::decl::ExtensionConstructor,
+    ) {
+        visit_path(max_stamp, &ext.ext_type_path);
+        if let DeclConstructorArguments::CstrRecord(labels) = &ext.ext_args {
+            for label in labels {
+                visit_ident(max_stamp, &label.ld_id);
+            }
+        }
+    }
+
+    fn visit_decl_signature(max_stamp: &mut i32, signature: &[DeclSignatureItem]) {
+        for item in signature {
+            match item {
+                DeclSignatureItem::SigValue(id, value_desc) => {
+                    visit_ident(max_stamp, id);
+                    if let Some(path) = &value_desc.val_path {
+                        visit_path(max_stamp, path);
+                    }
+                }
+                DeclSignatureItem::SigType(id, type_decl, _) => {
+                    visit_ident(max_stamp, id);
+                    visit_decl_type_decl(max_stamp, type_decl);
+                }
+                DeclSignatureItem::SigTypext(id, ext, _) => {
+                    visit_ident(max_stamp, id);
+                    visit_decl_extension_constructor(max_stamp, ext);
+                }
+                DeclSignatureItem::SigModule(id, module_decl, _) => {
+                    visit_ident(max_stamp, id);
+                    if let Some(path) = &module_decl.md_path {
+                        visit_path(max_stamp, path);
+                    }
+                    visit_decl_module_type(max_stamp, &module_decl.md_type);
+                }
+                DeclSignatureItem::SigModtype(id, module_type_decl) => {
+                    visit_ident(max_stamp, id);
+                    if let Some(module_type) = &module_type_decl.mtd_type {
+                        visit_decl_module_type(max_stamp, module_type);
+                    }
+                }
+                DeclSignatureItem::SigClass | DeclSignatureItem::SigClassType => {}
+            }
+        }
+    }
+
+    fn visit_structure(max_stamp: &mut i32, structure: &Structure) {
+        for item in &structure.str_items {
+            match &item.str_desc {
+                StructureItemDesc::Tstr_eval(expr, _) => visit_expression(max_stamp, expr),
+                StructureItemDesc::Tstr_value(_, bindings) => {
+                    for binding in bindings {
+                        visit_value_binding(max_stamp, binding);
+                    }
+                }
+                StructureItemDesc::Tstr_primitive(value_desc) => {
+                    visit_typed_value_desc(max_stamp, value_desc);
+                }
+                StructureItemDesc::Tstr_type(_, decls) => {
+                    for decl in decls {
+                        visit_typed_type_decl(max_stamp, decl);
+                    }
+                }
+                StructureItemDesc::Tstr_typext(type_ext) => {
+                    visit_path(max_stamp, &type_ext.tyext_path);
+                    for (param, _) in &type_ext.tyext_params {
+                        visit_typed_core_type(max_stamp, param);
+                    }
+                    for ext in &type_ext.tyext_constructors {
+                        visit_extension_constructor(max_stamp, ext);
+                    }
+                }
+                StructureItemDesc::Tstr_exception(ext) => visit_extension_constructor(max_stamp, ext),
+                StructureItemDesc::Tstr_module(binding) => visit_module_binding(max_stamp, binding),
+                StructureItemDesc::Tstr_recmodule(bindings) => {
+                    for binding in bindings {
+                        visit_module_binding(max_stamp, binding);
+                    }
+                }
+                StructureItemDesc::Tstr_modtype(module_type_decl) => {
+                    visit_module_type_decl(max_stamp, module_type_decl);
+                }
+                StructureItemDesc::Tstr_open(open_decl) => visit_open_decl(max_stamp, open_decl),
+                StructureItemDesc::Tstr_include(include_decl) => {
+                    visit_module_expr(max_stamp, &include_decl.incl_mod);
+                    visit_decl_signature(max_stamp, &include_decl.incl_type);
+                }
+                StructureItemDesc::Tstr_attribute(_) => {}
+            }
+        }
+
+        visit_decl_signature(max_stamp, &structure.str_type);
+    }
+
+    let mut max_stamp = 0;
+    visit_structure(&mut max_stamp, typed_structure);
+    max_stamp
+}
+
 fn expression_has_string_literal(
     expr: &Expression,
     value: &str,
@@ -539,7 +1218,9 @@ pub fn compile_source_to_js_with_options(
         return Ok(String::new());
     }
 
-    let lambda_start_stamp = type_ctx.current_stamp();
+    let lambda_start_stamp = type_ctx
+        .current_stamp()
+        .max(max_lambda_input_stamp(&typed_structure));
 
     let needs_raw_lambda =
         options.dump_lambda || options.dump_lambda_sexp || options.dump_lambda_sexp_locs;
@@ -1895,4 +2576,96 @@ fn prepare_inferred_signature_for_saving(
 
     let simple_sig = crate::types::includemod::simplify_signature(&typed_structure.str_type);
     consume_signature_save_renames(type_ctx, &simple_sig);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::max_lambda_input_stamp;
+    use crate::ident::{Ident, IdentFlags};
+    use crate::location::Location;
+    use crate::parse_arena::{LidentIdx, LocIdx, Located};
+    use crate::parser::ast::{Attributes, RecFlag};
+    use crate::types::decl::{ModuleDeclaration, ModuleType, RecStatus, SignatureItem, ValueKind};
+    use crate::types::path::Path;
+    use crate::types::typedtree::{
+        EnvRef, Expression, ExpressionDesc, Pattern, PatternDesc, Structure, StructureItem,
+        StructureItemDesc, ValueBinding,
+    };
+    use crate::types::{TypeExprRef, ValueDescription};
+
+    #[test]
+    fn max_lambda_input_stamp_includes_typed_paths_and_signature_items() {
+        let binding_id = Ident::new("x", 4100, IdentFlags::NONE);
+        let expr_path_id = Ident::new("ExprPath", 4200, IdentFlags::NONE);
+        let sig_module_id = Ident::new("SigModule", 4300, IdentFlags::NONE);
+        let sig_alias_id = Ident::new("SigAlias", 4400, IdentFlags::NONE);
+
+        let binding = ValueBinding {
+            vb_pat: Pattern {
+                pat_desc: PatternDesc::Tpat_var(binding_id, Located::mknoloc("x".to_string())),
+                pat_loc: LocIdx::none(),
+                pat_extra: Vec::new(),
+                pat_type: TypeExprRef::null(),
+                pat_env: EnvRef(0),
+                pat_attributes: Attributes::new(),
+            },
+            vb_expr: Expression {
+                exp_desc: ExpressionDesc::Texp_constant(crate::types::typedtree::Constant::Int(1)),
+                exp_loc: LocIdx::none(),
+                exp_extra: Vec::new(),
+                exp_type: TypeExprRef::null(),
+                exp_env: EnvRef(0),
+                exp_attributes: Attributes::new(),
+            },
+            vb_attributes: Attributes::new(),
+            vb_loc: LocIdx::none(),
+        };
+
+        let eval_expr = Expression {
+            exp_desc: ExpressionDesc::Texp_ident(
+                Path::pident(expr_path_id),
+                Located::mknoloc(LidentIdx(0)),
+                ValueDescription {
+                    val_type: TypeExprRef::null(),
+                    val_kind: ValueKind::ValReg,
+                    val_loc: Location::none(),
+                    val_attributes: Vec::new(),
+                    val_path: None,
+                },
+            ),
+            exp_loc: LocIdx::none(),
+            exp_extra: Vec::new(),
+            exp_type: TypeExprRef::null(),
+            exp_env: EnvRef(0),
+            exp_attributes: Attributes::new(),
+        };
+
+        let structure = Structure {
+            str_items: vec![
+                StructureItem {
+                    str_desc: StructureItemDesc::Tstr_value(RecFlag::Nonrecursive, vec![binding]),
+                    str_loc: LocIdx::none(),
+                    str_env: EnvRef(0),
+                },
+                StructureItem {
+                    str_desc: StructureItemDesc::Tstr_eval(eval_expr, Attributes::new()),
+                    str_loc: LocIdx::none(),
+                    str_env: EnvRef(0),
+                },
+            ],
+            str_type: vec![SignatureItem::SigModule(
+                sig_module_id,
+                ModuleDeclaration {
+                    md_type: ModuleType::MtyIdent(Path::pident(sig_alias_id)),
+                    md_attributes: Vec::new(),
+                    md_loc: Location::none(),
+                    md_path: None,
+                },
+                RecStatus::TrecNot,
+            )],
+            str_final_env: EnvRef(0),
+        };
+
+        assert_eq!(max_lambda_input_stamp(&structure), 4400);
+    }
 }
