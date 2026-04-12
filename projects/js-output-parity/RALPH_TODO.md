@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 72 / 657 JS snapshots passing, 0 compile errors, 585 output diffs
+**Status:** 75 / 657 JS snapshots passing, 0 compile errors, 582 output diffs
 
 ## Goal
 
@@ -35,9 +35,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **72 / 657**
+- JS snapshot parity: **75 / 657**
 - Compile errors: **0**
-- Output diffs: **585**
+- Output diffs: **582**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -89,6 +89,10 @@ Interpretation:
   function directives emit raw directive prologues, non-export modules keep the
   separator line before the purity trailer, and `default` exports alias the
   local `$$default` binding back to the public `default` name
+- OCaml `js_stmt_make.define_variable` / `js_dump.ml` declaration printing is
+  now matched more closely on the Rust printer path:
+  variable declarations whose lowered initializer is exactly `undefined` now
+  emit `let x;` instead of `let x = undefined;`
 
 ## Working Rules
 
@@ -143,6 +147,22 @@ Remaining internal compile errors under the measured wrapper baseline:
 
 ## Latest Session Findings
 
+- `compiler-rust/src/js_ir/printer.rs` now matches the OCaml declaration-printing
+  path for undefined-initialized bindings:
+  when the lowered JS IR carries `Some(undefined)` for a variable declaration,
+  the emitted JS now prints a bare declaration (`let x;`) instead of an
+  explicit undefined initializer.
+- Verified focused guards for this cluster:
+  - `cargo test --manifest-path compiler-rust/Cargo.toml test_print_variable_declaration_omits_undefined_initializer -- --nocapture`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml test_print_deps_program_omits_undefined_initializer -- --nocapture`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ModuleWithAlias.res -o /tmp/ModuleWithAlias.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/keep_uncurry_attribute.res -o /tmp/keep_uncurry_attribute.mjs`
+- `tests/tests/src/ModuleWithAlias.res` now matches its checked-in `.mjs`
+  snapshot exactly, and the remaining `= undefined;` declaration motif in
+  cached JS diffs dropped from **182** files to **108** files after the printer
+  change.
+- The authoritative JS snapshot baseline now reports **75 / 657** passing, **0**
+  compile errors, and **582** output diffs.
 - A dedicated wrapper script now exists at `scripts/test_js_output_parity.sh`.
 - The wrapper keeps Spice enabled by default, but the authoritative runs still skip the Spice guard in this environment because the configured external `SPICE_PPX` binary is missing.
 - The existing JS-output parity check already lived inside `scripts/test_rust_parity.sh`; the wrapper now exposes that section directly.
