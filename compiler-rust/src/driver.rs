@@ -3,7 +3,9 @@
 //! This module wires together parsing, type-checking, Lambda conversion, and
 //! JS IR codegen to produce JavaScript output.
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Component, Path as FsPath, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -27,6 +29,11 @@ use crate::types::{TypeCheckContext, TypeContext, initial_env, transl_signature,
 // then eagerly creates Ident.create "+" consuming stamp 1000.
 // We match this by starting at 999 and consuming one stamp.
 const OCAML_NON_PREDEF_STAMP_START: i32 = 999;
+static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
+
+pub fn enable_cli_cleanup_skip() {
+    SKIP_CLI_CLEANUP.store(true, Ordering::Relaxed);
+}
 
 fn module_name_from_source_filename(path: &str) -> String {
     let basename = std::path::Path::new(path)
@@ -68,7 +75,7 @@ fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structure) 
         ConstructorArguments as DeclConstructorArguments, ModuleType as DeclModuleType,
         SignatureItem as DeclSignatureItem, TypeKind as DeclTypeKind,
     };
-    use crate::types::path::Path;
+    use crate::types::path::Path as TypePath;
     use crate::types::typedtree::{
         Case, ConstructorArgument, ExpExtra, Expression, ExpressionDesc, ExtensionConstructor,
         ExtensionConstructorKind, FunctionParam, FunctionParamPattern, IncludeDescription,
@@ -84,11 +91,11 @@ fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structure) 
         *max_stamp = (*max_stamp).max(id.stamp());
     }
 
-    fn visit_path(max_stamp: &mut i32, path: &Path) {
+    fn visit_path(max_stamp: &mut i32, path: &TypePath) {
         match path {
-            Path::Pident(id) => visit_ident(max_stamp, id),
-            Path::Pdot(prefix, _, _) => visit_path(max_stamp, prefix),
-            Path::Papply(functor, arg) => {
+            TypePath::Pident(id) => visit_ident(max_stamp, id),
+            TypePath::Pdot(prefix, _, _) => visit_path(max_stamp, prefix),
+            TypePath::Papply(functor, arg) => {
                 visit_path(max_stamp, functor);
                 visit_path(max_stamp, arg);
             }
@@ -1306,7 +1313,27 @@ pub fn compile_source_to_js_with_options(
     let program = compiler.compile_deps_program(&lowered_lambda);
 
     // JS IR -> JS source
-    Ok(print_deps_program(&program))
+    let js = print_deps_program(&program);
+
+    // The CLI compiler is a short-lived process. Skipping teardown for the
+    // large typechecking arenas keeps snapshot runs inside the harness timeout
+    // once output has already been produced.
+    if SKIP_CLI_CLEANUP.load(Ordering::Relaxed) {
+        std::mem::forget(compiler);
+        std::mem::forget(program);
+        std::mem::forget(lowered_lambda);
+        std::mem::forget(raw_converter);
+        std::mem::forget(implementation_coercion);
+        std::mem::forget(typed_structure);
+        std::mem::forget(final_env);
+        std::mem::forget(env);
+        std::mem::forget(tctx);
+        std::mem::forget(type_ctx);
+        std::mem::forget(structure);
+        std::mem::forget(parser);
+    }
+
+    Ok(js)
 }
 
 fn compute_raw_implementation_coercion(
@@ -1457,12 +1484,85 @@ pub fn compile_file_to_js_with_options(
 /// - Expands `-I` directories
 /// - Appends `{runtime_path}/lib/ocaml` as the stdlib directory (unless no_stdlib)
 fn build_load_path(options: &CompilerOptions) -> Vec<PathBuf> {
-    let mut paths = options.include_paths.clone();
-    if let Some(ref runtime_path) = options.runtime_path {
-        let stdlib_dir = runtime_path.join("lib").join("ocaml");
+    let stdlib_dir = options
+        .runtime_path
+        .as_ref()
+        .map(|runtime_path| runtime_path.join("lib").join("ocaml"));
+    let cwd = std::env::current_dir().ok();
+
+    let mut paths = options
+        .include_paths
+        .iter()
+        .map(|path| normalize_load_path_entry(path, stdlib_dir.as_deref(), cwd.as_deref()))
+        .collect::<Vec<_>>();
+
+    if let Some(stdlib_dir) = stdlib_dir {
         paths.push(stdlib_dir);
     }
+
     paths
+}
+
+fn normalize_load_path_entry(
+    path: &FsPath,
+    stdlib_dir: Option<&FsPath>,
+    cwd: Option<&FsPath>,
+) -> PathBuf {
+    if let Some(raw) = path.to_str() {
+        if let Some(rest) = raw.strip_prefix('+') {
+            if let Some(stdlib_dir) = stdlib_dir {
+                return normalize_lexical_path(stdlib_dir.join(rest));
+            }
+        }
+    }
+
+    if path.is_absolute() {
+        return normalize_lexical_path(path.to_path_buf());
+    }
+
+    match cwd {
+        Some(cwd) => normalize_lexical_path(cwd.join(path)),
+        None => normalize_lexical_path(path.to_path_buf()),
+    }
+}
+
+fn normalize_lexical_path(path: PathBuf) -> PathBuf {
+    let mut prefix: Option<OsString> = None;
+    let mut has_root = false;
+    let mut parts: Vec<OsString> = Vec::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(value) => prefix = Some(value.as_os_str().to_os_string()),
+            Component::RootDir => has_root = true,
+            Component::CurDir => {}
+            Component::ParentDir => match parts.last() {
+                Some(last) if last != ".." => {
+                    parts.pop();
+                }
+                _ if !has_root && prefix.is_none() => parts.push(OsString::from("..")),
+                _ => {}
+            },
+            Component::Normal(part) => parts.push(part.to_os_string()),
+        }
+    }
+
+    let mut normalized = PathBuf::new();
+    if let Some(prefix) = prefix {
+        normalized.push(prefix);
+    }
+    if has_root {
+        normalized.push(std::path::MAIN_SEPARATOR.to_string());
+    }
+    for part in parts {
+        normalized.push(part);
+    }
+
+    if normalized.as_os_str().is_empty() && !has_root {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
 }
 
 /// Load the Pervasives and Stdlib modules into the initial environment.
@@ -2568,17 +2668,19 @@ fn prepare_inferred_signature_for_saving(
 #[cfg(test)]
 mod tests {
     use super::max_lambda_input_stamp;
+    use super::normalize_load_path_entry;
     use crate::ident::{Ident, IdentFlags};
     use crate::location::Location;
     use crate::parse_arena::{LidentIdx, LocIdx, Located};
     use crate::parser::ast::{Attributes, RecFlag};
     use crate::types::decl::{ModuleDeclaration, ModuleType, RecStatus, SignatureItem, ValueKind};
-    use crate::types::path::Path;
+    use crate::types::path::Path as TypePath;
     use crate::types::typedtree::{
         EnvRef, Expression, ExpressionDesc, Pattern, PatternDesc, Structure, StructureItem,
         StructureItemDesc, ValueBinding,
     };
     use crate::types::{TypeExprRef, ValueDescription};
+    use std::path::PathBuf;
 
     #[test]
     fn max_lambda_input_stamp_includes_typed_paths_and_signature_items() {
@@ -2610,7 +2712,7 @@ mod tests {
 
         let eval_expr = Expression {
             exp_desc: ExpressionDesc::Texp_ident(
-                Path::pident(expr_path_id),
+                TypePath::pident(expr_path_id),
                 Located::mknoloc(LidentIdx(0)),
                 ValueDescription {
                     val_type: TypeExprRef::null(),
@@ -2643,7 +2745,7 @@ mod tests {
             str_type: vec![SignatureItem::SigModule(
                 sig_module_id,
                 ModuleDeclaration {
-                    md_type: ModuleType::MtyIdent(Path::pident(sig_alias_id)),
+                    md_type: ModuleType::MtyIdent(TypePath::pident(sig_alias_id)),
                     md_attributes: Vec::new(),
                     md_loc: Location::none(),
                     md_path: None,
@@ -2654,5 +2756,26 @@ mod tests {
         };
 
         assert_eq!(max_lambda_input_stamp(&structure), 4400);
+    }
+
+    #[test]
+    fn normalize_load_path_entry_expands_relative_paths_against_cwd() {
+        let cwd = std::path::Path::new("/repo/tests/tests/lib/bs");
+        let normalized =
+            normalize_load_path_entry(std::path::Path::new("../ocaml"), None, Some(cwd));
+        assert_eq!(normalized, PathBuf::from("/repo/tests/tests/lib/ocaml"));
+    }
+
+    #[test]
+    fn normalize_load_path_entry_expands_plus_paths_from_stdlib() {
+        let normalized = normalize_load_path_entry(
+            std::path::Path::new("+compiler-libs"),
+            Some(std::path::Path::new("/runtime/lib/ocaml")),
+            Some(std::path::Path::new("/repo")),
+        );
+        assert_eq!(
+            normalized,
+            PathBuf::from("/runtime/lib/ocaml/compiler-libs")
+        );
     }
 }

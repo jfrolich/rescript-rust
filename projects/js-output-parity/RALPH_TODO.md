@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 26 / 657 JS snapshots passing, 1 compile error, 630 output diffs
+**Status:** 26 / 657 JS snapshots passing, 0 compile errors, 631 output diffs
 
 ## Goal
 
@@ -36,15 +36,16 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 reported:
 
 - JS snapshot parity: **26 / 657**
-- Compile errors: **1**
-- Output diffs: **630**
+- Compile errors: **0**
+- Output diffs: **631**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
 - the authoritative wrapper is now scoped to the canonical in-repo 657-file set
-- compile failures are down to a single remaining internal guard
+- all current internal JS snapshot files now compile under the wrapper baseline
+- the former `Import.res` timeout is now exposed as a normal output-diff case
 - the current high-impact backend gap is module emission after lowering:
   export recovery, top-level function declaration shape, local JS-name mangling,
   and purity trailer emission
@@ -68,7 +69,7 @@ Interpretation:
 - [x] Route final JS codegen in `compiler-rust/src/driver.rs` through the raw-lambda / lowering path instead of the legacy typedtree shortcut.
 - [x] Inventory the current internal compile-error files from `temp/rust-parity/diffs/js_src_*.err`.
 - [x] Inventory the current internal text-diff files from `temp/rust-parity/diffs/js_src_*.diff`.
-- [ ] Pick one small internal structural file and one internal compile-error guard as the first implementation targets.
+- [x] Pick one small internal structural file and one internal compile-error guard as the first implementation targets.
 
 ## Expected Root-Cause Buckets
 
@@ -98,9 +99,9 @@ Internal text diffs already observed in the pre-wrapper run:
 - `tests/tests/src/test_other_exn.res`
 - `tests/tests/src/test_unsafe_cmp.res`
 
-Current internal compile error under the measured wrapper baseline:
+Remaining internal compile errors under the measured wrapper baseline:
 
-- `tests/tests/src/Import.res`
+- none
 
 ## Latest Session Findings
 
@@ -109,7 +110,10 @@ Current internal compile error under the measured wrapper baseline:
 - The existing JS-output parity check already lived inside `scripts/test_rust_parity.sh`; the wrapper now exposes that section directly.
 - `compiler-rust/src/driver.rs` now routes final JS generation through `raw_lambda::convert` + `raw_lambda::lower` instead of the legacy `lambda::convert::LambdaConverter` shortcut.
 - `scripts/test_rust_parity.sh` now compiles JS snapshots with each file's owning ReScript project's `compiler-args` and runs `bsc` from that project's `lib/bs`.
-- The canonical in-repo wrapper baseline now reports **26 / 657** passing, **1** compile error, and **630** output diffs.
+- `compiler-rust/src/driver.rs` now normalizes CLI `-I` load-path entries against the current working directory and expands `+stdlib`-relative includes before building the persistent load path, matching the wrapper's per-project `lib/bs` invocation model.
+- `compiler-rust/src/bin/bsc.rs` now enables a CLI-only post-emit fast-exit path so short-lived snapshot runs do not spend the harness timeout tearing down large typechecking arenas after the JS output is already produced.
+- The former `tests/tests/src/Import.res` compile-error guard now completes under the measured wrapper invocation and has moved into the normal output-diff cluster.
+- The canonical in-repo wrapper baseline now reports **26 / 657** passing, **0** compile errors, and **631** output diffs.
 - A printer/module-emission pass is now wired through `DepsProgram` metadata in Rust:
   - recover `program.exports` from the lowered `module/exports` block instead of printing a trailing array
   - print the ReScript version header, ES module export block, and module purity trailer

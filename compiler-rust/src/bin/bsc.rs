@@ -13,7 +13,8 @@ use rescript_compiler::binary_ast::{
     ppx, write_signature_ast_current, write_structure_ast_current,
 };
 use rescript_compiler::driver::{
-    CompilerOptions, compile_file_to_js_with_options, typecheck_interface_file,
+    CompilerOptions, compile_file_to_js_with_options, enable_cli_cleanup_skip,
+    typecheck_interface_file,
 };
 use rescript_compiler::parser::{Parser, module, sexp_locs};
 use std::env;
@@ -98,9 +99,18 @@ fn main() {
 
     let handler = builder
         .spawn(|| {
-            if let Err(err) = run() {
-                eprintln!("{err}");
-                std::process::exit(1);
+            enable_cli_cleanup_skip();
+            match run() {
+                Ok(()) => {
+                    let _ = std::io::stdout().flush();
+                    let _ = std::io::stderr().flush();
+                    std::process::exit(0);
+                }
+                Err(err) => {
+                    eprintln!("{err}");
+                    let _ = std::io::stderr().flush();
+                    std::process::exit(1);
+                }
             }
         })
         .expect("Failed to spawn compiler thread");
