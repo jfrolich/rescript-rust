@@ -443,31 +443,41 @@ impl LambdaCompiler {
                 Box::new(compiled_args[0].clone()),
                 LengthObject::Array,
             )),
-            Paddint | Paddfloat => Expression::bin(
+            Paddint => int32_add(compiled_args[0].clone(), compiled_args[1].clone()),
+            Paddfloat => Expression::bin(
                 BinOp::Plus,
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
-            Psubint | Psubfloat => Expression::bin(
+            Psubint => int32_minus(compiled_args[0].clone(), compiled_args[1].clone()),
+            Psubfloat => Expression::bin(
                 BinOp::Minus,
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
-            Pmulint | Pmulfloat => Expression::bin(
+            Pmulint => int32_mul(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pmulfloat => Expression::bin(
                 BinOp::Mul,
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
-            Pdivint | Pdivfloat => Expression::bin(
+            Pdivint => int32_div(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pdivfloat => Expression::bin(
                 BinOp::Div,
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
-            Pmodint | Pmodfloat => Expression::bin(
+            Pmodint => int32_mod(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pmodfloat => Expression::bin(
                 BinOp::Mod,
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
+            Ppowint => to_int32(Expression::bin(
+                BinOp::Pow,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            )),
             Ppowfloat => {
                 // Math.pow(base, exponent)
                 let math = Expression::var(Ident::create_persistent("Math"));
@@ -478,8 +488,8 @@ impl LambdaCompiler {
                 ));
                 Expression::call(pow, compiled_args, CallInfo::default())
             }
-            Pintcomp(cmp) | Pfloatcomp(cmp) | Pbigintcomp(cmp) | Pstringcomp(cmp)
-            | Pjscomp(cmp) => {
+            Pboolcomp(cmp) | Pintcomp(cmp) | Pfloatcomp(cmp) | Pbigintcomp(cmp)
+            | Pstringcomp(cmp) | Pjscomp(cmp) => {
                 let op = comparison_to_binop(*cmp);
                 Expression::bin(op, compiled_args[0].clone(), compiled_args[1].clone())
             }
@@ -494,11 +504,36 @@ impl LambdaCompiler {
                 compiled_args[1].clone(),
             ),
             Pnot => Expression::new(ExpressionDesc::JsNot(Box::new(compiled_args[0].clone()))),
-            Pnegint | Pnegfloat => Expression::bin(
-                BinOp::Minus,
-                Expression::number(Number::int(0)),
+            Pnegint => int32_minus(int_expr(0), compiled_args[0].clone()),
+            Pnegfloat => Expression::bin(BinOp::Minus, int_expr(0), compiled_args[0].clone()),
+            Pnotint => int_bnot(compiled_args[0].clone()),
+            Pandint => Expression::bin(
+                BinOp::Band,
                 compiled_args[0].clone(),
+                compiled_args[1].clone(),
             ),
+            Porint => Expression::bin(
+                BinOp::Bor,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Pxorint => Expression::bin(
+                BinOp::Bxor,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Plslint => Expression::bin(
+                BinOp::Lsl,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Plsrint => int32_lsr(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pasrint => Expression::bin(
+                BinOp::Asr,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Poffsetint(offset) => int32_offset(compiled_args[0].clone(), *offset),
             Pmakearray => Expression::array(compiled_args, MutableFlag::Mutable),
             Pstringadd => Expression::new(ExpressionDesc::StringAppend(
                 Box::new(compiled_args[0].clone()),
@@ -557,6 +592,11 @@ impl LambdaCompiler {
                 Box::new(Expression::undefined(true)),
             )),
             Ptypeof => Expression::new(ExpressionDesc::Typeof(Box::new(compiled_args[0].clone()))),
+            Pintoffloat => to_int32(compiled_args[0].clone()),
+            Pfloatofint => compiled_args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| Expression::undefined(false)),
             Pawait => Expression::new(ExpressionDesc::Await(Box::new(compiled_args[0].clone()))),
             PjsObjectCreate(obj_params) => {
                 self.compile_js_object_create(obj_params, compiled_args, &mut prelude)
@@ -1223,6 +1263,76 @@ fn comparison_to_binop(cmp: Comparison) -> BinOp {
         Comparison::Le => BinOp::Le,
         Comparison::Gt => BinOp::Gt,
         Comparison::Ge => BinOp::Ge,
+    }
+}
+
+fn int_expr(value: i32) -> Expression {
+    Expression::number(Number::int(value))
+}
+
+fn int_literal(expr: &Expression) -> Option<i32> {
+    match &expr.desc {
+        ExpressionDesc::Number(Number::Int { i, .. }) => Some(*i),
+        _ => None,
+    }
+}
+
+fn is_zero_int(expr: &Expression) -> bool {
+    int_literal(expr) == Some(0)
+}
+
+fn to_int32(expr: Expression) -> Expression {
+    match &expr.desc {
+        ExpressionDesc::Bin(BinOp::Bor, _, right) if is_zero_int(right) => expr,
+        _ => Expression::bin(BinOp::Bor, expr, int_expr(0)),
+    }
+}
+
+fn int32_add(left: Expression, right: Expression) -> Expression {
+    match (int_literal(&left), int_literal(&right)) {
+        (Some(lhs), Some(rhs)) => int_expr(lhs.wrapping_add(rhs)),
+        _ => to_int32(Expression::bin(BinOp::Plus, left, right)),
+    }
+}
+
+fn int32_minus(left: Expression, right: Expression) -> Expression {
+    match (int_literal(&left), int_literal(&right)) {
+        (Some(lhs), Some(rhs)) => int_expr(lhs.wrapping_sub(rhs)),
+        _ => to_int32(Expression::bin(BinOp::Minus, left, right)),
+    }
+}
+
+fn int32_mul(left: Expression, right: Expression) -> Expression {
+    match (int_literal(&left), int_literal(&right)) {
+        (Some(lhs), Some(rhs)) => int_expr(lhs.wrapping_mul(rhs)),
+        _ => to_int32(Expression::bin(BinOp::Mul, left, right)),
+    }
+}
+
+fn int32_div(left: Expression, right: Expression) -> Expression {
+    to_int32(Expression::bin(BinOp::Div, left, right))
+}
+
+fn int32_mod(left: Expression, right: Expression) -> Expression {
+    Expression::bin(BinOp::Mod, left, right)
+}
+
+fn int32_lsr(left: Expression, right: Expression) -> Expression {
+    to_int32(Expression::bin(BinOp::Lsr, left, right))
+}
+
+fn int32_offset(expr: Expression, offset: i32) -> Expression {
+    if offset == 0 {
+        expr
+    } else {
+        int32_add(expr, int_expr(offset))
+    }
+}
+
+fn int_bnot(expr: Expression) -> Expression {
+    match int_literal(&expr) {
+        Some(value) => int_expr(!value),
+        None => Expression::new(ExpressionDesc::JsBnot(Box::new(expr))),
     }
 }
 
@@ -2063,6 +2173,108 @@ mod tests {
             resolver.resolve_module_path(&module).as_deref(),
             Some("./ModuleWithAlias.mjs")
         );
+    }
+
+    #[test]
+    fn lowers_paddint_with_int32_coercion() {
+        let mut compiler = LambdaCompiler::new();
+        let lhs = Ident::create_local("lhs");
+        let rhs = Ident::create_local("rhs");
+        let program = compiler.compile_program(&Lambda::prim(
+            Primitive::Paddint,
+            vec![Lambda::var(lhs.clone()), Lambda::var(rhs.clone())],
+            Location::none(),
+        ));
+
+        let [stmt] = program.block.as_slice() else {
+            panic!("expected a single expression statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Bin(BinOp::Bor, left, right),
+                ..
+            }) => {
+                assert!(matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Bin(BinOp::Plus, lhs_expr, rhs_expr),
+                        ..
+                    }
+                    if matches!(
+                        lhs_expr.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                            ..
+                        } if id.same(&lhs)
+                    ) && matches!(
+                        rhs_expr.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                            ..
+                        } if id.same(&rhs)
+                    )
+                ));
+            }
+            other => panic!("expected `lhs + rhs | 0`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_plsrint_with_int32_coercion() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let shift = Ident::create_local("shift");
+        let program = compiler.compile_program(&Lambda::prim(
+            Primitive::Plsrint,
+            vec![Lambda::var(value.clone()), Lambda::var(shift.clone())],
+            Location::none(),
+        ));
+
+        let [stmt] = program.block.as_slice() else {
+            panic!("expected a single expression statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Bin(BinOp::Bor, left, right),
+                ..
+            }) => {
+                assert!(matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Bin(BinOp::Lsr, value_expr, shift_expr),
+                        ..
+                    }
+                    if matches!(
+                        value_expr.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                            ..
+                        } if id.same(&value)
+                    ) && matches!(
+                        shift_expr.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                            ..
+                        } if id.same(&shift)
+                    )
+                ));
+            }
+            other => panic!("expected `value >>> shift | 0`, got {other:?}"),
+        }
     }
 
     #[test]
