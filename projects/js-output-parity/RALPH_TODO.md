@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 49 / 657 JS snapshots passing, 0 compile errors, 608 output diffs
+**Status:** 70 / 657 JS snapshots passing, 0 compile errors, 587 output diffs
 
 ## Goal
 
@@ -35,9 +35,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **49 / 657**
+- JS snapshot parity: **70 / 657**
 - Compile errors: **0**
-- Output diffs: **608**
+- Output diffs: **587**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -75,6 +75,15 @@ Interpretation:
   shadowing case
 - external-corpus sweeps remain secondary; the in-repo backend frontier still has
   ample signal
+- OCaml `js_dump_program.ml` empty-deps-program output is now matched on the Rust
+  printer path:
+  import-free empty modules emit the checked-in
+  `/* This output is empty... */` explanation instead of the generic
+  `/* No side effect */` trailer
+- OCaml `js_dump_program.ml` vertical spacing is now matched more closely on the
+  Rust printer path:
+  non-empty import-free modules keep the extra blank line after the ReScript
+  header, and ES-module imports keep the blank line before the first statement
 
 ## Working Rules
 
@@ -260,3 +269,21 @@ Remaining internal compile errors under the measured wrapper baseline:
   the remaining include-chain drift still needs a later OCaml-aligned step that
   can see through let-wrapped module blocks, not just directly bound immutable
   blocks.
+- `compiler-rust/src/js_ir/printer.rs` now ports two OCaml-aligned
+  `js_dump_program.ml` behaviors on the Rust JS-output path:
+  - `deps_program_is_empty` now emits OCaml's checked-in empty-output
+    explanation instead of falling through to the generic no-side-effect trailer
+  - module-level spacing now matches the OCaml dump shape for the affected
+    snapshot cluster:
+    import-free non-empty modules keep the extra blank line after the header,
+    and ES-module imports keep the blank line before the first statement
+- Verified focused guards for this printer cluster:
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_deps_program --lib`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_empty_deps_program_uses_ocaml_empty_explanation --lib`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/abstract_type.res -o /tmp/abstract_type.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DictInference.res -o /tmp/DictInference.mjs`
+  - previously passing `tests/tests/src/keep_uncurry_attribute.res` and
+    `tests/tests/src/ExternalShadow.res` still match their checked-in `.mjs`
+    snapshots exactly
+- The authoritative JS snapshot baseline now reports **70 / 657** passing, **0**
+  compile errors, and **587** output diffs.
