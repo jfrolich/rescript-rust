@@ -72,6 +72,17 @@ Achieve full optimized lambda parity between the Rust and OCaml compilers. Focus
 | [RALPH_TODO.md](./optimized-lambda-parity/RALPH_TODO.md) | Agent task tracking for optimized lambda parity |
 | [RALPH_SETUP.md](./optimized-lambda-parity/RALPH_SETUP.md) | Build, baseline, and cache inspection instructions |
 
+### [js-output-parity](./js-output-parity/)
+
+Achieve byte-for-byte emitted JavaScript parity between the Rust and OCaml compilers. Focuses on the real downstream backend after optimized lambda: lambda passes, grouping/coercion, JS IR lowering, JS passes, and final JS dumping. Baseline is tracked via the dedicated wrapper over the existing snapshot harness.
+
+| Document | Description |
+|----------|-------------|
+| [PLAN.md](./js-output-parity/PLAN.md) | JS-output parity phase plan and backend execution order |
+| [RALPH_PROMPT.md](./js-output-parity/RALPH_PROMPT.md) | Agent loop instructions for emitted JS parity |
+| [RALPH_TODO.md](./js-output-parity/RALPH_TODO.md) | Agent task tracking and current baseline |
+| [RALPH_SETUP.md](./js-output-parity/RALPH_SETUP.md) | Build, baseline, direct repro, and artifact inspection instructions |
+
 ### [printer-parity](./printer-parity/)
 
 Achieve byte-for-byte identical printer/formatter output between Rust and OCaml. Covers the AST printer, OCaml Format module compatibility, and roundtrip idempotence. Currently at 423/506 syntax tests passing (83%).
