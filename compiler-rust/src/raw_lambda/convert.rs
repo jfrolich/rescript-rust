@@ -73,6 +73,21 @@ fn recmodule_function_shape_constant() -> Constant {
     }
 }
 
+fn raw_constructor_constant(
+    cstr: &crate::types::ConstructorDescription,
+    tag: i32,
+) -> Constant {
+    Constant::Int {
+        i: tag,
+        comment: Some(PointerInfo::Constructor(PointerConstructorTag {
+            name: cstr.cstr_name.clone(),
+            const_: cstr.cstr_consts,
+            non_const: cstr.cstr_nonconsts,
+            runtime_tag: constructor_runtime_tag(&cstr.cstr_attributes),
+        })),
+    }
+}
+
 fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
     fn collect(lam: &RawLambda, fv: &mut HashSet<Ident>) {
         match lam {
@@ -2501,6 +2516,9 @@ impl<'a> RawLambdaConverter<'a> {
         if cstr.cstr_inlined.is_some() {
             return match args {
                 [arg] => self.convert_expr_raw(arg),
+                [] if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) => {
+                    RawLambda::const_(raw_constructor_constant(cstr, 0))
+                }
                 _ => RawLambda::unit(),
             };
         }
@@ -2509,18 +2527,11 @@ impl<'a> RawLambdaConverter<'a> {
             ConstructorTag::CstrConstant(tag) => match cstr.cstr_name.as_str() {
                 "true" => RawLambda::const_(Constant::JsTrue),
                 "false" => RawLambda::const_(Constant::JsFalse),
-                _ => RawLambda::const_(Constant::Int {
-                    i: *tag,
-                    comment: Some(PointerInfo::Constructor(PointerConstructorTag {
-                        name: cstr.cstr_name.clone(),
-                        const_: cstr.cstr_consts,
-                        non_const: cstr.cstr_nonconsts,
-                        runtime_tag: constructor_runtime_tag(&cstr.cstr_attributes),
-                    })),
-                }),
+                _ => RawLambda::const_(raw_constructor_constant(cstr, *tag)),
             },
             ConstructorTag::CstrUnboxed => match args {
                 [arg] => self.convert_expr_raw(arg),
+                [] => RawLambda::const_(raw_constructor_constant(cstr, 0)),
                 _ => RawLambda::unit(),
             },
             ConstructorTag::CstrBlock(tag) => {
@@ -9440,6 +9451,46 @@ mod tests {
             if id.same(&scrutinee_id)
                 && *i == crate::types::btype::hash_variant("InvalidNext")
                 && name == "InvalidNext"));
+    }
+
+    #[test]
+    fn nullary_unboxed_constructor_keeps_constructor_metadata_in_raw_lambda() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+
+        let cstr = crate::types::ConstructorDescription {
+            cstr_name: "OnlyOne".to_string(),
+            cstr_res: crate::types::TypeExprRef(0),
+            cstr_existentials: Vec::new(),
+            cstr_args: Vec::new(),
+            cstr_arity: 0,
+            cstr_tag: crate::types::ConstructorTag::CstrUnboxed,
+            cstr_consts: 1,
+            cstr_nonconsts: 0,
+            cstr_generalized: false,
+            cstr_private: crate::types::asttypes::PrivateFlag::Public,
+            cstr_loc: Location::none(),
+            cstr_attributes: Vec::new(),
+            cstr_inlined: None,
+        };
+
+        let lowered = converter.convert_construct_raw(Location::none(), EnvRef(0), &cstr, &[]);
+
+        assert!(matches!(
+            lowered,
+            RawLambda::Lconst(Constant::Int {
+                i: 0,
+                comment: Some(PointerInfo::Constructor(PointerConstructorTag {
+                    name,
+                    const_,
+                    non_const,
+                    runtime_tag: None,
+                })),
+            }) if name == "OnlyOne" && const_ == 1 && non_const == 0
+        ));
     }
 
     fn else_exit_id(raw: &RawLambda) -> Option<i32> {

@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 625/657 (95.1%), 32 parity failures, 100 hunks
+**Status:** 625/657 (95.1%), 32 parity failures, 99 hunks
 
 ## Goal
 
@@ -24,7 +24,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
 - Optimized lambda parity: **625/657**
-- Parity hunks: **100**
+- Parity hunks: **99**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
@@ -33,7 +33,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
   - `js_exception_catch_test.res`: **9** hunks
   - `Stdlib_DictTests.res`: **8** hunks
   - `large_record_duplication_test.res`: **7** hunks
-  - `UntaggedVariants.res`: **5** hunks
+  - `UntaggedVariants.res`: **4** hunks
   - `Stdlib_IntlTests.res`: **4** hunks
   - `Stdlib_TempTests.res`: **4** hunks
   - `inline_const.res`: **4** hunks
@@ -69,6 +69,7 @@ Current frontier characteristics:
   - `minimal_test.res`
 - `conditional/cond_a.res` now also passes exactly as a minimal assert-failure guard.
 - `js_array_test.res` now also passes exactly as a large-file guard.
+- nullary `CstrUnboxed` constructor metadata is now preserved in raw lambda, which removed the hidden `OnlyOne` constructor-vs-unit mismatch in `UntaggedVariants.res`; that file is now down to **4** hunks, all in the existing static-exit numbering cluster.
 - `big_polyvar_test.res` now also passes exactly on the current authoritative baseline.
 - `js_json_test.res` now also passes exactly on the current authoritative baseline.
 - `LetUnwrap.res` now also passes exactly after preserving named polyvariant hash metadata in raw match tests.
@@ -127,6 +128,50 @@ Current frontier characteristics:
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### nullary `CstrUnboxed` constructors now keep constructor metadata
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::nullary_unboxed_constructor_keeps_constructor_metadata_in_raw_lambda -- --exact
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 300 ./scripts/test_lambda_parity.sh -j1 UntaggedVariants
+timeout 300 ./scripts/test_lambda_parity.sh -j1 --raw UntaggedVariants
+timeout 300 ./scripts/test_lambda_parity.sh -j1 js_array_test
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- OCaml compile coverage: **657/657**
+- Rust compile coverage: **657/657**
+- Optimized lambda parity: **625/657**
+- Exact hunks: **99**
+
+Key checkpoints:
+
+- `UntaggedVariants.res`: **4 hunks** (down from **5**)
+- focused raw `UntaggedVariants.res`: **exact parity**
+- `js_array_test.res`: **exact parity**
+
+`compiler/ml/translcore.ml` does not collapse a nullary unboxed constructor to
+unit. It still carries constructor-pointer metadata into
+`lam_constant_convert.ml`, and the raw printer only hides that detail because
+both constructor pointers and unit print as `0a`.
+
+Rust `compiler-rust/src/raw_lambda/convert.rs` was still treating zero-argument
+`ConstructorTag::CstrUnboxed` values as `RawLambda::unit()`. That kept
+`-drawlambda` looking fine but lost the constructor metadata that
+`Lam_convert.convert` needs, which is why optimized lambda printed
+`Const_js_undefined true` instead of
+`Const_int 0 (Pt_constructor "OnlyOne" 1 0)` in `UntaggedVariants.res`.
+
+`raw_lambda::convert` now preserves the constructor constant for nullary
+`CstrUnboxed` values the same way it already preserved the recursive-module
+`Function` shape constant. The new unit test locks that metadata in place. The
+remaining `UntaggedVariants.res` diffs are now only the pre-existing
+static-exit-numbering drift, so this slice reduced the authoritative baseline
+from **100** to **99** hunks without regressing the raw or large-file guards.
 
 ### optimized sexp strings now use OCaml byte escapes
 Ran:
