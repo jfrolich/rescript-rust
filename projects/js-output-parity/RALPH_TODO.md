@@ -234,3 +234,29 @@ Remaining internal compile errors under the measured wrapper baseline:
   record literal into both the projected field and the exported module record;
   the remaining drift there is the later coercion/grouping naming shape
   (`TestInlining_a` / direct `"a"` propagation), not duplicated allocation.
+- `compiler-rust/src/lambda/simplify.rs` now ports another OCaml-aligned slice
+  of `Lam_pass_collect` + `Lam_pass_remove_alias`:
+  - immutable block bindings created from both `Pmakeblock` and constant
+    `Lconst` blocks are tracked in the JS-backend simplifier environment
+  - `Pfield` over those tracked immutable blocks now resolves by named field
+    metadata when available, matching OCaml's `field_flatten_get` behavior for
+    records, inlined records, record extensions, and modules
+  - direct `Pfield` reads from constant blocks now also fold non-allocating
+    fields by name instead of trusting the raw numeric index
+- Verified focused guards for this cluster:
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::simplify::tests::flattens_immutable_module_block_field_aliases --lib`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::simplify::tests::flattens_record_field_aliases_by_name --lib`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::simplify::tests::flattens_constant_record_block_bindings_by_name --lib`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/RecordCoercion.res -o /tmp/RecordCoercion.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+- A follow-up authoritative wrapper rerun after the immutable-block field
+  flattening slice remained **49 / 657** passing, **0** compile errors, and
+  **608** output diffs.
+- `tests/tests/src/RecordCoercion.res` now folds the projected record field to
+  the direct string constant (`name: "a"`), so the active blocker there has
+  narrowed further to the later JS/backend naming/lifting shape
+  (`TestInlining_a` / grouped export emission).
+- `tests/tests/src/DerivingAccessorsCurried.res` did not materially move yet;
+  the remaining include-chain drift still needs a later OCaml-aligned step that
+  can see through let-wrapped module blocks, not just directly bound immutable
+  blocks.

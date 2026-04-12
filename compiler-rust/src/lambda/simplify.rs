@@ -13,13 +13,27 @@ use crate::lambda::{Apply, LFunction, Lambda, LambdaSwitch, TagInfo};
 
 #[derive(Clone, Default)]
 struct SimplifyEnv {
+    blocks: HashMap<Ident, ImmutableBlockInfo>,
     functions: HashMap<Ident, LFunction>,
     substitutions: HashMap<Ident, Lambda>,
+}
+
+#[derive(Clone)]
+enum BlockElement {
+    Na,
+    Simple(Lambda),
+}
+
+#[derive(Clone)]
+struct ImmutableBlockInfo {
+    tag_info: TagInfo,
+    elements: Vec<BlockElement>,
 }
 
 impl SimplifyEnv {
     fn without_ident(&self, id: &Ident) -> Self {
         let mut next = self.clone();
+        next.blocks.remove(id);
         next.functions.remove(id);
         next.substitutions.remove(id);
         next
@@ -28,6 +42,7 @@ impl SimplifyEnv {
     fn without_idents<'a>(&self, ids: impl IntoIterator<Item = &'a Ident>) -> Self {
         let mut next = self.clone();
         for id in ids {
+            next.blocks.remove(id);
             next.functions.remove(id);
             next.substitutions.remove(id);
         }
@@ -62,6 +77,9 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
         Lambda::Llet(kind, id, value, body) => {
             let value = simplify_with_env(value, env, exports);
             let mut body_env = env.without_ident(id);
+            if let Some(block_info) = immutable_block_elements(&value) {
+                body_env.blocks.insert(id.clone(), block_info);
+            }
             if let Some(substitution) = substitution_candidate(*kind, &value) {
                 body_env.substitutions.insert(id.clone(), substitution);
             }
@@ -194,6 +212,9 @@ fn simplify_primitive(
         .collect();
 
     match (&info.primitive, args.as_slice()) {
+        (Primitive::Pfield(index, dbg), [arg]) => {
+            simplify_field_access(*index, dbg, arg, env, &info.primitive, &info.loc)
+        }
         (
             Primitive::Pstringadd,
             [
@@ -211,6 +232,140 @@ fn simplify_primitive(
             delim: left_delim.clone().or(right_delim.clone()),
         }),
         _ => Lambda::prim(info.primitive.clone(), args, info.loc.clone()),
+    }
+}
+
+fn simplify_field_access(
+    index: i32,
+    dbg: &FieldDbgInfo,
+    arg: &Lambda,
+    env: &SimplifyEnv,
+    primitive: &Primitive,
+    loc: &crate::location::Location,
+) -> Lambda {
+    match arg {
+        Lambda::Lvar(id) => match env.blocks.get(id).and_then(|elements| {
+            block_field(elements, index, dbg).and_then(BlockElement::as_simple_form)
+        }) {
+            Some(value) => value.clone(),
+            None => Lambda::prim(primitive.clone(), vec![arg.clone()], loc.clone()),
+        },
+        Lambda::Lconst(Constant::Block {
+            tag_info, elements, ..
+        }) => constant_block_field(tag_info, elements, index, dbg)
+            .map(Lambda::const_)
+            .unwrap_or_else(|| Lambda::prim(primitive.clone(), vec![arg.clone()], loc.clone())),
+        _ => Lambda::prim(primitive.clone(), vec![arg.clone()], loc.clone()),
+    }
+}
+
+fn immutable_block_elements(value: &Lambda) -> Option<ImmutableBlockInfo> {
+    match value {
+        Lambda::Lprim(info)
+            if matches!(
+                info.primitive,
+                Primitive::Pmakeblock(_, _, crate::lambda::primitive::Mutable::Immutable)
+            ) =>
+        {
+            let Primitive::Pmakeblock(_, tag_info, _) = &info.primitive else {
+                unreachable!();
+            };
+            Some(ImmutableBlockInfo {
+                tag_info: tag_info.clone(),
+                elements: info.args.iter().map(block_element_of_lambda).collect(),
+            })
+        }
+        Lambda::Lconst(Constant::Block {
+            tag_info, elements, ..
+        }) => Some(ImmutableBlockInfo {
+            tag_info: tag_info.clone(),
+            elements: elements
+                .iter()
+                .cloned()
+                .map(Lambda::const_)
+                .map(BlockElement::Simple)
+                .collect(),
+        }),
+        _ => None,
+    }
+}
+
+fn block_element_of_lambda(value: &Lambda) -> BlockElement {
+    match value {
+        Lambda::Lvar(_) | Lambda::Lconst(_) => BlockElement::Simple(value.clone()),
+        Lambda::Lprim(info)
+            if matches!(&info.primitive, Primitive::Pfield(_, FieldDbgInfo::Module { .. }))
+                && matches!(
+                    info.args.as_slice(),
+                    [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]
+                ) =>
+        {
+            BlockElement::Simple(value.clone())
+        }
+        _ => BlockElement::Na,
+    }
+}
+
+fn constant_block_field(
+    tag_info: &TagInfo,
+    elements: &[Constant],
+    index: i32,
+    dbg: &FieldDbgInfo,
+) -> Option<Constant> {
+    if index < 0 {
+        return None;
+    }
+
+    let index = index as usize;
+    match (tag_info, dbg) {
+        (TagInfo::Module(fields), _) => dbg
+            .name()
+            .and_then(|name| fields.iter().position(|field_name| field_name == name))
+            .and_then(|position| elements.get(position))
+            .filter(|constant| !constant.is_allocating())
+            .cloned(),
+        (TagInfo::Record { fields, .. }, _) | (TagInfo::RecordInlined { fields, .. }, _) => dbg
+            .name()
+            .and_then(|name| fields.iter().position(|(field_name, _)| field_name == name))
+            .and_then(|position| elements.get(position))
+            .filter(|constant| !constant.is_allocating())
+            .cloned(),
+        (TagInfo::RecordExt { fields, .. }, _) => dbg
+            .name()
+            .and_then(|name| fields.iter().position(|field_name| field_name == name))
+            .and_then(|position| elements.get(position))
+            .filter(|constant| !constant.is_allocating())
+            .cloned(),
+        _ => elements
+            .get(index)
+            .filter(|constant| !constant.is_allocating())
+            .cloned(),
+    }
+}
+
+fn block_field<'a>(
+    block: &'a ImmutableBlockInfo,
+    index: i32,
+    dbg: &FieldDbgInfo,
+) -> Option<&'a BlockElement> {
+    if index < 0 {
+        return None;
+    }
+
+    match (&block.tag_info, dbg) {
+        (TagInfo::Module(fields), _) => dbg
+            .name()
+            .and_then(|name| fields.iter().position(|field_name| field_name == name))
+            .and_then(|position| block.elements.get(position)),
+        (TagInfo::Record { fields, .. }, _) | (TagInfo::RecordInlined { fields, .. }, _) => dbg
+            .name()
+            .and_then(|name| fields.iter().position(|(field_name, _)| field_name == name))
+            .and_then(|position| block.elements.get(position)),
+        (TagInfo::RecordExt { fields, .. }, _) => dbg
+            .name()
+            .and_then(|name| fields.iter().position(|field_name| field_name == name))
+            .and_then(|position| block.elements.get(position)),
+        _ => block.elements.get(index as usize),
     }
 }
 
@@ -273,6 +428,15 @@ fn substitution_candidate(kind: LetKind, value: &Lambda) -> Option<Lambda> {
             Some(value.clone())
         }
         _ => None,
+    }
+}
+
+impl BlockElement {
+    fn as_simple_form(&self) -> Option<&Lambda> {
+        match self {
+            BlockElement::Na => None,
+            BlockElement::Simple(value) => Some(value),
+        }
     }
 }
 
@@ -360,7 +524,7 @@ fn collect_exported_idents_into(lam: &Lambda, exports: &mut HashSet<Ident>) {
 #[cfg(test)]
 mod tests {
     use crate::ident::Ident;
-    use crate::lambda::compat::LetKind;
+    use crate::lambda::compat::{FieldDbgInfo, LetKind};
     use crate::lambda::constant::Constant;
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalObjLabel, ExternalObjSpec, Mutable, Primitive,
@@ -525,6 +689,218 @@ mod tests {
             simplified,
             Lambda::Lconst(Constant::Int { i: 2, .. })
         ));
+    }
+
+    #[test]
+    fn flattens_immutable_module_block_field_aliases() {
+        let field_fn = Ident::create_local("myField");
+        let include = Ident::create_local("include");
+        let projected = Ident::create_local("projected");
+        let param = Ident::create_local("param");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            field_fn.clone(),
+            Lambda::function_(
+                1,
+                vec![param.clone()],
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Record {
+                            name: "myField".to_string(),
+                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                        },
+                    ),
+                    vec![Lambda::var(param)],
+                    Location::none(),
+                ),
+                FunctionAttribute::default(),
+            ),
+                Lambda::let_(
+                    LetKind::Strict,
+                    include.clone(),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::Module(vec!["myField".to_string()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(field_fn.clone())],
+                    Location::none(),
+                ),
+                Lambda::let_(
+                    LetKind::Alias,
+                    projected.clone(),
+                    Lambda::prim(
+                        Primitive::Pfield(
+                            0,
+                            FieldDbgInfo::Module {
+                                name: "myField".to_string(),
+                            },
+                        ),
+                        vec![Lambda::var(include)],
+                        Location::none(),
+                    ),
+                    Lambda::var(projected),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(_, kept_id, kept_value, kept_body) = simplified else {
+            panic!("expected the projected function binding to remain");
+        };
+        assert_eq!(kept_id, field_fn);
+        assert!(matches!(*kept_value, Lambda::Lfunction(_)));
+        let Lambda::Lvar(body_id) = *kept_body else {
+            panic!("expected the body to reference the original function");
+        };
+        assert_eq!(body_id, kept_id);
+    }
+
+    #[test]
+    fn folds_record_field_from_constant_block() {
+        let name = Ident::create_local("name");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            name.clone(),
+            Lambda::prim(
+                Primitive::Pfield(
+                    1,
+                    FieldDbgInfo::Record {
+                        name: "name".to_string(),
+                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                    },
+                ),
+                vec![Lambda::const_(Constant::Block {
+                    tag: 0,
+                    tag_info: TagInfo::Record {
+                        fields: vec![
+                            ("number".to_string(), false),
+                            ("name".to_string(), false),
+                        ],
+                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                    },
+                    elements: vec![
+                        Constant::int(42),
+                        Constant::String {
+                            s: "a".to_string(),
+                            delim: None,
+                        },
+                    ],
+                })],
+                Location::none(),
+            ),
+            Lambda::var(name),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lconst(Constant::String { s, .. }) = simplified else {
+            panic!("expected the record field read to fold to a string constant");
+        };
+        assert_eq!(s, "a");
+    }
+
+    #[test]
+    fn flattens_record_field_aliases_by_name() {
+        let record = Ident::create_local("record");
+        let name = Ident::create_local("name");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            record.clone(),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::Record {
+                        fields: vec![
+                            ("number".to_string(), false),
+                            ("name".to_string(), false),
+                        ],
+                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                    },
+                    Mutable::Immutable,
+                ),
+                vec![
+                    Lambda::const_(Constant::int(42)),
+                    Lambda::const_(Constant::String {
+                        s: "a".to_string(),
+                        delim: None,
+                    }),
+                ],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                name.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Record {
+                            name: "name".to_string(),
+                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                        },
+                    ),
+                    vec![Lambda::var(record)],
+                    Location::none(),
+                ),
+                Lambda::var(name),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lconst(Constant::String { s, .. }) = simplified else {
+            panic!("expected the bound record field read to fold to a string constant");
+        };
+        assert_eq!(s, "a");
+    }
+
+    #[test]
+    fn flattens_constant_record_block_bindings_by_name() {
+        let record = Ident::create_local("record");
+        let name = Ident::create_local("name");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            record.clone(),
+            Lambda::const_(Constant::Block {
+                tag: 0,
+                tag_info: TagInfo::Record {
+                    fields: vec![
+                        ("number".to_string(), false),
+                        ("name".to_string(), false),
+                    ],
+                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                },
+                elements: vec![
+                    Constant::int(42),
+                    Constant::String {
+                        s: "a".to_string(),
+                        delim: None,
+                    },
+                ],
+            }),
+            Lambda::let_(
+                LetKind::Strict,
+                name.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Record {
+                            name: "name".to_string(),
+                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                        },
+                    ),
+                    vec![Lambda::var(record)],
+                    Location::none(),
+                ),
+                Lambda::var(name),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lconst(Constant::String { s, .. }) = simplified else {
+            panic!("expected the bound constant-record field read to fold");
+        };
+        assert_eq!(s, "a");
     }
 
     #[test]
