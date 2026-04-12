@@ -545,6 +545,11 @@ fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
 
 fn lower_constant(constant: Constant) -> Constant {
     match constant {
+        Constant::NativeInt { i, comment } => Constant::Int {
+            // OCaml's lam_constant_convert.ml truncates source ints here with Int32.of_int.
+            i: i as i32,
+            comment,
+        },
         Constant::Int {
             i,
             comment: Some(PointerInfo::Constructor(tag)),
@@ -1944,6 +1949,22 @@ mod tests {
                 s,
                 delim: Some(StringDelim::Plain)
             }) if s == "hello"
+        ));
+    }
+
+    #[test]
+    fn lowers_native_int_constants_to_wrapped_int32() {
+        let lowered = lower_to_lambda(RawLambda::const_(Constant::NativeInt {
+            i: 0xAFAFAFAF,
+            comment: None,
+        }));
+
+        assert!(matches!(
+            lowered,
+            Lambda::Lconst(Constant::Int {
+                i: -1347440721,
+                comment: None,
+            })
         ));
     }
 

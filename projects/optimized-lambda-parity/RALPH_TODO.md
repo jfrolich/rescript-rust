@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 602/657 (91.6%), 55 parity failures, 172 hunks
+**Status:** 606/657 (92.2%), 51 parity failures, 166 hunks
 
 ## Goal
 
@@ -23,8 +23,8 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **602/657**
-- Parity hunks: **172**
+- Optimized lambda parity: **606/657**
+- Parity hunks: **166**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
@@ -52,7 +52,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **55** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
+There are **51** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -72,6 +72,7 @@ Current frontier characteristics:
 - `conditional/cond_a.res` now also passes exactly as a minimal assert-failure guard.
 - `js_array_test.res` now also passes exactly as a large-file guard.
 - `big_polyvar_test.res` now also passes exactly on the current authoritative baseline.
+- `js_json_test.res` now also passes exactly on the current authoritative baseline.
 - `LetUnwrap.res` now also passes exactly after preserving named polyvariant hash metadata in raw match tests.
 - `polyvar_test.res` now also passes exactly on the current authoritative baseline.
 - `set_gen.res` now also passes exactly on the current authoritative baseline.
@@ -96,7 +97,6 @@ Current frontier characteristics:
   - `mario_game.res`: **2 hunks** on the current authoritative baseline (down from **36** across later slices)
 - the focused `Lam.if_` assert-failure rewrite is now landed:
   - `stringmatch_test.res`: **exact parity** (down from **1 hunk** on the prior baseline)
-  - `js_json_test.res`: **3 hunks** on the current authoritative baseline, so its remaining diffs are no longer dominated by that one rewrite
 - the external-return-wrapper slice is now landed:
   - `bs_splice_partial.res`: **exact parity**
   - `js_nullable_test.res`: **exact parity**
@@ -110,6 +110,55 @@ Current frontier characteristics:
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### native-int lowering now matches `lam_constant_convert.ml`
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests::lowers_native_int_constants_to_wrapped_int32 -- --exact
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 300 ./scripts/test_lambda_parity.sh -j1 js_json_test
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- OCaml compile coverage: **657/657**
+- Rust compile coverage: **657/657**
+- Optimized lambda parity: **606/657**
+- Stamp-canonicalized parity: not re-baselined in this rerun
+- Exact hunks: **166**
+- Stamp-canonicalized hunks: not re-baselined in this rerun
+
+Key checkpoints:
+
+- `js_json_test.res`: passes
+- next visible frontier remains the exception / recursive-module / switch clusters at the top of the current exact-diff table
+
+`compiler/core/lam_constant_convert.ml` converts `Const_base (Const_int i)` with
+`Int32.of_int i`, so OCaml's optimized-lambda dump wraps wide source ints to signed
+32-bit values at the raw-to-lowered boundary.
+
+Rust `compiler-rust/src/raw_lambda/lower.rs` was still forwarding those values as
+`Constant::NativeInt`, which left optimized-lambda sexps printing unsigned-looking
+large positives like `2947526575` where OCaml printed the wrapped `-1347440721`.
+
+Rust now mirrors the OCaml boundary rule directly:
+
+- `Constant::NativeInt` lowers to `Constant::Int { i: i as i32, ... }`
+- the new unit test covers the representative `0xAFAFAFAF` case from `js_json_test.res`
+
+Authoritative repo-wide baseline moved from:
+
+- **602/657**, **172** hunks
+
+to:
+
+- **606/657**, **166** hunks
+
+This confirms the remaining `js_json_test.res` drift was not a printer problem or a
+later-pass issue. It was one more missing `Lam_convert.convert` constant-lowering
+rule at the optimized boundary.
 
 ### constant `Blk_poly_var` conversion moved the polyvariant frontier again
 Ran:
