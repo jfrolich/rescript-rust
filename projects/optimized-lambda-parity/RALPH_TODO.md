@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 533/657 (81.1%), 124 parity failures, 515 hunks
+**Status:** 537/657 (81.7%), 120 parity failures, 425 hunks
 
 ## Goal
 
@@ -23,18 +23,21 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **533/657**
-- Parity hunks: **515**
+- Optimized lambda parity: **537/657**
+- Parity hunks: **425**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
-  - `js_json_test.res`: **45** hunks
   - `coercion_module_alias_test.res`: **40** hunks
   - `bs_unwrap_test.res`: **21** hunks
-  - `ticker.res`: **13** hunks
   - `inline_map_test.res`: **12** hunks
   - `inline_map2_test.res`: **12** hunks
-  - `exception_raise_test.res`: **12** hunks
+  - `record_extension_test.res`: **11** hunks
+  - `exception_raise_test.res`: **10** hunks
+  - `mario_game.res`: **9** hunks
+  - `js_exception_catch_test.res`: **9** hunks
+  - `Stdlib_DictTests.res`: **8** hunks
+  - `set_gen.res`: **8** hunks
 
 ## Working Rules
 
@@ -48,7 +51,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **124** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, not dump-path routing.
+There are **120** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order can still move whole control-flow clusters.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -81,11 +84,47 @@ Current frontier characteristics:
 - the focused `Lam.if_` assert-failure rewrite is now landed:
   - `stringmatch_test.res`: **exact parity** (down from **1 hunk** on the prior baseline)
   - `js_json_test.res`: **45 hunks** on a focused rerun, so its remaining diffs are no longer dominated by that one rewrite
-- the next visible optimized frontier is the current exact-diff leaders (`js_json_test.res`, `coercion_module_alias_test.res`, `bs_unwrap_test.res`, `ticker.res`, `inline_map_test.res`, `inline_map2_test.res`) plus the exception static-exit numbering cluster (`test_trywith.res`, `exception_raise_test.res`) and the remaining switch-control-flow files (`set_gen.res`, `test_set.res`, `variant.res`).
+- the next visible optimized frontier is the current exact-diff leaders (`coercion_module_alias_test.res`, `bs_unwrap_test.res`, `inline_map_test.res`, `inline_map2_test.res`, `record_extension_test.res`, `exception_raise_test.res`) plus the remaining switch-control-flow files (`set_gen.res`, `test_set.res`, `variant.res`) and the larger JS/backend-facing cluster (`mario_game.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`).
 - a fresh full raw `-drawlambda` rerun reported **656/657** with one exact failure in `coercion_module_alias_test.res`; that looks separate from the assert-failure lowering slice and should be handled in a dedicated raw-parity session.
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### raw sequence traversal order moved the exception frontier
+`compiler/ml/translcore.ml` builds sequences as:
+
+```text
+Lsequence (transl_exp expr1, transl_exp expr2)
+```
+
+That matters because OCaml evaluates constructor arguments right-to-left. Rust
+`compiler-rust/src/raw_lambda/convert.rs` was still converting `Texp_sequence`
+left-to-right, so later sequence elements consumed lower `next_raise_count()`
+ids and earlier `try ... catch` expressions ended up with the wrong static-exit
+numbering.
+
+`compiler-rust/src/raw_lambda/convert.rs` now converts the RHS before the LHS
+when lowering `Texp_sequence`, and it covers that OCaml-aligned traversal with:
+
+- `raw_lambda::convert::tests::raw_sequence_converts_rhs_before_lhs_for_raise_counts`
+
+Verified focused checks:
+
+- `test_trywith.res`: **exact parity** (down from **10 hunks**)
+- `exception_raise_test.res`: **10 hunks** on the authoritative baseline (down from **12**)
+
+Authoritative repo-wide baseline moved from:
+
+- **533/657**, **515** hunks
+
+to:
+
+- **537/657**, **425** hunks
+
+That is a gain of **4 files** and **90 hunks**. The previous exception static-exit
+cluster is smaller now: `test_trywith.res` is gone, and the remaining exception
+work is concentrated in `exception_raise_test.res` plus the raw-parity outlier
+`coercion_module_alias_test.res`.
 
 ### optional-parameter renaming moved the uncurry frontier
 `compiler/core/lam_convert.ml` runs `rename_optional_parameters` before lowering

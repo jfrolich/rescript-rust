@@ -4466,7 +4466,12 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::prim(Primitive::Pmakearray, elems, self.loc(expr.exp_loc))
             }
             ExpressionDesc::Texp_sequence(a, b) => {
-                RawLambda::seq(self.convert_expr_raw(a), self.convert_expr_raw(b))
+                // OCaml builds `Lsequence (transl_exp a, transl_exp b)`, and the
+                // constructor arguments are evaluated right-to-left. Match that
+                // traversal so raise-count allocation stays in sync.
+                let second = self.convert_expr_raw(b);
+                let first = self.convert_expr_raw(a);
+                RawLambda::seq(first, second)
             }
             ExpressionDesc::Texp_while(cond, body) => RawLambda::Lwhile(
                 Box::new(self.convert_expr_raw(cond)),
@@ -5506,100 +5511,12 @@ impl<'a> RawLambdaConverter<'a> {
             _ => None,
         };
 
-        // Build chain of catch/exit wrappers, each case in its own handler.
-        // OCaml's split_naive + comp_match_handlers wraps each extension case
-        // in catch(test, with (N) next_test), matching:
-        //   (catch (let (tag =a exn) (if (ext_slot_eq tag EXT) act (exit N)))
-        //    with (N) (let (tag =a exn) (if (ext_slot_eq tag EXT2) act2 (exit M)))
-        //    ...)
-        // Build chain of catch/exit wrappers matching OCaml's nesting:
-        // The FIRST case is innermost, subsequent cases wrap around it.
-        //   catch(catch(tag1_test(exit 1), with(1) tag2_test(exit 2)), with(2) tag3_test ...)
-        let tests = {
-            let mut ext_cases = extension_cases;
-            // Last case uses the default directly in its else branch
-            let (last_path, last_act) = ext_cases.pop().unwrap();
-            let tag_id = self.id_gen.create("tag");
-            let cond = RawLambda::prim(
-                Primitive::PextensionSlotEq,
-                vec![
-                    RawLambda::var(tag_id.clone()),
-                    self.translate_extension_path_raw(&last_path, loc),
-                ],
-                loc,
-            );
-            let outermost = RawLambda::let_(
-                LetKind::Alias,
-                tag_id,
-                RawLambda::var(exn_id.clone()),
-                RawLambda::LifThenElse(Box::new(cond), Box::new(last_act), Box::new(default)),
-            );
-            // Build from innermost (first case) outward, wrapping each in catch/exit
-            // Allocate all exit IDs first (matching OCaml's next_raise_count ordering)
-            let exit_ids: Vec<i32> = ext_cases.iter().map(|_| self.next_raise_count()).collect();
-            // Build innermost first
-            let first = ext_cases.first().map(|(path, act)| {
-                let tag_id = self.id_gen.create("tag");
-                let cond = RawLambda::prim(
-                    Primitive::PextensionSlotEq,
-                    vec![
-                        RawLambda::var(tag_id.clone()),
-                        self.translate_extension_path_raw(path, loc),
-                    ],
-                    loc,
-                );
-                RawLambda::let_(
-                    LetKind::Alias,
-                    tag_id,
-                    RawLambda::var(exn_id.clone()),
-                    RawLambda::LifThenElse(
-                        Box::new(cond),
-                        Box::new(act.clone()),
-                        Box::new(RawLambda::LstaticRaise(exit_ids[0], Vec::new())),
-                    ),
-                )
-            });
-            if let Some(inner) = first {
-                // Wrap remaining cases around inner
-                let mut result = inner;
-                for i in 1..ext_cases.len() {
-                    let (path, act) = &ext_cases[i];
-                    let tag_id = self.id_gen.create("tag");
-                    let cond = RawLambda::prim(
-                        Primitive::PextensionSlotEq,
-                        vec![
-                            RawLambda::var(tag_id.clone()),
-                            self.translate_extension_path_raw(path, loc),
-                        ],
-                        loc,
-                    );
-                    let handler = RawLambda::let_(
-                        LetKind::Alias,
-                        tag_id,
-                        RawLambda::var(exn_id.clone()),
-                        RawLambda::LifThenElse(
-                            Box::new(cond),
-                            Box::new(act.clone()),
-                            Box::new(RawLambda::LstaticRaise(exit_ids[i], Vec::new())),
-                        ),
-                    );
-                    result = RawLambda::LstaticCatch(
-                        Box::new(result),
-                        (exit_ids[i - 1], Vec::new()),
-                        Box::new(handler),
-                    );
-                }
-                // Final wrap with outermost (which uses default)
-                result = RawLambda::LstaticCatch(
-                    Box::new(result),
-                    (exit_ids[ext_cases.len() - 1], Vec::new()),
-                    Box::new(outermost),
-                );
-                result
-            } else {
-                outermost
-            }
-        };
+        let tests = self.build_simple_trywith_extension_chain_raw(
+            loc,
+            exn_id,
+            extension_cases,
+            default,
+        );
 
         Some(match (exit_id, catch_handler) {
             // Explicit catch-all: catch the static raise with the real body
@@ -5612,6 +5529,61 @@ impl<'a> RawLambdaConverter<'a> {
             }
             _ => tests,
         })
+    }
+
+    fn build_simple_trywith_extension_chain_raw(
+        &mut self,
+        loc: Location,
+        exn_id: &Ident,
+        extension_cases: Vec<(crate::types::Path, RawLambda)>,
+        default: RawLambda,
+    ) -> RawLambda {
+        let mut extension_cases = extension_cases.into_iter();
+        let (last_path, last_act) = extension_cases
+            .next_back()
+            .expect("extension handler requires at least one case");
+
+        let mut tests =
+            self.build_simple_trywith_extension_case_raw(loc, exn_id, last_path, last_act, default);
+
+        for (path, act) in extension_cases.rev() {
+            let exit_id = self.next_raise_count();
+            let body = self.build_simple_trywith_extension_case_raw(
+                loc,
+                exn_id,
+                path,
+                act,
+                RawLambda::LstaticRaise(exit_id, Vec::new()),
+            );
+            tests = RawLambda::LstaticCatch(Box::new(body), (exit_id, Vec::new()), Box::new(tests));
+        }
+
+        tests
+    }
+
+    fn build_simple_trywith_extension_case_raw(
+        &mut self,
+        loc: Location,
+        exn_id: &Ident,
+        path: crate::types::Path,
+        act: RawLambda,
+        fallback: RawLambda,
+    ) -> RawLambda {
+        let tag_id = self.id_gen.create("tag");
+        let cond = RawLambda::prim(
+            Primitive::PextensionSlotEq,
+            vec![
+                RawLambda::var(tag_id.clone()),
+                self.translate_extension_path_raw(&path, loc),
+            ],
+            loc,
+        );
+        RawLambda::let_(
+            LetKind::Alias,
+            tag_id,
+            RawLambda::var(exn_id.clone()),
+            RawLambda::LifThenElse(Box::new(cond), Box::new(act), Box::new(fallback)),
+        )
     }
 
     fn bind_constructor_args_irrefutably_raw(
@@ -9390,6 +9362,10 @@ impl<'a> RawLambdaConverter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::IdGenerator;
+    use crate::parse_arena::ParseArena;
+    use crate::parser::ast::Attributes;
+    use crate::types::env::initial_env;
 
     #[test]
     fn raw_polyvariant_compare_keeps_named_tag_metadata() {
@@ -9409,5 +9385,159 @@ mod tests {
             if id.same(&scrutinee_id)
                 && *i == crate::types::btype::hash_variant("InvalidNext")
                 && name == "InvalidNext"));
+    }
+
+    fn else_exit_id(raw: &RawLambda) -> Option<i32> {
+        let RawLambda::Llet(_, _, _, body) = raw else {
+            return None;
+        };
+        let RawLambda::LifThenElse(_, _, else_) = body.as_ref() else {
+            return None;
+        };
+        let RawLambda::LstaticRaise(id, args) = else_.as_ref() else {
+            return None;
+        };
+        if args.is_empty() { Some(*id) } else { None }
+    }
+
+    fn try_handler_exit_id(raw: &RawLambda) -> Option<i32> {
+        let RawLambda::LtryWith(_, _, handler) = raw else {
+            return None;
+        };
+        let RawLambda::LstaticCatch(_, (id, params), _) = handler.as_ref() else {
+            return None;
+        };
+        if params.is_empty() { Some(*id) } else { None }
+    }
+
+    fn simple_extension_try(
+        arena: &mut ParseArena,
+        name: &str,
+        body_value: i64,
+        handler_value: i64,
+    ) -> Expression {
+        let lid = Located::mknoloc(arena.push_lident(name));
+        let path = crate::types::Path::Pident(Ident::create_persistent(name));
+        let constructor = crate::types::ConstructorDescription {
+            cstr_name: name.to_string(),
+            cstr_res: crate::types::TypeExprRef(0),
+            cstr_existentials: Vec::new(),
+            cstr_args: Vec::new(),
+            cstr_arity: 0,
+            cstr_tag: crate::types::ConstructorTag::CstrExtension(path),
+            cstr_consts: -1,
+            cstr_nonconsts: -1,
+            cstr_generalized: false,
+            cstr_private: crate::types::asttypes::PrivateFlag::Public,
+            cstr_loc: Location::none(),
+            cstr_attributes: Vec::new(),
+            cstr_inlined: None,
+        };
+        let case = Case::simple(
+            Pattern::new(
+                PatternDesc::Tpat_construct(lid, constructor, Vec::new()),
+                LocIdx::none(),
+                crate::types::TypeExprRef(0),
+                EnvRef(0),
+                Attributes::new(),
+            ),
+            Expression::new(
+                ExpressionDesc::Texp_constant(TConstant::Int(handler_value)),
+                LocIdx::none(),
+                crate::types::TypeExprRef(0),
+                EnvRef(0),
+                Attributes::new(),
+            ),
+        );
+        Expression::new(
+            ExpressionDesc::Texp_try(
+                Box::new(Expression::new(
+                    ExpressionDesc::Texp_constant(TConstant::Int(body_value)),
+                    LocIdx::none(),
+                    crate::types::TypeExprRef(0),
+                    EnvRef(0),
+                    Attributes::new(),
+                )),
+                vec![case],
+            ),
+            LocIdx::none(),
+            crate::types::TypeExprRef(0),
+            EnvRef(0),
+            Attributes::new(),
+        )
+    }
+
+    #[test]
+    fn simple_trywith_extension_handler_assigns_exit_ids_in_source_order() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        converter.next_static_raise = 1;
+        let exn_id = Ident::create_local("exn");
+
+        let handler = converter.build_simple_trywith_extension_chain_raw(
+            Location::none(),
+            &exn_id,
+            vec![
+                (
+                    crate::types::Path::Pident(Ident::create_persistent("A")),
+                    RawLambda::const_(Constant::int(1)),
+                ),
+                (
+                    crate::types::Path::Pident(Ident::create_persistent("B")),
+                    RawLambda::const_(Constant::int(2)),
+                ),
+                (
+                    crate::types::Path::Pident(Ident::create_persistent("C")),
+                    RawLambda::const_(Constant::int(3)),
+                ),
+            ],
+            RawLambda::LstaticRaise(1, Vec::new()),
+        );
+
+        let RawLambda::LstaticCatch(first_case, (first_handler, first_params), rest) = handler else {
+            panic!("expected outer static catch");
+        };
+        assert_eq!(first_handler, 3);
+        assert!(first_params.is_empty());
+        assert_eq!(else_exit_id(&first_case), Some(3));
+
+        let RawLambda::LstaticCatch(second_case, (second_handler, second_params), last_case) =
+            *rest
+        else {
+            panic!("expected second static catch");
+        };
+        assert_eq!(second_handler, 2);
+        assert!(second_params.is_empty());
+        assert_eq!(else_exit_id(&second_case), Some(2));
+        assert_eq!(else_exit_id(&last_case), Some(1));
+    }
+
+    #[test]
+    fn raw_sequence_converts_rhs_before_lhs_for_raise_counts() {
+        let mut arena = ParseArena::new();
+        let first_try = simple_extension_try(&mut arena, "A", 1, 11);
+        let second_try = simple_extension_try(&mut arena, "B", 2, 22);
+        let sequence = Expression::new(
+            ExpressionDesc::Texp_sequence(Box::new(first_try), Box::new(second_try)),
+            LocIdx::none(),
+            crate::types::TypeExprRef(0),
+            EnvRef(0),
+            Attributes::new(),
+        );
+
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let lam = converter.convert_expr_raw(&sequence);
+
+        let RawLambda::Lsequence(first, second) = lam else {
+            panic!("expected sequence");
+        };
+        assert_eq!(try_handler_exit_id(&first), Some(2));
+        assert_eq!(try_handler_exit_id(&second), Some(1));
     }
 }
