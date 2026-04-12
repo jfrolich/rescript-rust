@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 79 / 657 JS snapshots passing, 0 compile errors, 578 output diffs
+**Status:** 82 / 657 JS snapshots passing, 0 compile errors, 575 output diffs
 
 ## Goal
 
@@ -35,14 +35,23 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **79 / 657**
+- JS snapshot parity: **82 / 657**
 - Compile errors: **0**
-- Output diffs: **578**
+- Output diffs: **575**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
+- the OCaml `js_pass_flatten.ml` stage is now on the Rust JS path ahead of the
+  already-ported `external_shadow` pass, so effectful sequence callbacks now
+  lower as statement blocks instead of giant comma expressions
+- the old `, undefined,` comma-sequence motif collapsed from **185** diff files
+  to **56** files after the flatten pass
+- the next cleanup frontier exposed by that port is later JS-pass work:
+  explicit dead `undefined;` statement noise now appears in **270** diff files,
+  which points directly at the still-missing `Js_pass_flatten_and_mark_dead`
+  / shake cleanup stages
 - the authoritative wrapper is now scoped to the canonical in-repo 657-file set
 - all current internal JS snapshot files now compile under the wrapper baseline
 - the former `Import.res` timeout is now exposed as a normal output-diff case
@@ -158,6 +167,25 @@ Remaining internal compile errors under the measured wrapper baseline:
 
 ## Latest Session Findings
 
+- `compiler-rust/src/lambda/compile.rs` now ports the OCaml
+  `js_pass_flatten.ml` stage and runs it before the existing
+  `external_shadow` pass on the Rust JS backend path.
+- Verified focused guards for this cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_flatten_pass -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release flattens_value_sequences_back_to_effect_statements_at_toplevel -- --nocapture`
+  - `tests/tests/src/gpr_1946_test.res` now lowers Mocha callback bodies as
+    statement blocks instead of giant comma expressions, though it still drifts
+    on earlier missing record / object lowering and later dead-statement cleanup
+  - `tests/tests/src/list_test.res` now lowers the `Mocha.describe` callback as
+    a block with explicit statements instead of one giant comma expression, but
+    it still needs later-pass cleanup and other backend fixes
+  - `tests/tests/src/ExternalShadow.res` still matches its checked-in `.mjs`
+    snapshot exactly after the pass ordering change
+- The authoritative JS snapshot baseline now reports **82 / 657** passing, **0**
+  compile errors, and **575** output diffs.
+- The old `, undefined,` diff motif dropped from **185** files to **56** after
+  the flatten pass; the newly-exposed frontier is dead-statement cleanup, with
+  explicit `undefined;` statements now visible in **270** failing diff files.
 - `compiler-rust/src/lambda/compile.rs` now ports the OCaml `Pimport`
   lambda-stage special-case for eta-expanded externals instead of trying to
   recover the pattern from compiled JS:

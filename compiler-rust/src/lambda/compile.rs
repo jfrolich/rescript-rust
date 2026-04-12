@@ -15,8 +15,9 @@ use crate::js_ir::op::{
 };
 use crate::js_ir::printer::is_js_keyword_or_global;
 use crate::js_ir::{
-    BinOp, Block, CallInfo, Delim, DepsProgram, Expression, ExpressionDesc, ForDirection, ModuleId,
-    ModulePathResolver, Program, Statement, StatementDesc, VariableDeclaration,
+    BinOp, Block, CallInfo, CaseClause, Delim, DepsProgram, Expression, ExpressionDesc,
+    ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc, StringClause,
+    VariableDeclaration,
 };
 use crate::lambda::analysis;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
@@ -83,11 +84,11 @@ impl LambdaCompiler {
             }
         };
 
-        let mut deps = apply_external_shadow_pass(DepsProgram {
+        let mut deps = apply_external_shadow_pass(apply_js_flatten_pass(DepsProgram {
             program: Program::new(block, exports),
             modules: vec![],
             side_effect: module_side_effect_reason(&simplified),
-        });
+        }));
         deps.modules = self.collect_required_modules(&deps.program.block);
         deps
     }
@@ -496,9 +497,7 @@ impl LambdaCompiler {
 
     fn compile_import_primitive(&mut self, args: &[Lambda]) -> Compiled {
         let target = match args {
-            [arg] => self
-                .dynamic_import_body(arg)
-                .unwrap_or_else(|| arg.clone()),
+            [arg] => self.dynamic_import_body(arg).unwrap_or_else(|| arg.clone()),
             _ => {
                 let mut prelude = vec![];
                 let mut compiled_args = Vec::new();
@@ -958,7 +957,10 @@ impl LambdaCompiler {
         default: bool,
         dynamic_import: bool,
     ) -> Expression {
-        Expression::qualified(self.external_module_id(module_name, default, dynamic_import), None)
+        Expression::qualified(
+            self.external_module_id(module_name, default, dynamic_import),
+            None,
+        )
     }
 
     fn translate_scoped_module_value(
@@ -980,8 +982,7 @@ impl LambdaCompiler {
                     }
                 }
                 Some((first_scope, rest_scopes)) => {
-                    let mut expr =
-                        self.external_module_binding(module_name, false, dynamic_import);
+                    let mut expr = self.external_module_binding(module_name, false, dynamic_import);
                     expr = self.static_index(expr, first_scope);
                     for scope in rest_scopes {
                         expr = self.static_index(expr, scope);
@@ -1560,7 +1561,9 @@ fn js_expr_no_side_effects(expr: &Expression) -> bool {
         ExpressionDesc::CamlBlock(items, _, _, _) => items.iter().all(js_expr_no_side_effects),
         ExpressionDesc::Object(dup, props) => {
             dup.as_deref().is_none_or(js_expr_no_side_effects)
-                && props.iter().all(|(_, value)| js_expr_no_side_effects(value))
+                && props
+                    .iter()
+                    .all(|(_, value)| js_expr_no_side_effects(value))
         }
         ExpressionDesc::Cond(test, consequent, alternate) => {
             js_expr_no_side_effects(test)
@@ -1770,6 +1773,390 @@ fn int_bnot(expr: Expression) -> Expression {
     match int_literal(&expr) {
         Some(value) => int_expr(!value),
         None => Expression::new(ExpressionDesc::JsBnot(Box::new(expr))),
+    }
+}
+
+fn apply_js_flatten_pass(mut deps: DepsProgram) -> DepsProgram {
+    deps.program = flatten_program(deps.program);
+    deps
+}
+
+fn flatten_program(mut program: Program) -> Program {
+    program.block = flatten_block(program.block);
+    program
+}
+
+fn flatten_block(block: Block) -> Block {
+    let mut flattened = Vec::new();
+
+    for stmt in block {
+        match flatten_statement(stmt) {
+            Statement {
+                desc: StatementDesc::Block(inner),
+                ..
+            } => flattened.extend(inner),
+            other => flattened.push(other),
+        }
+    }
+
+    flattened
+}
+
+fn flatten_statement(stmt: Statement) -> Statement {
+    let Statement { desc, comment } = stmt;
+
+    match desc {
+        StatementDesc::Exp(expr) => {
+            let Expression {
+                desc,
+                comment: expr_comment,
+            } = expr;
+
+            match desc {
+                ExpressionDesc::Seq(_, _) => {
+                    let block = flatten_sequence_statements(Expression {
+                        desc,
+                        comment: expr_comment,
+                    });
+                    Statement::new(StatementDesc::Block(block))
+                }
+                ExpressionDesc::CamlBlock(args, _, _, _) => {
+                    let block = args
+                        .into_iter()
+                        .map(|arg| flatten_statement(Statement::exp(arg)))
+                        .collect();
+                    Statement::new(StatementDesc::Block(block))
+                }
+                ExpressionDesc::Cond(test, consequent, alternate) => Statement {
+                    desc: StatementDesc::If(
+                        flatten_expression(*test),
+                        vec![flatten_statement(Statement::exp(*consequent))],
+                        vec![flatten_statement(Statement::exp(*alternate))],
+                    ),
+                    comment,
+                },
+                ExpressionDesc::Bin(BinOp::Eq, target, value) => {
+                    if matches!(value.desc, ExpressionDesc::Seq(_, _)) {
+                        let mut exprs = Vec::new();
+                        flatten_sequence_expressions(*value, &mut exprs);
+                        let last = exprs
+                            .pop()
+                            .expect("sequence flattening must produce at least one expression");
+                        let mut block: Block = exprs
+                            .into_iter()
+                            .map(|expr| flatten_statement(Statement::exp(expr)))
+                            .collect();
+                        block.push(flatten_statement(Statement::exp(Expression::bin(
+                            BinOp::Eq,
+                            *target,
+                            last,
+                        ))));
+                        Statement::new(StatementDesc::Block(block))
+                    } else {
+                        Statement {
+                            desc: StatementDesc::Exp(flatten_expression(Expression {
+                                desc: ExpressionDesc::Bin(BinOp::Eq, target, value),
+                                comment: expr_comment,
+                            })),
+                            comment,
+                        }
+                    }
+                }
+                desc => Statement {
+                    desc: StatementDesc::Exp(flatten_expression(Expression {
+                        desc,
+                        comment: expr_comment,
+                    })),
+                    comment,
+                },
+            }
+        }
+        StatementDesc::Return(expr) => {
+            let Expression {
+                desc,
+                comment: expr_comment,
+            } = expr;
+
+            match desc {
+                ExpressionDesc::Cond(test, consequent, alternate) => Statement {
+                    desc: StatementDesc::If(
+                        flatten_expression(*test),
+                        vec![flatten_statement(Statement::return_(*consequent))],
+                        vec![flatten_statement(Statement::return_(*alternate))],
+                    ),
+                    comment,
+                },
+                ExpressionDesc::Seq(_, _) => {
+                    let mut exprs = Vec::new();
+                    flatten_sequence_expressions(
+                        Expression {
+                            desc,
+                            comment: expr_comment,
+                        },
+                        &mut exprs,
+                    );
+                    let last = exprs
+                        .pop()
+                        .expect("return sequence flattening must produce at least one expression");
+                    let mut block: Block = exprs
+                        .into_iter()
+                        .map(|expr| flatten_statement(Statement::exp(expr)))
+                        .collect();
+                    block.push(flatten_statement(Statement::return_(last)));
+                    Statement::new(StatementDesc::Block(block))
+                }
+                desc => Statement {
+                    desc: StatementDesc::Return(flatten_expression(Expression {
+                        desc,
+                        comment: expr_comment,
+                    })),
+                    comment,
+                },
+            }
+        }
+        StatementDesc::Block(block) => {
+            if block.len() == 1 {
+                flatten_statement(block.into_iter().next().expect("single-item block"))
+            } else {
+                Statement {
+                    desc: StatementDesc::Block(flatten_block(block)),
+                    comment,
+                }
+            }
+        }
+        StatementDesc::Variable(decl) => Statement {
+            desc: StatementDesc::Variable(VariableDeclaration {
+                ident: decl.ident,
+                value: decl.value.map(flatten_expression),
+                property: decl.property,
+                ident_info: decl.ident_info,
+            }),
+            comment,
+        },
+        StatementDesc::If(cond, then_block, else_block) => Statement {
+            desc: StatementDesc::If(
+                flatten_expression(cond),
+                flatten_block(then_block),
+                flatten_block(else_block),
+            ),
+            comment,
+        },
+        StatementDesc::While(cond, body) => Statement {
+            desc: StatementDesc::While(flatten_expression(cond), flatten_block(body)),
+            comment,
+        },
+        StatementDesc::ForRange(start, finish, ident, direction, body) => Statement {
+            desc: StatementDesc::ForRange(
+                start.map(flatten_expression),
+                flatten_expression(finish),
+                ident,
+                direction,
+                flatten_block(body),
+            ),
+            comment,
+        },
+        StatementDesc::IntSwitch(test, clauses, default) => Statement {
+            desc: StatementDesc::IntSwitch(
+                flatten_expression(test),
+                clauses
+                    .into_iter()
+                    .map(|(tag, clause)| (tag, flatten_case_clause(clause)))
+                    .collect(),
+                default.map(flatten_block),
+            ),
+            comment,
+        },
+        StatementDesc::StringSwitch(test, clauses, default) => Statement {
+            desc: StatementDesc::StringSwitch(
+                flatten_expression(test),
+                clauses
+                    .into_iter()
+                    .map(|clause| StringClause {
+                        tag_type: clause.tag_type,
+                        clause: flatten_case_clause(clause.clause),
+                    })
+                    .collect(),
+                default.map(flatten_block),
+            ),
+            comment,
+        },
+        StatementDesc::Throw(expr) => Statement {
+            desc: StatementDesc::Throw(flatten_expression(expr)),
+            comment,
+        },
+        StatementDesc::Try(body, catch, finally) => Statement {
+            desc: StatementDesc::Try(
+                flatten_block(body),
+                catch.map(|(id, block)| (id, flatten_block(block))),
+                finally.map(flatten_block),
+            ),
+            comment,
+        },
+        StatementDesc::Debugger => Statement {
+            desc: StatementDesc::Debugger,
+            comment,
+        },
+        StatementDesc::Break => Statement {
+            desc: StatementDesc::Break,
+            comment,
+        },
+        StatementDesc::Continue => Statement {
+            desc: StatementDesc::Continue,
+            comment,
+        },
+    }
+}
+
+fn flatten_case_clause(clause: CaseClause) -> CaseClause {
+    CaseClause {
+        body: flatten_block(clause.body),
+        should_break: clause.should_break,
+        comment: clause.comment,
+    }
+}
+
+fn flatten_expression(expr: Expression) -> Expression {
+    let comment = expr.comment;
+    let desc = match expr.desc {
+        ExpressionDesc::Length(inner, object) => {
+            ExpressionDesc::Length(Box::new(flatten_expression(*inner)), object)
+        }
+        ExpressionDesc::IsNullOrUndefined(inner) => {
+            ExpressionDesc::IsNullOrUndefined(Box::new(flatten_expression(*inner)))
+        }
+        ExpressionDesc::StringAppend(left, right) => ExpressionDesc::StringAppend(
+            Box::new(flatten_expression(*left)),
+            Box::new(flatten_expression(*right)),
+        ),
+        ExpressionDesc::Bool(value) => ExpressionDesc::Bool(value),
+        ExpressionDesc::Typeof(inner) => {
+            ExpressionDesc::Typeof(Box::new(flatten_expression(*inner)))
+        }
+        ExpressionDesc::In(left, right) => ExpressionDesc::In(
+            Box::new(flatten_expression(*left)),
+            Box::new(flatten_expression(*right)),
+        ),
+        ExpressionDesc::JsNot(inner) => ExpressionDesc::JsNot(Box::new(flatten_expression(*inner))),
+        ExpressionDesc::JsBnot(inner) => {
+            ExpressionDesc::JsBnot(Box::new(flatten_expression(*inner)))
+        }
+        ExpressionDesc::Seq(left, right) => ExpressionDesc::Seq(
+            Box::new(flatten_expression(*left)),
+            Box::new(flatten_expression(*right)),
+        ),
+        ExpressionDesc::Cond(test, consequent, alternate) => ExpressionDesc::Cond(
+            Box::new(flatten_expression(*test)),
+            Box::new(flatten_expression(*consequent)),
+            Box::new(flatten_expression(*alternate)),
+        ),
+        ExpressionDesc::Bin(op, left, right) => ExpressionDesc::Bin(
+            op,
+            Box::new(flatten_expression(*left)),
+            Box::new(flatten_expression(*right)),
+        ),
+        ExpressionDesc::FlatCall(func, args) => ExpressionDesc::FlatCall(
+            Box::new(flatten_expression(*func)),
+            Box::new(flatten_expression(*args)),
+        ),
+        ExpressionDesc::Call(func, args, info) => ExpressionDesc::Call(
+            Box::new(flatten_expression(*func)),
+            args.into_iter().map(flatten_expression).collect(),
+            info,
+        ),
+        ExpressionDesc::StringIndex(left, right) => ExpressionDesc::StringIndex(
+            Box::new(flatten_expression(*left)),
+            Box::new(flatten_expression(*right)),
+        ),
+        ExpressionDesc::ArrayIndex(left, right) => ExpressionDesc::ArrayIndex(
+            Box::new(flatten_expression(*left)),
+            Box::new(flatten_expression(*right)),
+        ),
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
+            Box::new(flatten_expression(*tag)),
+            strings.into_iter().map(flatten_expression).collect(),
+            values.into_iter().map(flatten_expression).collect(),
+        ),
+        ExpressionDesc::StaticIndex(target, field, pos) => {
+            ExpressionDesc::StaticIndex(Box::new(flatten_expression(*target)), field, pos)
+        }
+        ExpressionDesc::New(target, args) => ExpressionDesc::New(
+            Box::new(flatten_expression(*target)),
+            args.map(|args| args.into_iter().map(flatten_expression).collect()),
+        ),
+        ExpressionDesc::Var(var) => ExpressionDesc::Var(var),
+        ExpressionDesc::Fun {
+            is_method,
+            params,
+            body,
+            env,
+            return_unit,
+            async_,
+            directive,
+        } => ExpressionDesc::Fun {
+            is_method,
+            params,
+            body: flatten_block(body),
+            env,
+            return_unit,
+            async_,
+            directive,
+        },
+        ExpressionDesc::Str { delim, txt } => ExpressionDesc::Str { delim, txt },
+        ExpressionDesc::RawJsCode(info) => ExpressionDesc::RawJsCode(info),
+        ExpressionDesc::Array(items, mutable_flag) => ExpressionDesc::Array(
+            items.into_iter().map(flatten_expression).collect(),
+            mutable_flag,
+        ),
+        ExpressionDesc::OptionalBlock(inner, flag) => {
+            ExpressionDesc::OptionalBlock(Box::new(flatten_expression(*inner)), flag)
+        }
+        ExpressionDesc::CamlBlock(items, mutable_flag, tag, tag_info) => ExpressionDesc::CamlBlock(
+            items.into_iter().map(flatten_expression).collect(),
+            mutable_flag,
+            Box::new(flatten_expression(*tag)),
+            tag_info,
+        ),
+        ExpressionDesc::CamlBlockTag(inner, tag) => {
+            ExpressionDesc::CamlBlockTag(Box::new(flatten_expression(*inner)), tag)
+        }
+        ExpressionDesc::Number(number) => ExpressionDesc::Number(number),
+        ExpressionDesc::Object(dup, props) => ExpressionDesc::Object(
+            dup.map(|dup| Box::new(flatten_expression(*dup))),
+            props
+                .into_iter()
+                .map(|(name, value)| (name, flatten_expression(value)))
+                .collect(),
+        ),
+        ExpressionDesc::Undefined { is_unit } => ExpressionDesc::Undefined { is_unit },
+        ExpressionDesc::Null => ExpressionDesc::Null,
+        ExpressionDesc::Await(inner) => ExpressionDesc::Await(Box::new(flatten_expression(*inner))),
+        ExpressionDesc::Spread(inner) => {
+            ExpressionDesc::Spread(Box::new(flatten_expression(*inner)))
+        }
+    };
+
+    Expression { desc, comment }
+}
+
+fn flatten_sequence_statements(expr: Expression) -> Block {
+    let mut exprs = Vec::new();
+    flatten_sequence_expressions(expr, &mut exprs);
+    exprs
+        .into_iter()
+        .map(|expr| flatten_statement(Statement::exp(expr)))
+        .collect()
+}
+
+fn flatten_sequence_expressions(expr: Expression, out: &mut Vec<Expression>) {
+    match expr.desc {
+        ExpressionDesc::Seq(left, right) => {
+            flatten_sequence_expressions(*left, out);
+            flatten_sequence_expressions(*right, out);
+        }
+        desc => out.push(Expression {
+            desc,
+            comment: expr.comment,
+        }),
     }
 }
 
@@ -2240,14 +2627,14 @@ fn collect_modules_from_expression(
 mod tests {
     use super::*;
     use crate::cmi::persistent_env::PersistentEnv;
-    use crate::js_ir::{ModulePathResolver, print_block};
-    use crate::lambda::{ApInfo, Apply, ApplyStatus, InlineAttribute, Lambda};
+    use crate::js_ir::{print_block, ModulePathResolver};
     use crate::lambda::constant::Constant;
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
         ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
         ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper, ExternalSpec,
     };
+    use crate::lambda::{ApInfo, Apply, ApplyStatus, InlineAttribute, Lambda};
     use crate::location::Location;
     use std::fs;
     use tempfile::tempdir;
@@ -2398,7 +2785,159 @@ mod tests {
                     } if id.same(&callback)
                 ));
             }
-            other => panic!("expected top-level sequence to flatten to a call statement, got {other:?}"),
+            other => {
+                panic!("expected top-level sequence to flatten to a call statement, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn js_flatten_pass_splits_function_return_sequences_into_statements() {
+        let function_ident = Ident::create_local("run");
+        let callback = Ident::create_local("callback");
+        let deps = apply_js_flatten_pass(DepsProgram {
+            program: Program::new(
+                vec![Statement::variable(VariableDeclaration {
+                    ident: function_ident,
+                    value: Some(Expression::new(ExpressionDesc::Fun {
+                        is_method: false,
+                        params: vec![],
+                        body: vec![Statement::return_(Expression::new(ExpressionDesc::Seq(
+                            Box::new(Expression::call(
+                                Expression::var(callback.clone()),
+                                vec![],
+                                CallInfo::default(),
+                            )),
+                            Box::new(Expression::undefined(false)),
+                        )))],
+                        env: Default::default(),
+                        return_unit: false,
+                        async_: false,
+                        directive: None,
+                    })),
+                    property: LetKind::Strict,
+                    ident_info: IdentInfo::default(),
+                })],
+                vec![],
+            ),
+            modules: vec![],
+            side_effect: None,
+        });
+
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!("expected one top-level statement");
+        };
+        let StatementDesc::Variable(VariableDeclaration {
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::Fun { body, .. },
+                    ..
+                }),
+            ..
+        }) = &stmt.desc
+        else {
+            panic!("expected a function-valued variable declaration");
+        };
+
+        let [first, second] = body.as_slice() else {
+            panic!("expected flattened function body");
+        };
+        match &first.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                assert!(args.is_empty());
+                assert!(matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&callback)
+                ));
+            }
+            other => panic!("expected callback expression statement, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Undefined { is_unit: false },
+                ..
+            }) => {}
+            other => panic!("expected return undefined after flattening, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn js_flatten_pass_turns_conditional_effects_into_if_statements() {
+        let then_callback = Ident::create_local("thenCallback");
+        let else_callback = Ident::create_local("elseCallback");
+        let deps = apply_js_flatten_pass(DepsProgram {
+            program: Program::new(
+                vec![Statement::exp(Expression::cond(
+                    Expression::bool(true),
+                    Expression::call(
+                        Expression::var(then_callback.clone()),
+                        vec![],
+                        CallInfo::default(),
+                    ),
+                    Expression::call(
+                        Expression::var(else_callback.clone()),
+                        vec![],
+                        CallInfo::default(),
+                    ),
+                ))],
+                vec![],
+            ),
+            modules: vec![],
+            side_effect: None,
+        });
+
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!("expected one top-level statement");
+        };
+        let StatementDesc::If(test, then_block, else_block) = &stmt.desc else {
+            panic!("expected conditional effect to lower to an if statement");
+        };
+        assert!(matches!(test.desc, ExpressionDesc::Bool(true)));
+
+        let [then_stmt] = then_block.as_slice() else {
+            panic!("expected one statement in then branch");
+        };
+        let [else_stmt] = else_block.as_slice() else {
+            panic!("expected one statement in else branch");
+        };
+
+        match &then_stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                assert!(args.is_empty());
+                assert!(matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&then_callback)
+                ));
+            }
+            other => panic!("expected then branch effect call, got {other:?}"),
+        }
+        match &else_stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                assert!(args.is_empty());
+                assert!(matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&else_callback)
+                ));
+            }
+            other => panic!("expected else branch effect call, got {other:?}"),
         }
     }
 
