@@ -62,10 +62,18 @@ fn string(s: &str) -> Sexp {
 fn escape_ocaml_string(s: &str) -> String {
     let mut escaped = String::with_capacity(s.len());
     for ch in s.chars() {
-        if ch == '\'' {
-            escaped.push(ch);
-        } else {
-            escaped.extend(ch.escape_default());
+        let byte = ch as u32;
+        match byte {
+            0x22 /* " */ => escaped.push_str("\\\""),
+            0x5C /* \\ */ => escaped.push_str("\\\\"),
+            0x0A /* \n */ => escaped.push_str("\\n"),
+            0x0D /* \r */ => escaped.push_str("\\r"),
+            0x09 /* \t */ => escaped.push_str("\\t"),
+            0x20..=0x7E => escaped.push(ch),
+            // Lambda strings are Latin-1 byte strings. OCaml prints non-ASCII
+            // and other non-printable bytes using decimal \NNN escapes.
+            _ if byte <= 0xFF => escaped.push_str(&format!("\\{byte:03}")),
+            _ => escaped.push_str(&format!("\\x{byte:04x}")),
         }
     }
     escaped
@@ -772,6 +780,20 @@ mod tests {
     fn does_not_escape_apostrophes_in_strings() {
         assert_eq!(escape_ocaml_string("l'"), "l'");
         assert_eq!(escape_ocaml_string("a'b\"c"), "a'b\\\"c");
+    }
+
+    #[test]
+    fn escapes_non_ascii_bytes_as_ocaml_decimal_escapes() {
+        assert_eq!(
+            escape_ocaml_string("\u{00e4}\u{00bd}\u{00a0}"),
+            "\\228\\189\\160"
+        );
+        assert_eq!(escape_ocaml_string("\u{00d7}"), "\\215");
+    }
+
+    #[test]
+    fn keeps_standard_control_character_escapes() {
+        assert_eq!(escape_ocaml_string("a\n\t\r\\\""), "a\\n\\t\\r\\\\\\\"");
     }
 }
 

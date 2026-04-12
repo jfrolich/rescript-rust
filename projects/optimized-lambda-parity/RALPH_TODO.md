@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 613/657 (93.3%), 44 parity failures, 132 hunks
+**Status:** 625/657 (95.1%), 32 parity failures, 100 hunks
 
 ## Goal
 
@@ -23,8 +23,8 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **613/657**
-- Parity hunks: **132**
+- Optimized lambda parity: **625/657**
+- Parity hunks: **100**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
@@ -33,11 +33,10 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
   - `js_exception_catch_test.res`: **9** hunks
   - `Stdlib_DictTests.res`: **8** hunks
   - `large_record_duplication_test.res`: **7** hunks
-  - `gpr_3142_test.res`: **6** hunks
-  - `chn_test.res`: **5** hunks
   - `UntaggedVariants.res`: **5** hunks
   - `Stdlib_IntlTests.res`: **4** hunks
   - `Stdlib_TempTests.res`: **4** hunks
+  - `inline_const.res`: **4** hunks
 
 ## Working Rules
 
@@ -51,7 +50,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **44** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
+There are **32** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -76,6 +75,19 @@ Current frontier characteristics:
 - `polyvar_test.res` now also passes exactly on the current authoritative baseline.
 - `set_gen.res` now also passes exactly on the current authoritative baseline.
 - `ari_regress_test.res`, `big_enum.res`, `equal_test.res`, `reasonReact.res`, and `reasonReactOptimizedCreateClass.res` now also pass exactly on the current authoritative baseline.
+- the optimized sexp printer now emits OCaml-style byte escapes for Latin-1 strings, which removed the remaining Unicode/raw-string formatting cluster:
+  - `Stdlib_Intl_CollatorTest.res`: **exact parity**
+  - `chn_test.res`: **exact parity**
+  - `exotic_labels_test.res`: **exact parity**
+  - `gbk.res`: **exact parity**
+  - `gpr_3142_test.res`: **exact parity**
+  - `poly_variant_test.res`: **exact parity**
+  - `raw_pure_test.res`: **exact parity**
+  - `res_debug.res`: **exact parity**
+  - `string_unicode_test.res`: **exact parity**
+  - `switch_string.res`: **exact parity**
+  - `tagged_template_test.res`: **exact parity**
+  - `test_regex.res`: **exact parity**
 - the constant `Blk_poly_var` conversion slice is now landed:
   - `bs_unwrap_test.res`: **exact parity**
   - `gpr_4280_test.res`: **exact parity**
@@ -110,10 +122,67 @@ Current frontier characteristics:
   - the recursive-module shape-name delimiter slice now also matches OCaml's `Const_base (Const_string (_, None)) -> Some DNone` lowering path
   - focused optimized recursive-module diffs are now down to **1** hunk total, all in `recmodule.res`, and that remaining hunk is identifier-stamp drift rather than shape construction
 - the next visible optimized frontier is the current exact-diff leaders (`record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`) plus the remaining switch-facing files (`variant.res`, `UntaggedVariants.res`, `switch_string.res`) and the stamp-heavy exception / `recmodule.res` residuals.
+- the next visible optimized frontier is the current exact-diff leaders (`record_extension_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`) plus the remaining raw-upstream exit-number files (`coercion_module_alias_test.res`, `exception_raise_test.res`, `js_exception_catch_test.res`, `record_extension_test.res`, `variant.res`) and the stamp-heavy exception / `recmodule.res` residuals.
 - a fresh full raw `-drawlambda` rerun after this slice reported **654/657** with **4** hunks across `coercion_module_alias_test.res`, `record_extension_test.res`, and `variant.res`; the focused recursive-module raw slice still stayed exact, so those raw failures look separate from this metadata change and need their own session.
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### optimized sexp strings now use OCaml byte escapes
+Ran:
+
+```bash
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 180 ./scripts/test_lambda_parity.sh -j1 gpr_3142_test
+timeout 180 ./scripts/test_lambda_parity.sh -j1 'string_unicode_test|tagged_template_test|switch_string|gbk|test_regex|raw_pure_test'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- OCaml compile coverage: **657/657**
+- Rust compile coverage: **657/657**
+- Optimized lambda parity: **625/657**
+- Exact hunks: **100**
+
+Key checkpoints:
+
+- `gpr_3142_test.res`: passes
+- `string_unicode_test.res`: passes
+- `tagged_template_test.res`: passes
+- `switch_string.res`: passes
+- `gbk.res`: passes
+- `test_regex.res`: passes
+- `raw_pure_test.res`: passes
+
+`compiler/core/sexp_lambda.ml` uses OCaml string escaping, which prints lambda
+strings as Latin-1 byte strings and emits decimal `\NNN` escapes for non-ASCII
+bytes. Rust `compiler-rust/src/lambda/sexp_lambda.rs` was still delegating to
+Rust `escape_default()`, so optimized sexps printed `\u{...}` escapes that do
+not match either OCaml `String.escaped` output or the existing raw-lambda
+printer.
+
+Rust now mirrors the OCaml/raw-printer behavior directly:
+
+- `escape_ocaml_string` emits `\"`, `\\`, `\n`, `\r`, `\t` for the standard
+  control escapes
+- non-printable and non-ASCII Latin-1 bytes now print as decimal `\NNN`
+- the new unit tests lock both the non-ASCII byte case and the control-escape
+  case into the optimized sexp printer
+
+Authoritative repo-wide baseline moved from:
+
+- **613/657**, **132** hunks
+
+to:
+
+- **625/657**, **100** hunks
+
+That is a gain of **12 files** and **32 hunks**. The dropped exact failures were:
+`Stdlib_Intl_CollatorTest.res`, `chn_test.res`, `exotic_labels_test.res`,
+`gbk.res`, `gpr_3142_test.res`, `poly_variant_test.res`, `raw_pure_test.res`,
+`res_debug.res`, `string_unicode_test.res`, `switch_string.res`,
+`tagged_template_test.res`, and `test_regex.res`.
 
 ### recursive-module init-shape names now preserve `Some DNone`
 Ran:
