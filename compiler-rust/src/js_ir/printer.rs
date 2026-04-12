@@ -146,21 +146,7 @@ impl JsPrinter {
 
     /// Print statements
     pub fn print_statements(&mut self, stmts: &Block, top_level: bool) {
-        let ordered: Vec<&Statement> = if top_level {
-            stmts
-                .iter()
-                .filter(|stmt| is_top_level_function_decl(stmt))
-                .chain(
-                    stmts
-                        .iter()
-                        .filter(|stmt| !is_top_level_function_decl(stmt)),
-                )
-                .collect()
-        } else {
-            stmts.iter().collect()
-        };
-
-        for (i, stmt) in ordered.into_iter().enumerate() {
+        for (i, stmt) in stmts.iter().enumerate() {
             if i > 0 {
                 if top_level {
                     self.newline();
@@ -1495,22 +1481,6 @@ pub(crate) fn is_js_keyword_or_global(s: &str) -> bool {
         )
 }
 
-fn is_top_level_function_decl(stmt: &Statement) -> bool {
-    matches!(
-        stmt.desc,
-        StatementDesc::Variable(VariableDeclaration {
-            value: Some(Expression {
-                desc: ExpressionDesc::Fun {
-                    is_method: false,
-                    ..
-                },
-                ..
-            }),
-            ..
-        })
-    )
-}
-
 /// Print a program to a string
 pub fn print_program(program: &Program) -> String {
     let mut printer = JsPrinter::new();
@@ -1647,5 +1617,45 @@ mod tests {
         let result = print_block(&vec![stmt]);
         assert!(result.contains("while (true)"));
         assert!(result.contains("break;"));
+    }
+
+    #[test]
+    fn test_print_block_preserves_top_level_function_order() {
+        let before = Ident::create_local("before");
+        let url = Ident::create_local("url");
+        let after = Ident::create_local("after");
+        let stmt_before = Statement::variable(VariableDeclaration {
+            ident: before,
+            value: Some(Expression::number(Number::int(1))),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        });
+        let stmt_fun = Statement::variable(VariableDeclaration {
+            ident: url.clone(),
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![Ident::create_local("prim")],
+                body: vec![Statement::return_(Expression::var(url))],
+                env: Default::default(),
+                return_unit: false,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        });
+        let stmt_after = Statement::variable(VariableDeclaration {
+            ident: after,
+            value: Some(Expression::number(Number::int(2))),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        });
+
+        let rendered = print_block(&vec![stmt_before, stmt_fun, stmt_after]);
+        let before_idx = rendered.find("let before").unwrap();
+        let fun_idx = rendered.find("function url").unwrap();
+        let after_idx = rendered.find("let after").unwrap();
+        assert!(before_idx < fun_idx);
+        assert!(fun_idx < after_idx);
     }
 }
