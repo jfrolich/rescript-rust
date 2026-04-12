@@ -3080,6 +3080,11 @@ impl<'a> RawLambdaConverter<'a> {
         None
     }
 
+    fn path_may_follow_mty_ident(path: &crate::types::Path) -> bool {
+        let head = path.head();
+        head.is_persistent() || head.is_global()
+    }
+
     fn normalize_module_path_in_env(
         &mut self,
         env: &crate::types::env::Env,
@@ -3098,16 +3103,84 @@ impl<'a> RawLambdaConverter<'a> {
             crate::types::Path::Pident(_) => path.clone(),
         };
 
-        if let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
-            &path,
-            env,
-            &mut self.persistent_env,
-            self.type_ctx,
-        ) {
-            if !alias_target.same(&path) {
-                return self.normalize_module_path_in_env(env, &alias_target);
+        if let Ok(md) = env.lookup_module(&path) {
+            match &md.md_type {
+                crate::types::decl::ModuleType::MtyAlias(_, alias_path) => {
+                    if !alias_path.same(&path) {
+                        return self.normalize_module_path_in_env(env, alias_path);
+                    }
+                }
+                crate::types::decl::ModuleType::MtyIdent(alias_path)
+                    if Self::path_may_follow_mty_ident(&path) && !alias_path.same(&path) =>
+                {
+                    return self.normalize_module_path_in_env(env, alias_path);
+                }
+                _ => {}
             }
         }
+
+        if Self::path_may_follow_mty_ident(&path) {
+            if let Some(alias_target) = crate::types::typecore::alias_target_for_module_path(
+                &path,
+                env,
+                &mut self.persistent_env,
+                self.type_ctx,
+            ) {
+                if !alias_target.same(&path) {
+                    return self.normalize_module_path_in_env(env, &alias_target);
+                }
+            }
+        }
+        path
+    }
+
+    fn normalize_value_prefix_path_in_env(
+        &mut self,
+        env: &crate::types::env::Env,
+        path: &crate::types::Path,
+    ) -> crate::types::Path {
+        let path = match path {
+            crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
+                Box::new(self.normalize_value_prefix_path_in_env(env, prefix)),
+                name.clone(),
+                *pos,
+            ),
+            crate::types::Path::Papply(left, right) => crate::types::Path::Papply(
+                Box::new(self.normalize_value_prefix_path_in_env(env, left)),
+                Box::new(self.normalize_value_prefix_path_in_env(env, right)),
+            ),
+            crate::types::Path::Pident(_) => path.clone(),
+        };
+
+        if let Ok(md) = env.lookup_module(&path) {
+            match &md.md_type {
+                crate::types::decl::ModuleType::MtyAlias(_, alias_path) => {
+                    if !alias_path.same(&path) {
+                        return self.normalize_value_prefix_path_in_env(env, alias_path);
+                    }
+                }
+                crate::types::decl::ModuleType::MtyIdent(alias_path)
+                    if Self::path_may_follow_mty_ident(&path) && !alias_path.same(&path) =>
+                {
+                    return self.normalize_value_prefix_path_in_env(env, alias_path);
+                }
+                _ => {}
+            }
+        }
+
+        if Self::path_may_follow_mty_ident(&path) {
+            if let Some(alias_target) = crate::types::typecore::alias_target_for_module_path(
+                &path,
+                env,
+                &mut self.persistent_env,
+                self.type_ctx,
+            ) {
+                if !alias_target.same(&path) {
+                    return self.normalize_value_prefix_path_in_env(env, &alias_target);
+                }
+            }
+        }
+
         path
     }
 
@@ -3118,7 +3191,7 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> crate::types::Path {
         match path {
             crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
-                Box::new(self.normalize_module_path_in_env(env, prefix)),
+                Box::new(self.normalize_value_prefix_path_in_env(env, prefix)),
                 name.clone(),
                 *pos,
             ),
@@ -10366,6 +10439,166 @@ mod tests {
             primitive,
             Primitive::Pstringcomp(crate::lambda::Comparison::Eq)
         );
+    }
+
+    #[test]
+    fn translate_module_path_raw_follows_mty_ident_flattened_submodule_aliases() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let mut env = initial_env(&ctx);
+
+        let pkg = Ident::create_persistent("Pkg");
+        let pkg_list = Ident::create_persistent("Pkg_List");
+        env.add_module(
+            pkg.clone(),
+            crate::types::decl::ModuleDeclaration {
+                md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                    crate::types::SignatureItem::SigModule(
+                        Ident::create_local("List"),
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: crate::types::decl::ModuleType::MtyIdent(
+                                crate::types::Path::Pident(pkg_list.clone()),
+                            ),
+                            md_attributes: Vec::new(),
+                            md_loc: Location::none(),
+                            md_path: None,
+                        },
+                        crate::types::decl::RecStatus::TrecNot,
+                    ),
+                ]),
+                md_attributes: Vec::new(),
+                md_loc: Location::none(),
+                md_path: None,
+            },
+        );
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let lowered = converter.translate_module_path_raw(
+            &crate::types::Path::pdot(crate::types::Path::Pident(pkg), "List"),
+            Location::none(),
+        );
+
+        assert!(matches!(
+            lowered,
+            RawLambda::LglobalModule(id, false) if id.same(&pkg_list)
+        ));
+    }
+
+    #[test]
+    fn translate_value_path_raw_keeps_local_unpack_prefixes() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let mut env = initial_env(&ctx);
+
+        let modtype_x = Ident::create_local("X");
+        let local_l = Ident::create_local("L");
+        env.add_module(
+            local_l.clone(),
+            crate::types::decl::ModuleDeclaration {
+                md_type: crate::types::decl::ModuleType::MtyIdent(crate::types::Path::Pident(
+                    modtype_x.clone(),
+                )),
+                md_attributes: Vec::new(),
+                md_loc: Location::none(),
+                md_path: None,
+            },
+        );
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let lowered = converter.translate_value_path_raw_in_env(
+            &env,
+            &crate::types::Path::pdot(crate::types::Path::Pident(local_l.clone()), "length"),
+            Location::none(),
+        );
+
+        let RawLambda::Lprim(info) = lowered else {
+            panic!("expected value path to lower to a field access");
+        };
+        assert!(matches!(
+            info.primitive,
+            Primitive::Pfield(_, FieldDbgInfo::Module { ref name }) if name == "length"
+        ));
+        assert!(matches!(
+            info.args.as_slice(),
+            [RawLambda::Lvar(id)] if id.same(&local_l)
+        ));
+    }
+
+    #[test]
+    fn translate_value_path_raw_follows_persistent_mty_ident_flattened_submodule_aliases() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let mut env = initial_env(&ctx);
+
+        let pkg = Ident::create_persistent("Pkg");
+        let pkg_list = Ident::create_persistent("Pkg_List");
+        env.add_module(
+            pkg.clone(),
+            crate::types::decl::ModuleDeclaration {
+                md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                    crate::types::SignatureItem::SigModule(
+                        Ident::create_local("List"),
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: crate::types::decl::ModuleType::MtyIdent(
+                                crate::types::Path::Pident(pkg_list.clone()),
+                            ),
+                            md_attributes: Vec::new(),
+                            md_loc: Location::none(),
+                            md_path: None,
+                        },
+                        crate::types::decl::RecStatus::TrecNot,
+                    ),
+                ]),
+                md_attributes: Vec::new(),
+                md_loc: Location::none(),
+                md_path: None,
+            },
+        );
+        env.add_module(
+            pkg_list.clone(),
+            crate::types::decl::ModuleDeclaration {
+                md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                    crate::types::SignatureItem::SigValue(
+                        Ident::create_local("length"),
+                        crate::types::decl::ValueDescription {
+                            val_type: ctx.new_var(None),
+                            val_kind: crate::types::decl::ValueKind::ValReg,
+                            val_loc: Location::none(),
+                            val_attributes: Vec::new(),
+                            val_path: None,
+                        },
+                    ),
+                ]),
+                md_attributes: Vec::new(),
+                md_loc: Location::none(),
+                md_path: None,
+            },
+        );
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let lowered = converter.translate_value_path_raw_in_env(
+            &env,
+            &crate::types::Path::pdot(
+                crate::types::Path::pdot(crate::types::Path::Pident(pkg), "List"),
+                "length",
+            ),
+            Location::none(),
+        );
+
+        let RawLambda::Lprim(info) = lowered else {
+            panic!("expected value path to lower to a field access");
+        };
+        assert!(matches!(
+            info.primitive,
+            Primitive::Pfield(_, FieldDbgInfo::Module { ref name }) if name == "length"
+        ));
+        assert!(matches!(
+            info.args.as_slice(),
+            [RawLambda::LglobalModule(id, false)] if id.same(&pkg_list)
+        ));
     }
 
     #[test]

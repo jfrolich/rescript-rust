@@ -999,7 +999,9 @@ fn rewrite_included_signature_paths_to_local(
                 }
             }
             crate::types::decl::SignatureItem::SigModule(id, md, _) => {
-                md.md_path = Some(Path::Pident(id.clone()));
+                if md.md_path.is_none() {
+                    md.md_path = Some(Path::Pident(id.clone()));
+                }
                 rewrite_included_module_type_paths_to_local(
                     ctx,
                     &mut md.md_type,
@@ -7034,9 +7036,29 @@ fn type_module_expr_with_alias<'a>(
                 let alias_target = match &mod_type {
                     Some(crate::types::decl::ModuleType::MtyAlias(_, p1)) => {
                         // Match OCaml typemod.ml line 1246: normalize the alias target
-                        env.normalize_path(p1)
+                        let mut normalized = p1.clone();
+                        while let Some(next) = crate::types::typecore::alias_target_for_module_path(
+                            &normalized,
+                            env,
+                            &mut tctx.persistent_env,
+                            tctx.type_ctx,
+                        ) {
+                            if next.same(&normalized) {
+                                break;
+                            }
+                            normalized = next;
+                        }
+                        env.normalize_path(&normalized)
                     }
                     _ => path_clone.clone(),
+                };
+                let constrained_mod_type = ModuleType {
+                    mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_ident(
+                        alias_target.clone(),
+                        arena.placeholder_located(loc),
+                    ),
+                    mty_loc: loc,
+                    mty_attributes: mod_expr.pmod_attributes.clone(),
                 };
 
                 // Fix inner mod_type to Tmty_alias (OCaml line 1234)
@@ -7053,7 +7075,7 @@ fn type_module_expr_with_alias<'a>(
                 Ok(ModuleExpr {
                     mod_desc: ModuleExprDesc::Tmod_constraint(
                         Box::new(inner),
-                        ModuleType::placeholder(),
+                        constrained_mod_type.clone(),
                         crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
                         ModuleCoercion::Tcoerce_alias(
                             env_ref,
@@ -7062,7 +7084,7 @@ fn type_module_expr_with_alias<'a>(
                         ),
                     ),
                     mod_loc: loc,
-                    mod_type: ModuleType::placeholder(),
+                    mod_type: constrained_mod_type,
                     mod_env: env_ref,
                     mod_attributes: mod_expr.pmod_attributes.clone(),
                 })

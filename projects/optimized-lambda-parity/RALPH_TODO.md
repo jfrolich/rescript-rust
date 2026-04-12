@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 647/657 (98.5%), 10 parity failures, 35 hunks
+**Status:** 653/657 (99.4%), 3 parity failures, 6 hunks, 1 Rust timeout (`Import.res`)
 
 ## Goal
 
@@ -22,23 +22,27 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 ```
 
 - OCaml compile coverage: **657/657**
-- Rust compile coverage: **657/657**
-- Optimized lambda parity: **647/657**
-- Parity hunks: **35**
+- Rust compile coverage: **656/657**
+- Optimized lambda parity: **653/657**
+- Parity hunks: **6**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
-  - `Import.res`: **21** hunks
-  - `global_module_alias_test.res`: **3** hunks
-  - `async_await.res`: **2** hunks
   - `coercion_module_alias_test.res`: **2** hunks
   - `test_non_export.res`: **2** hunks
-  - `exception_raise_test.res`: **1** hunk
-  - `module_alias_test.res`: **1** hunk
-  - `module_missing_conversion.res`: **1** hunk
-  - `module_parameter_test.res`: **1** hunk
-  - `test_include.res`: **1** hunk
-- Full raw `-drawlambda` guard on the same worktree is currently **647/657** with **26** exact hunks; the remaining exact raw failures are the same module/import/coercion cluster listed below.
+  - `exception_raise_test.res`: **2** hunks
+  - `inner_call.res`: **2** hunks
+- Rust timeout in the current authoritative run:
+  - `Import.res`
+- Full raw `-drawlambda` baseline has not been re-run across all 657 files after this slice.
+- Focused raw guard after this slice on the module/import alias cluster:
+  - `DynamicImportModuleWithAlias.res`
+  - `Import.res`
+  - `global_module_alias_test.res`
+  - `module_alias_test.res`
+  - `test_include.res`
+  - `test_non_export.res`
+  - **8/9 exact**, with only `coercion_module_alias_test.res` still failing (**2** hunks)
 
 ## Working Rules
 
@@ -52,26 +56,33 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **10** remaining optimized-lambda failures on the current worktree. The `gpr_5557.res` and `option_repr_test.res` exact-exit pair is now exact under both `-drawlambda` and `-dlambda-sexp`; the visible frontier is now the raw-stage module/import alias cluster plus `exception_raise_test.res`.
+There are **3** remaining optimized-lambda parity failures on the current worktree, plus **1** Rust timeout on `Import.res`.
 
 Current frontier characteristics:
-- fresh 2026-04-12 reruns on this worktree put both the full raw and full optimized baselines at **647/657**; the older **649/657** note below is historical and no longer authoritative for this checkout.
+- fresh 2026-04-12 reruns on this worktree put the full optimized baseline at **653/657**, **6** hunks, with a Rust timeout on `Import.res`; older `647/657` and `649/657` notes below are historical.
 - newly exact after the alias-`simple_for_let` static-exit allocation fix:
   - `gpr_5557.res`
   - `option_repr_test.res`
 - current remaining optimized failures:
-  - `Import.res`
-  - `async_await.res`
   - `coercion_module_alias_test.res`
   - `exception_raise_test.res`
+  - `inner_call.res`
+- current Rust timeout:
+  - `Import.res`
+- `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
+- `raw_lambda/lower.rs` is no longer an identity shim.
+- persistent-vs-local module-path normalization is now split in `raw_lambda::convert`:
+  - persistent flattened aliases like `Belt.List` still normalize to `Belt_List`
+  - local unpack/functor binders like `L` / `U` are preserved instead of being rewritten to their module-type aliases
+- alias-wrapped `Tmod_constraint` wrappers in `type_module_expr_with_alias` now keep the explicit alias target in `mod_type`, which removed the duplicated pack-alias coercion tail around `module(L: X)` cases.
+- exact files removed by this slice:
+  - `DynamicImportModuleWithAlias.res`
   - `global_module_alias_test.res`
   - `module_alias_test.res`
   - `module_missing_conversion.res`
   - `module_parameter_test.res`
   - `test_include.res`
   - `test_non_export.res`
-- `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
-- `raw_lambda/lower.rs` is no longer an identity shim.
 - raw switch case counts (`sw_numconsts` / `sw_numblocks`) now survive through `RawLambdaSwitch`, so `raw_lambda::lower::lower_switch` can recompute `sw_consts_full` / `sw_blocks_full` the same way `Lam_convert.convert_switch` does; this removed:
   - `adt_optimize_test.res`
   - `mario_game.res`
@@ -170,6 +181,54 @@ Current frontier characteristics:
   - `test_seq.res`
 - a fresh full raw `-drawlambda` rerun has not been re-baselined yet after this slice.
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
+
+## Latest Session Findings
+
+### module-path normalization must distinguish persistent flattened aliases from local alias binders
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::translate_value_path_raw_keeps_local_unpack_prefixes -- --exact
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::translate_value_path_raw_follows_persistent_mty_ident_flattened_submodule_aliases -- --exact
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::translate_module_path_raw_follows_mty_ident_flattened_submodule_aliases -- --exact
+timeout 600 ./scripts/test_lambda_parity.sh -j1 --raw 'DynamicImportModuleWithAlias|Import|coercion_module_alias_test|global_module_alias_test|module_alias_test|test_include|test_non_export'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- Focused raw alias/module subset: **8/9 exact**, **2** hunks
+- Full optimized baseline:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **656/657**
+  - Optimized lambda parity: **653/657**
+  - Exact hunks: **6**
+  - Rust timeout: `Import.res`
+
+This slice landed the high-leverage alias normalization split in
+`compiler-rust/src/raw_lambda/convert.rs`:
+
+- persistent flattened submodule aliases still normalize through
+  `alias_target_for_module_path` so `Belt.List.length` lowers through
+  `Belt_List`
+- local unpack/functor binders no longer normalize through `MtyIdent`, so
+  OCaml-shaped binders like `L.length` and `include U` stay rooted at the
+  local module binder instead of being rewritten to `X` / `S`
+
+It also fixed the `module(L: X)` pack path in `compiler-rust/src/types/typemod.rs`
+by keeping the alias wrapper's `mod_type` aligned with OCaml's explicit alias
+target instead of a placeholder. That removed the visible module/import alias
+cluster and moved the authoritative frontier down to:
+
+- `coercion_module_alias_test.res`
+- `exception_raise_test.res`
+- `inner_call.res`
+- `Import.res` timeout
+
+The remaining visible alias bug in `coercion_module_alias_test.res` is no
+longer broad routing/normalization drift. It is a narrow hidden-module
+coercion case where OCaml still preserves the original alias root for `N'`
+while Rust either reuses the localized field binding or rebases through `M2`.
 
 ## Key Findings from Session 2026-04-12
 
