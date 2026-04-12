@@ -308,3 +308,27 @@ Remaining internal compile errors under the measured wrapper baseline:
     snapshots exactly
 - The authoritative JS snapshot baseline now reports **70 / 657** passing, **0**
   compile errors, and **587** output diffs.
+- `compiler-rust/src/lambda/compile.rs` and
+  `compiler-rust/src/js_ir/printer.rs` now port the OCaml list-cons backend
+  shape from `js_of_lam_block.ml` / `js_dump.ml`:
+  - `Fld_cons` field reads lower to `.hd` / `.tl` instead of numeric array
+    indexing
+  - constructor blocks named `::` print as `{hd, tl}` objects instead of the
+    generic `{TAG, _0, _1}` variant shape
+- Verified focused guards for this list-cons cluster:
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release lowers_pfield_cons_to_hd_tl_properties --lib`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_cons_constructor_as_hd_tl_object --lib`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_non_cons_constructor_keeps_tag_object_shape --lib`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Import.res -o /tmp/Import.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_list.res -o /tmp/test_list.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+- `tests/tests/src/Import.res` now emits list literals with the OCaml `{hd, tl}`
+  constructor shape; the remaining drift there is later async/import/backend
+  shaping plus the still-missing `/* [] */0` empty-list comment.
+- `tests/tests/src/test_list.res` now reads and constructs lists through `.hd`,
+  `.tl`, and `{hd, tl}` consistently; its remaining diff is no longer the list
+  runtime shape and has narrowed to later control-flow/function lowering.
+- `tests/tests/src/ExternalShadow.res` still matches its checked-in `.mjs`
+  snapshot exactly after the list-cons port.
+- A follow-up authoritative wrapper rerun after the list-cons port remained
+  **70 / 657** passing, **0** compile errors, and **587** output diffs.

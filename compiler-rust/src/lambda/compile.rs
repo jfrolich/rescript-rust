@@ -737,6 +737,15 @@ impl LambdaCompiler {
             | FieldDbgInfo::RecordExtension { name } => Expression::new(
                 ExpressionDesc::StaticIndex(Box::new(target.clone()), name.clone(), None),
             ),
+            FieldDbgInfo::Cons => Expression::new(ExpressionDesc::StaticIndex(
+                Box::new(target.clone()),
+                match idx {
+                    0 => "hd".to_string(),
+                    1 => "tl".to_string(),
+                    _ => format!("_{}", idx),
+                },
+                None,
+            )),
             FieldDbgInfo::VariantTag => Expression::new(ExpressionDesc::StaticIndex(
                 Box::new(target.clone()),
                 "TAG".to_string(),
@@ -2408,6 +2417,63 @@ mod tests {
                 ..
             }) => assert!(id.same(&value)),
             other => panic!("expected optional unwrap to lower to the inner value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_pfield_cons_to_hd_tl_properties() {
+        let mut compiler = LambdaCompiler::new();
+        let list = Ident::create_local("list");
+        let head_program = compiler.compile_program(&Lambda::prim(
+            Primitive::Pfield(0, FieldDbgInfo::Cons),
+            vec![Lambda::var(list.clone())],
+            Location::none(),
+        ));
+        let tail_program = compiler.compile_program(&Lambda::prim(
+            Primitive::Pfield(1, FieldDbgInfo::Cons),
+            vec![Lambda::var(list.clone())],
+            Location::none(),
+        ));
+
+        let [head_stmt] = head_program.block.as_slice() else {
+            panic!("expected a single expression statement for head");
+        };
+        let [tail_stmt] = tail_program.block.as_slice() else {
+            panic!("expected a single expression statement for tail");
+        };
+
+        match &head_stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::StaticIndex(target, field, _),
+                ..
+            }) => {
+                assert_eq!(field, "hd");
+                assert!(matches!(
+                    target.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&list)
+                ));
+            }
+            other => panic!("expected head access to lower to `.hd`, got {other:?}"),
+        }
+
+        match &tail_stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::StaticIndex(target, field, _),
+                ..
+            }) => {
+                assert_eq!(field, "tl");
+                assert!(matches!(
+                    target.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&list)
+                ));
+            }
+            other => panic!("expected tail access to lower to `.tl`, got {other:?}"),
         }
     }
 
