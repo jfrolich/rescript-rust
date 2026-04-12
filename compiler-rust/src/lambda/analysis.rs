@@ -110,7 +110,9 @@ pub fn no_side_effects(lam: &Lambda) -> bool {
 /// Check if a primitive operation is pure (no side effects).
 fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
     match prim {
-        Primitive::Pidentity | Primitive::Pignore => args.first().map(no_side_effects).unwrap_or(true),
+        Primitive::Pidentity | Primitive::Pignore => {
+            args.first().map(no_side_effects).unwrap_or(true)
+        }
         // Division can raise division by zero
         Primitive::Pmodint | Primitive::Pdivint | Primitive::Pdivbigint | Primitive::Pmodbigint => {
             if args.len() >= 2 {

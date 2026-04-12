@@ -1082,7 +1082,10 @@ mod tests {
         let median_ms = percentile_nearest_rank(&elapsed_ms_values, 50.0);
         let p95_ms = percentile_nearest_rank(&elapsed_ms_values, 95.0);
 
-        let min_mbs = mb_per_s_values.iter().copied().fold(f64::INFINITY, f64::min);
+        let min_mbs = mb_per_s_values
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
         let median_mbs = percentile_nearest_rank(&mb_per_s_values, 50.0);
 
         println!("\nSummary");

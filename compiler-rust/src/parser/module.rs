@@ -3872,7 +3872,11 @@ fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
         let content = content.clone();
         p.next();
         let loc = p.from_location(&loc);
-        vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+        vec![super::core::doc_comment_to_attribute(
+            p.arena_mut(),
+            loc,
+            content,
+        )]
     } else {
         vec![]
     };
@@ -3900,7 +3904,11 @@ fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
             let content = content.clone();
             p.next();
             let loc = p.from_location(&loc);
-            vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+            vec![super::core::doc_comment_to_attribute(
+                p.arena_mut(),
+                loc,
+                content,
+            )]
         } else {
             vec![]
         };

@@ -224,7 +224,12 @@ pub enum ExpressionDesc {
     /// Record: `{l1: E1, ..., ln: En}` or `{...E0, l1: E1, ...}`.
     /// Fields are (lid, label_desc, definition, optional).
     Texp_record {
-        fields: Vec<(Loc<LidentIdx>, LabelDescription, RecordLabelDefinition, bool)>,
+        fields: Vec<(
+            Loc<LidentIdx>,
+            LabelDescription,
+            RecordLabelDefinition,
+            bool,
+        )>,
         extended_expression: Option<Box<Expression>>,
     },
 

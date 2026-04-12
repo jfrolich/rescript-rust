@@ -670,8 +670,8 @@ fn comparison_to_binop(cmp: Comparison) -> BinOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lambda::constant::Constant;
     use crate::lambda::Lambda;
+    use crate::lambda::constant::Constant;
 
     #[test]
     fn test_compile_constant_int() {

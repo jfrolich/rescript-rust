@@ -647,10 +647,8 @@ impl Default for ParseArena {
         let static_optional_default_opt_str = strings.intern("*opt*");
         let static_optional_default_sth_str = strings.intern("*sth*");
         let static_default_attr_str = strings.intern("#default");
-        let static_constructor_from_spread_attr_str =
-            strings.intern("res.constructor_from_spread");
-        let static_pat_from_variant_spread_attr_str =
-            strings.intern("res.patFromVariantSpread");
+        let static_constructor_from_spread_attr_str = strings.intern("res.constructor_from_spread");
+        let static_pat_from_variant_spread_attr_str = strings.intern("res.patFromVariantSpread");
         // CMI-loaded declaration attributes are converted back into parser attrs
         // during typedtree reconstruction. Pre-intern the common decl-attr names
         // that can arrive from external CMIs so that round-tripping imported
@@ -858,7 +856,8 @@ impl Default for ParseArena {
             ptyp_attributes: Attributes::new(),
         };
         let static_ast_literal_types = StaticAstLiteralTypes {
-            type_string: core_types.push(mk_ast_literal_type(static_ast_literal_type_string_lident)),
+            type_string: core_types
+                .push(mk_ast_literal_type(static_ast_literal_type_string_lident)),
             type_int: core_types.push(mk_ast_literal_type(static_ast_literal_type_int_lident)),
             type_bool: core_types.push(mk_ast_literal_type(static_ast_literal_type_bool_lident)),
             type_float: core_types.push(mk_ast_literal_type(static_ast_literal_type_float_lident)),

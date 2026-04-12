@@ -112,7 +112,8 @@ fn rewrite_structure_item(
             let rewritten = mbs
                 .iter()
                 .map(|mb| {
-                    let rewritten_expr = rewrite_mod_expr_idx(mb.pmb_expr, arena, let_unwrap_enabled)?;
+                    let rewritten_expr =
+                        rewrite_mod_expr_idx(mb.pmb_expr, arena, let_unwrap_enabled)?;
                     Ok(crate::parser::ast::ModuleBinding {
                         pmb_name: mb.pmb_name.clone(),
                         pmb_expr: rewritten_expr,
@@ -229,13 +230,9 @@ fn rewrite_module_expr(
             let rewritten_expr = rewrite_expr_idx(*expr, arena, let_unwrap_enabled)?;
             ModuleExprDesc::Pmod_unpack(rewritten_expr)
         }
-        ModuleExprDesc::Pmod_extension(ext) => {
-            ModuleExprDesc::Pmod_extension(Box::new(rewrite_extension(
-                ext,
-                arena,
-                let_unwrap_enabled,
-            )?))
-        }
+        ModuleExprDesc::Pmod_extension(ext) => ModuleExprDesc::Pmod_extension(Box::new(
+            rewrite_extension(ext, arena, let_unwrap_enabled)?,
+        )),
         _ => (*mod_expr.pmod_desc).clone(),
     };
 
@@ -266,7 +263,9 @@ fn rewrite_expression(
     let_unwrap_enabled: bool,
 ) -> Result<Expression, String> {
     let desc = match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_ident(_) | ExpressionDesc::Pexp_constant(_) => (*expr.pexp_desc).clone(),
+        ExpressionDesc::Pexp_ident(_) | ExpressionDesc::Pexp_constant(_) => {
+            (*expr.pexp_desc).clone()
+        }
         ExpressionDesc::Pexp_let(inner) => {
             let (rec_flag, bindings, body) = &**inner;
             return rewrite_let_expression(
@@ -457,9 +456,9 @@ fn rewrite_expression(
             let rewritten_body = rewrite_expr_idx(*body, arena, let_unwrap_enabled)?;
             ExpressionDesc::Pexp_open(Box::new((*override_flag, *lid, rewritten_body)))
         }
-        ExpressionDesc::Pexp_extension(ext) => {
-            ExpressionDesc::Pexp_extension(Box::new(rewrite_extension(ext, arena, let_unwrap_enabled)?))
-        }
+        ExpressionDesc::Pexp_extension(ext) => ExpressionDesc::Pexp_extension(Box::new(
+            rewrite_extension(ext, arena, let_unwrap_enabled)?,
+        )),
         ExpressionDesc::Pexp_await(subject) => {
             let rewritten = rewrite_expr_idx(*subject, arena, let_unwrap_enabled)?;
             ExpressionDesc::Pexp_await(rewritten)
@@ -513,7 +512,13 @@ fn rewrite_let_expression(
             if !let_unwrap_enabled {
                 return Err(FEATURE_NOT_ENABLED_MSG.to_string());
             }
-            return rewrite_supported_let_unwrap(original_expr, vb, body, arena, let_unwrap_enabled);
+            return rewrite_supported_let_unwrap(
+                original_expr,
+                vb,
+                body,
+                arena,
+                let_unwrap_enabled,
+            );
         }
     }
 
@@ -552,7 +557,8 @@ fn rewrite_supported_let_unwrap(
     let_unwrap_enabled: bool,
 ) -> Result<Expression, String> {
     let pat = arena.get_pat(vb.pvb_pat).clone();
-    let kind = classify_let_unwrap_pattern(&pat, arena).ok_or_else(|| UNSUPPORTED_TYPE_MSG.to_string())?;
+    let kind =
+        classify_let_unwrap_pattern(&pat, arena).ok_or_else(|| UNSUPPORTED_TYPE_MSG.to_string())?;
 
     let source_expr = arena.get_expr(vb.pvb_expr).clone();
     if matches!(&*source_expr.pexp_desc, ExpressionDesc::Pexp_pack(_)) {
@@ -744,12 +750,12 @@ fn rewrite_jsx_element(
                 closing: *closing,
             }))
         }
-        JsxElement::Unary(JsxUnaryElement { tag_name, props }) => Ok(JsxElement::Unary(
-            JsxUnaryElement {
+        JsxElement::Unary(JsxUnaryElement { tag_name, props }) => {
+            Ok(JsxElement::Unary(JsxUnaryElement {
                 tag_name: tag_name.clone(),
                 props: rewrite_jsx_props(props, arena, let_unwrap_enabled)?,
-            },
-        )),
+            }))
+        }
         JsxElement::Container(JsxContainerElement {
             tag_name_start,
             opening_end,
@@ -832,7 +838,8 @@ let f = x => {
 }
 "#;
         let (mut arena, structure) = parse_structure(source);
-        let rewritten = rewrite_structure(&structure, &mut arena, true).expect("rewrite should work");
+        let rewritten =
+            rewrite_structure(&structure, &mut arena, true).expect("rewrite should work");
 
         let StructureItemDesc::Pstr_value(inner) = &*rewritten[0].pstr_desc else {
             panic!("expected value item");
@@ -853,7 +860,10 @@ let f = x => {
             }
             _ => false,
         };
-        assert!(rewritten_to_match, "expected let? to be rewritten into match");
+        assert!(
+            rewritten_to_match,
+            "expected let? to be rewritten into match"
+        );
     }
 
     #[test]
@@ -865,7 +875,8 @@ let f = x => {
 }
 "#;
         let (mut arena, structure) = parse_structure(source);
-        let err = rewrite_structure(&structure, &mut arena, false).expect_err("rewrite should fail");
+        let err =
+            rewrite_structure(&structure, &mut arena, false).expect_err("rewrite should fail");
         assert!(err.contains("Experimental feature not enabled: LetUnwrap"));
     }
 

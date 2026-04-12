@@ -48,7 +48,7 @@ const STAMP_UNDEFINED_RECURSIVE_MODULE: i32 = 28;
 const STAMP_FALSE: i32 = 29;
 const STAMP_TRUE: i32 = 30;
 const STAMP_VOID: i32 = 31; // "()"
-const STAMP_NIL: i32 = 32;  // "[]"
+const STAMP_NIL: i32 = 32; // "[]"
 const STAMP_CONS: i32 = 33; // "::"
 const STAMP_NONE: i32 = 34;
 const STAMP_SOME: i32 = 35;
@@ -70,76 +70,189 @@ fn make_predef_exn_ident(name: &str, stamp: i32) -> Ident {
     Ident::new(name, stamp, IdentFlags::PREDEF_EXN.with_global())
 }
 
-pub fn ident_int() -> Ident { make_ident("int", STAMP_INT) }
-pub fn ident_char() -> Ident { make_ident("char", STAMP_CHAR) }
-pub fn ident_float() -> Ident { make_ident("float", STAMP_FLOAT) }
-pub fn ident_bool() -> Ident { make_ident("bool", STAMP_BOOL) }
-pub fn ident_unit() -> Ident { make_ident("unit", STAMP_UNIT) }
-pub fn ident_exn() -> Ident { make_ident("exn", STAMP_EXN) }
-pub fn ident_array() -> Ident { make_ident("array", STAMP_ARRAY) }
-pub fn ident_list() -> Ident { make_ident("list", STAMP_LIST) }
-pub fn ident_option() -> Ident { make_ident("option", STAMP_OPTION) }
-pub fn ident_result() -> Ident { make_ident("result", STAMP_RESULT) }
-pub fn ident_dict() -> Ident { make_ident("dict", STAMP_DICT) }
-pub fn ident_bigint() -> Ident { make_ident("bigint", STAMP_BIGINT) }
-pub fn ident_string() -> Ident { make_ident("string", STAMP_STRING) }
-pub fn ident_extension_constructor() -> Ident { make_ident("extension_constructor", STAMP_EXTENSION_CONSTRUCTOR) }
-pub fn ident_unknown() -> Ident { make_ident("unknown", STAMP_UNKNOWN) }
-pub fn ident_promise() -> Ident { make_ident("promise", STAMP_PROMISE) }
+pub fn ident_int() -> Ident {
+    make_ident("int", STAMP_INT)
+}
+pub fn ident_char() -> Ident {
+    make_ident("char", STAMP_CHAR)
+}
+pub fn ident_float() -> Ident {
+    make_ident("float", STAMP_FLOAT)
+}
+pub fn ident_bool() -> Ident {
+    make_ident("bool", STAMP_BOOL)
+}
+pub fn ident_unit() -> Ident {
+    make_ident("unit", STAMP_UNIT)
+}
+pub fn ident_exn() -> Ident {
+    make_ident("exn", STAMP_EXN)
+}
+pub fn ident_array() -> Ident {
+    make_ident("array", STAMP_ARRAY)
+}
+pub fn ident_list() -> Ident {
+    make_ident("list", STAMP_LIST)
+}
+pub fn ident_option() -> Ident {
+    make_ident("option", STAMP_OPTION)
+}
+pub fn ident_result() -> Ident {
+    make_ident("result", STAMP_RESULT)
+}
+pub fn ident_dict() -> Ident {
+    make_ident("dict", STAMP_DICT)
+}
+pub fn ident_bigint() -> Ident {
+    make_ident("bigint", STAMP_BIGINT)
+}
+pub fn ident_string() -> Ident {
+    make_ident("string", STAMP_STRING)
+}
+pub fn ident_extension_constructor() -> Ident {
+    make_ident("extension_constructor", STAMP_EXTENSION_CONSTRUCTOR)
+}
+pub fn ident_unknown() -> Ident {
+    make_ident("unknown", STAMP_UNKNOWN)
+}
+pub fn ident_promise() -> Ident {
+    make_ident("promise", STAMP_PROMISE)
+}
 
 // ============================================================================
 // Predef exception idents
 // ============================================================================
 
-pub fn ident_match_failure() -> Ident { make_predef_exn_ident("Match_failure", STAMP_MATCH_FAILURE) }
-pub fn ident_invalid_argument() -> Ident { make_predef_exn_ident("Invalid_argument", STAMP_INVALID_ARGUMENT) }
-pub fn ident_failure() -> Ident { make_predef_exn_ident("Failure", STAMP_FAILURE) }
-pub fn ident_ok() -> Ident { make_predef_exn_ident("Ok", STAMP_OK) }
-pub fn ident_error() -> Ident { make_predef_exn_ident("Error", STAMP_ERROR) }
-pub fn ident_dict_magic_field() -> Ident { make_ident("dictValuesType", STAMP_DICT_MAGIC_FIELD) }
-pub fn ident_js_exn() -> Ident { make_predef_exn_ident("JsExn", STAMP_JS_EXN) }
-pub fn ident_not_found() -> Ident { make_predef_exn_ident("Not_found", STAMP_NOT_FOUND) }
-pub fn ident_end_of_file() -> Ident { make_predef_exn_ident("End_of_file", STAMP_END_OF_FILE) }
-pub fn ident_division_by_zero() -> Ident { make_predef_exn_ident("Division_by_zero", STAMP_DIVISION_BY_ZERO) }
-pub fn ident_assert_failure() -> Ident { make_predef_exn_ident("Assert_failure", STAMP_ASSERT_FAILURE) }
-pub fn ident_undefined_recursive_module() -> Ident { make_predef_exn_ident("Undefined_recursive_module", STAMP_UNDEFINED_RECURSIVE_MODULE) }
+pub fn ident_match_failure() -> Ident {
+    make_predef_exn_ident("Match_failure", STAMP_MATCH_FAILURE)
+}
+pub fn ident_invalid_argument() -> Ident {
+    make_predef_exn_ident("Invalid_argument", STAMP_INVALID_ARGUMENT)
+}
+pub fn ident_failure() -> Ident {
+    make_predef_exn_ident("Failure", STAMP_FAILURE)
+}
+pub fn ident_ok() -> Ident {
+    make_predef_exn_ident("Ok", STAMP_OK)
+}
+pub fn ident_error() -> Ident {
+    make_predef_exn_ident("Error", STAMP_ERROR)
+}
+pub fn ident_dict_magic_field() -> Ident {
+    make_ident("dictValuesType", STAMP_DICT_MAGIC_FIELD)
+}
+pub fn ident_js_exn() -> Ident {
+    make_predef_exn_ident("JsExn", STAMP_JS_EXN)
+}
+pub fn ident_not_found() -> Ident {
+    make_predef_exn_ident("Not_found", STAMP_NOT_FOUND)
+}
+pub fn ident_end_of_file() -> Ident {
+    make_predef_exn_ident("End_of_file", STAMP_END_OF_FILE)
+}
+pub fn ident_division_by_zero() -> Ident {
+    make_predef_exn_ident("Division_by_zero", STAMP_DIVISION_BY_ZERO)
+}
+pub fn ident_assert_failure() -> Ident {
+    make_predef_exn_ident("Assert_failure", STAMP_ASSERT_FAILURE)
+}
+pub fn ident_undefined_recursive_module() -> Ident {
+    make_predef_exn_ident(
+        "Undefined_recursive_module",
+        STAMP_UNDEFINED_RECURSIVE_MODULE,
+    )
+}
 
 // ============================================================================
 // Constructor idents
 // ============================================================================
 
-pub fn ident_false() -> Ident { make_ident("false", STAMP_FALSE) }
-pub fn ident_true() -> Ident { make_ident("true", STAMP_TRUE) }
-pub fn ident_void() -> Ident { make_ident("()", STAMP_VOID) }
-pub fn ident_nil() -> Ident { make_ident("[]", STAMP_NIL) }
-pub fn ident_cons() -> Ident { make_ident("::", STAMP_CONS) }
-pub fn ident_none() -> Ident { make_ident("None", STAMP_NONE) }
-pub fn ident_some() -> Ident { make_ident("Some", STAMP_SOME) }
-pub fn ident_ctor_unknown() -> Ident { make_ident("Unknown", STAMP_CTOR_UNKNOWN) }
+pub fn ident_false() -> Ident {
+    make_ident("false", STAMP_FALSE)
+}
+pub fn ident_true() -> Ident {
+    make_ident("true", STAMP_TRUE)
+}
+pub fn ident_void() -> Ident {
+    make_ident("()", STAMP_VOID)
+}
+pub fn ident_nil() -> Ident {
+    make_ident("[]", STAMP_NIL)
+}
+pub fn ident_cons() -> Ident {
+    make_ident("::", STAMP_CONS)
+}
+pub fn ident_none() -> Ident {
+    make_ident("None", STAMP_NONE)
+}
+pub fn ident_some() -> Ident {
+    make_ident("Some", STAMP_SOME)
+}
+pub fn ident_ctor_unknown() -> Ident {
+    make_ident("Unknown", STAMP_CTOR_UNKNOWN)
+}
 
 // ============================================================================
 // Paths (Pident wrappers)
 // ============================================================================
 
-pub fn path_int() -> Path { Path::pident(ident_int()) }
-pub fn path_char() -> Path { Path::pident(ident_char()) }
-pub fn path_float() -> Path { Path::pident(ident_float()) }
-pub fn path_bool() -> Path { Path::pident(ident_bool()) }
-pub fn path_unit() -> Path { Path::pident(ident_unit()) }
-pub fn path_exn() -> Path { Path::pident(ident_exn()) }
-pub fn path_array() -> Path { Path::pident(ident_array()) }
-pub fn path_list() -> Path { Path::pident(ident_list()) }
-pub fn path_option() -> Path { Path::pident(ident_option()) }
-pub fn path_result() -> Path { Path::pident(ident_result()) }
-pub fn path_dict() -> Path { Path::pident(ident_dict()) }
-pub fn path_bigint() -> Path { Path::pident(ident_bigint()) }
-pub fn path_string() -> Path { Path::pident(ident_string()) }
-pub fn path_extension_constructor() -> Path { Path::pident(ident_extension_constructor()) }
-pub fn path_unknown() -> Path { Path::pident(ident_unknown()) }
-pub fn path_promise() -> Path { Path::pident(ident_promise()) }
-pub fn path_match_failure() -> Path { Path::pident(ident_match_failure()) }
-pub fn path_assert_failure() -> Path { Path::pident(ident_assert_failure()) }
-pub fn path_undefined_recursive_module() -> Path { Path::pident(ident_undefined_recursive_module()) }
+pub fn path_int() -> Path {
+    Path::pident(ident_int())
+}
+pub fn path_char() -> Path {
+    Path::pident(ident_char())
+}
+pub fn path_float() -> Path {
+    Path::pident(ident_float())
+}
+pub fn path_bool() -> Path {
+    Path::pident(ident_bool())
+}
+pub fn path_unit() -> Path {
+    Path::pident(ident_unit())
+}
+pub fn path_exn() -> Path {
+    Path::pident(ident_exn())
+}
+pub fn path_array() -> Path {
+    Path::pident(ident_array())
+}
+pub fn path_list() -> Path {
+    Path::pident(ident_list())
+}
+pub fn path_option() -> Path {
+    Path::pident(ident_option())
+}
+pub fn path_result() -> Path {
+    Path::pident(ident_result())
+}
+pub fn path_dict() -> Path {
+    Path::pident(ident_dict())
+}
+pub fn path_bigint() -> Path {
+    Path::pident(ident_bigint())
+}
+pub fn path_string() -> Path {
+    Path::pident(ident_string())
+}
+pub fn path_extension_constructor() -> Path {
+    Path::pident(ident_extension_constructor())
+}
+pub fn path_unknown() -> Path {
+    Path::pident(ident_unknown())
+}
+pub fn path_promise() -> Path {
+    Path::pident(ident_promise())
+}
+pub fn path_match_failure() -> Path {
+    Path::pident(ident_match_failure())
+}
+pub fn path_assert_failure() -> Path {
+    Path::pident(ident_assert_failure())
+}
+pub fn path_undefined_recursive_module() -> Path {
+    Path::pident(ident_undefined_recursive_module())
+}
 
 // ============================================================================
 // Stamp-based predef detection (matches OCaml's type_is_builtin_path_but_option)

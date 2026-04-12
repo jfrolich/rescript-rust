@@ -32,9 +32,9 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 
 use super::ffi_types::{
-    Attr, Cst, Delim, ExternalModuleName, ExternalSpec, FfiType, Label, LabelNoname, LamConstant,
-    ModuleBindName, ObjParam, Param, Params, PointerInfo, ReturnWrapper, encode_ffi_type,
-    ImportAttributes,
+    Attr, Cst, Delim, ExternalModuleName, ExternalSpec, FfiType, ImportAttributes, Label,
+    LabelNoname, LamConstant, ModuleBindName, ObjParam, Param, Params, PointerInfo, ReturnWrapper,
+    encode_ffi_type,
 };
 use super::spice_ppx;
 
@@ -68,7 +68,12 @@ fn starts_with_marshal_magic(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(
         (chars.next(), chars.next(), chars.next(), chars.next()),
-        (Some('\u{84}'), Some('\u{95}'), Some('\u{A6}'), Some('\u{BE}'))
+        (
+            Some('\u{84}'),
+            Some('\u{95}'),
+            Some('\u{A6}'),
+            Some('\u{BE}')
+        )
     )
 }
 
@@ -372,9 +377,12 @@ fn build_arg_type_specs(typ: &CoreType, arena: &mut ParseArena) -> (Params, usiz
 
     // OCaml's ffi_bs_aux: if all args are {Nothing, Arg_empty}, use ParamNumber(n)
     // Otherwise use Params(list)
-    let all_simple = param_specs
-        .iter()
-        .all(|p| matches!((&p.arg_label, &p.arg_type), (LabelNoname::ArgEmpty, Attr::Nothing)));
+    let all_simple = param_specs.iter().all(|p| {
+        matches!(
+            (&p.arg_label, &p.arg_type),
+            (LabelNoname::ArgEmpty, Attr::Nothing)
+        )
+    });
     let params = if all_simple {
         Params::ParamNumber(arity as i64)
     } else {
@@ -1160,10 +1168,10 @@ fn to_undefined_type(typ: &CoreType, loc: LocIdx, arena: &mut ParseArena) -> Cor
 #[derive(Debug)]
 struct ExternalDesc {
     val_name: Option<String>,
-    module_as_val: bool,                          // @module with no payload
-    external_module_name: Option<String>,         // @module("name") with string payload
-    module_bind_name: Option<String>,             // @module("name", "bind") second string
-    import_attributes: Option<ImportAttributes>,  // @module({from, with})
+    module_as_val: bool,                         // @module with no payload
+    external_module_name: Option<String>,        // @module("name") with string payload
+    module_bind_name: Option<String>,            // @module("name", "bind") second string
+    import_attributes: Option<ImportAttributes>, // @module({from, with})
     call_name: Option<String>,
     send_name: Option<String>,
     new_name: Option<String>,
@@ -1636,14 +1644,17 @@ fn build_ffi_type(
 
     // Build ExternalModuleName from desc.external_module_name if present
     // (this is @module("name") or @module("name", "bind") with string payload)
-    let external_module_name = desc.external_module_name.as_ref().map(|bundle| ExternalModuleName {
-        bundle: bundle.clone(),
-        module_bind_name: match &desc.module_bind_name {
-            Some(name) => ModuleBindName::PhintName(name.clone()),
-            None => ModuleBindName::PhintNothing,
-        },
-        import_attributes: desc.import_attributes.clone(),
-    });
+    let external_module_name =
+        desc.external_module_name
+            .as_ref()
+            .map(|bundle| ExternalModuleName {
+                bundle: bundle.clone(),
+                module_bind_name: match &desc.module_bind_name {
+                    Some(name) => ModuleBindName::PhintName(name.clone()),
+                    None => ModuleBindName::PhintNothing,
+                },
+                import_attributes: desc.import_attributes.clone(),
+            });
 
     // Determine external spec based on attributes
     // Priority follows OCaml's external_desc_of_non_obj pattern matching
@@ -3376,9 +3387,15 @@ fn handle_ffi(
                 if let ExpressionDesc::Pexp_constant(c) = &*e.pexp_desc {
                     if let Constant::String(s, _) = &**c {
                         Some(s.to_string())
-                    } else { None }
-                } else { None }
-            } else { None }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         }
         _ => None,
     };
@@ -3438,9 +3455,10 @@ fn handle_ffi(
 
         let raw_expr_idx = arena.push_expr(raw_expr);
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(
-                Box::new((raw_expr_idx, arrow_type_idx)),
-            )),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
+                raw_expr_idx,
+                arrow_type_idx,
+            )))),
             pexp_loc: loc,
             pexp_attributes: Attributes::new(),
         }
@@ -4597,13 +4615,19 @@ fn rewrite_object_fields(
                             let mut undefined = false;
                             if let Payload::PStr(items) = &attr.1 {
                                 for item in items.iter() {
-                                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc {
+                                    if let StructureItemDesc::Pstr_eval(eval_inner) =
+                                        &*item.pstr_desc
+                                    {
                                         let (expr_idx, _) = &**eval_inner;
                                         let expr = arena.get_expr(*expr_idx);
-                                        if let ExpressionDesc::Pexp_record(record_inner) = &*expr.pexp_desc {
+                                        if let ExpressionDesc::Pexp_record(record_inner) =
+                                            &*expr.pexp_desc
+                                        {
                                             let (fields, _) = &**record_inner;
                                             for field in fields.iter() {
-                                                let field_name = match arena.get_longident(field.lid.txt) {
+                                                let field_name = match arena
+                                                    .get_longident(field.lid.txt)
+                                                {
                                                     Longident::Lident(s) => arena.get_string(*s),
                                                     _ => "",
                                                 };
@@ -4627,13 +4651,19 @@ fn rewrite_object_fields(
                             has_set = true;
                             if let Payload::PStr(items) = &attr.1 {
                                 for item in items.iter() {
-                                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc {
+                                    if let StructureItemDesc::Pstr_eval(eval_inner) =
+                                        &*item.pstr_desc
+                                    {
                                         let (expr_idx, _) = &**eval_inner;
                                         let expr = arena.get_expr(*expr_idx);
-                                        if let ExpressionDesc::Pexp_record(record_inner) = &*expr.pexp_desc {
+                                        if let ExpressionDesc::Pexp_record(record_inner) =
+                                            &*expr.pexp_desc
+                                        {
                                             let (fields, _) = &**record_inner;
                                             for field in fields.iter() {
-                                                let field_name = match arena.get_longident(field.lid.txt) {
+                                                let field_name = match arena
+                                                    .get_longident(field.lid.txt)
+                                                {
                                                     Longident::Lident(s) => arena.get_string(*s),
                                                     _ => "",
                                                 };
@@ -5147,10 +5177,8 @@ fn flatten_value_binding(vb: &ValueBinding, arena: &mut ParseArena) -> Vec<Value
 
     // OCaml ast_tuple_pattern_flatten:
     // | Ppat_record (lid_pats, _), Pexp_pack {pmod_desc = Pmod_ident id} -> ...
-    if let (
-        PatternDesc::Ppat_record(record_inner),
-        ExpressionDesc::Pexp_pack(mod_expr_idx),
-    ) = (&*pvb_pat.ppat_desc, &*pvb_expr.pexp_desc)
+    if let (PatternDesc::Ppat_record(record_inner), ExpressionDesc::Pexp_pack(mod_expr_idx)) =
+        (&*pvb_pat.ppat_desc, &*pvb_expr.pexp_desc)
     {
         let (ref lid_pats, _) = **record_inner;
         let mod_expr = arena.get_mod_expr(*mod_expr_idx);
@@ -5753,7 +5781,10 @@ fn pipe_tuple_bound(
         let mapped = pipe_tuple_map(obj_ident_expr, xs, f, arena);
 
         let pat = Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: obj_name, loc: obj_loc })),
+            ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
+                txt: obj_name,
+                loc: obj_loc,
+            })),
             ppat_loc: obj_loc,
             ppat_attributes: Attributes::new(),
         };
@@ -5784,7 +5815,12 @@ fn pipe_tuple_bound(
 /// - Pexp_apply(fn1, args) -> Pexp_apply(fn1, (Nolabel, a) :: args)
 /// - otherwise -> fn(a) = Pexp_apply(fn, [(Nolabel, a)])
 /// Matches OCaml's Ext_list.map in ast_exp_apply.ml lines 105-128.
-fn pipe_tuple_map(a: Expression, xs: &[ExprIdx], f: &Expression, arena: &mut ParseArena) -> Expression {
+fn pipe_tuple_map(
+    a: Expression,
+    xs: &[ExprIdx],
+    f: &Expression,
+    arena: &mut ParseArena,
+) -> Expression {
     let mapped: Vec<ExprIdx> = xs
         .iter()
         .map(|fn_expr_idx| {
@@ -5793,7 +5829,10 @@ fn pipe_tuple_map(a: Expression, xs: &[ExprIdx], f: &Expression, arena: &mut Par
                 ExpressionDesc::Pexp_construct(ctor, None) => {
                     let a_idx = arena.push_expr(a.clone());
                     Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_construct(ctor.clone(), Some(a_idx))),
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
+                            ctor.clone(),
+                            Some(a_idx),
+                        )),
                         pexp_loc: fn_expr.pexp_loc,
                         pexp_attributes: fn_expr.pexp_attributes.clone(),
                     }
@@ -5917,9 +5956,7 @@ fn desugar_pipe(
         // If `a` is not a simple identifier, bind it first to avoid multiple evaluation:
         //   let __tuple_internal_obj = a in (x(__tuple_internal_obj), y(__tuple_internal_obj))
         // Matches OCaml's ast_exp_apply.ml lines 100-131
-        ExpressionDesc::Pexp_tuple(xs) => {
-            pipe_tuple_bound(a, xs, &f, arena)
-        }
+        ExpressionDesc::Pexp_tuple(xs) => pipe_tuple_bound(a, xs, &f, arena),
 
         // Default: a -> f becomes f(a)
         _ => Expression {
@@ -5963,9 +6000,13 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                 if has_unwrap_attr(&vb.pvb_attributes, arena) {
                     // OCaml bs_builtin_ppx: rewrite supported let? forms into a match with
                     // an early-return case and a continuation case.
-                    if !matches!(&*arena.get_expr(vb.pvb_expr).pexp_desc, ExpressionDesc::Pexp_pack(_)) {
+                    if !matches!(
+                        &*arena.get_expr(vb.pvb_expr).pexp_desc,
+                        ExpressionDesc::Pexp_pack(_)
+                    ) {
                         let vb_pat = arena.get_pat(vb.pvb_pat);
-                        if let Some((variant, var_name)) = classify_let_unwrap_pattern(vb_pat, arena)
+                        if let Some((variant, var_name)) =
+                            classify_let_unwrap_pattern(vb_pat, arena)
                         {
                             let loc = arena.mk_ghost_loc(vb_pat.ppat_loc);
                             let var_name_idx = arena.intern(&var_name);
@@ -9332,10 +9373,8 @@ fn handle_abstract_tdcl(
                             js_set_scopes: vec![],
                         },
                     };
-                    let setter_prim = vec![
-                        prim_as_idx,
-                        prim_str(arena, encode_ffi_type(&setter_ffi)),
-                    ];
+                    let setter_prim =
+                        vec![prim_as_idx, prim_str(arena, encode_ffi_type(&setter_ffi))];
                     let setter_vd = ValueDescription {
                         pval_name: Located {
                             txt: arena.push_string(format!("{}Set", label_name)),
@@ -10133,7 +10172,11 @@ fn make_arrows(args: Vec<TypeArg>, ret: CoreType, loc: LocIdx, arena: &mut Parse
     let num_args = args.len();
     for (i, arg) in args.into_iter().rev().enumerate() {
         // i=0 is the last (rightmost) arg, i=num_args-1 is the first (outermost) arg
-        let arity = if i == num_args - 1 { full_arity } else { none_arity };
+        let arity = if i == num_args - 1 {
+            full_arity
+        } else {
+            none_arity
+        };
         result = CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
                 Box::new(arg),
@@ -10347,7 +10390,10 @@ fn expand_extensions_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
             let new_expr = expand_extensions_expr(&expr, arena);
             let new_expr_idx = arena.push_expr(new_expr);
             vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((new_expr_idx, attrs.clone())))),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+                    new_expr_idx,
+                    attrs.clone(),
+                )))),
                 pstr_loc: item.pstr_loc,
             }]
         }
@@ -10368,19 +10414,24 @@ fn expand_extensions_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
                 })
                 .collect();
             vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((*rec, new_bindings)))),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+                    *rec,
+                    new_bindings,
+                )))),
                 pstr_loc: item.pstr_loc,
             }]
         }
         StructureItemDesc::Pstr_module(mb) => {
             let new_expr_idx = expand_extensions_mod_expr(mb.pmb_expr, arena);
             vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_module(Box::new(crate::parser::ast::ModuleBinding {
-                    pmb_name: mb.pmb_name.clone(),
-                    pmb_expr: new_expr_idx,
-                    pmb_attributes: mb.pmb_attributes.clone(),
-                    pmb_loc: mb.pmb_loc,
-                }))),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_module(Box::new(
+                    crate::parser::ast::ModuleBinding {
+                        pmb_name: mb.pmb_name.clone(),
+                        pmb_expr: new_expr_idx,
+                        pmb_attributes: mb.pmb_attributes.clone(),
+                        pmb_loc: mb.pmb_loc,
+                    },
+                ))),
                 pstr_loc: item.pstr_loc,
             }]
         }
@@ -10427,7 +10478,11 @@ fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expressi
             let new_body = expand_extensions_expr(&body_expr, arena);
             let new_body_idx = arena.push_expr(new_body);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((*rec_flag, new_bindings, new_body_idx)))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
+                    *rec_flag,
+                    new_bindings,
+                    new_body_idx,
+                )))),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -10466,7 +10521,11 @@ fn expand_extensions_mod_expr(me_idx: ModExprIdx, arena: &mut ParseArena) -> Mod
             let (ref name, ref mty, ref body) = **inner;
             let new_body_idx = expand_extensions_mod_expr(*body, arena);
             let new_me = ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_functor(Box::new((name.clone(), mty.clone(), new_body_idx)))),
+                pmod_desc: Box::new(ModuleExprDesc::Pmod_functor(Box::new((
+                    name.clone(),
+                    mty.clone(),
+                    new_body_idx,
+                )))),
                 pmod_loc: me.pmod_loc,
                 pmod_attributes: me.pmod_attributes.clone(),
             };
@@ -11229,8 +11288,7 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                 psig_desc: Box::new(SignatureItemDesc::Psig_recmodule(Box::new(new_mds))),
                 psig_loc: item.psig_loc,
             }
-        }
-        // All SignatureItemDesc variants are covered above
+        } // All SignatureItemDesc variants are covered above
     }
 }
 

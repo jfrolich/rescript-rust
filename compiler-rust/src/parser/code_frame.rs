@@ -349,8 +349,9 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
                         buf.push(' ');
                     }
 
-                    let is_highlighted_gutter =
-                        i == 0 && *line_number >= highlight_line_start && *line_number <= highlight_line_end;
+                    let is_highlighted_gutter = i == 0
+                        && *line_number >= highlight_line_start
+                        && *line_number <= highlight_line_end;
                     if use_color && is_highlighted_gutter {
                         buf.push_str(emphasis_ansi(emphasis));
                     }

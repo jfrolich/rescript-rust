@@ -1242,8 +1242,7 @@ impl<'src> Scanner<'src> {
                     let offset16 = self.offset16;
                     let char_pos = self.char_pos;
                     let ch_len = self.ch_len;
-                    let (codepoint, length) =
-                        self.decode_codepoint_from_latin1_source(self.offset);
+                    let (codepoint, length) = self.decode_codepoint_from_latin1_source(self.offset);
 
                     for _ in 0..length {
                         self.next();

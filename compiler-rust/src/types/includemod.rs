@@ -11,13 +11,13 @@
 #![allow(dead_code)]
 
 use crate::ident::Ident;
+use crate::types::Path;
 use crate::types::ctype::{self, UnifyState};
 use crate::types::decl::{
     ExtensionConstructor, ModtypeDeclaration, ModuleDeclaration, ModuleType, Signature,
     SignatureItem, TypeDeclaration, ValueDescription, ValueKind,
 };
 use crate::types::env::Env;
-use crate::types::Path;
 use crate::types::typedtree::ModuleCoercion;
 use crate::types::{TypeContext, TypeExprRef};
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
@@ -157,7 +157,8 @@ fn modtypes_inner<'a>(
                                 | ModuleType::MtyAlias(_, alias_path)
                                     if !alias_path.same(path) =>
                                 {
-                                    if let Some(expanded) = expand_local(env, alias_path, visiting) {
+                                    if let Some(expanded) = expand_local(env, alias_path, visiting)
+                                    {
                                         return Some(expanded);
                                     }
                                 }
@@ -172,11 +173,12 @@ fn modtypes_inner<'a>(
                     let parent_sig = match &parent_mty {
                         ModuleType::MtySignature(sig) => sig.clone(),
                         ModuleType::MtyIdent(parent_path)
-                        | ModuleType::MtyAlias(_, parent_path) => match expand_local(env, parent_path, visiting)?
-                        {
-                            ModuleType::MtySignature(sig) => sig,
-                            _ => return None,
-                        },
+                        | ModuleType::MtyAlias(_, parent_path) => {
+                            match expand_local(env, parent_path, visiting)? {
+                                ModuleType::MtySignature(sig) => sig,
+                                _ => return None,
+                            }
+                        }
                         _ => return None,
                     };
                     for item in &parent_sig {
@@ -215,10 +217,7 @@ fn modtypes_inner<'a>(
     }
 
     match (mty_impl, mty_sig) {
-        (
-            ModuleType::MtyAlias(pres_impl, impl_path),
-            ModuleType::MtyAlias(pres_sig, sig_path),
-        ) => {
+        (ModuleType::MtyAlias(pres_impl, impl_path), ModuleType::MtyAlias(pres_sig, sig_path)) => {
             let impl_path = normalized_alias_path(env, impl_path);
             let sig_path = normalized_alias_path(env, sig_path);
             if !impl_path.same(&sig_path) {
@@ -245,10 +244,7 @@ fn modtypes_inner<'a>(
             let expanded = expand_module_type_in_env(type_ctx, env, &impl_path)
                 .map(|mty| {
                     ctype::strengthen_module_type_for_inclusion_path(
-                        type_ctx,
-                        env,
-                        &impl_path,
-                        &mty,
+                        type_ctx, env, &impl_path, &mty,
                     )
                 })
                 .unwrap_or_else(|| ModuleType::MtyAlias(pres_impl.clone(), impl_path.clone()));
@@ -314,8 +310,10 @@ fn modtypes_inner<'a>(
             let result_coercion = modtypes_inner(type_ctx, env, result_impl, result_sig, false)?;
 
             // If both parameter and result coercions are identity, return identity
-            if matches!((&param_coercion, &result_coercion),
-                (ModuleCoercion::Tcoerce_none, ModuleCoercion::Tcoerce_none)) {
+            if matches!(
+                (&param_coercion, &result_coercion),
+                (ModuleCoercion::Tcoerce_none, ModuleCoercion::Tcoerce_none)
+            ) {
                 Ok(ModuleCoercion::Tcoerce_none)
             } else {
                 Ok(ModuleCoercion::Tcoerce_functor(
@@ -458,8 +456,14 @@ pub fn signatures<'a>(
     let mut type_subst = HashMap::new();
     let mut module_subst = HashMap::new();
     let mut modtype_subst = HashMap::new();
-    let len_impl = sig_impl.iter().filter(|item| is_runtime_component(item)).count();
-    let len_sig = sig_sig.iter().filter(|item| is_runtime_component(item)).count();
+    let len_impl = sig_impl
+        .iter()
+        .filter(|item| is_runtime_component(item))
+        .count();
+    let len_sig = sig_sig
+        .iter()
+        .filter(|item| is_runtime_component(item))
+        .count();
     let runtime_fields = sig_sig
         .iter()
         .filter(|item| is_runtime_component(item))
@@ -469,11 +473,9 @@ pub fn signatures<'a>(
         .iter()
         .scan(0usize, |runtime_pos, item| {
             let current = match item {
-                SignatureItem::SigModule(id, _, _) => Some((
-                    id.clone(),
-                    *runtime_pos,
-                    ModuleCoercion::Tcoerce_none,
-                )),
+                SignatureItem::SigModule(id, _, _) => {
+                    Some((id.clone(), *runtime_pos, ModuleCoercion::Tcoerce_none))
+                }
                 _ => None,
             };
             if is_runtime_component(item) {
@@ -603,13 +605,7 @@ fn signature_item<'a>(
                 }
             }
             if let Some((pos, impl_ext_constr)) = found {
-                extension_constructors(
-                    type_ctx,
-                    env,
-                    id.clone(),
-                    impl_ext_constr,
-                    ext_constr,
-                )?;
+                extension_constructors(type_ctx, env, id.clone(), impl_ext_constr, ext_constr)?;
                 Ok((pos, ModuleCoercion::Tcoerce_none))
             } else {
                 Err(IncludeModError::MissingValue(id.clone()))
@@ -793,16 +789,14 @@ fn value_descriptions<'a>(
             // Both are primitives - check compatibility (simplified: just accept)
             Ok(ModuleCoercion::Tcoerce_none)
         }
-        (ValueKind::ValPrim(prim), _) => {
-            Ok(ModuleCoercion::Tcoerce_primitive(
-                crate::types::typedtree::PrimitiveCoercion {
-                    pc_desc: prim.clone(),
-                    pc_type: sig_desc.val_type,
-                    pc_loc: impl_desc.val_loc.clone(),
-                    pc_id: id,
-                },
-            ))
-        }
+        (ValueKind::ValPrim(prim), _) => Ok(ModuleCoercion::Tcoerce_primitive(
+            crate::types::typedtree::PrimitiveCoercion {
+                pc_desc: prim.clone(),
+                pc_type: sig_desc.val_type,
+                pc_loc: impl_desc.val_loc.clone(),
+                pc_id: id,
+            },
+        )),
         (_, ValueKind::ValPrim(_)) => {
             // Signature expects primitive but implementation is regular - mismatch
             // OCaml raises Dont_match here but we'll allow it for now
@@ -818,14 +812,13 @@ fn add_sig_item_to_env(item: &SignatureItem, env: &mut Env) {
         SignatureItem::SigType(id, decl, _) => env.add_type(id.clone(), decl.clone()),
         SignatureItem::SigModule(id, md, _) => env.add_module(id.clone(), md.clone()),
         SignatureItem::SigModtype(id, mtd) => env.add_modtype(id.clone(), mtd.clone()),
-        SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        SignatureItem::SigTypext(_, _, _)
+        | SignatureItem::SigClass
+        | SignatureItem::SigClassType => {}
     }
 }
 
-fn substitute_module_path(
-    path: &Path,
-    module_subst: &HashMap<String, Path>,
-) -> Path {
+fn substitute_module_path(path: &Path, module_subst: &HashMap<String, Path>) -> Path {
     match path {
         Path::Pident(id) => module_subst
             .get(id.name())
@@ -860,7 +853,11 @@ fn substitute_modtype_path(
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
-            Box::new(substitute_modtype_path(functor, module_subst, modtype_subst)),
+            Box::new(substitute_modtype_path(
+                functor,
+                module_subst,
+                modtype_subst,
+            )),
             Box::new(substitute_module_path(arg, module_subst)),
         ),
     }
@@ -922,8 +919,7 @@ fn substitute_module_declaration_paths(
     modtype_subst: &HashMap<String, Path>,
 ) -> ModuleDeclaration {
     let mut substituted = md.clone();
-    substituted.md_type =
-        substitute_module_type_paths(&md.md_type, module_subst, modtype_subst);
+    substituted.md_type = substitute_module_type_paths(&md.md_type, module_subst, modtype_subst);
     substituted.md_path = md
         .md_path
         .as_ref()
@@ -1079,7 +1075,14 @@ fn close_matching_variant_rows_from_expected<'a>(
                     ..
                 },
             ) if impl_arg.lbl == expected_arg.lbl => {
-                align_rows(type_ctx, env, impl_arg.typ, expected_arg.typ, depth + 1, seen);
+                align_rows(
+                    type_ctx,
+                    env,
+                    impl_arg.typ,
+                    expected_arg.typ,
+                    depth + 1,
+                    seen,
+                );
                 align_rows(type_ctx, env, *impl_ret, *expected_ret, depth + 1, seen);
             }
             (TypeDesc::Ttuple(impl_items), TypeDesc::Ttuple(expected_items))
@@ -1135,17 +1138,32 @@ fn close_matching_variant_rows_from_expected<'a>(
                     ) {
                         (RowField::Rpresent(None), RowField::Rpresent(None))
                         | (RowField::Rabsent, RowField::Rabsent) => {}
-                        (RowField::Rpresent(Some(impl_arg)), RowField::Rpresent(Some(expected_arg))) => {
+                        (
+                            RowField::Rpresent(Some(impl_arg)),
+                            RowField::Rpresent(Some(expected_arg)),
+                        ) => {
                             align_rows(type_ctx, env, impl_arg, expected_arg, depth + 1, seen);
                         }
                         (
-                            RowField::Reither { types: impl_types, .. },
-                            RowField::Reither { types: expected_types, .. },
+                            RowField::Reither {
+                                types: impl_types, ..
+                            },
+                            RowField::Reither {
+                                types: expected_types,
+                                ..
+                            },
                         ) if impl_types.len() == expected_types.len() => {
                             for (impl_arg, expected_arg) in
                                 impl_types.iter().zip(expected_types.iter())
                             {
-                                align_rows(type_ctx, env, *impl_arg, *expected_arg, depth + 1, seen);
+                                align_rows(
+                                    type_ctx,
+                                    env,
+                                    *impl_arg,
+                                    *expected_arg,
+                                    depth + 1,
+                                    seen,
+                                );
                             }
                         }
                         (
@@ -1179,7 +1197,11 @@ fn close_matching_variant_rows_from_expected<'a>(
                             row_fixed: expected_row.row_fixed,
                             row_name: None,
                         }));
-                        ctype::update_level(type_ctx, type_ctx.get_level(impl_more_repr), closing_row);
+                        ctype::update_level(
+                            type_ctx,
+                            type_ctx.get_level(impl_more_repr),
+                            closing_row,
+                        );
                         ctype::link_type(type_ctx, impl_more_repr, closing_row);
                     }
                 }
@@ -1200,9 +1222,12 @@ fn close_matching_variant_rows_from_expected<'a>(
                 }
             }
             (
-                TypeDesc::Tpackage { args: impl_args, .. },
                 TypeDesc::Tpackage {
-                    args: expected_args, ..
+                    args: impl_args, ..
+                },
+                TypeDesc::Tpackage {
+                    args: expected_args,
+                    ..
                 },
             ) if impl_args.len() == expected_args.len() => {
                 for (impl_arg, expected_arg) in impl_args.iter().zip(expected_args.iter()) {
@@ -1238,23 +1263,28 @@ fn type_declarations<'a>(
     }
 
     // Match OCaml's Includecore.type_declarations variance check.
-    let sig_is_abstract =
-        matches!(sig_decl.type_kind, crate::types::decl::TypeKind::TypeAbstract)
-            && sig_decl.type_manifest.is_none();
+    let sig_is_abstract = matches!(
+        sig_decl.type_kind,
+        crate::types::decl::TypeKind::TypeAbstract
+    ) && sig_decl.type_manifest.is_none();
     let need_variance = sig_is_abstract
         || matches!(impl_decl.type_private, crate::types::PrivateFlag::Private)
         || matches!(impl_decl.type_kind, crate::types::decl::TypeKind::TypeOpen);
     if need_variance && impl_decl.type_variance.len() == sig_decl.type_variance.len() {
-        let abstract_or_private = sig_is_abstract
-            || matches!(sig_decl.type_private, crate::types::PrivateFlag::Private);
-        let open_sig =
-            matches!(sig_decl.type_kind, crate::types::decl::TypeKind::TypeOpen)
-                && sig_decl.type_manifest.is_none();
+        let abstract_or_private =
+            sig_is_abstract || matches!(sig_decl.type_private, crate::types::PrivateFlag::Private);
+        let open_sig = matches!(sig_decl.type_kind, crate::types::decl::TypeKind::TypeOpen)
+            && sig_decl.type_manifest.is_none();
 
         for (i, (sig_param, (impl_var, sig_var))) in sig_decl
             .type_params
             .iter()
-            .zip(impl_decl.type_variance.iter().zip(sig_decl.type_variance.iter()))
+            .zip(
+                impl_decl
+                    .type_variance
+                    .iter()
+                    .zip(sig_decl.type_variance.iter()),
+            )
             .enumerate()
         {
             let implies = |lhs: bool, rhs: bool| !lhs || rhs;

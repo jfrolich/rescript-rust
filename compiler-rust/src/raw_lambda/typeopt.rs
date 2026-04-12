@@ -7,8 +7,8 @@ use std::collections::HashSet;
 
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    Attribute, ConstructorArguments, ConstructorDescription, TypeDeclaration, TypeKind,
-    INTERNAL_OPTIONAL_ATTR_NAME,
+    Attribute, ConstructorArguments, ConstructorDescription, INTERNAL_OPTIONAL_ATTR_NAME,
+    TypeDeclaration, TypeKind,
 };
 use crate::types::env::Env;
 use crate::types::path::Path;
@@ -61,10 +61,9 @@ fn type_cannot_contain_undefined_rec(
                     return false;
                 };
                 match &decl.type_kind {
-                    TypeKind::TypeAbstract => decl
-                        .type_attributes
-                        .iter()
-                        .any(is_not_undefined_attr),
+                    TypeKind::TypeAbstract => {
+                        decl.type_attributes.iter().any(is_not_undefined_attr)
+                    }
                     TypeKind::TypeOpen => false,
                     TypeKind::TypeRecord(_, _) => true,
                     TypeKind::TypeVariant(cdecls)
@@ -79,16 +78,18 @@ fn type_cannot_contain_undefined_rec(
                                 false
                             } else if untagged {
                                 match &cd.cd_args {
-                                    ConstructorArguments::CstrTuple(args) => match args.as_slice() {
-                                        [arg] => {
-                                            type_is_builtin_object(ctx, env, *arg)
-                                                || type_cannot_contain_undefined_rec(
-                                                    ctx, env, *arg, seen,
-                                                )
+                                    ConstructorArguments::CstrTuple(args) => {
+                                        match args.as_slice() {
+                                            [arg] => {
+                                                type_is_builtin_object(ctx, env, *arg)
+                                                    || type_cannot_contain_undefined_rec(
+                                                        ctx, env, *arg, seen,
+                                                    )
+                                            }
+                                            [] => true,
+                                            [_, _, ..] => true,
                                         }
-                                        [] => true,
-                                        [_, _, ..] => true,
-                                    },
+                                    }
                                     ConstructorArguments::CstrRecord(labels) => {
                                         match labels.as_slice() {
                                             [label] => {
@@ -131,10 +132,7 @@ fn type_cannot_contain_undefined_rec(
 /// Checks type descriptor directly for types that are always safe
 /// (Ttuple, Tarrow, Tvariant, Tpackage, Tconstr for builtin types).
 /// Also tries to expand Tconstr types via type declarations.
-pub(crate) fn type_cannot_contain_undefined_no_env(
-    ctx: &TypeContext<'_>,
-    ty: TypeExprRef,
-) -> bool {
+pub(crate) fn type_cannot_contain_undefined_no_env(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool {
     fn rec(ctx: &TypeContext<'_>, ty: TypeExprRef, seen: &mut HashSet<TypeExprRef>) -> bool {
         let ty = ctx.repr(ty);
         if !seen.insert(ty) {
@@ -265,26 +263,42 @@ fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
     }
     match id.name() {
         "option" | "unit" | "unknown" => BuiltinPathTest::ForSureNo,
-        "int" | "char" | "float" | "bool" | "exn" | "array" | "list" | "result" | "dict"
-        | "bigint" | "string" | "extension_constructor" | "promise" => {
-            BuiltinPathTest::ForSureYes
-        }
+        "int"
+        | "char"
+        | "float"
+        | "bool"
+        | "exn"
+        | "array"
+        | "list"
+        | "result"
+        | "dict"
+        | "bigint"
+        | "string"
+        | "extension_constructor"
+        | "promise" => BuiltinPathTest::ForSureYes,
         _ => BuiltinPathTest::NotApplicable,
     }
 }
 
-pub(crate) fn find_type_decl_pub(ctx: &TypeContext<'_>, env: &Env, path: &Path) -> Option<TypeDeclaration> {
+pub(crate) fn find_type_decl_pub(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    path: &Path,
+) -> Option<TypeDeclaration> {
     find_type_decl(ctx, env, path)
 }
 
 fn find_type_decl(ctx: &TypeContext<'_>, env: &Env, path: &Path) -> Option<TypeDeclaration> {
     match path {
-        Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => {
-            ctx.find_type_decl_by_stamp(id.stamp()).map(|decl| decl.clone())
-        }
+        Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => ctx
+            .find_type_decl_by_stamp(id.stamp())
+            .map(|decl| decl.clone()),
         _ => crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path)
             .or_else(|| ctx.find_resolved_pdot_type(&path.name()))
-            .or_else(|| ctx.find_type_decl_by_path(&path.name()).map(|decl| decl.clone()))
+            .or_else(|| {
+                ctx.find_type_decl_by_path(&path.name())
+                    .map(|decl| decl.clone())
+            })
             .or_else(|| env.lookup_type(path).ok().cloned()),
     }
 }

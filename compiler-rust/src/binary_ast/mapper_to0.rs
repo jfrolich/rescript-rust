@@ -989,8 +989,7 @@ impl<'a> Mapper<'a> {
             }
             current::ExpressionDesc::Pexp_coerce(inner) => {
                 let (ref e_idx, _, ref ty_idx) = **inner;
-                let _from_type = owner_idx
-                    .and_then(|owner| self.arena.coerce_from_type(owner));
+                let _from_type = owner_idx.and_then(|owner| self.arena.coerce_from_type(owner));
                 // parsetree0 has unit instead of Option<CoreType> for the middle arg
                 pt0::ExpressionDesc::Coerce(
                     Box::new(self.map_expr_idx(*e_idx)),

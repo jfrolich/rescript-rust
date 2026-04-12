@@ -42,10 +42,7 @@ fn default_runtime_path() -> Option<PathBuf> {
 
     if last == "bin" && third == "@rescript" && fourth == "node_modules" {
         let base: PathBuf = components[..len - 4].iter().collect();
-        let runtime = base
-            .join("node_modules")
-            .join("@rescript")
-            .join("runtime");
+        let runtime = base.join("node_modules").join("@rescript").join("runtime");
         if runtime.exists() {
             return Some(runtime);
         }
@@ -98,14 +95,16 @@ fn main() {
     let builder = std::thread::Builder::new()
         .name("compiler".into())
         .stack_size(512 * 1024 * 1024); // 512MB
-    
-    let handler = builder.spawn(|| {
-        if let Err(err) = run() {
-            eprintln!("{err}");
-            std::process::exit(1);
-        }
-    }).expect("Failed to spawn compiler thread");
-    
+
+    let handler = builder
+        .spawn(|| {
+            if let Err(err) = run() {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        })
+        .expect("Failed to spawn compiler thread");
+
     handler.join().expect("Compiler thread panicked");
 }
 
@@ -158,8 +157,7 @@ fn run() -> Result<()> {
                         opts.runtime_path = Some(PathBuf::from(val));
                     }
                 }
-                "-open"
-                => {
+                "-open" => {
                     if let Some(val) = args.next() {
                         opts.open_modules.push(val);
                     }
@@ -169,14 +167,8 @@ fn run() -> Result<()> {
                         opts.jsx_version = val.parse::<i32>().ok();
                     }
                 }
-                "-w"
-                | "-warn-error"
-                | "-color"
-                | "-bs-package-name"
-                | "-bs-jsx-mode"
-                | "-pp"
-                | "-ppx"
-                | "-ppxopt" => {
+                "-w" | "-warn-error" | "-color" | "-bs-package-name" | "-bs-jsx-mode" | "-pp"
+                | "-ppx" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
                     let _ = args.next();
                 }

@@ -387,8 +387,10 @@ impl Lambda {
                             args,
                             loc,
                         } => {
-                            if let [Lambda::Lconst(Constant::Int { i: range, .. }), Lambda::Lvar(xx)] =
-                                args.as_slice()
+                            if let [
+                                Lambda::Lconst(Constant::Int { i: range, .. }),
+                                Lambda::Lvar(xx),
+                            ] = args.as_slice()
                             {
                                 if let Lambda::Lswitch(switch_arg, body) = &else_ {
                                     if let Lambda::Lvar(yy) = switch_arg.as_ref() {
@@ -515,11 +517,13 @@ impl Lambda {
                                     args: outer_args,
                                     ..
                                 }) => {
-                                    if let [Lambda::Lprim(PrimInfo {
-                                        primitive: Primitive::Pintcomp(Comparison::Eq),
-                                        args: pred_args,
-                                        loc,
-                                    })] = outer_args.as_slice()
+                                    if let [
+                                        Lambda::Lprim(PrimInfo {
+                                            primitive: Primitive::Pintcomp(Comparison::Eq),
+                                            args: pred_args,
+                                            loc,
+                                        }),
+                                    ] = outer_args.as_slice()
                                     {
                                         if let [Lambda::Lvar(j), Lambda::Lconst(_)] =
                                             pred_args.as_slice()

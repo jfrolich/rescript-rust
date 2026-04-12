@@ -1210,16 +1210,16 @@ fn strengthen_module_type_for_module_access_path<'a>(
     use super::decl::ModuleType;
 
     match mty {
-        ModuleType::MtySignature(sig) => ModuleType::MtySignature(
-            strengthen_signature_for_module_access_path(
+        ModuleType::MtySignature(sig) => {
+            ModuleType::MtySignature(strengthen_signature_for_module_access_path(
                 ctx,
                 env,
                 aliasable,
                 module_access_path,
                 sig,
                 0,
-            ),
-        ),
+            ))
+        }
         ModuleType::MtyAlias(..) | ModuleType::MtyIdent(..) => mty.clone(),
         ModuleType::MtyFunctor {
             param,
@@ -1264,7 +1264,9 @@ fn strengthen_module_decl_for_module_access_path<'a>(
     let mut strengthened = md.clone();
     strengthened.md_type = match &md.md_type {
         ModuleType::MtyAlias(..) => md.md_type.clone(),
-        _ if aliasable => ModuleType::MtyAlias(AliasPresence::MtaPresent, module_access_path.clone()),
+        _ if aliasable => {
+            ModuleType::MtyAlias(AliasPresence::MtaPresent, module_access_path.clone())
+        }
         _ => strengthen_module_type_for_module_access_path(
             ctx,
             env,
@@ -1319,11 +1321,7 @@ fn strengthen_signature_for_module_access_path<'a>(
                     &child_path,
                     md,
                 );
-                let new_item = SignatureItem::SigModule(
-                    id.clone(),
-                    strengthened_md,
-                    *rec_status,
-                );
+                let new_item = SignatureItem::SigModule(id.clone(), strengthened_md, *rec_status);
                 env.add_module(id.clone(), md.clone());
                 new_item
             }
@@ -1331,7 +1329,8 @@ fn strengthen_signature_for_module_access_path<'a>(
                 let mut strengthened_mtd = mtd.clone();
                 if mtd.mtd_type.is_none() {
                     let modtype_path = Path::pdot(module_access_path.clone(), id.name());
-                    strengthened_mtd.mtd_type = Some(super::decl::ModuleType::MtyIdent(modtype_path));
+                    strengthened_mtd.mtd_type =
+                        Some(super::decl::ModuleType::MtyIdent(modtype_path));
                 }
                 let new_item = SignatureItem::SigModtype(id.clone(), strengthened_mtd);
                 env.add_modtype(id.clone(), mtd.clone());

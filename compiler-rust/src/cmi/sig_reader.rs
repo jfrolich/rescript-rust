@@ -20,8 +20,7 @@ use crate::types::decl::{
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{
-    Commutable, FieldKind, RowDesc, RowField, TypeArg, TypeDesc, TypeExprRef,
-    GENERIC_LEVEL,
+    Commutable, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeArg, TypeDesc, TypeExprRef,
 };
 use crate::types::variance::Variance;
 
@@ -49,7 +48,10 @@ impl<'a> SigReadContext<'a> {
 
     /// Read a complete signature (list of signature items).
     pub fn read_signature(&mut self, items: &[OcamlValue]) -> Signature {
-        items.iter().map(|item| self.read_signature_item(item)).collect()
+        items
+            .iter()
+            .map(|item| self.read_signature_item(item))
+            .collect()
     }
 
     /// Read a signature item.
@@ -68,14 +70,12 @@ impl<'a> SigReadContext<'a> {
                 0 => {
                     let id = read_ident(&fields[0]);
                     let debug_sig_values = std::env::var("RUST_DEBUG_SIG_VALUE").ok();
-                    let debug_this_value = debug_sig_values
-                        .as_deref()
-                        .is_some_and(|raw| {
-                            raw.split(',')
-                                .map(|part| part.trim())
-                                .filter(|part| !part.is_empty())
-                                .any(|target| target == id.name())
-                        });
+                    let debug_this_value = debug_sig_values.as_deref().is_some_and(|raw| {
+                        raw.split(',')
+                            .map(|part| part.trim())
+                            .filter(|part| !part.is_empty())
+                            .any(|target| target == id.name())
+                    });
                     if debug_this_value {
                         eprintln!(
                             "[sig-read] raw value={} before read_type_expr ids={}",
@@ -447,8 +447,7 @@ impl<'a> SigReadContext<'a> {
                 ModuleType::MtyIdent(path)
             }
             OcamlValue::Block(1, fields) => {
-                let sig_items: Vec<OcamlValue> =
-                    fields[0].as_list().into_iter().cloned().collect();
+                let sig_items: Vec<OcamlValue> = fields[0].as_list().into_iter().cloned().collect();
                 let signature = self.read_signature(&sig_items);
                 ModuleType::MtySignature(signature)
             }
@@ -996,11 +995,31 @@ fn debug_loaded_type_refs(ctx: &TypeContext<'_>, ty: TypeExprRef) -> String {
 /// Rust's initial_env uses persistent idents (stamp=0). Normalizing here
 /// ensures CMI types unify with initial_env types.
 fn is_predef_type_name(name: &str) -> bool {
-    matches!(name,
-        "int" | "char" | "float" | "bool" | "unit" | "exn" | "array" |
-        "list" | "option" | "nativeint" | "int32" | "int64" | "lazy_t" |
-        "bytes" | "string" | "ref" | "result" | "dict" | "promise" |
-        "unknown" | "bigint" | "symbol" | "regexp"
+    matches!(
+        name,
+        "int"
+            | "char"
+            | "float"
+            | "bool"
+            | "unit"
+            | "exn"
+            | "array"
+            | "list"
+            | "option"
+            | "nativeint"
+            | "int32"
+            | "int64"
+            | "lazy_t"
+            | "bytes"
+            | "string"
+            | "ref"
+            | "result"
+            | "dict"
+            | "promise"
+            | "unknown"
+            | "bigint"
+            | "symbol"
+            | "regexp"
     )
 }
 
@@ -1013,21 +1032,25 @@ fn read_ident(value: &OcamlValue) -> Ident {
     if stamp == 0 {
         // Persistent identifier
         let id = Ident::create_persistent(name);
-        if flags & 1 != 0 {
-            id.with_global()
-        } else {
-            id
-        }
+        if flags & 1 != 0 { id.with_global() } else { id }
     } else if stamp < 1000 {
         if let Some(predef_id) = crate::types::predef::find_predef_ident(name) {
             // Predef type: use matching predef ident with correct stamp.
             predef_id
         } else {
             // Non-predef with small stamp: preserve original.
-            Ident::new(name, stamp, crate::ident::IdentFlags::from_bits_truncate(flags))
+            Ident::new(
+                name,
+                stamp,
+                crate::ident::IdentFlags::from_bits_truncate(flags),
+            )
         }
     } else {
-        Ident::new(name, stamp, crate::ident::IdentFlags::from_bits_truncate(flags))
+        Ident::new(
+            name,
+            stamp,
+            crate::ident::IdentFlags::from_bits_truncate(flags),
+        )
     }
 }
 
@@ -1107,7 +1130,10 @@ fn read_attributes(value: &OcamlValue) -> Vec<Attribute> {
                 Some(Attribute {
                     attr_name,
                     attr_payload: payload,
-                    attr_loc: fields.get(2).map(read_location).unwrap_or_else(Location::none),
+                    attr_loc: fields
+                        .get(2)
+                        .map(read_location)
+                        .unwrap_or_else(Location::none),
                 })
             }
             _ => None,
@@ -1138,7 +1164,9 @@ fn read_attribute_payload(value: &OcamlValue) -> AttributePayload {
 fn extract_str_payload_string(structure: &OcamlValue) -> Option<String> {
     // Walk the tree looking for any string value
     fn find_string_in_value(v: &OcamlValue, depth: usize) -> Option<String> {
-        if depth > 8 { return None; }
+        if depth > 8 {
+            return None;
+        }
         match v {
             OcamlValue::String(s) => Some(s.clone()),
             OcamlValue::Block(_, fields) => {

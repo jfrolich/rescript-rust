@@ -215,7 +215,14 @@ fn transform_structure_item_multi(
     // Handle Pstr_value with potential @react.component
     if let StructureItemDesc::Pstr_value(val_inner) = *item.pstr_desc {
         let (rec_flag, bindings) = *val_inner;
-        return transform_value_bindings(rec_flag, bindings, &item.pstr_loc, config, arena, warnings);
+        return transform_value_bindings(
+            rec_flag,
+            bindings,
+            &item.pstr_loc,
+            config,
+            arena,
+            warnings,
+        );
     }
 
     // Handle Pstr_primitive (external) with potential @react.component
@@ -2712,7 +2719,9 @@ fn extract_args_rec(
             }
 
             if is_labelled(arg_label) || is_optional(arg_label) {
-                if let Some(message) = optional_argument_annotation_warning(arena, arg_label, default, lhs_pat) {
+                if let Some(message) =
+                    optional_argument_annotation_warning(arena, arg_label, default, lhs_pat)
+                {
                     let loc = lhs_pat.ppat_loc;
                     warnings.push(JsxPreprocessorWarning {
                         start_pos: *arena.loc_start(loc),
@@ -3712,12 +3721,8 @@ fn transform_expression(
             let mut config_clone = config.clone();
             let mut ignored_warnings = vec![];
             let module_expr = arena.get_mod_expr(module_idx).clone();
-            let transformed_module = transform_module_expr(
-                module_expr,
-                &mut config_clone,
-                arena,
-                &mut ignored_warnings,
-            );
+            let transformed_module =
+                transform_module_expr(module_expr, &mut config_clone, arena, &mut ignored_warnings);
             let body_expr = arena.get_expr(body_idx).clone();
             let transformed_body = transform_expression(body_expr, config, arena);
             ExpressionDesc::Pexp_letmodule(Box::new((
@@ -3750,12 +3755,8 @@ fn transform_expression(
             let mut config_clone = config.clone();
             let mut ignored_warnings = vec![];
             let mexpr_val = arena.get_mod_expr(mexpr).clone();
-            let transformed = transform_module_expr(
-                mexpr_val,
-                &mut config_clone,
-                arena,
-                &mut ignored_warnings,
-            );
+            let transformed =
+                transform_module_expr(mexpr_val, &mut config_clone, arena, &mut ignored_warnings);
             ExpressionDesc::Pexp_pack(arena.push_mod_expr(transformed))
         }
         ExpressionDesc::Pexp_open(inner) => {

@@ -52,7 +52,11 @@ fn predef_exception_ident(name: &str) -> Option<Ident> {
         "Undefined_recursive_module" => 28,
         _ => return None,
     };
-    Some(Ident::new(name, stamp, IdentFlags::PREDEF_EXN.with_global()))
+    Some(Ident::new(
+        name,
+        stamp,
+        IdentFlags::PREDEF_EXN.with_global(),
+    ))
 }
 
 fn free_vars_rec(
@@ -100,10 +104,7 @@ pub fn constructor_existentials(
             // Collect free vars from the result type
             let res_vars = free_vars(ctx, res_ty);
             // Existentials = args vars - result vars
-            arg_vars
-                .difference(&res_vars)
-                .copied()
-                .collect()
+            arg_vars.difference(&res_vars).copied().collect()
         }
     }
 }
@@ -200,7 +201,9 @@ impl<T: Clone> BindingTable<T> {
 
         match self.by_name.get_mut(&name) {
             Some(entries) => entries.push((id, value, true)),
-            None => { self.by_name.insert(name, vec![(id, value, true)]); }
+            None => {
+                self.by_name.insert(name, vec![(id, value, true)]);
+            }
         }
     }
 
@@ -215,7 +218,9 @@ impl<T: Clone> BindingTable<T> {
 
         match self.by_name.get_mut(&name) {
             Some(entries) => entries.push((id, value, false)),
-            None => { self.by_name.insert(name, vec![(id, value, false)]); }
+            None => {
+                self.by_name.insert(name, vec![(id, value, false)]);
+            }
         }
     }
 
@@ -556,10 +561,7 @@ impl Env {
     /// return `is_local=false` and should use `decl.type_path`.
     /// This matches OCaml's IdTbl.find_name which returns Pident for
     /// current-table bindings and Pdot for opened-table bindings.
-    pub fn find_type_with_origin(
-        &self,
-        name: &str,
-    ) -> EnvResult<(&Ident, &TypeDeclaration, bool)> {
+    pub fn find_type_with_origin(&self, name: &str) -> EnvResult<(&Ident, &TypeDeclaration, bool)> {
         self.types
             .find_by_name_with_origin(name)
             .map(|(id, decl, is_local)| (id, decl.as_ref(), is_local))
@@ -589,7 +591,9 @@ impl Env {
                         name: &str,
                         depth: usize,
                     ) -> Option<&'a super::decl::TypeDeclaration> {
-                        if depth > 10 { return None; }
+                        if depth > 10 {
+                            return None;
+                        }
                         match mty {
                             super::decl::ModuleType::MtySignature(sig) => {
                                 for item in sig {
@@ -605,18 +609,29 @@ impl Env {
                             | super::decl::ModuleType::MtyAlias(_, type_path) => {
                                 if let Ok(mtd) = env.lookup_modtype(type_path) {
                                     if let Some(resolved) = &mtd.mtd_type {
-                                        return find_type_in_module_type(env, resolved, name, depth + 1);
+                                        return find_type_in_module_type(
+                                            env,
+                                            resolved,
+                                            name,
+                                            depth + 1,
+                                        );
                                     }
                                 }
                                 if let Ok(md) = env.lookup_module(type_path) {
-                                    return find_type_in_module_type(env, &md.md_type, name, depth + 1);
+                                    return find_type_in_module_type(
+                                        env,
+                                        &md.md_type,
+                                        name,
+                                        depth + 1,
+                                    );
                                 }
                                 None
                             }
                             _ => None,
                         }
                     }
-                    if let Some(decl) = find_type_in_module_type(self, &parent_md.md_type, name, 0) {
+                    if let Some(decl) = find_type_in_module_type(self, &parent_md.md_type, name, 0)
+                    {
                         return Ok(decl);
                     }
                 }
@@ -932,11 +947,10 @@ impl Env {
             Path::Pdot(parent, name, _) => {
                 // Try to find the modtype through the parent module's signature.
                 // First try ident-based lookup, then name-based for stamp mismatches.
-                let parent_md = self.lookup_module(parent)
-                    .or_else(|_| {
-                        // Fallback: try by name if stamp doesn't match
-                        self.find_module(parent.last())
-                    });
+                let parent_md = self.lookup_module(parent).or_else(|_| {
+                    // Fallback: try by name if stamp doesn't match
+                    self.find_module(parent.last())
+                });
                 if let Ok(parent_md) = parent_md {
                     if let super::decl::ModuleType::MtySignature(ref sig) = parent_md.md_type {
                         for item in sig {
@@ -1169,84 +1183,129 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
 
     // ---- Abstract types ----
     // Order matches OCaml's Predef.common_initial_env add_type order
-    add_type_with_constrs(&mut env, predef::ident_bool(), TypeDeclaration {
-        type_kind: TypeKind::TypeVariant(vec![
-            cstr(predef::ident_false(), vec![]),
-            cstr(predef::ident_true(), vec![]),
-        ]),
-        type_immediate: true,
-        ..decl_abstr(0, true)
-    }, ctx);
+    add_type_with_constrs(
+        &mut env,
+        predef::ident_bool(),
+        TypeDeclaration {
+            type_kind: TypeKind::TypeVariant(vec![
+                cstr(predef::ident_false(), vec![]),
+                cstr(predef::ident_true(), vec![]),
+            ]),
+            type_immediate: true,
+            ..decl_abstr(0, true)
+        },
+        ctx,
+    );
     add_type_with_constrs(&mut env, predef::ident_int(), decl_abstr(0, true), ctx);
     add_type_with_constrs(&mut env, predef::ident_float(), decl_abstr(0, false), ctx);
     add_type_with_constrs(&mut env, predef::ident_bigint(), decl_abstr(0, false), ctx);
     add_type_with_constrs(&mut env, predef::ident_string(), decl_abstr(0, false), ctx);
-    add_type_with_constrs(&mut env, predef::ident_unit(), TypeDeclaration {
-        type_kind: TypeKind::TypeVariant(vec![cstr(predef::ident_void(), vec![])]),
-        type_immediate: true,
-        ..decl_abstr(0, true)
-    }, ctx);
-    add_type_with_constrs(&mut env, predef::ident_extension_constructor(), decl_abstr(0, false), ctx);
-    add_type_with_constrs(&mut env, predef::ident_exn(), TypeDeclaration {
-        type_kind: TypeKind::TypeOpen,
-        ..decl_abstr(0, false)
-    }, ctx);
+    add_type_with_constrs(
+        &mut env,
+        predef::ident_unit(),
+        TypeDeclaration {
+            type_kind: TypeKind::TypeVariant(vec![cstr(predef::ident_void(), vec![])]),
+            type_immediate: true,
+            ..decl_abstr(0, true)
+        },
+        ctx,
+    );
+    add_type_with_constrs(
+        &mut env,
+        predef::ident_extension_constructor(),
+        decl_abstr(0, false),
+        ctx,
+    );
+    add_type_with_constrs(
+        &mut env,
+        predef::ident_exn(),
+        TypeDeclaration {
+            type_kind: TypeKind::TypeOpen,
+            ..decl_abstr(0, false)
+        },
+        ctx,
+    );
     {
         let tvar = ctx.new_generic_var(None);
-        add_type_with_constrs(&mut env, predef::ident_option(), TypeDeclaration {
-            type_params: vec![tvar],
-            type_arity: 1,
-            type_kind: TypeKind::TypeVariant(vec![
-                cstr(predef::ident_none(), vec![]),
-                cstr(predef::ident_some(), vec![tvar]),
-            ]),
-            type_variance: vec![crate::types::variance::Variance::covariant()],
-            ..decl_abstr(1, false)
-        }, ctx);
+        add_type_with_constrs(
+            &mut env,
+            predef::ident_option(),
+            TypeDeclaration {
+                type_params: vec![tvar],
+                type_arity: 1,
+                type_kind: TypeKind::TypeVariant(vec![
+                    cstr(predef::ident_none(), vec![]),
+                    cstr(predef::ident_some(), vec![tvar]),
+                ]),
+                type_variance: vec![crate::types::variance::Variance::covariant()],
+                ..decl_abstr(1, false)
+            },
+            ctx,
+        );
     }
     {
         let tvar1 = ctx.new_generic_var(None);
         let tvar2 = ctx.new_generic_var(None);
-        add_type_with_constrs(&mut env, predef::ident_result(), TypeDeclaration {
-            type_params: vec![tvar1, tvar2],
-            type_arity: 2,
-            type_kind: TypeKind::TypeVariant(vec![
-                cstr(predef::ident_ok(), vec![tvar1]),
-                cstr(predef::ident_error(), vec![tvar2]),
-            ]),
-            type_variance: vec![
-                crate::types::variance::Variance::covariant(),
-                crate::types::variance::Variance::covariant(),
-            ],
-            ..decl_abstr(2, false)
-        }, ctx);
+        add_type_with_constrs(
+            &mut env,
+            predef::ident_result(),
+            TypeDeclaration {
+                type_params: vec![tvar1, tvar2],
+                type_arity: 2,
+                type_kind: TypeKind::TypeVariant(vec![
+                    cstr(predef::ident_ok(), vec![tvar1]),
+                    cstr(predef::ident_error(), vec![tvar2]),
+                ]),
+                type_variance: vec![
+                    crate::types::variance::Variance::covariant(),
+                    crate::types::variance::Variance::covariant(),
+                ],
+                ..decl_abstr(2, false)
+            },
+            ctx,
+        );
     }
     {
         let tvar = ctx.new_generic_var(None);
-        add_type_with_constrs(&mut env, predef::ident_promise(), TypeDeclaration {
-            type_params: vec![tvar],
-            type_arity: 1,
-            type_variance: vec![crate::types::variance::Variance::covariant()],
-            ..decl_abstr(1, false)
-        }, ctx);
+        add_type_with_constrs(
+            &mut env,
+            predef::ident_promise(),
+            TypeDeclaration {
+                type_params: vec![tvar],
+                type_arity: 1,
+                type_variance: vec![crate::types::variance::Variance::covariant()],
+                ..decl_abstr(1, false)
+            },
+            ctx,
+        );
     }
-    add_type_with_constrs(&mut env, predef::ident_array(), TypeDeclaration {
-        type_variance: vec![crate::types::variance::Variance::full()],
-        ..decl_abstr(1, false)
-    }, ctx);
+    add_type_with_constrs(
+        &mut env,
+        predef::ident_array(),
+        TypeDeclaration {
+            type_variance: vec![crate::types::variance::Variance::full()],
+            ..decl_abstr(1, false)
+        },
+        ctx,
+    );
     {
         let tvar = ctx.new_generic_var(None);
         let list_ty = ctx.new_generic_constr(predef::path_list(), vec![tvar]);
-        add_type_with_constrs(&mut env, predef::ident_list(), TypeDeclaration {
-            type_params: vec![tvar],
-            type_arity: 1,
-            type_kind: TypeKind::TypeVariant(vec![
-                cstr(predef::ident_nil(), vec![]),
-                cstr(predef::ident_cons(), vec![tvar, list_ty]),
-            ]),
-            type_variance: vec![crate::types::variance::Variance::covariant()],
-            ..decl_abstr(1, false)
-        }, ctx);
+        add_type_with_constrs(
+            &mut env,
+            predef::ident_list(),
+            TypeDeclaration {
+                type_params: vec![tvar],
+                type_arity: 1,
+                type_kind: TypeKind::TypeVariant(vec![
+                    cstr(predef::ident_nil(), vec![]),
+                    cstr(predef::ident_cons(), vec![tvar, list_ty]),
+                ]),
+                type_variance: vec![crate::types::variance::Variance::covariant()],
+                ..decl_abstr(1, false)
+            },
+            ctx,
+        );
     }
     {
         let tvar = ctx.new_generic_var(None);
@@ -1259,33 +1318,43 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
             ld_loc: Location::none(),
             ld_attributes: vec![],
         };
-        add_type_with_constrs(&mut env, predef::ident_dict(), TypeDeclaration {
-            type_params: vec![tvar],
-            type_arity: 1,
-            type_kind: TypeKind::TypeRecord(
-                vec![dict_label],
-                crate::types::decl::RecordRepresentation::RecordRegular,
-            ),
-            type_variance: vec![crate::types::variance::Variance::full()],
-            ..decl_abstr(1, false)
-        }, ctx);
+        add_type_with_constrs(
+            &mut env,
+            predef::ident_dict(),
+            TypeDeclaration {
+                type_params: vec![tvar],
+                type_arity: 1,
+                type_kind: TypeKind::TypeRecord(
+                    vec![dict_label],
+                    crate::types::decl::RecordRepresentation::RecordRegular,
+                ),
+                type_variance: vec![crate::types::variance::Variance::full()],
+                ..decl_abstr(1, false)
+            },
+            ctx,
+        );
     }
     {
         let tvar = ctx.new_generic_var(None);
         let type_unknown = ctx.new_generic_constr(predef::path_unknown(), vec![]);
-        add_type_with_constrs(&mut env, predef::ident_unknown(), TypeDeclaration {
-            type_params: vec![],
-            type_arity: 0,
-            type_kind: TypeKind::TypeVariant(vec![ConstructorDeclaration {
-                cd_id: predef::ident_ctor_unknown(),
-                cd_args: ConstructorArguments::CstrTuple(vec![tvar]),
-                cd_res: Some(type_unknown),
-                cd_loc: Location::none(),
-                cd_attributes: vec![],
-            }]),
-            type_unboxed: super::decl::UnboxedStatus::TRUE_FALSE,
-            ..decl_abstr(0, false)
-        }, ctx);
+        add_type_with_constrs(
+            &mut env,
+            predef::ident_unknown(),
+            TypeDeclaration {
+                type_params: vec![],
+                type_arity: 0,
+                type_kind: TypeKind::TypeVariant(vec![ConstructorDeclaration {
+                    cd_id: predef::ident_ctor_unknown(),
+                    cd_args: ConstructorArguments::CstrTuple(vec![tvar]),
+                    cd_res: Some(type_unknown),
+                    cd_loc: Location::none(),
+                    cd_attributes: vec![],
+                }]),
+                type_unboxed: super::decl::UnboxedStatus::TRUE_FALSE,
+                ..decl_abstr(0, false)
+            },
+            ctx,
+        );
     }
 
     // Standard exception constructors (extension constructors of exn)
@@ -1316,39 +1385,76 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
             };
 
         add_exception(&mut env, predef::ident_not_found(), vec![], exn_ty);
-        add_exception(&mut env, predef::ident_invalid_argument(), vec![string_ty_for_exn], exn_ty);
-        add_exception(&mut env, predef::ident_failure(), vec![string_ty_for_exn], exn_ty);
+        add_exception(
+            &mut env,
+            predef::ident_invalid_argument(),
+            vec![string_ty_for_exn],
+            exn_ty,
+        );
+        add_exception(
+            &mut env,
+            predef::ident_failure(),
+            vec![string_ty_for_exn],
+            exn_ty,
+        );
         add_exception(&mut env, Ident::create_persistent("Exit"), vec![], exn_ty);
         add_exception(
             &mut env,
             predef::ident_match_failure(),
-            vec![ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
-                string_ty_for_exn, int_ty_for_exn, int_ty_for_exn,
-            ]))],
+            vec![
+                ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
+                    string_ty_for_exn,
+                    int_ty_for_exn,
+                    int_ty_for_exn,
+                ])),
+            ],
             exn_ty,
         );
         add_exception(
             &mut env,
             predef::ident_assert_failure(),
-            vec![ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
-                string_ty_for_exn, int_ty_for_exn, int_ty_for_exn,
-            ]))],
+            vec![
+                ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
+                    string_ty_for_exn,
+                    int_ty_for_exn,
+                    int_ty_for_exn,
+                ])),
+            ],
             exn_ty,
         );
-        add_exception(&mut env, Ident::create_persistent("Sys_error"), vec![string_ty_for_exn], exn_ty);
+        add_exception(
+            &mut env,
+            Ident::create_persistent("Sys_error"),
+            vec![string_ty_for_exn],
+            exn_ty,
+        );
         add_exception(&mut env, predef::ident_end_of_file(), vec![], exn_ty);
         add_exception(&mut env, predef::ident_division_by_zero(), vec![], exn_ty);
-        add_exception(&mut env, Ident::create_persistent("Stack_overflow"), vec![], exn_ty);
+        add_exception(
+            &mut env,
+            Ident::create_persistent("Stack_overflow"),
+            vec![],
+            exn_ty,
+        );
         add_exception(
             &mut env,
             predef::ident_undefined_recursive_module(),
-            vec![ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
-                string_ty_for_exn, int_ty_for_exn, int_ty_for_exn,
-            ]))],
+            vec![
+                ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
+                    string_ty_for_exn,
+                    int_ty_for_exn,
+                    int_ty_for_exn,
+                ])),
+            ],
             exn_ty,
         );
         let unknown_ty_for_exn = ctx.new_generic_constr(predef::path_unknown(), vec![]);
-        add_exception(&mut env, predef::ident_js_exn(), vec![unknown_ty_for_exn], exn_ty);
+        add_exception(
+            &mut env,
+            predef::ident_js_exn(),
+            vec![unknown_ty_for_exn],
+            exn_ty,
+        );
     }
 
     // ref('a) = { mutable contents: 'a }

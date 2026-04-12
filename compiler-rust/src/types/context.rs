@@ -231,18 +231,31 @@ pub struct TypeContext<'a> {
     /// Maps type path (with stamp for uniqueness) → Vec<(field_name, position, mutable, repr, attributes)>.
     /// Populated during type checking when record patterns are processed.
     /// Used by raw lambda conversion to bind ALL record fields (matching OCaml's make_record_matching).
-    record_labels_cache: RefCell<ahash::AHashMap<String, Vec<(String, i32, super::asttypes::MutableFlag, super::decl::RecordRepresentation, Vec<super::decl::Attribute>)>>>,
+    record_labels_cache: RefCell<
+        ahash::AHashMap<
+            String,
+            Vec<(
+                String,
+                i32,
+                super::asttypes::MutableFlag,
+                super::decl::RecordRepresentation,
+                Vec<super::decl::Attribute>,
+            )>,
+        >,
+    >,
 
     /// Synthetic dict-pattern labels created by type-directed label lookup.
     /// OCaml mutates `lbl_all` on the predefined dict magic field as each dict
     /// pattern field is resolved; we model that with an append-only side table.
-    dict_pattern_labels_cache: RefCell<Vec<(
-        String,
-        i32,
-        super::asttypes::MutableFlag,
-        super::decl::RecordRepresentation,
-        Vec<super::decl::Attribute>,
-    )>>,
+    dict_pattern_labels_cache: RefCell<
+        Vec<(
+            String,
+            i32,
+            super::asttypes::MutableFlag,
+            super::decl::RecordRepresentation,
+            Vec<super::decl::Attribute>,
+        )>,
+    >,
 
     /// Stored typedtree environment snapshots, keyed by EnvRef.
     typed_envs: RefCell<Vec<Arc<Env>>>,
@@ -316,9 +329,7 @@ impl<'a> TypeContext<'a> {
             typed_envs.push(Arc::new(env.clone_preserve_id()));
             env_ref
         };
-        self.typed_envs_by_id
-            .borrow_mut()
-            .insert(env.id(), env_ref);
+        self.typed_envs_by_id.borrow_mut().insert(env.id(), env_ref);
         env_ref
     }
 
@@ -410,7 +421,12 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Cache a resolved module signature.
-    pub fn register_resolved_module_sig(&self, path: &str, access_path: Path, sig: super::decl::Signature) {
+    pub fn register_resolved_module_sig(
+        &self,
+        path: &str,
+        access_path: Path,
+        sig: super::decl::Signature,
+    ) {
         self.resolved_module_sig_cache
             .borrow_mut()
             .insert(path.to_string(), (access_path, sig));
@@ -524,11 +540,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Get or create a cached predef singleton helper.
-    fn get_or_create_predef(
-        &self,
-        cache: &Cell<Option<TypeExprRef>>,
-        path: Path,
-    ) -> TypeExprRef {
+    fn get_or_create_predef(&self, cache: &Cell<Option<TypeExprRef>>, path: Path) -> TypeExprRef {
         if let Some(ty) = cache.get() {
             ty
         } else {
@@ -574,14 +586,14 @@ impl<'a> TypeContext<'a> {
     /// Get the cached generic option constructor scheme types.
     /// Returns (`'a`, `option('a)`), both allocated once at generic level.
     pub fn predef_option_scheme(&self) -> (TypeExprRef, TypeExprRef) {
-        match (self.predef_option_inner.get(), self.predef_option_type.get()) {
+        match (
+            self.predef_option_inner.get(),
+            self.predef_option_type.get(),
+        ) {
             (Some(inner), Some(option_ty)) => (inner, option_ty),
             _ => {
                 let inner = self.new_generic_var(None);
-                let option_ty = self.new_generic_constr(
-                    super::predef::path_option(),
-                    vec![inner],
-                );
+                let option_ty = self.new_generic_constr(super::predef::path_option(), vec![inner]);
                 self.predef_option_inner.set(Some(inner));
                 self.predef_option_type.set(Some(option_ty));
                 (inner, option_ty)
@@ -668,7 +680,9 @@ impl<'a> TypeContext<'a> {
     /// Record that `new_ref` is an arity-updated version of `original_ref`.
     /// The sexp serializer will use `original_ref` as the dedup key for both.
     pub fn set_arity_alias(&self, new_ref: TypeExprRef, original_ref: TypeExprRef) {
-        self.arity_aliases.borrow_mut().insert(new_ref, original_ref);
+        self.arity_aliases
+            .borrow_mut()
+            .insert(new_ref, original_ref);
     }
 
     /// Get the arity alias for a TypeExprRef, if any.
@@ -681,17 +695,36 @@ impl<'a> TypeContext<'a> {
     pub fn register_record_labels(
         &self,
         type_path_name: &str,
-        labels: Vec<(String, i32, super::asttypes::MutableFlag, super::decl::RecordRepresentation, Vec<super::decl::Attribute>)>,
+        labels: Vec<(
+            String,
+            i32,
+            super::asttypes::MutableFlag,
+            super::decl::RecordRepresentation,
+            Vec<super::decl::Attribute>,
+        )>,
     ) {
-        self.record_labels_cache.borrow_mut().insert(type_path_name.to_string(), labels);
+        self.record_labels_cache
+            .borrow_mut()
+            .insert(type_path_name.to_string(), labels);
     }
 
     /// Look up cached record labels for a type path.
     pub fn get_record_labels(
         &self,
         type_path_name: &str,
-    ) -> Option<Vec<(String, i32, super::asttypes::MutableFlag, super::decl::RecordRepresentation, Vec<super::decl::Attribute>)>> {
-        self.record_labels_cache.borrow().get(type_path_name).cloned()
+    ) -> Option<
+        Vec<(
+            String,
+            i32,
+            super::asttypes::MutableFlag,
+            super::decl::RecordRepresentation,
+            Vec<super::decl::Attribute>,
+        )>,
+    > {
+        self.record_labels_cache
+            .borrow()
+            .get(type_path_name)
+            .cloned()
     }
 
     /// Replace the synthetic dict-pattern label cache.
@@ -743,7 +776,10 @@ impl<'a> TypeContext<'a> {
     }
 
     pub fn find_generic_dotted_constr_copy(&self, source: TypeExprRef) -> Option<TypeExprRef> {
-        self.generic_dotted_constr_copies.borrow().get(&source).copied()
+        self.generic_dotted_constr_copies
+            .borrow()
+            .get(&source)
+            .copied()
     }
 
     pub fn remember_generic_dotted_constr_copy(&self, source: TypeExprRef, copied: TypeExprRef) {
@@ -1104,7 +1140,9 @@ impl<'a> TypeContext<'a> {
     /// Register a raw module signature for lazy renaming.
     /// Called during load_pervasives to store sigs for normalize_path.
     pub fn register_raw_module_sig(&self, name: &str, sig: super::decl::Signature) {
-        self.raw_module_sigs.borrow_mut().insert(name.to_string(), sig);
+        self.raw_module_sigs
+            .borrow_mut()
+            .insert(name.to_string(), sig);
     }
 
     /// Trigger module signature renaming for a persistent module.
@@ -1125,7 +1163,11 @@ impl<'a> TypeContext<'a> {
     pub fn trigger_all_module_sig_renames(&self) {
         let names: Vec<String> = self.raw_module_sigs.borrow().keys().cloned().collect();
         for name in &names {
-            if !self.renamed_module_sigs.borrow().contains_key(name.as_str()) {
+            if !self
+                .renamed_module_sigs
+                .borrow()
+                .contains_key(name.as_str())
+            {
                 self.rename_one_module_sig(name);
             }
         }
@@ -1144,22 +1186,38 @@ impl<'a> TypeContext<'a> {
                         super::decl::SignatureItem::SigValue(self.rename_ident(id), desc.clone())
                     }
                     super::decl::SignatureItem::SigType(id, decl, rec_status) => {
-                        super::decl::SignatureItem::SigType(self.rename_ident(id), decl.clone(), *rec_status)
+                        super::decl::SignatureItem::SigType(
+                            self.rename_ident(id),
+                            decl.clone(),
+                            *rec_status,
+                        )
                     }
                     super::decl::SignatureItem::SigTypext(id, ext, ext_status) => {
-                        super::decl::SignatureItem::SigTypext(self.rename_ident(id), ext.clone(), *ext_status)
+                        super::decl::SignatureItem::SigTypext(
+                            self.rename_ident(id),
+                            ext.clone(),
+                            *ext_status,
+                        )
                     }
                     super::decl::SignatureItem::SigModule(id, md, rec_status) => {
-                        super::decl::SignatureItem::SigModule(self.rename_ident(id), md.clone(), *rec_status)
+                        super::decl::SignatureItem::SigModule(
+                            self.rename_ident(id),
+                            md.clone(),
+                            *rec_status,
+                        )
                     }
                     super::decl::SignatureItem::SigModtype(id, mtd) => {
                         super::decl::SignatureItem::SigModtype(self.rename_ident(id), mtd.clone())
                     }
                     super::decl::SignatureItem::SigClass => super::decl::SignatureItem::SigClass,
-                    super::decl::SignatureItem::SigClassType => super::decl::SignatureItem::SigClassType,
+                    super::decl::SignatureItem::SigClassType => {
+                        super::decl::SignatureItem::SigClassType
+                    }
                 })
                 .collect();
-            self.renamed_module_sigs.borrow_mut().insert(module_name.to_string(), renamed);
+            self.renamed_module_sigs
+                .borrow_mut()
+                .insert(module_name.to_string(), renamed);
         }
     }
 
