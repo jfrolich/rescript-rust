@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 648/657 (98.6%), 9 parity failures, 40 hunks
+**Status:** 649/657 (98.8%), 8 parity failures, 38 hunks
 
 ## Goal
 
@@ -23,8 +23,8 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **648/657**
-- Parity hunks: **40**
+- Optimized lambda parity: **649/657**
+- Parity hunks: **38**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
@@ -34,7 +34,6 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
   - `Stdlib_TempTests.res`: **4** hunks
   - `UntaggedVariants.res`: **4** hunks
   - `coercion_module_alias_test.res`: **2** hunks
-  - `inline_regression_test.res`: **2** hunks
   - `gpr_5557.res`: **1** hunk
   - `option_repr_test.res`: **1** hunk
 
@@ -50,7 +49,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **9** remaining optimized-lambda failures after this slice. The dominant frontier is still split between exact raw static-exit allocation and a smaller number of post-raw lowering mismatches, and stage isolation is still mandatory before taking the next fix.
+There are **8** remaining optimized-lambda failures after this slice. The dominant frontier is still split between exact raw static-exit allocation and a smaller number of post-raw lowering mismatches, and stage isolation is still mandatory before taking the next fix.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -143,7 +142,7 @@ Current frontier characteristics:
     - `recmodule.res`: **exact parity**
     - `functors.res`: **exact parity**
   - `raw_lambda::lower` now matches OCaml's module-alias collapse rule more closely: only a field-selection prefix starting at slot `0` collapses to the source module; non-prefix slices such as `presentLight` stay materialized as `Blk_module`
-- the next visible optimized frontier is the current exact-diff leaders (`exception_raise_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`, `Stdlib_TempTests.res`, `UntaggedVariants.res`) plus the remaining raw-upstream exact-exit cluster (`gpr_5557.res`, `inline_regression_test.res`, `option_repr_test.res`) and the remaining raw-stage outlier (`coercion_module_alias_test.res`).
+- the next visible optimized frontier is the current exact-diff leaders (`exception_raise_test.res`, `Stdlib_DictTests.res`, `large_record_duplication_test.res`, `Stdlib_TempTests.res`, `UntaggedVariants.res`) plus the remaining raw-upstream exact-exit cluster (`gpr_5557.res`, `option_repr_test.res`) and the remaining raw-stage outlier (`coercion_module_alias_test.res`).
 - focused raw guards after this slice all went exact:
   - `equal_exception_test.res`
   - `js_exception_catch_test.res`
@@ -155,6 +154,42 @@ Current frontier characteristics:
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### fully recursive letrec groups must stay grouped; moved the authoritative baseline to 649/657
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests:: -- --nocapture
+timeout 600 ./scripts/test_lambda_parity.sh -j1 'inline_regression_test|js_array_test'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- Optimized lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Optimized lambda parity: **649/657**
+  - Exact hunks: **38**
+
+Key checkpoints:
+
+- focused optimized parity:
+  - `inline_regression_test.res`: **exact parity**
+  - `js_array_test.res`: **exact parity**
+- removed from the authoritative optimized frontier:
+  - `inline_regression_test.res`
+- authoritative optimized baseline moved from **648/657**, **40** hunks to **649/657**, **38** hunks
+
+`inline_regression_test.res` already matched in raw lambda, but Rust was still
+splitting the lowered `find_end` / `find_beg` group into nested `Lletrec`
+nodes. OCaml keeps that fully recursive group intact after `Lam_convert`.
+
+Rust `rebuild_recursive_bindings` was eagerly re-running SCC splitting for every
+multi-binding `letrec`, even when every binding was already self-recursive.
+Preserving a single `Lletrec` for fully recursive groups restores OCaml's shape
+for this motif while keeping the existing non-recursive split path intact; the
+new lowering unit test locks that regression.
 
 ### raw switch case counts must survive into lowering; moved the authoritative baseline to 648/657
 Ran:

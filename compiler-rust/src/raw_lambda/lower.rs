@@ -1411,6 +1411,12 @@ fn rebuild_recursive_bindings(bindings: Vec<(Ident, Lambda)>, body: Lambda) -> L
             }
         }
         _ => {
+            if bindings
+                .iter()
+                .all(|(id, bind)| hit_variable(id, bind))
+            {
+                return Lambda::letrec(bindings, body);
+            }
             let deps = binding_dependencies(&bindings);
             let components = strongly_connected_binding_components(&deps);
             if components.len() <= 1 {
@@ -1653,6 +1659,7 @@ pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lambda::FunctionAttribute;
     use crate::lambda::InlineAttribute;
     use crate::lambda::compat::LetKind;
     use crate::lambda::constant::{ConstructorRuntimeTag, ConstructorTag, StringDelim};
@@ -2605,6 +2612,55 @@ mod tests {
             panic!("expected strict let after letrec");
         };
         assert!(id.same(&fake_z));
+    }
+
+    #[test]
+    fn keeps_fully_recursive_function_groups_in_single_letrec() {
+        let find_end = Ident::create_local("find_end");
+        let find_beg = Ident::create_local("find_beg");
+        let end_param = Ident::create_local("n");
+        let beg_param = Ident::create_local("p");
+
+        let function_attr = FunctionAttribute::default();
+        let find_end_binding = Lambda::prim(
+            Primitive::PjsFnMake(1),
+            vec![Lambda::function_(
+                1,
+                vec![end_param],
+                Lambda::seq(
+                    Lambda::var(find_end.clone()),
+                    Lambda::var(find_beg.clone()),
+                ),
+                function_attr.clone(),
+            )],
+            Location::none(),
+        );
+        let find_beg_binding = Lambda::prim(
+            Primitive::PjsFnMake(1),
+            vec![Lambda::function_(
+                1,
+                vec![beg_param],
+                Lambda::var(find_beg.clone()),
+                function_attr,
+            )],
+            Location::none(),
+        );
+
+        let lowered = rebuild_recursive_bindings(
+            vec![
+                (find_end.clone(), find_end_binding),
+                (find_beg.clone(), find_beg_binding),
+            ],
+            Lambda::var(find_end.clone()),
+        );
+
+        let Lambda::Lletrec(bindings, body) = lowered else {
+            panic!("expected a single letrec");
+        };
+        assert_eq!(bindings.len(), 2);
+        assert!(bindings[0].0.same(&find_end));
+        assert!(bindings[1].0.same(&find_beg));
+        assert!(matches!(body.as_ref(), Lambda::Lvar(id) if id.same(&find_end)));
     }
 
     #[test]
