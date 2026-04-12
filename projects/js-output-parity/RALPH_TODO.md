@@ -184,6 +184,29 @@ Remaining internal compile errors under the measured wrapper baseline:
 
 ## Latest Session Findings
 
+- `compiler-rust/src/lambda/compile.rs` now matches the OCaml
+  `lam_compile.ml` switch/result continuation shape more closely for the
+  baseline Rust backend path:
+  value-producing `Lswitch` and `LstringSwitch` branches now compile each case
+  and default body in assign-to-temp style instead of pure effect style, so
+  branch results are written into the switch temporary before `break`
+- Verified focused guards for this cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release int_switch_expressions_assign_branch_values_into_the_result_temp -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release string_switch_expressions_assign_branch_values_into_the_result_temp -- --nocapture`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_string_switch.res -o /tmp/test_string_switch.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/stringmatch_test.res -o /tmp/stringmatch_test.mjs`
+- `tests/tests/src/test_string_switch.res` and
+  `tests/tests/src/stringmatch_test.res` now emit explicit per-branch
+  `$$switch = ...;` assignments instead of leaving the switch result temporary
+  uninitialized through each case body
+- The authoritative JS snapshot baseline remains **84 / 657** passing, **0**
+  compile errors, and **573** output diffs after this OCaml-aligned switch-temp
+  assignment fix
+- Interpretation:
+  this confirms the remaining switch-heavy drift is not just missing
+  assign-context lowering in `lam_compile`; the current frontier in those files
+  has moved outward to earlier pattern-match/default lowering and later cleanup
+  of unreachable `throw undefined` / dead assignment noise
 - `compiler-rust/src/lambda/compile.rs` now ports the OCaml
   `js_pass_flatten.ml` stage and runs it before the existing
   `external_shadow` pass on the Rust JS backend path.
