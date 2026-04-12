@@ -15,6 +15,7 @@ use std::fs;
 use std::path::Path as FsPath;
 use std::path::PathBuf;
 
+use crate::cmi::marshal_reader::MarshalReader;
 use crate::driver::{
     CompilerOptions, jsx_version_for_structure, load_pervasives, normalize_signature_types,
 };
@@ -243,6 +244,18 @@ impl PersistentEnv {
                     _ => None,
                 }
             })
+    }
+
+    /// Resolve a module name to its companion `.cmj` path when present.
+    pub fn resolve_module_cmj_path(&self, name: &str) -> Option<PathBuf> {
+        let cmj_filename = format!("{name}.cmj");
+        self.find_in_path_uncap(&cmj_filename).map(PathBuf::from)
+    }
+
+    /// Read the `pure` flag recorded in a module's `.cmj` metadata.
+    pub fn module_cmj_is_pure(&self, name: &str) -> Option<bool> {
+        let path = self.resolve_module_cmj_path(name)?;
+        read_cmj_pure(&path)
     }
 
     fn read_source_latin1(path: &FsPath) -> Option<String> {
@@ -635,6 +648,17 @@ fn find_in_path(load_path: &[PathBuf], filename: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn read_cmj_pure(path: &FsPath) -> Option<bool> {
+    const CMJ_DIGEST_LEN: usize = 16;
+
+    let bytes = fs::read(path).ok()?;
+    let marshaled = bytes.get(CMJ_DIGEST_LEN..)?;
+    let mut reader = MarshalReader::new();
+    let value = reader.read_from_bytes(marshaled).ok()?;
+    let (_, fields) = value.as_block_opt()?;
+    fields.get(1).map(|field| field.as_bool())
 }
 
 /// This is the core of `open_signature` from OCaml's `env.ml`.

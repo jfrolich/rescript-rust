@@ -93,6 +93,19 @@ impl ModulePathResolver {
         }
     }
 
+    /// Return the side-effect reason OCaml records for a required module, if it
+    /// is not marked pure.
+    pub fn module_side_effect_reason(&self, module: &ModuleId) -> Option<String> {
+        if self.is_pure_module(module) {
+            return None;
+        }
+
+        Some(match &module.kind {
+            Kind::External { name, .. } => name.clone(),
+            Kind::Runtime | Kind::Ml => module.id.name().to_string(),
+        })
+    }
+
     fn runtime_module_path(&self, module_name: &str) -> String {
         let dir = match self.format {
             ModuleFormat::EsModule => "es6",
@@ -109,6 +122,23 @@ impl ModulePathResolver {
         ocaml_dir.join(format!("{module_name}.cmi")).exists()
             || ocaml_dir.join(format!("{module_name}.ast")).exists()
             || ocaml_dir.join(format!("{module_name}.iast")).exists()
+    }
+
+    fn is_pure_module(&self, module: &ModuleId) -> bool {
+        match &module.kind {
+            Kind::Runtime => true,
+            Kind::External { .. } => false,
+            Kind::Ml => {
+                if self.is_runtime_module(module.id.name()) {
+                    true
+                } else {
+                    self.persistent_env
+                        .as_ref()
+                        .and_then(|env| env.module_cmj_is_pure(module.id.name()))
+                        .unwrap_or(false)
+                }
+            }
+        }
     }
 
     fn relative_output_path(&self, target_source: &FsPath) -> Option<String> {

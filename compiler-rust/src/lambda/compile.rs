@@ -95,15 +95,22 @@ impl LambdaCompiler {
             }
         };
         let exports = resolve_export_aliases(&block, exports);
+        let side_effect = module_side_effect_reason(&simplified);
 
         let mut deps = apply_js_shake_pass(apply_external_shadow_pass(apply_js_flatten_pass(
             DepsProgram {
                 program: Program::new(block, exports),
                 modules: vec![],
-                side_effect: module_side_effect_reason(&simplified),
+                side_effect,
             },
         )));
         deps.modules = self.collect_required_modules(&deps.program.block);
+        if deps.side_effect.is_none() {
+            deps.side_effect = required_module_side_effect_reason(
+                self.module_path_resolver.as_ref(),
+                &deps.modules,
+            );
+        }
         deps
     }
 
@@ -1129,9 +1136,7 @@ impl LambdaCompiler {
                 i,
                 comment: Some(PointerInfo::Constructor(tag)),
             } => match &tag.runtime_tag {
-                Some(ConstructorRuntimeTag::Int(value)) => {
-                    Expression::number(Number::int(*value))
-                }
+                Some(ConstructorRuntimeTag::Int(value)) => Expression::number(Number::int(*value)),
                 Some(ConstructorRuntimeTag::String(value)) => Expression::string(value.clone()),
                 Some(ConstructorRuntimeTag::Float(value)) => {
                     Expression::number(Number::float(value.clone()))
@@ -1935,6 +1940,23 @@ fn module_side_effect_reason(lam: &Lambda) -> Option<String> {
         _ if analysis::no_side_effects(lam) => None,
         _ => Some(String::new()),
     }
+}
+
+fn required_module_side_effect_reason(
+    module_path_resolver: Option<&ModulePathResolver>,
+    modules: &[ModuleId],
+) -> Option<String> {
+    modules.iter().find_map(|module| {
+        if let Some(resolver) = module_path_resolver {
+            resolver.module_side_effect_reason(module)
+        } else {
+            match &module.kind {
+                Kind::Runtime => None,
+                Kind::External { name, .. } => Some(name.clone()),
+                Kind::Ml => Some(module.id.name().to_string()),
+            }
+        }
+    })
 }
 
 fn js_expr_no_side_effects(expr: &Expression) -> bool {
@@ -3518,6 +3540,7 @@ mod tests {
     use crate::lambda::{ApInfo, Apply, ApplyStatus, InlineAttribute, Lambda};
     use crate::location::Location;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     fn write_ast_source_stub(ast_path: &std::path::Path, source_path: &std::path::Path) {
@@ -3534,6 +3557,25 @@ mod tests {
             module_bind_name: ExternalModuleBindName::Nothing,
             import_attributes: None,
         }
+    }
+
+    fn resolver_with_checked_in_cmj() -> ModulePathResolver {
+        let mut persistent_env = PersistentEnv::new();
+        persistent_env.add_load_path(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("repo root")
+                .join("tests")
+                .join("tests")
+                .join("lib")
+                .join("ocaml"),
+        );
+        ModulePathResolver::from_compile_options(
+            None,
+            Some(std::path::Path::new("/tmp/Effect.mjs")),
+            None,
+            Some(persistent_env),
+        )
     }
 
     #[test]
@@ -3654,7 +3696,9 @@ mod tests {
             panic!("expected the rebound export alias to be shaken away");
         };
         match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, .. }) => assert!(ident.same(&source)),
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&source))
+            }
             other => panic!("expected only the original exported binding to remain, got {other:?}"),
         }
     }
@@ -4839,6 +4883,54 @@ mod tests {
         assert_eq!(deps.modules.len(), 1);
         assert_eq!(deps.modules[0].id.name(), "Belt_List");
         assert!(!deps.modules[0].dynamic_import);
+    }
+
+    #[test]
+    fn required_module_effect_reason_uses_external_module_name() {
+        let reason = required_module_side_effect_reason(
+            None,
+            &[ModuleId {
+                id: Ident::create_persistent("GentTypeReTestGen"),
+                kind: Kind::External {
+                    name: "./gentTypeReTest.gen".to_string(),
+                    default: false,
+                    import_attributes: None,
+                },
+                dynamic_import: false,
+            }],
+        );
+
+        assert_eq!(reason.as_deref(), Some("./gentTypeReTest.gen"));
+    }
+
+    #[test]
+    fn pure_ml_dependencies_do_not_mark_module_impure() {
+        let resolver = resolver_with_checked_in_cmj();
+        let reason = required_module_side_effect_reason(
+            Some(&resolver),
+            &[ModuleId {
+                id: Ident::create_persistent("Side_effect_free"),
+                kind: Kind::Ml,
+                dynamic_import: false,
+            }],
+        );
+
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn impure_ml_dependencies_use_module_name_as_effect_reason() {
+        let resolver = resolver_with_checked_in_cmj();
+        let reason = required_module_side_effect_reason(
+            Some(&resolver),
+            &[ModuleId {
+                id: Ident::create_persistent("Test_utils"),
+                kind: Kind::Ml,
+                dynamic_import: false,
+            }],
+        );
+
+        assert_eq!(reason.as_deref(), Some("Test_utils"));
     }
 
     #[test]

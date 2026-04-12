@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 106 / 657 JS snapshots passing, 0 compile errors, 551 output diffs
+**Status:** 108 / 657 JS snapshots passing, 0 compile errors, 549 output diffs
 
 ## Goal
 
@@ -35,14 +35,28 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **106 / 657**
+- JS snapshot parity: **108 / 657**
 - Compile errors: **0**
-- Output diffs: **551**
+- Output diffs: **549**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
+- OCaml `core/lam_stats_export.ml` / `lam_compile_env.ml` purity fallback is
+  now matched more closely on the Rust JS-output path:
+  when the lowered module body itself is pure, Rust no longer stops at
+  `module_side_effect_reason`; it now falls back to the first required module
+  that is not marked pure, using the same runtime / external / `.cmj` split
+  OCaml uses for final deps-program purity
+- `tests/tests/src/gentTypeReTest.res` now matches its checked-in `.mjs`
+  snapshot exactly after that fallback change
+- `tests/tests/src/test_utils.res` also now matches its checked-in `.mjs`
+  snapshot exactly after the same effect-reason fix
+- `tests/tests/src/reactTestUtils.res` still fails on later backend shaping, but
+  its purity-trailer drift is gone; the remaining differences have moved on to
+  callback / option lowering and export shape instead of final deps-program
+  purity reporting
 - OCaml `core/js_dump.ml` now matches more closely on one more printer slice:
   `Blk_record`, `Blk_record_inlined`, `Blk_record_ext`, and `Blk_module`
   `Caml_block` values no longer bypass Rust's shared object-literal emitter
@@ -235,6 +249,36 @@ Remaining internal compile errors under the measured wrapper baseline:
 - none
 
 ## Latest Session Findings
+
+- `compiler-rust/src/lambda/compile.rs`,
+  `compiler-rust/src/js_ir/mod.rs`, and
+  `compiler-rust/src/cmi/persistent_env.rs` now match one more slice of
+  OCaml `core/lam_stats_export.ml` / `lam_compile_env.ml` on the Rust JS path:
+  after JS-pass lowering collects required modules, Rust no longer treats a
+  pure top-level lambda body as sufficient for `/* No side effect */`;
+  it now falls back to the first required module that is not pure, using
+  runtime modules as pure, external modules as impure, and `.cmj` metadata for
+  ML modules
+- Verified focused guards for this cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release required_module_effect_reason_uses_external_module_name -- --test-threads=1`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release pure_ml_dependencies_do_not_mark_module_impure -- --test-threads=1`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release impure_ml_dependencies_use_module_name_as_effect_reason -- --test-threads=1`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gentTypeReTest.res -o /tmp/gentTypeReTest.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/reactTestUtils.res -o /tmp/reactTestUtils.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/gentTypeReTest.res` and `tests/tests/src/test_utils.res`
+  both dropped out of the diff set after the purity-fallback change
+- `tests/tests/src/reactTestUtils.res` still fails, but its diff no longer
+  includes the final purity trailer; the remaining hunks are earlier backend
+  mismatches
+- The authoritative JS snapshot baseline now reports **108 / 657** passing,
+  **0** compile errors, and **549** output diffs.
+- Interpretation:
+  this is a real OCaml backend parity improvement in deps-program purity
+  reporting. It resolves the missing required-module fallback without touching
+  printer-only string rewrites, and it leaves the remaining import/callback
+  lowering gaps visible for later passes.
 
 - `compiler-rust/src/js_ir/printer.rs` now matches one more slice of
   OCaml `core/js_dump.ml` more closely on the Rust JS-output path:
