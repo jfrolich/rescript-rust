@@ -171,7 +171,11 @@ impl LambdaCompiler {
                 }
             }
             Lambda::Lfunction(func) => {
-                let params = func.params.clone();
+                let params = if func.attr.one_unit_arg {
+                    vec![]
+                } else {
+                    func.params.clone()
+                };
                 let expr = Expression::new(ExpressionDesc::Fun {
                     is_method: false,
                     params,
@@ -4425,7 +4429,7 @@ mod tests {
         ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
         ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper, ExternalSpec,
     };
-    use crate::lambda::{ApInfo, Apply, ApplyStatus, InlineAttribute, Lambda};
+    use crate::lambda::{ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, Lambda};
     use crate::location::Location;
     use std::fs;
     use std::path::PathBuf;
@@ -6621,6 +6625,26 @@ mod tests {
                 ));
             }
             other => panic!("expected the impure binding to remain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn one_unit_arg_functions_lower_to_zero_arg_js_functions() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::function_(
+            1,
+            vec![Ident::create_local("param")],
+            Lambda::unit(),
+            FunctionAttribute {
+                one_unit_arg: true,
+                ..FunctionAttribute::default()
+            },
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        match compiled.expr.desc {
+            ExpressionDesc::Fun { params, .. } => assert!(params.is_empty()),
+            other => panic!("expected lowered JS function, got {other:?}"),
         }
     }
 }

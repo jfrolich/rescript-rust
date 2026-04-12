@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 110 / 657 JS snapshots passing, 0 compile errors, 547 output diffs
+**Status:** 121 / 657 JS snapshots passing, 0 compile errors, 536 output diffs
 
 ## Goal
 
@@ -35,13 +35,39 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **110 / 657**
+- JS snapshot parity: **121 / 657**
 - Compile errors: **0**
-- Output diffs: **547**
+- Output diffs: **536**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- OCaml `core/lam_pass_alpha_conversion.ml` / `core/lam_compile.ml` /
+  `core/js_exp_make.ml` one-unit-argument lowering is now matched more closely
+  on the Rust JS-output path:
+  when the JS-backend simplifier unwraps `Pjs_fn_make_unit` around a synthetic
+  single-`param` lambda, it now preserves OCaml's `one_unit_arg` marker, and
+  JS lowering now honors that marker by dropping the synthetic JS parameter the
+  same way OCaml's `E.ocaml_fun ~one_unit_arg` path does
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release unwraps_pjs_fn_make_unit_into_one_unit_arg_functions -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release one_unit_arg_functions_lower_to_zero_arg_js_functions -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UncurriedAlways.res -o /tmp/UncurriedAlways.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+- `tests/tests/src/UncurriedAlways.res` narrowed materially:
+  the old `function inl(param)` drift is gone, and the remaining diffs there
+  have moved on to later callback/app-lowering and byte-shape cleanup instead
+  of synthetic unit-parameter lowering
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the one-unit-argument change
+- the cached `function ... (param)` addition motif collapsed from **90** diff
+  files to **8** files after the authoritative rerun, which confirms this was a
+  broad backend lowering gap rather than a local printer issue
+- The authoritative JS snapshot baseline now reports **121 / 657** passing,
+  **0** compile errors, and **536** output diffs after the one-unit-argument
+  lowering fix
 
 - `compiler-rust/src/lambda/compile.rs` now ports the core of OCaml
   `core/js_pass_flatten_and_mark_dead.ml` onto the Rust JS-output path:

@@ -478,6 +478,14 @@ fn simplify_primitive(
         .collect();
 
     match (&info.primitive, args.as_slice()) {
+        (Primitive::PjsFnMakeUnit, [Lambda::Lfunction(func)])
+            if func.arity == 1
+                && matches!(func.params.as_slice(), [param] if param.name() == "param") =>
+        {
+            let mut func = func.clone();
+            func.attr.one_unit_arg = true;
+            Lambda::Lfunction(func)
+        }
         (Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit, [arg]) => arg.clone(),
         (Primitive::Pfield(index, dbg), [arg]) => {
             simplify_field_access(*index, dbg, arg, env, &info.primitive, &info.loc)
@@ -561,11 +569,13 @@ fn block_element_of_lambda(value: &Lambda) -> BlockElement {
     match value {
         Lambda::Lvar(_) | Lambda::Lconst(_) => BlockElement::Simple(value.clone()),
         Lambda::Lprim(info)
-            if matches!(&info.primitive, Primitive::Pfield(_, FieldDbgInfo::Module { .. }))
-                && matches!(
-                    info.args.as_slice(),
-                    [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]
-                ) =>
+            if matches!(
+                &info.primitive,
+                Primitive::Pfield(_, FieldDbgInfo::Module { .. })
+            ) && matches!(
+                info.args.as_slice(),
+                [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]
+            ) =>
         {
             BlockElement::Simple(value.clone())
         }
@@ -983,13 +993,13 @@ mod tests {
                 ),
                 FunctionAttribute::default(),
             ),
-                Lambda::let_(
-                    LetKind::Strict,
-                    include.clone(),
-                    Lambda::prim(
-                        Primitive::Pmakeblock(
-                            0,
-                            TagInfo::Module(vec!["myField".to_string()]),
+            Lambda::let_(
+                LetKind::Strict,
+                include.clone(),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::Module(vec!["myField".to_string()]),
                         Mutable::Immutable,
                     ),
                     vec![Lambda::var(field_fn.clone())],
@@ -1141,10 +1151,7 @@ mod tests {
                 vec![Lambda::const_(Constant::Block {
                     tag: 0,
                     tag_info: TagInfo::Record {
-                        fields: vec![
-                            ("number".to_string(), false),
-                            ("name".to_string(), false),
-                        ],
+                        fields: vec![("number".to_string(), false), ("name".to_string(), false)],
                         mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                     },
                     elements: vec![
@@ -1178,10 +1185,7 @@ mod tests {
                 Primitive::Pmakeblock(
                     0,
                     TagInfo::Record {
-                        fields: vec![
-                            ("number".to_string(), false),
-                            ("name".to_string(), false),
-                        ],
+                        fields: vec![("number".to_string(), false), ("name".to_string(), false)],
                         mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                     },
                     Mutable::Immutable,
@@ -1230,10 +1234,7 @@ mod tests {
             Lambda::const_(Constant::Block {
                 tag: 0,
                 tag_info: TagInfo::Record {
-                    fields: vec![
-                        ("number".to_string(), false),
-                        ("name".to_string(), false),
-                    ],
+                    fields: vec![("number".to_string(), false), ("name".to_string(), false)],
                     mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                 },
                 elements: vec![
@@ -1476,5 +1477,27 @@ mod tests {
             ] if *id == extra)
         ));
         assert!(matches!(*body, Lambda::Lvar(id) if id == add5));
+    }
+
+    #[test]
+    fn unwraps_pjs_fn_make_unit_into_one_unit_arg_functions() {
+        let param = Ident::create_local("param");
+
+        let simplified = simplify_for_js_backend(&Lambda::prim(
+            Primitive::PjsFnMakeUnit,
+            vec![Lambda::function_(
+                1,
+                vec![param.clone()],
+                Lambda::unit(),
+                FunctionAttribute::default(),
+            )],
+            Location::none(),
+        ));
+
+        let Lambda::Lfunction(func) = simplified else {
+            panic!("expected the unit wrapper to unwrap to a function");
+        };
+        assert_eq!(func.params, vec![param]);
+        assert!(func.attr.one_unit_arg);
     }
 }
