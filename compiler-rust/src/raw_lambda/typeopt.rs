@@ -311,6 +311,7 @@ fn has_undefined_literal(attrs: &[Attribute]) -> bool {
 pub(crate) fn type_is_builtin_object(ctx: &TypeContext<'_>, env: &Env, ty: TypeExprRef) -> bool {
     let ty = scrape_ty(ctx, env, ty);
     match &*ctx.get_desc(ty) {
+        TypeDesc::Tobject { .. } => true,
         TypeDesc::Tconstr { path, args, .. } => {
             if matches!(path, Path::Pident(id) if id.name() == "dict") && args.len() == 1 {
                 true
@@ -320,6 +321,22 @@ pub(crate) fn type_is_builtin_object(ctx: &TypeContext<'_>, env: &Env, ty: TypeE
             }
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::IdGenerator;
+
+    #[test]
+    fn builtin_object_recognizes_object_types() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let fields = ctx.new_type(TypeDesc::Tnil);
+        let object = ctx.new_type(TypeDesc::Tobject { fields, name: None });
+
+        assert!(type_is_builtin_object(&ctx, &Env::empty(), object));
     }
 }
 

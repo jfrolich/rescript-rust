@@ -10,10 +10,10 @@ use crate::ident::Ident;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
 use crate::lambda::constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 use crate::lambda::free_variables::free_variables;
-use crate::lambda::primitive::ExternalFfiKind;
+use crate::lambda::primitive::{ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec};
 use crate::lambda::primitive::Primitive;
 use crate::lambda::tag_info::TagInfo;
-use crate::lambda::{ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch};
+use crate::lambda::{ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
 use crate::parser::ast::MutableFlag;
 use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch};
@@ -171,34 +171,35 @@ impl LoweringContext {
             }
 
             let lowered_func = self.lower_lambda(RawLambda::Lsend(name, obj, loc));
-            return Lambda::Lapply(Apply {
-                ap_func: Box::new(lowered_func),
-                ap_args: ap_args
-                    .into_iter()
-                    .map(|arg| self.lower_lambda(arg))
-                    .collect(),
-                ap_info: ApInfo {
+            let lowered_args = ap_args
+                .into_iter()
+                .map(|arg| self.lower_lambda(arg))
+                .collect();
+            return make_apply(
+                lowered_func,
+                lowered_args,
+                ApInfo {
                     loc: ap_info.loc,
                     inlined: ap_info.inlined,
                     status: ApplyStatus::Uncurry,
                 },
                 ap_transformed_jsx,
-            });
+            );
         }
 
-        Lambda::Lapply(Apply {
-            ap_func: Box::new(self.lower_lambda(func)),
-            ap_args: ap_args
+        make_apply(
+            self.lower_lambda(func),
+            ap_args
                 .into_iter()
                 .map(|arg| self.lower_lambda(arg))
                 .collect(),
-            ap_info: ApInfo {
+            ApInfo {
                 loc: ap_info.loc,
                 inlined: ap_info.inlined,
                 status: ApplyStatus::Uncurry,
             },
             ap_transformed_jsx,
-        })
+        )
     }
 
     fn lower_let(&mut self, kind: LetKind, id: Ident, value: RawLambda, body: RawLambda) -> Lambda {
@@ -301,7 +302,7 @@ impl LoweringContext {
                 ffi,
                 dynamic_import,
                 transformed_jsx,
-            } if prim_name.is_empty() && ffi.kind == ExternalFfiKind::ObjCreate => {
+            } if is_object_create_call(&prim_name, &arg_types, &ffi) => {
                 Lambda::prim(Primitive::PjsObjectCreate(arg_types), args, loc)
             }
             Primitive::PjsCall {
@@ -405,7 +406,7 @@ impl LoweringContext {
             .map(|lam| Box::new(self.lower_lambda(*lam)));
 
         if lowered_failaction.is_none() && lowered_blocks.is_empty() {
-            if let Some(diff) = happens_to_be_diff(&lowered_consts) {
+            if let Some(diff) = happens_to_be_diff(&lowered_consts, switch.sw_names.as_ref()) {
                 if diff == 0 {
                     return lowered_scrutinee;
                 }
@@ -708,6 +709,146 @@ fn matches_optional_parameter_binding(params: &[Ident], value: &RawLambda) -> bo
     opt.same(opt2) && params.iter().any(|param| param.same(opt))
 }
 
+fn make_apply(func: Lambda, args: Vec<Lambda>, ap_info: ApInfo, ap_transformed_jsx: bool) -> Lambda {
+    match func {
+        Lambda::Lfunction(function) => {
+            if let Some(reduced) = eta_reduce_function_apply(&function, &args, &ap_info) {
+                return reduced;
+            }
+            make_lapply(Lambda::Lfunction(function), args, ap_info, ap_transformed_jsx)
+        }
+        Lambda::Llet(kind, id, value, body) => match *body {
+            body @ Lambda::Lfunction(_) => {
+                Lambda::let_(kind, id, *value, make_apply(body, args, ap_info, ap_transformed_jsx))
+            }
+            body => make_lapply(
+                Lambda::Llet(kind, id, value, Box::new(body)),
+                args,
+                ap_info,
+                ap_transformed_jsx,
+            ),
+        },
+        func => make_lapply(func, args, ap_info, ap_transformed_jsx),
+    }
+}
+
+fn eta_reduce_function_apply(function: &LFunction, args: &[Lambda], ap_info: &ApInfo) -> Option<Lambda> {
+    match function.body.as_ref() {
+        Lambda::Lprim(PrimInfo {
+            primitive:
+                Primitive::PnullToOpt
+                | Primitive::PnullUndefinedToOpt
+                | Primitive::PisNull
+                | Primitive::PisNullUndefined
+                | Primitive::Ptypeof,
+            args: wrap_args,
+            ..
+        }) => {
+            let [Lambda::Lprim(inner_call)] = wrap_args.as_slice() else {
+                return None;
+            };
+            let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
+            Some(Lambda::Lprim(PrimInfo {
+                primitive: function_primitive(function.body.as_ref())?,
+                args: vec![Lambda::Lprim(PrimInfo {
+                    primitive: inner_call.primitive.clone(),
+                    args: eta_args,
+                    loc: ap_info.loc.clone(),
+                })],
+                loc: ap_info.loc.clone(),
+            }))
+        }
+        Lambda::Lprim(inner_call) => {
+            let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
+            Some(Lambda::Lprim(PrimInfo {
+                primitive: inner_call.primitive.clone(),
+                args: eta_args,
+                loc: ap_info.loc.clone(),
+            }))
+        }
+        Lambda::Lsequence(first, second) => {
+            let Lambda::Lprim(inner_call) = first.as_ref() else {
+                return None;
+            };
+            let Lambda::Lconst(constant) = second.as_ref() else {
+                return None;
+            };
+            let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
+            Some(Lambda::Lsequence(
+                Box::new(Lambda::Lprim(PrimInfo {
+                    primitive: inner_call.primitive.clone(),
+                    args: eta_args,
+                    loc: ap_info.loc.clone(),
+                })),
+                Box::new(Lambda::Lconst(constant.clone())),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn function_primitive(body: &Lambda) -> Option<Primitive> {
+    match body {
+        Lambda::Lprim(PrimInfo { primitive, .. }) => Some(primitive.clone()),
+        _ => None,
+    }
+}
+
+fn eta_conversion_args(params: &[Ident], inner_args: &[Lambda], outer_args: &[Lambda]) -> Option<Vec<Lambda>> {
+    if params.len() != inner_args.len() || params.len() != outer_args.len() {
+        return None;
+    }
+
+    params
+        .iter()
+        .zip(inner_args.iter())
+        .zip(outer_args.iter())
+        .map(|((param, inner_arg), outer_arg)| match inner_arg {
+            Lambda::Lvar(id) if param.same(id) => Some(outer_arg.clone()),
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::PjsFnMake(arity),
+                args,
+                loc,
+            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if param.same(id)) => {
+                Some(Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::PjsFnMake(*arity),
+                    args: vec![outer_arg.clone()],
+                    loc: loc.clone(),
+                }))
+            }
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::PjsFnMakeUnit,
+                args,
+                loc,
+            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if param.same(id)) => {
+                Some(Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::PjsFnMakeUnit,
+                    args: vec![outer_arg.clone()],
+                    loc: loc.clone(),
+                }))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn make_lapply(func: Lambda, args: Vec<Lambda>, ap_info: ApInfo, ap_transformed_jsx: bool) -> Lambda {
+    Lambda::Lapply(Apply {
+        ap_func: Box::new(func),
+        ap_args: args,
+        ap_info,
+        ap_transformed_jsx,
+    })
+}
+
+fn bool_const(value: bool) -> Lambda {
+    if value {
+        Lambda::true_()
+    } else {
+        Lambda::false_()
+    }
+}
+
 fn int_const_value_any(lam: &Lambda) -> Option<i32> {
     match lam {
         Lambda::Lconst(Constant::Int { i, .. }) => Some(*i),
@@ -715,39 +856,170 @@ fn int_const_value_any(lam: &Lambda) -> Option<i32> {
     }
 }
 
+fn string_constant_value(constant: &Constant) -> Option<(&str, bool)> {
+    match constant {
+        Constant::String { s, delim } => Some((s.as_str(), delim.is_none())),
+        _ => None,
+    }
+}
+
+fn float_constant_value(constant: &Constant) -> Option<f64> {
+    match constant {
+        Constant::Float(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+fn pointer_constant_value(constant: &Constant) -> Option<&str> {
+    match constant {
+        Constant::Pointer(name) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn is_object_create_call(
+    prim_name: &str,
+    arg_types: &[ExternalArgSpec],
+    ffi: &ExternalFfiSpec,
+) -> bool {
+    prim_name.is_empty()
+        && (ffi.kind == ExternalFfiKind::ObjCreate
+            || arg_types.iter().any(|arg| arg.label.is_some()))
+}
+
 fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Location) -> Lambda {
     match args.as_slice() {
-        [lhs, rhs] => {
-            let Some(lhs) = int_const_value_any(lhs) else {
-                return Lambda::prim(primitive, args, loc);
-            };
-            let Some(rhs) = int_const_value_any(rhs) else {
-                return Lambda::prim(primitive, args, loc);
-            };
-            let folded = match primitive {
-                Primitive::Paddint => Some(lhs.wrapping_add(rhs)),
-                Primitive::Psubint => Some(lhs.wrapping_sub(rhs)),
-                Primitive::Pmulint => Some(lhs.wrapping_mul(rhs)),
-                Primitive::Pdivint => (rhs != 0).then(|| lhs.wrapping_div(rhs)),
-                Primitive::Pmodint => (rhs != 0).then(|| lhs.wrapping_rem(rhs)),
-                Primitive::Pandint => Some(lhs & rhs),
-                Primitive::Porint => Some(lhs | rhs),
-                Primitive::Pxorint => Some(lhs ^ rhs),
-                Primitive::Plslint => Some(lhs.wrapping_shl((rhs & 31) as u32)),
-                Primitive::Plsrint => Some(((lhs as u32) >> ((rhs & 31) as u32)) as i32),
-                Primitive::Pasrint => Some(lhs.wrapping_shr((rhs & 31) as u32)),
-                _ => None,
-            };
-            if let Some(value) = folded {
+        [Lambda::Lconst(constant)] => match (&primitive, constant) {
+            (Primitive::Pnegint, Constant::Int { i, .. }) => {
                 return Lambda::const_(Constant::Int {
-                    i: value,
+                    i: i.wrapping_neg(),
                     comment: None,
                 });
             }
-            Lambda::prim(primitive, args, loc)
+            (Primitive::Pintoffloat, Constant::Float(value)) => {
+                if let Ok(value) = value.parse::<f64>() {
+                    return Lambda::const_(Constant::Int {
+                        i: value as i32,
+                        comment: None,
+                    });
+                }
+            }
+            (Primitive::Pstringlength, constant) => {
+                if let Some((value, true)) = string_constant_value(constant) {
+                    return Lambda::const_(Constant::Int {
+                        i: value.len() as i32,
+                        comment: None,
+                    });
+                }
+            }
+            (Primitive::Pnot, Constant::JsTrue) => return Lambda::false_(),
+            (Primitive::Pnot, Constant::JsFalse) => return Lambda::true_(),
+            _ => {}
         }
-        _ => Lambda::prim(primitive, args, loc),
+        [Lambda::Lconst(lhs), Lambda::Lconst(rhs)] => match (&primitive, lhs, rhs) {
+            (Primitive::Pintcomp(comparison), Constant::Int { i: lhs, .. }, Constant::Int { i: rhs, .. }) => {
+                return bool_const(comparison.cmp_int32(*lhs, *rhs));
+            }
+            (Primitive::Pfloatcomp(comparison), lhs, rhs) => {
+                if let (Some(lhs), Some(rhs)) =
+                    (float_constant_value(lhs), float_constant_value(rhs))
+                {
+                    return bool_const(comparison.cmp_float(lhs, rhs));
+                }
+            }
+            (Primitive::Pintcomp(Comparison::Eq), lhs, rhs) => {
+                if let (Some(lhs), Some(rhs)) =
+                    (pointer_constant_value(lhs), pointer_constant_value(rhs))
+                {
+                    return bool_const(lhs == rhs);
+                }
+            }
+            (Primitive::Pintcomp(Comparison::Neq), lhs, rhs) => {
+                if let (Some(lhs), Some(rhs)) =
+                    (pointer_constant_value(lhs), pointer_constant_value(rhs))
+                {
+                    return bool_const(lhs != rhs);
+                }
+            }
+            (Primitive::Paddint, _, _)
+            | (Primitive::Psubint, _, _)
+            | (Primitive::Pmulint, _, _)
+            | (Primitive::Pdivint, _, _)
+            | (Primitive::Pmodint, _, _)
+            | (Primitive::Pandint, _, _)
+            | (Primitive::Porint, _, _)
+            | (Primitive::Pxorint, _, _)
+            | (Primitive::Plslint, _, _)
+            | (Primitive::Plsrint, _, _)
+            | (Primitive::Pasrint, _, _) => {
+                let Some(lhs) = int_const_value_any(&Lambda::Lconst(lhs.clone())) else {
+                    return Lambda::prim(primitive, args, loc);
+                };
+                let Some(rhs) = int_const_value_any(&Lambda::Lconst(rhs.clone())) else {
+                    return Lambda::prim(primitive, args, loc);
+                };
+                let folded = match primitive {
+                    Primitive::Paddint => Some(lhs.wrapping_add(rhs)),
+                    Primitive::Psubint => Some(lhs.wrapping_sub(rhs)),
+                    Primitive::Pmulint => Some(lhs.wrapping_mul(rhs)),
+                    Primitive::Pdivint => (rhs != 0).then(|| lhs.wrapping_div(rhs)),
+                    Primitive::Pmodint => (rhs != 0).then(|| lhs.wrapping_rem(rhs)),
+                    Primitive::Pandint => Some(lhs & rhs),
+                    Primitive::Porint => Some(lhs | rhs),
+                    Primitive::Pxorint => Some(lhs ^ rhs),
+                    Primitive::Plslint => Some(lhs.wrapping_shl((rhs & 31) as u32)),
+                    Primitive::Plsrint => Some(((lhs as u32) >> ((rhs & 31) as u32)) as i32),
+                    Primitive::Pasrint => Some(lhs.wrapping_shr((rhs & 31) as u32)),
+                    _ => None,
+                };
+                if let Some(value) = folded {
+                    return Lambda::const_(Constant::Int {
+                        i: value,
+                        comment: None,
+                    });
+                }
+            }
+            (Primitive::Psequand, Constant::JsFalse, Constant::JsTrue | Constant::JsFalse)
+            | (Primitive::Psequand, Constant::JsTrue, Constant::JsFalse)
+            | (Primitive::Psequor, Constant::JsFalse, Constant::JsFalse) => {
+                return Lambda::false_();
+            }
+            (Primitive::Psequand, Constant::JsTrue, Constant::JsTrue)
+            | (Primitive::Psequor, Constant::JsTrue, Constant::JsTrue | Constant::JsFalse)
+            | (Primitive::Psequor, Constant::JsFalse, Constant::JsTrue) => {
+                return Lambda::true_();
+            }
+            (Primitive::Pstringadd, lhs, rhs) => {
+                if let (Some((lhs, true)), Some((rhs, true))) =
+                    (string_constant_value(lhs), string_constant_value(rhs))
+                {
+                    return Lambda::const_(Constant::String {
+                        s: format!("{lhs}{rhs}"),
+                        delim: None,
+                    });
+                }
+            }
+            (Primitive::Pstringrefs | Primitive::Pstringrefu, lhs, Constant::Int { i, .. }) => {
+                if let Some((value, true)) = string_constant_value(lhs) {
+                    if let Ok(index) = usize::try_from(*i) {
+                        if let Some(byte) = value.as_bytes().get(index) {
+                            return Lambda::const_(Constant::Char((*byte).into()));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        },
+        _ => {}
     }
+
+    if let Primitive::Pmakeblock(_, TagInfo::Module(fields), _) = &primitive {
+        if let Some(module_alias) = collapse_module_alias(fields, &args) {
+            return module_alias;
+        }
+    }
+
+    Lambda::prim(primitive, args, loc)
 }
 
 fn is_empty_module_shape_constant(lam: &Lambda) -> bool {
@@ -769,7 +1041,13 @@ fn int_constant_value(lam: &Lambda) -> Option<i32> {
     }
 }
 
-fn happens_to_be_diff(sw_consts: &[(i32, Lambda)]) -> Option<i32> {
+fn happens_to_be_diff(
+    sw_consts: &[(i32, Lambda)],
+    sw_names: Option<&crate::lambda::SwitchNames>,
+) -> Option<i32> {
+    if sw_names.is_some() {
+        return None;
+    }
     let ((a, a_lam), rest) = sw_consts.split_first()?;
     let (b, b_lam) = rest.first()?;
     let a0 = int_constant_value(a_lam)?;
@@ -784,6 +1062,65 @@ fn happens_to_be_diff(sw_consts: &[(i32, Lambda)]) -> Option<i32> {
         }
     }
     Some(diff)
+}
+
+fn collapse_module_alias(fields: &[String], args: &[Lambda]) -> Option<Lambda> {
+    let (first_field, rest_fields) = fields.split_first()?;
+    let (first_arg, rest_args) = args.split_first()?;
+
+    let (field_name, module_value) = module_field_access(first_arg)?;
+    if field_name != first_field.as_str() {
+        return None;
+    }
+
+    let mut expected_index = 1i32;
+    for (field, arg) in rest_fields.iter().zip(rest_args.iter()) {
+        let (field_name, arg_module_value) = module_field_access(arg)?;
+        if field_name != field.as_str() || !same_module_source(&module_value, &arg_module_value) {
+            return None;
+        }
+        match arg {
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::Pfield(index, FieldDbgInfo::Module { .. }),
+                ..
+            }) if *index == expected_index => expected_index += 1,
+            _ => return None,
+        }
+    }
+
+    if rest_fields.len() != rest_args.len() {
+        return None;
+    }
+
+    Some(module_value)
+}
+
+fn module_field_access(arg: &Lambda) -> Option<(String, Lambda)> {
+    let Lambda::Lprim(PrimInfo {
+        primitive: Primitive::Pfield(index, FieldDbgInfo::Module { name }),
+        args,
+        ..
+    }) = arg
+    else {
+        return None;
+    };
+    let [module_value @ (Lambda::LglobalModule(_, _) | Lambda::Lvar(_))] = args.as_slice() else {
+        return None;
+    };
+    if *index < 0 {
+        return None;
+    }
+    Some((name.clone(), module_value.clone()))
+}
+
+fn same_module_source(lhs: &Lambda, rhs: &Lambda) -> bool {
+    match (lhs, rhs) {
+        (Lambda::Lvar(lhs), Lambda::Lvar(rhs)) => lhs.same(rhs),
+        (Lambda::LglobalModule(lhs, lhs_dynamic), Lambda::LglobalModule(rhs, rhs_dynamic)) => {
+            lhs.same(rhs) && lhs_dynamic == rhs_dynamic
+        }
+        _ => false,
+    }
 }
 
 fn exception_id_destructed(lam: &Lambda, exn: &Ident) -> bool {
@@ -1152,6 +1489,44 @@ mod tests {
     }
 
     #[test]
+    fn eta_reduces_primitive_wrapper_application() {
+        let prim0 = Ident::create_local("prim0");
+        let prim1 = Ident::create_local("prim1");
+        let lhs = Ident::create_local("lhs");
+        let rhs = Ident::create_local("rhs");
+        let raw = RawLambda::Lapply(RawApply {
+            ap_func: Box::new(RawLambda::function_(
+                2,
+                vec![prim0.clone(), prim1.clone()],
+                RawLambda::prim(
+                    Primitive::Paddint,
+                    vec![RawLambda::var(prim0.clone()), RawLambda::var(prim1.clone())],
+                    Location::none(),
+                ),
+                crate::lambda::FunctionAttribute::default(),
+            )),
+            ap_args: vec![RawLambda::var(lhs.clone()), RawLambda::var(rhs.clone())],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let lowered = lower_to_lambda(raw);
+        let Lambda::Lprim(info) = lowered else {
+            panic!("expected primitive application");
+        };
+        assert!(matches!(info.primitive, Primitive::Paddint));
+        let [Lambda::Lvar(actual_lhs), Lambda::Lvar(actual_rhs)] = info.args.as_slice() else {
+            panic!("expected lowered primitive arguments");
+        };
+        assert!(actual_lhs.same(&lhs));
+        assert!(actual_rhs.same(&rhs));
+    }
+
+    #[test]
     fn renames_optional_parameter_guards_from_prefix_lets() {
         let opt_x = Ident::create_local("*opt*");
         let y = Ident::create_local("y");
@@ -1282,6 +1657,33 @@ mod tests {
     }
 
     #[test]
+    fn lowers_labeled_blank_js_call_to_object_create_without_objcreate_kind() {
+        let raw = RawLambda::prim(
+            Primitive::PjsCall {
+                prim_name: String::new(),
+                arg_types: vec![crate::lambda::primitive::ExternalArgSpec {
+                    label: Some("name".to_string()),
+                }],
+                ffi: crate::lambda::primitive::ExternalFfiSpec {
+                    module_name: None,
+                    kind: ExternalFfiKind::Default,
+                    returns_unit: false,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![RawLambda::unit()],
+            Location::none(),
+        );
+
+        let lowered = lower_to_lambda(raw);
+        let Lambda::Lprim(info) = lowered else {
+            panic!("expected Lprim");
+        };
+        assert!(matches!(info.primitive, Primitive::PjsObjectCreate(_)));
+    }
+
+    #[test]
     fn lowers_extension_slot_eq_via_exception_id_field() {
         let exn = Ident::create_local("exn");
         let slot = Ident::create_local("slot");
@@ -1369,6 +1771,17 @@ mod tests {
             lower_to_lambda(raw),
             Lambda::Lconst(Constant::JsUndefined { is_unit: false })
         ));
+    }
+
+    #[test]
+    fn folds_integer_comparison_constants_to_boolean_constant() {
+        let lowered = lower_to_lambda(RawLambda::prim(
+            Primitive::Pintcomp(Comparison::Eq),
+            vec![RawLambda::const_(Constant::int(1)), RawLambda::const_(Constant::int(2))],
+            Location::none(),
+        ));
+
+        assert!(matches!(lowered, Lambda::Lconst(Constant::JsFalse)));
     }
 
     #[test]
@@ -1569,6 +1982,38 @@ mod tests {
         };
         assert!(switch.sw_consts_full);
         assert!(switch.sw_blocks_full);
+    }
+
+    #[test]
+    fn keeps_named_linear_switches_instead_of_collapsing_to_scrutinee() {
+        let scrutinee = Ident::create_local("scrutinee");
+        let lowered = lower_to_lambda(RawLambda::Lswitch(
+            Box::new(RawLambda::var(scrutinee.clone())),
+            RawLambdaSwitch {
+                sw_consts_full: true,
+                sw_consts: vec![
+                    (0, RawLambda::const_(Constant::int(0))),
+                    (1, RawLambda::const_(Constant::int(1))),
+                ],
+                sw_blocks_full: false,
+                sw_blocks: Vec::new(),
+                sw_failaction: None,
+                sw_names: Some(crate::lambda::SwitchNames {
+                    consts: vec!["A".to_string(), "B".to_string()],
+                    blocks: Vec::new(),
+                }),
+            },
+            Location::none(),
+        ));
+
+        let Lambda::Lswitch(arg, switch) = lowered else {
+            panic!("expected named switch to remain a switch");
+        };
+        let Lambda::Lvar(id) = arg.as_ref() else {
+            panic!("expected switch scrutinee");
+        };
+        assert!(id.same(&scrutinee));
+        assert_eq!(switch.sw_consts.len(), 2);
     }
 
     #[test]

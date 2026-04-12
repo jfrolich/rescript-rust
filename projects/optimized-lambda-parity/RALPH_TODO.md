@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 567/657 (86.3%), 90 parity failures, 264 hunks
+**Status:** 587/657 (89.3%), 70 parity failures, 225 hunks
 
 ## Goal
 
@@ -23,8 +23,8 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **567/657**
-- Parity hunks: **264**
+- Optimized lambda parity: **587/657**
+- Parity hunks: **225**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
@@ -33,8 +33,8 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
   - `exception_raise_test.res`: **11** hunks
   - `js_exception_catch_test.res`: **9** hunks
   - `Stdlib_DictTests.res`: **8** hunks
-  - `recmodule.res`: **8** hunks
   - `rec_module_test.res`: **8** hunks
+  - `recmodule.res`: **7** hunks
   - `large_record_duplication_test.res`: **7** hunks
   - `rec_module_opt.res`: **6** hunks
   - `gpr_3142_test.res`: **6** hunks
@@ -51,7 +51,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **90** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order can still move whole control-flow clusters.
+There are **70** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order can still move whole control-flow clusters.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -74,6 +74,7 @@ Current frontier characteristics:
 - `LetUnwrap.res` now also passes exactly after preserving named polyvariant hash metadata in raw match tests.
 - `polyvar_test.res` now also passes exactly on the current authoritative baseline.
 - `set_gen.res` now also passes exactly on the current authoritative baseline.
+- `ari_regress_test.res`, `big_enum.res`, `equal_test.res`, `reasonReact.res`, and `reasonReactOptimizedCreateClass.res` now also pass exactly on the current authoritative baseline.
 - export-aware alias retention now keeps OCaml's module-export alias lets, which removed both accessor-file failures.
 - the `Pisout` switch-normalization slice is now landed:
   - `arity_infer.res`: **exact parity**
@@ -90,6 +91,68 @@ Current frontier characteristics:
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### `Lam.apply` smart constructors, `Lam.prim` folding, and builtin-object classification moved the baseline again
+`compiler/core/lam_convert.ml` does not lower applications and primitives by
+blindly rebuilding the raw node. It routes them through the same smart
+constructors OCaml uses for optimized lambda:
+
+- `Lam.apply` eta-reduces wrappers like `fun x -> prim x`
+- `Lam.prim` folds small constant cases instead of preserving the unfused
+  primitive node
+- blank JS externals returning builtin object types become
+  `Pjs_object_create`, not a generic `Pjs_call`
+
+Rust `compiler-rust/src/raw_lambda/lower.rs` was still constructing `Lapply`
+and most `Lprim` nodes directly, and `compiler-rust/src/raw_lambda/typeopt.rs`
+only recognized dict paths as builtin object results. That left several
+structurally small but high-signal files on the board even when `-drawlambda`
+already matched:
+
+- `ari_regress_test.res`
+- `equal_test.res`
+- `big_enum.res`
+- `reasonReact.res`
+- `reasonReactOptimizedCreateClass.res`
+
+Rust now:
+
+- lowers applications through `make_apply`/`make_lapply`, including the
+  `Lam.apply` eta-reduction path
+- ports the missing `Lam.prim` folding cases needed by this slice and keeps
+  named switches out of the `happens_to_be_diff` collapse path
+- classifies `TypeDesc::Tobject` as a builtin object result, which lets
+  `Js.Obj.empty()` lower to `Pjs_object_create` instead of `Pjs_call`
+- covers the slice with focused unit tests:
+  - `raw_lambda::lower::tests::eta_reduces_primitive_wrapper_application`
+  - `raw_lambda::lower::tests::folds_integer_comparison_constants_to_boolean_constant`
+  - `raw_lambda::lower::tests::keeps_named_linear_switches_instead_of_collapsing_to_scrutinee`
+  - `raw_lambda::lower::tests::lowers_labeled_blank_js_call_to_object_create_without_objcreate_kind`
+  - `raw_lambda::typeopt::tests::builtin_object_recognizes_object_types`
+
+Verified focused checks:
+
+- `ari_regress_test.res`: **exact parity**
+- `equal_test.res`: **exact parity**
+- `big_enum.res`: **exact parity**
+- `reasonReact.res`: **exact parity**
+- `reasonReactOptimizedCreateClass.res`: **exact parity**
+
+A focused raw `-drawlambda` rerun for the two `reasonReact` files also stayed
+exact, confirming that this slice was in `Lam_convert.convert` lowering rather
+than upstream raw-lambda construction.
+
+Authoritative repo-wide baseline moved from:
+
+- **567/657**, **264** hunks
+
+to:
+
+- **587/657**, **225** hunks
+
+That is a gain of **20 files** and **39 hunks**. The remaining frontier is
+smaller now and more concentrated in exception, recursive-module, record-spread,
+and module-alias clusters.
 
 ### polyvariant block-tag lowering plus OCaml string escaping moved the set frontier
 `compiler/core/lam_convert.ml` special-cases `Pmakeblock` for `Blk_poly_var s`:
