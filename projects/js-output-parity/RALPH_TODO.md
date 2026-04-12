@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 46 / 657 JS snapshots passing, 0 compile errors, 611 output diffs
+**Status:** 49 / 657 JS snapshots passing, 0 compile errors, 608 output diffs
 
 ## Goal
 
@@ -35,9 +35,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **46 / 657**
+- JS snapshot parity: **49 / 657**
 - Compile errors: **0**
-- Output diffs: **611**
+- Output diffs: **608**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -56,6 +56,12 @@ Interpretation:
 - a small OCaml-aligned post-lowering lambda simplifier is now on the JS path:
   obvious local function applications are beta-reduced before JS IR lowering,
   and dead pure lets are dropped instead of leaking through as backend noise
+- a larger OCaml-aligned subset of `Lam_pass_lets_dce` is now also on the JS
+  path:
+  simple alias/constant/module-field bindings are substituted through the
+  lowered lambda body, pure `Lsequence` noise is removed, and constant
+  `Pstringadd` chains are folded after substitution while still preserving
+  exported bindings needed by the final module export block
 - `tests/tests/src/AsInUncurriedExternals.res` is now fully resolved in the
   checked-in snapshot set; `tests/tests/src/Import.res` narrowed further after
   the simplifier removed some dead-let churn, but its remaining drift is still
@@ -189,3 +195,21 @@ Remaining internal compile errors under the measured wrapper baseline:
 - `tests/tests/src/Import.res` still differs, but the dead `let = undefined`
   churn is materially reduced; the remaining drift is still in later lambda/JS
   backend shaping.
+- `compiler-rust/src/lambda/simplify.rs` now ports another OCaml-aligned subset
+  of `Lam_pass_lets_dce` used on the JS backend path:
+  - collect exported ids from the module-export block so exported bindings are
+    preserved even when later substitution makes them look locally unused
+  - substitute simple lowered-lambda aliases (`Lvar`, constants, and module
+    field aliases) through the body instead of emitting long JS alias chains
+  - drop pure `Lsequence` noise, which removes dead top-level coercion helper
+    lambdas like the ones in `tests/tests/src/RecordCoercion.res`
+  - fold constant `Pstringadd` chains after alias substitution
+- Verified focused guards for this cluster:
+  - `tests/tests/src/Coercion.res` now emits `let xx = 1;`; the remaining drift
+    there is later backend shaping/order, not the alias value itself
+  - `tests/tests/src/RecordCoercion.res` no longer emits the three dead
+    top-level identity functions; the remaining drift is object/record shaping
+  - previously passing `tests/tests/src/ExternalShadow.res` and
+    `tests/tests/src/keep_uncurry_attribute.res` still match exactly
+- The authoritative JS snapshot baseline now reports **49 / 657** passing, **0**
+  compile errors, and **608** output diffs.
