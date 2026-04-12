@@ -196,10 +196,13 @@ fn simplify_primitive(
     match (&info.primitive, args.as_slice()) {
         (
             Primitive::Pstringadd,
-            [
-                Lambda::Lconst(Constant::String { s: left, delim: left_delim }),
-                Lambda::Lconst(Constant::String { s: right, delim: right_delim }),
-            ],
+            [Lambda::Lconst(Constant::String {
+                s: left,
+                delim: left_delim,
+            }), Lambda::Lconst(Constant::String {
+                s: right,
+                delim: right_delim,
+            })],
         ) => Lambda::const_(Constant::String {
             s: format!("{left}{right}"),
             delim: left_delim.clone().or(right_delim.clone()),
@@ -351,7 +354,9 @@ mod tests {
     use crate::ident::Ident;
     use crate::lambda::compat::LetKind;
     use crate::lambda::constant::Constant;
-    use crate::lambda::primitive::{ExternalArgAttr, ExternalObjLabel, ExternalObjSpec, Mutable, Primitive};
+    use crate::lambda::primitive::{
+        ExternalArgAttr, ExternalObjLabel, ExternalObjSpec, Mutable, Primitive,
+    };
     use crate::lambda::{ApInfo, Apply, FunctionAttribute, InlineAttribute, Lambda, TagInfo};
     use crate::location::Location;
 
@@ -541,10 +546,7 @@ mod tests {
                     exported.clone(),
                     Lambda::prim(
                         Primitive::Pstringadd,
-                        vec![
-                            Lambda::var(a1),
-                            Lambda::const_(Constant::string("world")),
-                        ],
+                        vec![Lambda::var(a1), Lambda::const_(Constant::string("world"))],
                         Location::none(),
                     ),
                     export_block,
