@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 87 / 657 JS snapshots passing, 0 compile errors, 570 output diffs
+**Status:** 88 / 657 JS snapshots passing, 0 compile errors, 569 output diffs
 
 ## Goal
 
@@ -35,14 +35,24 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **87 / 657**
+- JS snapshot parity: **88 / 657**
 - Compile errors: **0**
-- Output diffs: **570**
+- Output diffs: **569**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
+- OCaml `frontend/ast_config.ml` / `core/js_dump_program.ml` top-level
+  directive handling is now matched more closely on the Rust JS-output path:
+  file-level `@@directive("...")` attributes are collected from the parsed
+  structure in source order and emitted ahead of the ReScript header during
+  deps-program printing
+- `tests/tests/src/directives.res` now matches its checked-in `.mjs` snapshot
+  exactly after threading file directives through the Rust printer path
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the file-directive change, which confirms this slice stays isolated to module
+  prelude emission
 - the JS-backend post-lowering simplifier now matches OCaml's treatment of
   `Pjs_fn_make` / `Pjs_fn_make_unit` more closely for one important slice:
   those wrappers are now transparent on the Rust JS path, so the existing local
@@ -195,6 +205,29 @@ Remaining internal compile errors under the measured wrapper baseline:
 - none
 
 ## Latest Session Findings
+
+- `compiler-rust/src/driver.rs` and `compiler-rust/src/js_ir/printer.rs` now
+  port the OCaml file-directive path from `frontend/ast_config.ml` and
+  `core/js_dump_program.ml`:
+  top-level `@@directive("...")` attributes are collected from the parsed
+  structure in source order and emitted before the version header in deps
+  program output
+- Verified focused guards for this cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release driver::tests::extract_file_directives_preserves_source_order -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_deps_program_emits_top_level_directives_before_header -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/directives.res -o /tmp/directives.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+- `tests/tests/src/directives.res` is now an exact snapshot match.
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the file-directive change.
+- The authoritative JS snapshot baseline now reports **88 / 657** passing, **0**
+  compile errors, and **569** output diffs.
+- Interpretation:
+  this resolves one remaining printer/metadata gap without touching later
+  backend shaping. The next frontier is still in the larger backend-shaping
+  clusters such as `Coercion.res`, `DerivingAccessors*.res`, and
+  `ExternalArity.res`, not in top-level file directive emission.
 
 - `compiler-rust/src/lambda/simplify.rs` now matches the OCaml JS backend path
   more closely for lowered function wrappers:

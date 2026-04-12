@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow};
 use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::PersistentEnv;
 use crate::context::IdGenerator;
-use crate::js_ir::{ModulePathResolver, printer::print_deps_program};
+use crate::js_ir::{ModulePathResolver, printer::print_deps_program_with_directives};
 use crate::lambda::compile::LambdaCompiler;
 use crate::parser::ast::{
     Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature,
@@ -1137,6 +1137,7 @@ pub fn compile_source_to_js_with_options(
             parser.diagnostics().len()
         ));
     }
+    let file_directives = extract_file_directives_from_structure(&structure, parser.arena())?;
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
@@ -1322,7 +1323,11 @@ pub fn compile_source_to_js_with_options(
     let program = compiler.compile_deps_program(&lowered_lambda);
 
     // JS IR -> JS source
-    let js = print_deps_program(&program, Some(&module_path_resolver));
+    let js = print_deps_program_with_directives(
+        &program,
+        Some(&module_path_resolver),
+        &file_directives,
+    );
 
     // The CLI compiler is a short-lived process. Skipping teardown for the
     // large typechecking arenas keeps snapshot runs inside the harness timeout
@@ -2320,6 +2325,53 @@ fn extract_flags_from_config_payload(
     result
 }
 
+fn extract_single_string_payload(
+    payload: &Payload,
+    arena: &crate::parse_arena::ParseArena,
+) -> Option<String> {
+    use crate::parser::ast::ExpressionDesc as ED;
+
+    let Payload::PStr(items) = payload else {
+        return None;
+    };
+    if items.len() != 1 {
+        return None;
+    }
+    let StructureItemDesc::Pstr_eval(inner) = &*items[0].pstr_desc else {
+        return None;
+    };
+    let (expr_idx, _attrs) = &**inner;
+    let expr = arena.get_expr(*expr_idx);
+    match &*expr.pexp_desc {
+        ED::Pexp_constant(c) => match &**c {
+            Constant::String(s, _) => Some(s.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn extract_file_directives_from_structure(
+    structure: &Structure,
+    arena: &crate::parse_arena::ParseArena,
+) -> Result<Vec<String>> {
+    let mut directives = Vec::new();
+
+    for item in structure {
+        let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc else {
+            continue;
+        };
+        if arena.get_string(attr.0.txt) != "directive" {
+            continue;
+        }
+        let directive = extract_single_string_payload(&attr.1, arena)
+            .ok_or_else(|| anyhow!("Expected string literal payload in @@directive"))?;
+        directives.push(directive);
+    }
+
+    Ok(directives)
+}
+
 /// Extract `@@config({flags: [...]})` overrides from a parsed structure.
 pub fn extract_file_config_from_structure(
     structure: &Structure,
@@ -2676,11 +2728,13 @@ fn prepare_inferred_signature_for_saving(
 
 #[cfg(test)]
 mod tests {
+    use super::extract_file_directives_from_structure;
     use super::max_lambda_input_stamp;
     use super::normalize_load_path_entry;
     use crate::ident::{Ident, IdentFlags};
     use crate::location::Location;
     use crate::parse_arena::{LidentIdx, LocIdx, Located};
+    use crate::parser::{Parser, module};
     use crate::parser::ast::{Attributes, RecFlag};
     use crate::types::decl::{ModuleDeclaration, ModuleType, RecStatus, SignatureItem, ValueKind};
     use crate::types::path::Path as TypePath;
@@ -2785,6 +2839,24 @@ mod tests {
         assert_eq!(
             normalized,
             PathBuf::from("/runtime/lib/ocaml/compiler-libs")
+        );
+    }
+
+    #[test]
+    fn extract_file_directives_preserves_source_order() {
+        let mut parser = Parser::new(
+            "directives.res",
+            "@@directive(\"first directive;\")\n@@directive(\"second directive;\")\nlet a = 1",
+        );
+        let structure = module::parse_structure(&mut parser);
+
+        assert!(!parser.has_errors());
+        assert_eq!(
+            extract_file_directives_from_structure(&structure, parser.arena()).unwrap(),
+            vec![
+                "first directive;".to_string(),
+                "second directive;".to_string()
+            ]
         );
     }
 }
