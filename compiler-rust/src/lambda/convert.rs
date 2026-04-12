@@ -12,8 +12,10 @@ use crate::ident::{Ident, IdentFlags};
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::constant::{Constant, StringDelim};
 use crate::lambda::primitive::{
-    ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
-    ExternalReturnWrapper, ExternalSpec, ImportAttributes, Mutable, Primitive,
+    ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
+    ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
+    ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, ImportAttributes,
+    Mutable, Primitive,
 };
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::{
@@ -1107,7 +1109,7 @@ impl<'a> LambdaConverter<'a> {
         // Fallback to an external call placeholder.
         let prim = Primitive::PjsCall {
             prim_name: prim.prim_name.clone(),
-            arg_types: vec![ExternalArgSpec { label: None }; prim.prim_arity as usize],
+            arg_types: decoded_external_arg_types(&prim.prim_native_name, prim.prim_arity as usize),
             ffi: decoded_external_ffi_spec(&prim.prim_native_name),
             dynamic_import: false,
             transformed_jsx: false,
@@ -1301,12 +1303,20 @@ fn decoded_external_ffi_spec(encoded: &str) -> ExternalFfiSpec {
             ExternalFfiKind::Default
         },
         spec: ffi_marshaled.as_ref().and_then(ffi_marshaled_external_spec),
+        obj_params: ffi_marshaled.as_ref().and_then(ffi_marshaled_obj_params),
         return_wrapper: ffi_marshaled
             .as_ref()
             .and_then(ffi_marshaled_return_wrapper)
             .unwrap_or(ExternalReturnWrapper::Identity),
         inline_constant: None,
     }
+}
+
+fn decoded_external_arg_types(encoded: &str, arity: usize) -> Vec<ExternalArgSpec> {
+    decode_marshaled_ffi_type(encoded)
+        .as_ref()
+        .and_then(ffi_marshaled_arg_types)
+        .unwrap_or_else(|| vec![ExternalArgSpec::dummy(); arity])
 }
 
 fn decode_marshaled_ffi_type(encoded: &str) -> Option<OcamlValue> {
@@ -1320,6 +1330,14 @@ fn decode_marshaled_ffi_type(encoded: &str) -> Option<OcamlValue> {
 
 fn ffi_marshaled_is_obj_create(value: &OcamlValue) -> bool {
     matches!(value.as_block_opt(), Some((1, _)))
+}
+
+fn ffi_marshaled_arg_types(value: &OcamlValue) -> Option<Vec<ExternalArgSpec>> {
+    let (tag, fields) = value.as_block_opt()?;
+    if tag != 0 || fields.len() != 3 {
+        return None;
+    }
+    decode_params(&fields[0])
 }
 
 fn ffi_marshaled_return_wrapper(value: &OcamlValue) -> Option<ExternalReturnWrapper> {
@@ -1342,6 +1360,137 @@ fn ffi_marshaled_external_spec(value: &OcamlValue) -> Option<ExternalSpec> {
         return None;
     }
     decode_external_spec(&fields[2])
+}
+
+fn ffi_marshaled_obj_params(value: &OcamlValue) -> Option<Vec<ExternalObjSpec>> {
+    let (tag, fields) = value.as_block_opt()?;
+    match (tag, fields) {
+        (1, [params]) => Some(
+            params
+                .as_list()
+                .into_iter()
+                .filter_map(decode_obj_param)
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn decode_params(value: &OcamlValue) -> Option<Vec<ExternalArgSpec>> {
+    let (tag, fields) = value.as_block_opt()?;
+    match (tag, fields) {
+        (0, [params]) => Some(params.as_list().into_iter().filter_map(decode_param).collect()),
+        (1, [arity]) => Some(vec![ExternalArgSpec::dummy(); arity.as_int().max(0) as usize]),
+        _ => None,
+    }
+}
+
+fn decode_param(value: &OcamlValue) -> Option<ExternalArgSpec> {
+    let (tag, fields) = value.as_block_opt()?;
+    if tag != 0 || fields.len() != 2 {
+        return None;
+    }
+    Some(ExternalArgSpec {
+        arg_type: decode_arg_attr(&fields[0])?,
+        arg_label: decode_arg_label(&fields[1])?,
+    })
+}
+
+fn decode_obj_param(value: &OcamlValue) -> Option<ExternalObjSpec> {
+    let (tag, fields) = value.as_block_opt()?;
+    if tag != 0 || fields.len() != 2 {
+        return None;
+    }
+    Some(ExternalObjSpec {
+        obj_arg_type: decode_arg_attr(&fields[0])?,
+        obj_arg_label: decode_obj_label(&fields[1])?,
+    })
+}
+
+fn decode_arg_attr(value: &OcamlValue) -> Option<ExternalArgAttr> {
+    if let OcamlValue::Int(tag) = value {
+        return match *tag {
+            0 => Some(ExternalArgAttr::ExternUnit),
+            1 => Some(ExternalArgAttr::Nothing),
+            2 => Some(ExternalArgAttr::Ignore),
+            3 => Some(ExternalArgAttr::Unwrap),
+            _ => None,
+        };
+    }
+
+    let (tag, fields) = value.as_block_opt()?;
+    match (tag, fields) {
+        (0, [descr]) => Some(ExternalArgAttr::PolyVarString {
+            descr: decode_string_pair_list(descr),
+        }),
+        (1, [descr]) => Some(ExternalArgAttr::PolyVar {
+            descr: descr.as_option().map(decode_string_pair_list),
+        }),
+        (2, [descr]) => Some(ExternalArgAttr::Int(
+            descr
+                .as_list()
+                .into_iter()
+                .filter_map(|entry| {
+                    let (entry_tag, entry_fields) = entry.as_block_opt()?;
+                    if entry_tag != 0 || entry_fields.len() != 2 {
+                        return None;
+                    }
+                    Some((entry_fields[0].as_string().to_string(), entry_fields[1].as_int()))
+                })
+                .collect(),
+        )),
+        (3, [cst]) => Some(ExternalArgAttr::ArgCst(decode_arg_const(cst)?)),
+        _ => None,
+    }
+}
+
+fn decode_arg_const(value: &OcamlValue) -> Option<ExternalArgConst> {
+    let (tag, fields) = value.as_block_opt()?;
+    match (tag, fields) {
+        (0, [i]) => Some(ExternalArgConst::IntLit(i.as_int())),
+        (1, [s, delim]) => Some(ExternalArgConst::StringLit(
+            s.as_string().to_string(),
+            decode_arg_delim(delim)?,
+        )),
+        _ => None,
+    }
+}
+
+fn decode_arg_delim(value: &OcamlValue) -> Option<ExternalArgDelim> {
+    match value.as_int() {
+        0 => Some(ExternalArgDelim::None),
+        1 => Some(ExternalArgDelim::StarJ),
+        2 => Some(ExternalArgDelim::NoQuotes),
+        3 => Some(ExternalArgDelim::BackQuotes),
+        _ => None,
+    }
+}
+
+fn decode_arg_label(value: &OcamlValue) -> Option<ExternalArgLabel> {
+    match value.as_int() {
+        0 => Some(ExternalArgLabel::Label),
+        1 => Some(ExternalArgLabel::Empty),
+        2 => Some(ExternalArgLabel::Optional),
+        _ => None,
+    }
+}
+
+fn decode_obj_label(value: &OcamlValue) -> Option<ExternalObjLabel> {
+    if let OcamlValue::Int(0) = value {
+        return Some(ExternalObjLabel::Empty);
+    }
+
+    let (tag, fields) = value.as_block_opt()?;
+    match (tag, fields) {
+        (0, [name]) => Some(ExternalObjLabel::Label {
+            name: name.as_string().to_string(),
+        }),
+        (1, [name, for_sure_no_nested_option]) => Some(ExternalObjLabel::Optional {
+            name: name.as_string().to_string(),
+            for_sure_no_nested_option: for_sure_no_nested_option.as_bool(),
+        }),
+        _ => None,
+    }
 }
 
 fn decode_external_spec(value: &OcamlValue) -> Option<ExternalSpec> {
@@ -1460,6 +1609,23 @@ fn decode_string_list(value: &OcamlValue) -> Vec<String> {
         .as_list()
         .into_iter()
         .map(|item| item.as_string().to_string())
+        .collect()
+}
+
+fn decode_string_pair_list(value: &OcamlValue) -> Vec<(String, String)> {
+    value
+        .as_list()
+        .into_iter()
+        .filter_map(|entry| {
+            let (tag, fields) = entry.as_block_opt()?;
+            if tag != 0 || fields.len() != 2 {
+                return None;
+            }
+            Some((
+                fields[0].as_string().to_string(),
+                fields[1].as_string().to_string(),
+            ))
+        })
         .collect()
 }
 

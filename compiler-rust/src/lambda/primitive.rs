@@ -31,11 +31,81 @@ pub struct JsRawInfo {
     pub is_stmt: bool,
 }
 
-/// External argument specification
+/// String delimiter for external constant arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalArgDelim {
+    None,
+    StarJ,
+    NoQuotes,
+    BackQuotes,
+}
+
+/// Constant preserved from external argument metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalArgConst {
+    IntLit(i64),
+    StringLit(String, ExternalArgDelim),
+}
+
+/// OCaml external argument label metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalArgLabel {
+    Label,
+    Empty,
+    Optional,
+}
+
+/// OCaml object-field label metadata for `@obj` externals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalObjLabel {
+    Empty,
+    Label {
+        name: String,
+    },
+    Optional {
+        name: String,
+        for_sure_no_nested_option: bool,
+    },
+}
+
+/// OCaml external argument attribute metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalArgAttr {
+    PolyVarString {
+        descr: Vec<(String, String)>,
+    },
+    PolyVar {
+        descr: Option<Vec<(String, String)>>,
+    },
+    Int(Vec<(String, i64)>),
+    ArgCst(ExternalArgConst),
+    ExternUnit,
+    Nothing,
+    Ignore,
+    Unwrap,
+}
+
+/// External argument specification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalArgSpec {
-    // Placeholder - actual structure from External_arg_spec
-    pub label: Option<String>,
+    pub arg_type: ExternalArgAttr,
+    pub arg_label: ExternalArgLabel,
+}
+
+impl ExternalArgSpec {
+    pub fn dummy() -> Self {
+        Self {
+            arg_type: ExternalArgAttr::Nothing,
+            arg_label: ExternalArgLabel::Empty,
+        }
+    }
+}
+
+/// `@obj` external field specification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalObjSpec {
+    pub obj_arg_type: ExternalArgAttr,
+    pub obj_arg_label: ExternalObjLabel,
 }
 
 /// Import attributes attached to an external module binding.
@@ -111,6 +181,8 @@ pub struct ExternalFfiSpec {
     pub kind: ExternalFfiKind,
     /// OCaml external-spec metadata used by the backend after optimized lambda.
     pub spec: Option<ExternalSpec>,
+    /// OCaml `@obj` field metadata preserved across lowering.
+    pub obj_params: Option<Vec<ExternalObjSpec>>,
     /// How the fully applied call result should be wrapped.
     pub return_wrapper: ExternalReturnWrapper,
     /// Optional inline constant preserved from marshaled external ffi metadata.
@@ -162,7 +234,7 @@ pub enum Primitive {
     },
 
     /// Create a JavaScript object
-    PjsObjectCreate(Vec<ExternalArgSpec>),
+    PjsObjectCreate(Vec<ExternalObjSpec>),
 
     // ==================== Exceptions ====================
     /// Raise an exception

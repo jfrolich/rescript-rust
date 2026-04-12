@@ -11,9 +11,8 @@ use crate::ident::Ident;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
 use crate::lambda::constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 use crate::lambda::free_variables::free_variables;
-use crate::lambda::primitive::Primitive;
 use crate::lambda::primitive::{
-    ExternalArgSpec, ExternalFfiKind, ExternalFfiSpec, ExternalReturnWrapper,
+    ExternalFfiSpec, ExternalReturnWrapper, Primitive,
 };
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch, PrimInfo};
@@ -320,7 +319,15 @@ impl LoweringContext {
                 dynamic_import: _call_dynamic_import,
                 transformed_jsx,
             } if is_object_create_call(&prim_name, &arg_types, &ffi) => {
-                Lambda::prim(Primitive::PjsObjectCreate(arg_types), args, loc)
+                Lambda::prim(
+                    Primitive::PjsObjectCreate(
+                        ffi.obj_params
+                            .clone()
+                            .expect("guarded object-create metadata"),
+                    ),
+                    args,
+                    loc,
+                )
             }
             Primitive::PjsCall {
                 prim_name,
@@ -956,14 +963,8 @@ fn pointer_constant_value(constant: &Constant) -> Option<&str> {
     }
 }
 
-fn is_object_create_call(
-    prim_name: &str,
-    arg_types: &[ExternalArgSpec],
-    ffi: &ExternalFfiSpec,
-) -> bool {
-    prim_name.is_empty()
-        && (ffi.kind == ExternalFfiKind::ObjCreate
-            || arg_types.iter().any(|arg| arg.label.is_some()))
+fn is_object_create_call(prim_name: &str, _arg_types: &[crate::lambda::primitive::ExternalArgSpec], ffi: &ExternalFfiSpec) -> bool {
+    prim_name.is_empty() && ffi.obj_params.is_some()
 }
 
 fn wrap_ffi_result(call: Lambda, return_wrapper: ExternalReturnWrapper, loc: Location) -> Lambda {
@@ -1657,7 +1658,7 @@ mod tests {
     use super::*;
     use crate::lambda::compat::LetKind;
     use crate::lambda::constant::{ConstructorRuntimeTag, ConstructorTag, StringDelim};
-    use crate::lambda::primitive::{JsRawInfo, Mutable};
+    use crate::lambda::primitive::{ExternalFfiKind, JsRawInfo, Mutable};
     use crate::lambda::FunctionAttribute;
     use crate::lambda::InlineAttribute;
 
@@ -1849,12 +1850,16 @@ mod tests {
         let raw = RawLambda::prim(
             Primitive::PjsCall {
                 prim_name: String::new(),
-                arg_types: vec![crate::lambda::primitive::ExternalArgSpec {
-                    label: Some("name".to_string()),
-                }],
+                arg_types: vec![crate::lambda::primitive::ExternalArgSpec::dummy()],
                 ffi: crate::lambda::primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::ObjCreate,
                     spec: None,
+                    obj_params: Some(vec![crate::lambda::primitive::ExternalObjSpec {
+                        obj_arg_type: crate::lambda::primitive::ExternalArgAttr::Nothing,
+                        obj_arg_label: crate::lambda::primitive::ExternalObjLabel::Label {
+                            name: "name".to_string(),
+                        },
+                    }]),
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
                 },
@@ -1877,12 +1882,16 @@ mod tests {
         let raw = RawLambda::prim(
             Primitive::PjsCall {
                 prim_name: String::new(),
-                arg_types: vec![crate::lambda::primitive::ExternalArgSpec {
-                    label: Some("name".to_string()),
-                }],
+                arg_types: vec![crate::lambda::primitive::ExternalArgSpec::dummy()],
                 ffi: crate::lambda::primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
+                    obj_params: Some(vec![crate::lambda::primitive::ExternalObjSpec {
+                        obj_arg_type: crate::lambda::primitive::ExternalArgAttr::Nothing,
+                        obj_arg_label: crate::lambda::primitive::ExternalObjLabel::Label {
+                            name: "name".to_string(),
+                        },
+                    }]),
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
                 },
@@ -1947,12 +1956,13 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: String::new(),
                 arg_types: vec![
-                    crate::lambda::primitive::ExternalArgSpec { label: None },
-                    crate::lambda::primitive::ExternalArgSpec { label: None },
+                    crate::lambda::primitive::ExternalArgSpec::dummy(),
+                    crate::lambda::primitive::ExternalArgSpec::dummy(),
                 ],
                 ffi: crate::lambda::primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
+                    obj_params: None,
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
                 },
@@ -1982,6 +1992,7 @@ mod tests {
                 ffi: crate::lambda::primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
+                    obj_params: None,
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: Some(Constant::String {
                         s: "hello".to_string(),
@@ -2006,10 +2017,11 @@ mod tests {
         let lowered = lower_to_lambda(RawLambda::prim(
             Primitive::PjsCall {
                 prim_name: "get".to_string(),
-                arg_types: vec![crate::lambda::primitive::ExternalArgSpec { label: None }],
+                arg_types: vec![crate::lambda::primitive::ExternalArgSpec::dummy()],
                 ffi: crate::lambda::primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
+                    obj_params: None,
                     return_wrapper: ExternalReturnWrapper::NullToOpt,
                     inline_constant: None,
                 },
@@ -2038,10 +2050,11 @@ mod tests {
         let lowered = lower_to_lambda(RawLambda::prim(
             Primitive::PjsCall {
                 prim_name: "get".to_string(),
-                arg_types: vec![crate::lambda::primitive::ExternalArgSpec { label: None }],
+                arg_types: vec![crate::lambda::primitive::ExternalArgSpec::dummy()],
                 ffi: crate::lambda::primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
+                    obj_params: None,
                     return_wrapper: ExternalReturnWrapper::NullUndefinedToOpt,
                     inline_constant: None,
                 },
@@ -2758,6 +2771,7 @@ mod tests {
                     ffi: ExternalFfiSpec {
                         kind: ExternalFfiKind::Default,
                         spec: None,
+                        obj_params: None,
                         return_wrapper: ExternalReturnWrapper::Identity,
                         inline_constant: None,
                     },

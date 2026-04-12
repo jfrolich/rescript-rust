@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 29 / 657 JS snapshots passing, 0 compile errors, 628 output diffs
+**Status:** 32 / 657 JS snapshots passing, 0 compile errors, 625 output diffs
 
 ## Goal
 
@@ -27,7 +27,7 @@ JS backend only.
 
 ## Current Baseline
 
-Authoritative wrapper run on **2026-04-12** using:
+Latest authoritative wrapper run on **2026-04-12** using:
 
 ```bash
 timeout 1800 ./scripts/test_js_output_parity.sh
@@ -35,9 +35,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **29 / 657**
+- JS snapshot parity: **32 / 657**
 - Compile errors: **0**
-- Output diffs: **628**
+- Output diffs: **625**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -49,6 +49,10 @@ Interpretation:
 - preserving OCaml external-spec metadata through `PjsCall` is necessary for
   backend parity after optimized lambda: `@val`, `@new`, `@get`, and related
   externals cannot be lowered as a generic `primName(...)` call
+- preserving OCaml marshaled external argument metadata is also necessary for
+  `@as(...)` constants and `@obj` field assembly: the backend must lower these
+  from preserved FFI metadata rather than trying to reconstruct them from the
+  final primitive name
 - the `ExternalShadow.res` cluster is now resolved end-to-end in the checked-in
   snapshot set; the remaining frontier has moved on from that external-call /
   shadowing case
@@ -135,6 +139,13 @@ Remaining internal compile errors under the measured wrapper baseline:
   - `Js_get` / `Js_set`
   - `Js_get_index` / `Js_set_index`
   - `Js_send`
+- `compiler-rust/src/lambda/convert.rs`, `compiler-rust/src/raw_lambda/convert.rs`, and `compiler-rust/src/raw_lambda/lower.rs` now preserve and route the OCaml external-object metadata needed for `@obj` lowering instead of collapsing it to a boolean/object-create hint.
+- `compiler-rust/src/lambda/compile.rs` now lowers marshaled external argument constants and `PjsObjectCreate` fields directly from preserved FFI metadata, matching the OCaml backend's handling of `@as(...)` and `@obj`.
+- Focused guards for this cluster:
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release --lib lowers_js_object_create_with_marshaled_fields`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release --lib blank_js_call_to_object_create`
+- The authoritative JS snapshot baseline now reports **32 / 657** passing, **0** compile errors, and **625** output diffs.
+- `tests/tests/src/AsInUncurriedExternals.res` and `tests/tests/src/UncurriedExternals.res` both narrowed after the metadata port; the remaining drift in those files has moved on to later-pass/backend cleanup rather than missing `@as` / `@obj` lowering.
 - `compiler-rust/src/lambda/compile.rs` now applies a port of `js_pass_external_shadow.ml`, so lexical shadowing of JS globals rewrites initializer/self-property reads through `globalThis` without rewriting unrelated uses like `parseInt`.
 - `compiler-rust/src/js_ir/printer.rs` no longer reorders top-level function-valued bindings ahead of earlier statements; the Rust printer now preserves OCaml's block order.
 - Typedtree parity and both lambda parity stages are considered complete for this project and are not part of the remaining frontier.

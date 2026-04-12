@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
-use crate::js_ir::op::{IdentInfo, Kind, LengthObject, MutableFlag, Number};
+use crate::js_ir::op::{IdentInfo, Kind, LengthObject, MutableFlag, Number, PropertyName};
 use crate::js_ir::printer::is_js_keyword_or_global;
 use crate::js_ir::{
     BinOp, Block, CallInfo, Delim, DepsProgram, Expression, ExpressionDesc, ForDirection, ModuleId,
@@ -18,7 +18,10 @@ use crate::js_ir::{
 use crate::lambda::analysis;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
 use crate::lambda::constant::{Constant, StringDelim};
-use crate::lambda::primitive::{ExternalModuleName, ExternalSpec, Mutable, Primitive};
+use crate::lambda::primitive::{
+    ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
+    ExternalModuleName, ExternalObjLabel, ExternalObjSpec, ExternalSpec, Mutable, Primitive,
+};
 use crate::lambda::{Apply, Lambda, LambdaSwitch, TagInfo};
 
 /// Compilation result for an expression: prelude statements plus a value expression.
@@ -543,6 +546,9 @@ impl LambdaCompiler {
             )),
             Ptypeof => Expression::new(ExpressionDesc::Typeof(Box::new(compiled_args[0].clone()))),
             Pawait => Expression::new(ExpressionDesc::Await(Box::new(compiled_args[0].clone()))),
+            PjsObjectCreate(obj_params) => {
+                self.compile_js_object_create(obj_params, compiled_args, &mut prelude)
+            }
             PjsFnMake(_) | PjsFnMakeUnit => compiled_args
                 .first()
                 .cloned()
@@ -580,7 +586,12 @@ impl LambdaCompiler {
                 compiled_args,
                 CallInfo::default(),
             ),
-            PjsCall { prim_name, ffi, .. } => self.compile_js_call(prim_name, ffi, compiled_args),
+            PjsCall {
+                prim_name,
+                arg_types,
+                ffi,
+                ..
+            } => self.compile_js_call(prim_name, arg_types, ffi, compiled_args, &mut prelude),
             Pnull => Expression::null(),
             Pundefined => Expression::undefined(false),
             _ => Expression::undefined(false),
@@ -697,11 +708,196 @@ impl LambdaCompiler {
         Expression::bin(BinOp::Eq, field, value.clone())
     }
 
+    fn compile_external_arg_const(&self, cst: &ExternalArgConst) -> Expression {
+        match cst {
+            ExternalArgConst::IntLit(i) => Expression::number(Number::Int {
+                i: *i as i32,
+                c: None,
+            }),
+            ExternalArgConst::StringLit(s, delim) => {
+                let delim = match delim {
+                    ExternalArgDelim::None => Delim::None,
+                    ExternalArgDelim::StarJ => Delim::StarJ,
+                    ExternalArgDelim::NoQuotes => Delim::NoQuotes,
+                    ExternalArgDelim::BackQuotes => Delim::BackQuotes,
+                };
+                Expression::new(ExpressionDesc::Str {
+                    delim,
+                    txt: s.clone(),
+                })
+            }
+        }
+    }
+
+    fn lower_external_arg_value(
+        &self,
+        arg: Expression,
+        arg_label: ExternalArgLabel,
+        arg_type: &ExternalArgAttr,
+    ) -> Option<Expression> {
+        match arg_type {
+            ExternalArgAttr::ArgCst(_) => None,
+            ExternalArgAttr::ExternUnit => {
+                if matches!(arg_label, ExternalArgLabel::Empty) {
+                    None
+                } else {
+                    Some(Expression::undefined(true))
+                }
+            }
+            ExternalArgAttr::Ignore => None,
+            _ => Some(arg),
+        }
+    }
+
+    fn assemble_external_args_no_splice(
+        &self,
+        arg_types: &[ExternalArgSpec],
+        args: Vec<Expression>,
+    ) -> Vec<Expression> {
+        let mut runtime_args = args.into_iter();
+        let mut assembled = Vec::new();
+
+        for arg_spec in arg_types {
+            match &arg_spec.arg_type {
+                ExternalArgAttr::ArgCst(cst) => {
+                    assembled.push(self.compile_external_arg_const(cst));
+                }
+                _ => {
+                    let arg = runtime_args
+                        .next()
+                        .unwrap_or_else(|| Expression::undefined(false));
+                    if let Some(expr) =
+                        self.lower_external_arg_value(arg, arg_spec.arg_label, &arg_spec.arg_type)
+                    {
+                        assembled.push(expr);
+                    }
+                }
+            }
+        }
+
+        debug_assert!(runtime_args.next().is_none());
+        assembled
+    }
+
+    fn compile_js_object_create(
+        &self,
+        obj_params: &[ExternalObjSpec],
+        args: Vec<Expression>,
+        prelude: &mut Block,
+    ) -> Expression {
+        let mut runtime_args = args.into_iter();
+        let mut props = Vec::new();
+        let mut optional_assignments = Vec::new();
+
+        for obj_param in obj_params {
+            match &obj_param.obj_arg_label {
+                ExternalObjLabel::Empty => {
+                    if !matches!(obj_param.obj_arg_type, ExternalArgAttr::ArgCst(_)) {
+                        let _ = runtime_args.next();
+                    }
+                }
+                ExternalObjLabel::Label { name } => match &obj_param.obj_arg_type {
+                    ExternalArgAttr::ArgCst(cst) => {
+                        props.push((
+                            PropertyName::lit(name.clone()),
+                            self.compile_external_arg_const(cst),
+                        ));
+                    }
+                    _ => {
+                        let arg = runtime_args
+                            .next()
+                            .unwrap_or_else(|| Expression::undefined(false));
+                        if let Some(value) = self.lower_external_arg_value(
+                            arg,
+                            ExternalArgLabel::Label,
+                            &obj_param.obj_arg_type,
+                        ) {
+                            props.push((PropertyName::lit(name.clone()), value));
+                        }
+                    }
+                },
+                ExternalObjLabel::Optional { name, .. } => {
+                    let arg = runtime_args
+                        .next()
+                        .unwrap_or_else(|| Expression::undefined(false));
+                    if matches!(arg.desc, ExpressionDesc::Undefined { .. }) {
+                        continue;
+                    }
+
+                    let prepared = if self.expr_is_simple(&arg) {
+                        arg
+                    } else {
+                        let tmp = self.fresh_ident("obj");
+                        prelude.push(Statement::variable(VariableDeclaration {
+                            ident: tmp.clone(),
+                            value: Some(arg),
+                            property: LetKind::Variable,
+                            ident_info: IdentInfo::default(),
+                        }));
+                        Expression::var(tmp)
+                    };
+
+                    if let Some(value) = self.lower_external_arg_value(
+                        prepared.clone(),
+                        ExternalArgLabel::Empty,
+                        &obj_param.obj_arg_type,
+                    ) {
+                        optional_assignments.push((name.clone(), prepared, value));
+                    }
+                }
+            }
+        }
+
+        debug_assert!(runtime_args.next().is_none());
+
+        if optional_assignments.is_empty() {
+            return Expression::new(ExpressionDesc::Object(None, props));
+        }
+
+        let obj = self.fresh_ident("obj");
+        prelude.push(Statement::variable(VariableDeclaration {
+            ident: obj.clone(),
+            value: Some(Expression::new(ExpressionDesc::Object(None, props))),
+            property: LetKind::Variable,
+            ident_info: IdentInfo::default(),
+        }));
+
+        for (name, arg, value) in optional_assignments {
+            let cond = Expression::bin(
+                BinOp::NotEqEq,
+                arg,
+                Expression::undefined(false),
+            );
+            let assign = Expression::bin(
+                BinOp::Eq,
+                self.static_index(Expression::var(obj.clone()), &name),
+                value,
+            );
+            prelude.push(Statement::if_(cond, vec![Statement::exp(assign)], vec![]));
+        }
+
+        Expression::var(obj)
+    }
+
+    fn expr_is_simple(&self, expr: &Expression) -> bool {
+        matches!(
+            expr.desc,
+            ExpressionDesc::Var(_)
+                | ExpressionDesc::Undefined { .. }
+                | ExpressionDesc::Null
+                | ExpressionDesc::Bool(_)
+                | ExpressionDesc::Number(_)
+                | ExpressionDesc::Str { .. }
+        )
+    }
+
     fn compile_js_call(
         &self,
         prim_name: &str,
+        arg_types: &[ExternalArgSpec],
         ffi: &crate::lambda::primitive::ExternalFfiSpec,
         args: Vec<Expression>,
+        _prelude: &mut Block,
     ) -> Expression {
         match ffi.spec.as_ref() {
             Some(ExternalSpec::JsVar {
@@ -710,6 +906,7 @@ impl LambdaCompiler {
                 scopes,
             }) => {
                 let value = self.translate_scoped_global_value(name, scopes);
+                let args = self.assemble_external_args_no_splice(arg_types, args);
                 if args.is_empty() {
                     value
                 } else {
@@ -724,7 +921,7 @@ impl LambdaCompiler {
                 ..
             }) => Expression::call(
                 self.translate_scoped_global_value(name, scopes),
-                args,
+                self.assemble_external_args_no_splice(arg_types, args),
                 CallInfo::default(),
             ),
             Some(ExternalSpec::JsNew {
@@ -734,69 +931,87 @@ impl LambdaCompiler {
                 ..
             }) => Expression::new(ExpressionDesc::New(
                 Box::new(self.translate_scoped_global_value(name, scopes)),
-                Some(args),
+                Some(self.assemble_external_args_no_splice(arg_types, args)),
             )),
             Some(ExternalSpec::JsSend {
                 name,
                 js_send_scopes,
                 ..
             }) => match args.split_first() {
-                Some((receiver, rest)) => Expression::call(
-                    self.static_index(
-                        self.apply_scoped_access(receiver.clone(), js_send_scopes),
-                        name,
-                    ),
-                    rest.to_vec(),
-                    CallInfo::default(),
-                ),
+                Some((receiver, rest)) => {
+                    let rest_args = self.assemble_external_args_no_splice(
+                        arg_types.get(1..).unwrap_or(&[]),
+                        rest.to_vec(),
+                    );
+                    Expression::call(
+                        self.static_index(
+                            self.apply_scoped_access(receiver.clone(), js_send_scopes),
+                            name,
+                        ),
+                        rest_args,
+                        CallInfo::default(),
+                    )
+                }
                 None => self.compile_plain_js_call(prim_name, args),
             },
             Some(ExternalSpec::JsGet {
                 js_get_name,
                 js_get_scopes,
-            }) => match args.as_slice() {
+            }) => {
+                let assembled = self.assemble_external_args_no_splice(arg_types, args);
+                match assembled.as_slice() {
                 [receiver] => self.static_index(
                     self.apply_scoped_access(receiver.clone(), js_get_scopes),
                     js_get_name,
                 ),
-                _ => self.compile_plain_js_call(prim_name, args),
-            },
+                    _ => self.compile_plain_js_call(prim_name, assembled),
+                }
+            }
             Some(ExternalSpec::JsSet {
                 js_set_name,
                 js_set_scopes,
-            }) => match args.as_slice() {
-                [receiver, value] => Expression::bin(
-                    BinOp::Eq,
-                    self.static_index(
-                        self.apply_scoped_access(receiver.clone(), js_set_scopes),
-                        js_set_name,
+            }) => {
+                let assembled = self.assemble_external_args_no_splice(arg_types, args);
+                match assembled.as_slice() {
+                    [receiver, value] => Expression::bin(
+                        BinOp::Eq,
+                        self.static_index(
+                            self.apply_scoped_access(receiver.clone(), js_set_scopes),
+                            js_set_name,
+                        ),
+                        value.clone(),
                     ),
-                    value.clone(),
-                ),
-                _ => self.compile_plain_js_call(prim_name, args),
-            },
+                    _ => self.compile_plain_js_call(prim_name, assembled),
+                }
+            }
             Some(ExternalSpec::JsGetIndex {
                 js_get_index_scopes,
-            }) => match args.as_slice() {
-                [receiver, index] => Expression::new(ExpressionDesc::ArrayIndex(
-                    Box::new(self.apply_scoped_access(receiver.clone(), js_get_index_scopes)),
-                    Box::new(index.clone()),
-                )),
-                _ => self.compile_plain_js_call(prim_name, args),
-            },
-            Some(ExternalSpec::JsSetIndex {
-                js_set_index_scopes,
-            }) => match args.as_slice() {
-                [receiver, index, value] => Expression::bin(
-                    BinOp::Eq,
-                    Expression::new(ExpressionDesc::ArrayIndex(
-                        Box::new(self.apply_scoped_access(receiver.clone(), js_set_index_scopes)),
+            }) => {
+                let assembled = self.assemble_external_args_no_splice(arg_types, args);
+                match assembled.as_slice() {
+                    [receiver, index] => Expression::new(ExpressionDesc::ArrayIndex(
+                        Box::new(self.apply_scoped_access(receiver.clone(), js_get_index_scopes)),
                         Box::new(index.clone()),
                     )),
-                    value.clone(),
-                ),
-                _ => self.compile_plain_js_call(prim_name, args),
-            },
+                    _ => self.compile_plain_js_call(prim_name, assembled),
+                }
+            }
+            Some(ExternalSpec::JsSetIndex {
+                js_set_index_scopes,
+            }) => {
+                let assembled = self.assemble_external_args_no_splice(arg_types, args);
+                match assembled.as_slice() {
+                    [receiver, index, value] => Expression::bin(
+                        BinOp::Eq,
+                        Expression::new(ExpressionDesc::ArrayIndex(
+                            Box::new(self.apply_scoped_access(receiver.clone(), js_set_index_scopes)),
+                            Box::new(index.clone()),
+                        )),
+                        value.clone(),
+                    ),
+                    _ => self.compile_plain_js_call(prim_name, assembled),
+                }
+            }
             Some(ExternalSpec::JsModuleAsVar(module_name)) => {
                 self.compile_module_external_fallback(prim_name, module_name, args, false)
             }
@@ -1226,7 +1441,9 @@ mod tests {
     use super::*;
     use crate::lambda::constant::Constant;
     use crate::lambda::primitive::{
-        ExternalFfiKind, ExternalFfiSpec, ExternalReturnWrapper, ExternalSpec,
+        ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
+        ExternalFfiKind, ExternalFfiSpec, ExternalObjLabel, ExternalObjSpec,
+        ExternalReturnWrapper, ExternalSpec,
     };
     use crate::lambda::Lambda;
     use crate::location::Location;
@@ -1253,6 +1470,7 @@ mod tests {
                         external_module_name: None,
                         scopes: vec![],
                     }),
+                    obj_params: None,
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
                 },
@@ -1292,6 +1510,7 @@ mod tests {
                         splice: false,
                         scopes: vec![],
                     }),
+                    obj_params: None,
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
                 },
@@ -1324,6 +1543,161 @@ mod tests {
                 ));
             }
             other => panic!("expected a new expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_marshaled_constant_args_in_js_call() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "somefn".to_string(),
+                arg_types: vec![ExternalArgSpec {
+                    arg_type: ExternalArgAttr::ArgCst(ExternalArgConst::StringLit(
+                        "{foo:true}".to_string(),
+                        ExternalArgDelim::NoQuotes,
+                    )),
+                    arg_label: ExternalArgLabel::Empty,
+                }],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsCall {
+                        name: "somefn".to_string(),
+                        external_module_name: None,
+                        splice: false,
+                        scopes: vec!["somescope".to_string()],
+                        tagged_template: false,
+                    }),
+                    obj_params: None,
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![Lambda::const_(Constant::JsUndefined { is_unit: false })],
+            Location::none(),
+        );
+
+        let program = compiler.compile_program(&lam);
+        let [stmt] = program.block.as_slice() else {
+            panic!("expected a single expression statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                assert!(matches!(
+                    func.desc,
+                    ExpressionDesc::StaticIndex(_, ref field, _)
+                    if field == "somefn"
+                ));
+                assert!(matches!(
+                    args.as_slice(),
+                    [Expression {
+                        desc: ExpressionDesc::Str {
+                            delim: Delim::NoQuotes,
+                            txt,
+                        },
+                        ..
+                    }] if txt == "{foo:true}"
+                ));
+            }
+            other => panic!("expected a JS call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_js_object_create_with_marshaled_fields() {
+        let mut compiler = LambdaCompiler::new();
+        let name_ident = Ident::create_local("name");
+        let lam = Lambda::prim(
+            Primitive::PjsObjectCreate(vec![
+                ExternalObjSpec {
+                    obj_arg_type: ExternalArgAttr::ArgCst(ExternalArgConst::StringLit(
+                        "false".to_string(),
+                        ExternalArgDelim::NoQuotes,
+                    )),
+                    obj_arg_label: ExternalObjLabel::Label {
+                        name: "objectMode".to_string(),
+                    },
+                },
+                ExternalObjSpec {
+                    obj_arg_type: ExternalArgAttr::Nothing,
+                    obj_arg_label: ExternalObjLabel::Label {
+                        name: "name".to_string(),
+                    },
+                },
+                ExternalObjSpec {
+                    obj_arg_type: ExternalArgAttr::ArgCst(ExternalArgConst::StringLit(
+                        "true".to_string(),
+                        ExternalArgDelim::NoQuotes,
+                    )),
+                    obj_arg_label: ExternalObjLabel::Label {
+                        name: "someOther".to_string(),
+                    },
+                },
+                ExternalObjSpec {
+                    obj_arg_type: ExternalArgAttr::ExternUnit,
+                    obj_arg_label: ExternalObjLabel::Empty,
+                },
+            ]),
+            vec![
+                Lambda::var(name_ident.clone()),
+                Lambda::const_(Constant::JsUndefined { is_unit: true }),
+            ],
+            Location::none(),
+        );
+
+        let program = compiler.compile_program(&lam);
+        let [stmt] = program.block.as_slice() else {
+            panic!("expected a single expression statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Object(_, props),
+                ..
+            }) => {
+                assert_eq!(props.len(), 3);
+                assert!(matches!(
+                    &props[0],
+                    (
+                        PropertyName::Lit(name),
+                        Expression {
+                            desc: ExpressionDesc::Str {
+                                delim: Delim::NoQuotes,
+                                txt,
+                            },
+                            ..
+                        },
+                    ) if name == "objectMode" && txt == "false"
+                ));
+                assert!(matches!(
+                    &props[1],
+                    (
+                        PropertyName::Lit(name),
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                            ..
+                        },
+                    ) if name == "name" && id.same(&name_ident)
+                ));
+                assert!(matches!(
+                    &props[2],
+                    (
+                        PropertyName::Lit(name),
+                        Expression {
+                            desc: ExpressionDesc::Str {
+                                delim: Delim::NoQuotes,
+                                txt,
+                            },
+                            ..
+                        },
+                    ) if name == "someOther" && txt == "true"
+                ));
+            }
+            other => panic!("expected an object literal, got {other:?}"),
         }
     }
 
