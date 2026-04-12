@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 496/657 (75.5%), 161 parity failures, 724 hunks
+**Status:** 501/657 (76.3%), 156 parity failures, 679 hunks
 
 ## Goal
 
@@ -23,10 +23,10 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **496/657**
-- Stamp-canonicalized parity: **496/657**
-- Exact hunks: **724**
-- Stamp-canonicalized hunks: **724**
+- Optimized lambda parity: **501/657**
+- Stamp-canonicalized parity: **501/657**
+- Exact hunks: **679**
+- Stamp-canonicalized hunks: **679**
 - Largest current exact diffs:
   - `js_json_test.res`: **45** hunks
   - `coercion_module_alias_test.res`: **40** hunks
@@ -47,7 +47,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **161** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, not dump-path routing.
+There are **156** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, not dump-path routing.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -67,6 +67,8 @@ Current frontier characteristics:
 - `conditional/cond_a.res` now also passes exactly as a minimal assert-failure guard.
 - `js_array_test.res` now also passes exactly as a large-file guard.
 - `big_polyvar_test.res` now also passes exactly on the current authoritative baseline.
+- `LetUnwrap.res` now also passes exactly after preserving named polyvariant hash metadata in raw match tests.
+- `polyvar_test.res` now also passes exactly on the current authoritative baseline.
 - export-aware alias retention now keeps OCaml's module-export alias lets, which removed both accessor-file failures.
 - the focused `Lam.if_` assert-failure rewrite is now landed:
   - `stringmatch_test.res`: **exact parity** (down from **1 hunk** on the prior baseline)
@@ -76,6 +78,31 @@ Current frontier characteristics:
 - Stamp canonicalization still does not reduce the baseline at all.
 
 ## Key Findings from Session 2026-04-12
+
+### polyvariant constant-match metadata moved the frontier again
+`compiler-rust/src/raw_lambda/convert.rs` and `compiler-rust/src/raw_lambda/matching.rs`
+now keep `PointerInfo::PolyVariant` on hashed constant polyvariant equality tests
+instead of degrading them to raw `"123a"` pointer strings too early.
+
+That keeps `-drawlambda` parity intact while allowing `raw_lambda/lower.rs` to recover
+OCaml's symbolic `Const_pointer "Tag"` form during optimized-lambda lowering.
+
+Verified focused checks:
+
+- `LetUnwrap.res`: **exact parity** (down from **1 hunk**)
+- `more_poly_variant_test.res`: **3 hunks** (down from **9**)
+
+Authoritative repo-wide baseline moved from:
+
+- **496/657**, **724** hunks
+
+to:
+
+- **501/657**, **679** hunks
+
+This confirms the remaining polyvariant frontier is no longer the simple constant-hash
+comparison path. The next visible cluster is the broader `more_poly_variant_test.res` /
+`poly_variant_test.res` family plus the existing large-file leaders.
 
 ### `Lam.if_` smart-constructor parity moved again
 `compiler-rust/src/lambda/mod.rs` now mirrors the OCaml `Lam.seq` / `Lam.if_`

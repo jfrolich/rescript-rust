@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use crate::ident::{Ident, IdentFlags};
+use crate::lambda::constant::PointerInfo;
 use crate::lambda::LetKind;
 use crate::lambda::primitive::Mutable;
 use crate::lambda::{Comparison, FieldDbgInfo, Primitive, SwitchNames, TagInfo};
@@ -6833,33 +6834,28 @@ fn convert_polyvar_list(xs: &[(i32, (String, RawLambda))]) -> Vec<(Vec<(i32, Str
 
 /// Create a disjunction of equality tests for polyvar hash values.
 /// Equivalent to OCaml's `Polyvar_pattern_match.or_list`.
+fn raw_polyvariant_hash_const(hash: i32, name: &str) -> RawLambda {
+    RawLambda::Lconst(crate::lambda::constant::Constant::Int {
+        i: hash,
+        comment: Some(PointerInfo::PolyVariant(name.to_string())),
+    })
+}
+
 fn or_list_polyvar(arg: &RawLambda, hash_names: &[(i32, String)]) -> RawLambda {
     let (first_hash, first_name) = &hash_names[0];
     let init = RawLambda::Lprim(RawPrimInfo {
         primitive: Primitive::Pintcomp(Comparison::Eq),
-        args: vec![
-            arg.clone(),
-            RawLambda::Lconst(crate::lambda::constant::Constant::Pointer(format!(
-                "{}a",
-                first_hash
-            ))),
-        ],
+        args: vec![arg.clone(), raw_polyvariant_hash_const(*first_hash, first_name)],
         loc: Location::none(),
     });
-    hash_names[1..].iter().fold(init, |acc, (hash, _name)| {
+    hash_names[1..].iter().fold(init, |acc, (hash, name)| {
         RawLambda::Lprim(RawPrimInfo {
             primitive: Primitive::Psequor,
             args: vec![
                 acc,
                 RawLambda::Lprim(RawPrimInfo {
                     primitive: Primitive::Pintcomp(Comparison::Eq),
-                    args: vec![
-                        arg.clone(),
-                        RawLambda::Lconst(crate::lambda::constant::Constant::Pointer(format!(
-                            "{}a",
-                            hash
-                        ))),
-                    ],
+                    args: vec![arg.clone(), raw_polyvariant_hash_const(*hash, name)],
                     loc: Location::none(),
                 }),
             ],
@@ -9009,5 +9005,30 @@ mod tests {
 
         assert!(names.consts.is_empty());
         assert_eq!(names.blocks, vec!["Ok".to_string(), "Error".to_string()]);
+    }
+
+    #[test]
+    fn or_list_polyvar_keeps_named_hash_metadata() {
+        let arg = RawLambda::var(Ident::create_local("match"));
+        let raw = or_list_polyvar(
+            &arg,
+            &[
+                (btype::hash_variant("A"), "A".to_string()),
+                (btype::hash_variant("B"), "B".to_string()),
+            ],
+        );
+
+        let RawLambda::Lprim(first_or) = raw else {
+            panic!("expected sequor chain");
+        };
+        let [RawLambda::Lprim(first_eq), RawLambda::Lprim(second_eq)] = first_or.args.as_slice()
+        else {
+            panic!("expected two equality tests");
+        };
+
+        assert!(matches!(first_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::constant::Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
+            if *i == btype::hash_variant("A") && name == "A"));
+        assert!(matches!(second_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::constant::Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
+            if *i == btype::hash_variant("B") && name == "B"));
     }
 }

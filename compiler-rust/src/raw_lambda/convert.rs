@@ -401,6 +401,14 @@ fn raw_polyvariant_const(tag: &str) -> RawLambda {
     })
 }
 
+fn raw_polyvariant_compare(scrutinee: RawLambda, tag: &str, loc: Location) -> RawLambda {
+    RawLambda::prim(
+        Primitive::Pjscomp(Comparison::Eq),
+        vec![scrutinee, raw_polyvariant_const(tag)],
+        loc,
+    )
+}
+
 fn raw_record_field_access(lbl: &LabelDescription) -> Option<(i32, FieldDbgInfo)> {
     let name = label_runtime_name(lbl);
     let info = match &lbl.lbl_repres {
@@ -5742,7 +5750,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         let mut seen_tags = std::collections::BTreeSet::new();
-        let mut const_cases = Vec::<(i32, RawLambda)>::new();
+        let mut const_cases = Vec::<(String, RawLambda)>::new();
         let mut default_case = None;
         let mut variant_pat_type = None;
 
@@ -5763,7 +5771,7 @@ impl<'a> RawLambdaConverter<'a> {
                         variant_pat_type = Some(pat.pat_type);
                     }
                     const_cases.push((
-                        tag,
+                        label.to_string(),
                         wrap_aliases_raw(&aliases, raw_polyvariant_const(label), body),
                     ));
                 }
@@ -5844,16 +5852,9 @@ impl<'a> RawLambdaConverter<'a> {
                 .0
                 .into_iter()
                 .rev()
-                .fold(cases_to_test.1, |else_, (tag, body)| {
+                .fold(cases_to_test.1, |else_, (label, body)| {
                     RawLambda::LifThenElse(
-                        Box::new(RawLambda::prim(
-                            Primitive::Pjscomp(Comparison::Eq),
-                            vec![
-                                scrut_lam.clone(),
-                                RawLambda::const_(Constant::Pointer(format!("{tag}a"))),
-                            ],
-                            loc,
-                        )),
+                        Box::new(raw_polyvariant_compare(scrut_lam.clone(), &label, loc)),
                         Box::new(body),
                         Box::new(else_),
                     )
@@ -9383,5 +9384,30 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn raw_primitive_name(name: &str) -> &str {
         name.strip_suffix("[js]").unwrap_or(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_polyvariant_compare_keeps_named_tag_metadata() {
+        let scrutinee_id = Ident::create_local("value");
+        let comparison = raw_polyvariant_compare(
+            RawLambda::var(scrutinee_id.clone()),
+            "InvalidNext",
+            Location::none(),
+        );
+
+        let RawLambda::Lprim(info) = comparison else {
+            panic!("expected primitive comparison");
+        };
+
+        assert!(matches!(info.primitive, Primitive::Pjscomp(Comparison::Eq)));
+        assert!(matches!(info.args.as_slice(), [RawLambda::Lvar(id), RawLambda::Lconst(Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
+            if id.same(&scrutinee_id)
+                && *i == crate::types::btype::hash_variant("InvalidNext")
+                && name == "InvalidNext"));
     }
 }
