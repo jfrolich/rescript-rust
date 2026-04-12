@@ -13,7 +13,7 @@ use crate::js_ir::op::{IdentInfo, Kind, LengthObject, MutableFlag, Number, Prope
 use crate::js_ir::printer::is_js_keyword_or_global;
 use crate::js_ir::{
     BinOp, Block, CallInfo, Delim, DepsProgram, Expression, ExpressionDesc, ForDirection, ModuleId,
-    Program, Statement, StatementDesc, VariableDeclaration,
+    ModulePathResolver, Program, Statement, StatementDesc, VariableDeclaration,
 };
 use crate::lambda::analysis;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
@@ -34,6 +34,7 @@ struct Compiled {
 /// Lambda compiler to JS IR.
 pub struct LambdaCompiler {
     id_gen: IdGenerator,
+    module_path_resolver: Option<ModulePathResolver>,
 }
 
 impl Default for LambdaCompiler {
@@ -47,6 +48,15 @@ impl LambdaCompiler {
     pub fn new() -> Self {
         Self {
             id_gen: IdGenerator::new(),
+            module_path_resolver: None,
+        }
+    }
+
+    /// Create a compiler with module import resolution context.
+    pub fn with_module_path_resolver(module_path_resolver: Option<ModulePathResolver>) -> Self {
+        Self {
+            id_gen: IdGenerator::new(),
+            module_path_resolver,
         }
     }
 
@@ -68,11 +78,13 @@ impl LambdaCompiler {
             }
         };
 
-        apply_external_shadow_pass(DepsProgram {
+        let mut deps = apply_external_shadow_pass(DepsProgram {
             program: Program::new(block, exports),
             modules: vec![],
             side_effect: module_side_effect_reason(lam),
-        })
+        });
+        deps.modules = self.collect_required_modules(&deps.program.block);
+        deps
     }
 
     fn compile_expr(&mut self, lam: &Lambda) -> Compiled {
@@ -581,11 +593,7 @@ impl LambdaCompiler {
                 Some(expr) => expr,
                 None => Expression::undefined(false),
             },
-            Pimport => Expression::call(
-                Expression::var(Ident::create_persistent("import")),
-                compiled_args,
-                CallInfo::default(),
-            ),
+            Pimport => self.compile_import(compiled_args),
             PjsCall {
                 prim_name,
                 arg_types,
@@ -863,11 +871,7 @@ impl LambdaCompiler {
         }));
 
         for (name, arg, value) in optional_assignments {
-            let cond = Expression::bin(
-                BinOp::NotEqEq,
-                arg,
-                Expression::undefined(false),
-            );
+            let cond = Expression::bin(BinOp::NotEqEq, arg, Expression::undefined(false));
             let assign = Expression::bin(
                 BinOp::Eq,
                 self.static_index(Expression::var(obj.clone()), &name),
@@ -960,10 +964,10 @@ impl LambdaCompiler {
             }) => {
                 let assembled = self.assemble_external_args_no_splice(arg_types, args);
                 match assembled.as_slice() {
-                [receiver] => self.static_index(
-                    self.apply_scoped_access(receiver.clone(), js_get_scopes),
-                    js_get_name,
-                ),
+                    [receiver] => self.static_index(
+                        self.apply_scoped_access(receiver.clone(), js_get_scopes),
+                        js_get_name,
+                    ),
                     _ => self.compile_plain_js_call(prim_name, assembled),
                 }
             }
@@ -1004,7 +1008,9 @@ impl LambdaCompiler {
                     [receiver, index, value] => Expression::bin(
                         BinOp::Eq,
                         Expression::new(ExpressionDesc::ArrayIndex(
-                            Box::new(self.apply_scoped_access(receiver.clone(), js_set_index_scopes)),
+                            Box::new(
+                                self.apply_scoped_access(receiver.clone(), js_set_index_scopes),
+                            ),
                             Box::new(index.clone()),
                         )),
                         value.clone(),
@@ -1034,6 +1040,87 @@ impl LambdaCompiler {
             args,
             CallInfo::default(),
         )
+    }
+
+    fn compile_import(&self, args: Vec<Expression>) -> Expression {
+        let [arg] = args.as_slice() else {
+            return Expression::call(
+                Expression::var(Ident::create_persistent("import")),
+                args,
+                CallInfo::default(),
+            );
+        };
+
+        let Some((module, member)) = self.module_of_expression(arg) else {
+            return Expression::call(
+                Expression::var(Ident::create_persistent("import")),
+                args,
+                CallInfo::default(),
+            );
+        };
+
+        let Some(path) = self
+            .module_path_resolver
+            .as_ref()
+            .and_then(|resolver| resolver.resolve_module_path(&module))
+        else {
+            return Expression::call(
+                Expression::var(Ident::create_persistent("import")),
+                args,
+                CallInfo::default(),
+            );
+        };
+
+        let import_expr = Expression::call(
+            Expression::var(Ident::create_persistent("import")),
+            vec![Expression::string(path)],
+            CallInfo::default(),
+        );
+
+        match member {
+            Some(member) => {
+                let param = self.fresh_ident("m");
+                let body = vec![Statement::return_(
+                    self.static_index(Expression::var(param.clone()), &member),
+                )];
+                let callback = Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![param],
+                    body,
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                });
+                Expression::call(
+                    self.static_index(import_expr, "then"),
+                    vec![callback],
+                    CallInfo::default(),
+                )
+            }
+            None => import_expr,
+        }
+    }
+
+    fn module_of_expression(&self, expr: &Expression) -> Option<(ModuleId, Option<String>)> {
+        match &expr.desc {
+            ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, member)) => {
+                Some((module.clone(), member.clone()))
+            }
+            ExpressionDesc::StaticIndex(target, field, _) => match &target.desc {
+                ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, None)) => {
+                    Some((module.clone(), Some(field.clone())))
+                }
+                _ => None,
+            },
+            ExpressionDesc::Call(func, _, _) => match &func.desc {
+                ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, member)) => {
+                    Some((module.clone(), member.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     fn translate_scoped_global_value(&self, name: &str, scopes: &[String]) -> Expression {
@@ -1088,6 +1175,14 @@ impl LambdaCompiler {
 
     fn fresh_ident(&self, prefix: &str) -> Ident {
         self.id_gen.create(prefix)
+    }
+
+    fn collect_required_modules(&self, block: &Block) -> Vec<ModuleId> {
+        let mut seen = std::collections::HashSet::new();
+        collect_modules_from_block(block, &mut seen);
+        let mut modules = seen.into_iter().collect::<Vec<_>>();
+        modules.sort_by(|left, right| left.id.name().cmp(right.id.name()));
+        modules
     }
 }
 
@@ -1436,17 +1531,187 @@ fn global_this_field(name: &str) -> Expression {
     ))
 }
 
+fn collect_modules_from_block(block: &Block, seen: &mut std::collections::HashSet<ModuleId>) {
+    for stmt in block {
+        collect_modules_from_statement(stmt, seen);
+    }
+}
+
+fn collect_modules_from_statement(
+    stmt: &Statement,
+    seen: &mut std::collections::HashSet<ModuleId>,
+) {
+    match &stmt.desc {
+        StatementDesc::Block(block) => collect_modules_from_block(block, seen),
+        StatementDesc::Variable(decl) => {
+            if let Some(value) = &decl.value {
+                collect_modules_from_expression(value, seen);
+            }
+        }
+        StatementDesc::Exp(expr) | StatementDesc::Throw(expr) | StatementDesc::Return(expr) => {
+            collect_modules_from_expression(expr, seen)
+        }
+        StatementDesc::If(cond, then_block, else_block) => {
+            collect_modules_from_expression(cond, seen);
+            collect_modules_from_block(then_block, seen);
+            collect_modules_from_block(else_block, seen);
+        }
+        StatementDesc::While(cond, body) => {
+            collect_modules_from_expression(cond, seen);
+            collect_modules_from_block(body, seen);
+        }
+        StatementDesc::ForRange(init, finish, _, _, body) => {
+            if let Some(init) = init {
+                collect_modules_from_expression(init, seen);
+            }
+            collect_modules_from_expression(finish, seen);
+            collect_modules_from_block(body, seen);
+        }
+        StatementDesc::IntSwitch(expr, clauses, default) => {
+            collect_modules_from_expression(expr, seen);
+            for (_, clause) in clauses {
+                collect_modules_from_block(&clause.body, seen);
+            }
+            if let Some(default) = default {
+                collect_modules_from_block(default, seen);
+            }
+        }
+        StatementDesc::StringSwitch(expr, clauses, default) => {
+            collect_modules_from_expression(expr, seen);
+            for clause in clauses {
+                collect_modules_from_block(&clause.clause.body, seen);
+            }
+            if let Some(default) = default {
+                collect_modules_from_block(default, seen);
+            }
+        }
+        StatementDesc::Try(body, handler, finalizer) => {
+            collect_modules_from_block(body, seen);
+            if let Some((_, handler_block)) = handler {
+                collect_modules_from_block(handler_block, seen);
+            }
+            if let Some(finalizer_block) = finalizer {
+                collect_modules_from_block(finalizer_block, seen);
+            }
+        }
+        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+    }
+}
+
+fn collect_modules_from_expression(
+    expr: &Expression,
+    seen: &mut std::collections::HashSet<ModuleId>,
+) {
+    match &expr.desc {
+        ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, _)) => {
+            if !module.dynamic_import {
+                seen.insert(module.clone());
+            }
+        }
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::OptionalBlock(inner, _) => collect_modules_from_expression(inner, seen),
+        ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right)
+        | ExpressionDesc::In(left, right) => {
+            collect_modules_from_expression(left, seen);
+            collect_modules_from_expression(right, seen);
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            collect_modules_from_expression(test, seen);
+            collect_modules_from_expression(consequent, seen);
+            collect_modules_from_expression(alternate, seen);
+        }
+        ExpressionDesc::FlatCall(func, args) => {
+            collect_modules_from_expression(func, seen);
+            collect_modules_from_expression(args, seen);
+        }
+        ExpressionDesc::Call(func, args, _) => {
+            collect_modules_from_expression(func, seen);
+            for arg in args {
+                collect_modules_from_expression(arg, seen);
+            }
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            collect_modules_from_expression(tag, seen);
+            for string in strings {
+                collect_modules_from_expression(string, seen);
+            }
+            for value in values {
+                collect_modules_from_expression(value, seen);
+            }
+        }
+        ExpressionDesc::StaticIndex(target, _, _) => collect_modules_from_expression(target, seen),
+        ExpressionDesc::New(target, args) => {
+            collect_modules_from_expression(target, seen);
+            if let Some(args) = args {
+                for arg in args {
+                    collect_modules_from_expression(arg, seen);
+                }
+            }
+        }
+        ExpressionDesc::Fun { body, .. } => collect_modules_from_block(body, seen),
+        ExpressionDesc::Array(items, _) => {
+            for item in items {
+                collect_modules_from_expression(item, seen);
+            }
+        }
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            for item in items {
+                collect_modules_from_expression(item, seen);
+            }
+            collect_modules_from_expression(tag, seen);
+        }
+        ExpressionDesc::Object(dup, props) => {
+            if let Some(dup) = dup {
+                collect_modules_from_expression(dup, seen);
+            }
+            for (_, value) in props {
+                collect_modules_from_expression(value, seen);
+            }
+        }
+        ExpressionDesc::Bool(_)
+        | ExpressionDesc::Var(crate::js_ir::VIdent::Id(_))
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::RawJsCode(_)
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmi::persistent_env::PersistentEnv;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::Lambda;
     use crate::lambda::constant::Constant;
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-        ExternalFfiKind, ExternalFfiSpec, ExternalObjLabel, ExternalObjSpec,
-        ExternalReturnWrapper, ExternalSpec,
+        ExternalFfiKind, ExternalFfiSpec, ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper,
+        ExternalSpec,
     };
-    use crate::lambda::Lambda;
     use crate::location::Location;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn write_ast_source_stub(ast_path: &std::path::Path, source_path: &std::path::Path) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(source_path.to_string_lossy().as_bytes());
+        bytes.push(b'\n');
+        fs::write(ast_path, bytes).expect("failed to write ast source stub");
+    }
 
     #[test]
     fn test_compile_constant_int() {
@@ -1699,6 +1964,105 @@ mod tests {
             }
             other => panic!("expected an object literal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn collects_static_module_dependencies() {
+        let mut compiler = LambdaCompiler::new();
+        let deps = compiler.compile_deps_program(&Lambda::global_module(
+            Ident::create_persistent("Belt_List"),
+            false,
+        ));
+
+        assert_eq!(deps.modules.len(), 1);
+        assert_eq!(deps.modules[0].id.name(), "Belt_List");
+        assert!(!deps.modules[0].dynamic_import);
+    }
+
+    #[test]
+    fn resolves_runtime_dynamic_import_to_string_path() {
+        let runtime = tempdir().expect("failed to create runtime tempdir");
+        let runtime_ocaml = runtime.path().join("lib").join("ocaml");
+        fs::create_dir_all(&runtime_ocaml).expect("failed to create runtime ocaml dir");
+        fs::write(runtime_ocaml.join("Belt_List.cmi"), []).expect("failed to stub runtime cmi");
+
+        let project = tempdir().expect("failed to create project tempdir");
+        let source = project.path().join("src").join("Import.res");
+        let output = project.path().join("src").join("Import.mjs");
+
+        let resolver = ModulePathResolver::from_compile_options(
+            Some(source.to_str().expect("utf8 source path")),
+            Some(output.as_path()),
+            Some(runtime.path()),
+            None,
+        );
+        let mut compiler = LambdaCompiler::with_module_path_resolver(Some(resolver));
+        let program = compiler.compile_program(&Lambda::prim(
+            Primitive::Pimport,
+            vec![Lambda::global_module(
+                Ident::create_persistent("Belt_List"),
+                true,
+            )],
+            Location::none(),
+        ));
+
+        let [stmt] = program.block.as_slice() else {
+            panic!("expected a single import expression statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                assert!(matches!(
+                    func.desc,
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(ref id)) if id.name() == "import"
+                ));
+                assert!(matches!(
+                    args.as_slice(),
+                    [Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    }] if txt == "@rescript/runtime/lib/es6/Belt_List.js"
+                ));
+            }
+            other => panic!("expected import(\"...\") call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolves_local_module_paths_from_ast_metadata() {
+        let project = tempdir().expect("failed to create project tempdir");
+        let source_dir = project.path().join("src");
+        let build_dir = project.path().join("lib").join("bs").join("src");
+        fs::create_dir_all(&source_dir).expect("failed to create source dir");
+        fs::create_dir_all(&build_dir).expect("failed to create build dir");
+
+        let current_source = source_dir.join("Current.res");
+        let target_source = source_dir.join("ModuleWithAlias.res");
+        fs::write(&current_source, "").expect("failed to stub current source");
+        fs::write(&target_source, "").expect("failed to stub target source");
+        write_ast_source_stub(&build_dir.join("ModuleWithAlias.ast"), &target_source);
+
+        let mut pers = PersistentEnv::new();
+        pers.set_load_path(vec![build_dir]);
+
+        let resolver = ModulePathResolver::from_compile_options(
+            Some(current_source.to_str().expect("utf8 current source path")),
+            Some(source_dir.join("Current.mjs").as_path()),
+            None,
+            Some(pers),
+        );
+        let module = ModuleId {
+            id: Ident::create_persistent("ModuleWithAlias"),
+            kind: Kind::Ml,
+            dynamic_import: true,
+        };
+
+        assert_eq!(
+            resolver.resolve_module_path(&module).as_deref(),
+            Some("./ModuleWithAlias.mjs")
+        );
     }
 
     #[test]

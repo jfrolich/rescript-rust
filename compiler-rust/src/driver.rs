@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow};
 use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::PersistentEnv;
 use crate::context::IdGenerator;
-use crate::js_ir::printer::print_deps_program;
+use crate::js_ir::{ModulePathResolver, printer::print_deps_program};
 use crate::lambda::compile::LambdaCompiler;
 use crate::parser::ast::{
     Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature,
@@ -1101,6 +1101,8 @@ pub struct CompilerOptions {
     /// When set, after type_structure, checks for a matching .cmi and
     /// unifies implementation value types with interface types.
     pub source_filename: Option<String>,
+    /// Output path used for module-format and relative-import resolution.
+    pub output_path: Option<PathBuf>,
     /// JSX version from CLI `-bs-jsx` (e.g. 4). When set, enables JSX PPX rewrite.
     pub jsx_version: Option<i32>,
 }
@@ -1309,11 +1311,18 @@ pub fn compile_source_to_js_with_options(
     }
 
     // Lambda -> JS IR
-    let mut compiler = LambdaCompiler::new();
+    let module_path_resolver = ModulePathResolver::from_compile_options(
+        options.source_filename.as_deref(),
+        options.output_path.as_deref(),
+        options.runtime_path.as_deref(),
+        tctx.persistent_env.clone(),
+    );
+    let mut compiler =
+        LambdaCompiler::with_module_path_resolver(Some(module_path_resolver.clone()));
     let program = compiler.compile_deps_program(&lowered_lambda);
 
     // JS IR -> JS source
-    let js = print_deps_program(&program);
+    let js = print_deps_program(&program, Some(&module_path_resolver));
 
     // The CLI compiler is a short-lived process. Skipping teardown for the
     // large typechecking arenas keeps snapshot runs inside the harness timeout

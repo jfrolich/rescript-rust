@@ -219,6 +219,32 @@ impl PersistentEnv {
         Some(PathBuf::from(path_str.into_owned()))
     }
 
+    /// Resolve a module name back to the source path recorded in its sibling
+    /// binary AST when available. This mirrors the source-path lookup OCaml's
+    /// backend uses indirectly through cmj/package metadata when computing JS
+    /// import paths.
+    pub fn resolve_module_source_path(&self, name: &str) -> Option<PathBuf> {
+        for ext in ["ast", "iast"] {
+            let ast_filename = format!("{name}.{ext}");
+            if let Some(ast_path) = self.find_in_path_uncap(&ast_filename) {
+                if let Some(source_path) = Self::read_ast_source_path(FsPath::new(&ast_path)) {
+                    return Some(source_path);
+                }
+            }
+        }
+
+        self.cache
+            .get(name)
+            .and_then(|loaded| loaded.as_ref())
+            .and_then(|ps| {
+                let path = PathBuf::from(&ps.ps_filename);
+                match path.extension().and_then(|ext| ext.to_str()) {
+                    Some("res" | "resi" | "ml" | "mli") => Some(path),
+                    _ => None,
+                }
+            })
+    }
+
     fn read_source_latin1(path: &FsPath) -> Option<String> {
         let bytes = fs::read(path).ok()?;
         Some(bytes.iter().map(|&b| b as char).collect())

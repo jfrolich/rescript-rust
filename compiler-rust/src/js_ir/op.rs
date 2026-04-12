@@ -181,7 +181,7 @@ pub enum Level {
 }
 
 /// Module kind
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Kind {
     /// OCaml/ReScript module
     Ml,
@@ -196,7 +196,7 @@ pub enum Kind {
 }
 
 /// Import attributes for ES modules
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ImportAttributes {
     /// Attribute type (e.g., "json")
     pub type_: String,

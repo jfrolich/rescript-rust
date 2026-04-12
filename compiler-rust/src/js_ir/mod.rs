@@ -16,13 +16,17 @@
 pub mod op;
 pub mod printer;
 
+use std::ffi::OsString;
+use std::path::{Component, Path as FsPath, PathBuf};
+
+use crate::cmi::persistent_env::PersistentEnv;
 use crate::ident::Ident;
 use crate::lambda::tag_info::TagInfo;
 pub use op::{BinOp, IdentInfo, Kind, LengthObject, MutableFlag, Number, Property, PropertyName};
 pub use printer::{JsPrinter, print_block, print_deps_program, print_expression, print_program};
 
 /// Module identifier for imports/requires
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModuleId {
     /// The module identifier
     pub id: Ident,
@@ -30,6 +34,206 @@ pub struct ModuleId {
     pub kind: Kind,
     /// Is this a dynamic import?
     pub dynamic_import: bool,
+}
+
+/// Output module format used to resolve import paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleFormat {
+    /// ECMAScript modules (`.mjs`)
+    EsModule,
+    /// CommonJS (`.js`, `.bs.js`)
+    CommonJs,
+}
+
+/// Resolves lowered module identifiers to emitted JavaScript import paths.
+#[derive(Clone)]
+pub struct ModulePathResolver {
+    format: ModuleFormat,
+    output_suffix: String,
+    current_source_path: Option<PathBuf>,
+    runtime_path: Option<PathBuf>,
+    persistent_env: Option<PersistentEnv>,
+}
+
+impl ModulePathResolver {
+    /// Build a resolver from the current compilation context.
+    pub fn from_compile_options(
+        source_filename: Option<&str>,
+        output_path: Option<&FsPath>,
+        runtime_path: Option<&FsPath>,
+        persistent_env: Option<PersistentEnv>,
+    ) -> Self {
+        Self {
+            format: module_format_from_output_path(output_path),
+            output_suffix: output_suffix_from_path(output_path),
+            current_source_path: source_filename
+                .map(|path| normalize_absolute_path(FsPath::new(path))),
+            runtime_path: runtime_path.map(normalize_absolute_path),
+            persistent_env,
+        }
+    }
+
+    /// Resolve the emitted JavaScript import path for a lowered module id.
+    pub fn resolve_module_path(&self, module: &ModuleId) -> Option<String> {
+        match &module.kind {
+            Kind::External { name, .. } => Some(name.clone()),
+            Kind::Runtime => Some(self.runtime_module_path(module.id.name())),
+            Kind::Ml => {
+                if self.is_runtime_module(module.id.name()) {
+                    Some(self.runtime_module_path(module.id.name()))
+                } else {
+                    let target_source = self
+                        .persistent_env
+                        .as_ref()?
+                        .resolve_module_source_path(module.id.name())
+                        .map(|path| normalize_absolute_path(&path))?;
+                    self.relative_output_path(&target_source)
+                }
+            }
+        }
+    }
+
+    fn runtime_module_path(&self, module_name: &str) -> String {
+        let dir = match self.format {
+            ModuleFormat::EsModule => "es6",
+            ModuleFormat::CommonJs => "js",
+        };
+        format!("@rescript/runtime/lib/{dir}/{module_name}.js")
+    }
+
+    fn is_runtime_module(&self, module_name: &str) -> bool {
+        let Some(runtime_path) = &self.runtime_path else {
+            return false;
+        };
+        let ocaml_dir = runtime_path.join("lib").join("ocaml");
+        ocaml_dir.join(format!("{module_name}.cmi")).exists()
+            || ocaml_dir.join(format!("{module_name}.ast")).exists()
+            || ocaml_dir.join(format!("{module_name}.iast")).exists()
+    }
+
+    fn relative_output_path(&self, target_source: &FsPath) -> Option<String> {
+        let current_source = self.current_source_path.as_ref()?;
+        let from_dir = current_source.parent()?;
+        let target_dir = target_source.parent()?;
+        let target_stem = target_source.file_stem()?.to_str()?;
+        let target_output = target_dir.join(format!("{target_stem}{}", self.output_suffix));
+        let relative = relative_path_between(from_dir, &target_output)?;
+        let mut rendered = relative.to_string_lossy().replace('\\', "/");
+        if !rendered.starts_with("./") && !rendered.starts_with("../") {
+            rendered = format!("./{rendered}");
+        }
+        Some(rendered)
+    }
+}
+
+fn module_format_from_output_path(output_path: Option<&FsPath>) -> ModuleFormat {
+    match output_path
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+    {
+        Some(name) if name.ends_with(".mjs") => ModuleFormat::EsModule,
+        _ => ModuleFormat::CommonJs,
+    }
+}
+
+fn output_suffix_from_path(output_path: Option<&FsPath>) -> String {
+    match output_path
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+    {
+        Some(name) if name.ends_with(".mjs") => ".mjs".to_string(),
+        Some(name) if name.ends_with(".bs.js") => ".bs.js".to_string(),
+        _ => ".js".to_string(),
+    }
+}
+
+fn normalize_absolute_path(path: &FsPath) -> PathBuf {
+    let base = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    normalize_lexical_path(base)
+}
+
+fn normalize_lexical_path(path: PathBuf) -> PathBuf {
+    let mut prefix: Option<OsString> = None;
+    let mut has_root = false;
+    let mut parts: Vec<OsString> = Vec::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(value) => prefix = Some(value.as_os_str().to_os_string()),
+            Component::RootDir => has_root = true,
+            Component::CurDir => {}
+            Component::ParentDir => match parts.last() {
+                Some(last) if last != ".." => {
+                    parts.pop();
+                }
+                _ if !has_root && prefix.is_none() => parts.push(OsString::from("..")),
+                _ => {}
+            },
+            Component::Normal(part) => parts.push(part.to_os_string()),
+        }
+    }
+
+    let mut normalized = PathBuf::new();
+    if let Some(prefix) = prefix {
+        normalized.push(prefix);
+    }
+    if has_root {
+        normalized.push(std::path::MAIN_SEPARATOR.to_string());
+    }
+    for part in parts {
+        normalized.push(part);
+    }
+
+    if normalized.as_os_str().is_empty() && !has_root {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
+fn relative_path_between(base_dir: &FsPath, target: &FsPath) -> Option<PathBuf> {
+    let base = normalize_lexical_path(base_dir.to_path_buf());
+    let target = normalize_lexical_path(target.to_path_buf());
+
+    let base_components: Vec<_> = base.components().collect();
+    let target_components: Vec<_> = target.components().collect();
+
+    if matches!(
+        (base_components.first(), target_components.first()),
+        (Some(Component::Prefix(left)), Some(Component::Prefix(right)))
+            if left.as_os_str() != right.as_os_str()
+    ) {
+        return None;
+    }
+
+    let shared_prefix = base_components
+        .iter()
+        .zip(target_components.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+
+    let mut relative = PathBuf::new();
+    for component in &base_components[shared_prefix..] {
+        if matches!(component, Component::Normal(_)) {
+            relative.push("..");
+        }
+    }
+    for component in &target_components[shared_prefix..] {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => relative.push(".."),
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    Some(relative)
 }
 
 /// Variable identifier (local or qualified)

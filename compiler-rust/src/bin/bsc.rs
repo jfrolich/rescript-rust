@@ -235,6 +235,7 @@ fn run() -> Result<()> {
         runtime_path,
         open_modules: opts.open_modules.clone(),
         source_filename: Some(source_path.to_string_lossy().into_owned()),
+        output_path: opts.output.clone(),
         jsx_version: opts.jsx_version,
     };
 
