@@ -212,6 +212,7 @@ fn simplify_primitive(
         .collect();
 
     match (&info.primitive, args.as_slice()) {
+        (Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit, [arg]) => arg.clone(),
         (Primitive::Pfield(index, dbg), [arg]) => {
             simplify_field_access(*index, dbg, arg, env, &info.primitive, &info.loc)
         }
@@ -1040,5 +1041,75 @@ mod tests {
         assert_eq!(fields, vec!["a".to_string(), "name".to_string()]);
         assert!(matches!(&args[0], Lambda::Lvar(id) if *id == shared));
         assert!(matches!(&args[1], Lambda::Lvar(id) if *id == projected));
+    }
+
+    #[test]
+    fn unwraps_pjs_fn_make_bindings_before_beta_reducing_local_calls() {
+        let add = Ident::create_local("add");
+        let add5 = Ident::create_local("add5");
+        let left = Ident::create_local("left");
+        let right = Ident::create_local("right");
+        let extra = Ident::create_local("extra");
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            add.clone(),
+            Lambda::prim(
+                Primitive::PjsFnMake(2),
+                vec![Lambda::function_(
+                    2,
+                    vec![left.clone(), right.clone()],
+                    Lambda::prim(
+                        Primitive::Paddint,
+                        vec![Lambda::var(left), Lambda::var(right)],
+                        Location::none(),
+                    ),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                add5.clone(),
+                Lambda::function_(
+                    1,
+                    vec![extra.clone()],
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(add)),
+                        ap_args: vec![Lambda::const_(Constant::int(5)), Lambda::var(extra.clone())],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: crate::lambda::ApplyStatus::Uncurry,
+                        },
+                        ap_transformed_jsx: false,
+                    }),
+                    FunctionAttribute::default(),
+                ),
+                Lambda::var(add5.clone()),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(_, id, value, body) = simplified else {
+            panic!("expected the add5 binding to remain after simplification");
+        };
+        assert_eq!(id, add5);
+        let Lambda::Lfunction(func) = *value else {
+            panic!("expected add5 to stay a function");
+        };
+        assert_eq!(func.params, vec![extra.clone()]);
+        assert!(matches!(
+            *func.body,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Paddint,
+                args,
+                ..
+            }) if matches!(args.as_slice(), [
+                Lambda::Lconst(Constant::Int { i: 5, .. }),
+                Lambda::Lvar(id)
+            ] if *id == extra)
+        ));
+        assert!(matches!(*body, Lambda::Lvar(id) if id == add5));
     }
 }

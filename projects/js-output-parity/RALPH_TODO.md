@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 85 / 657 JS snapshots passing, 0 compile errors, 572 output diffs
+**Status:** 87 / 657 JS snapshots passing, 0 compile errors, 570 output diffs
 
 ## Goal
 
@@ -35,14 +35,26 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **85 / 657**
+- JS snapshot parity: **87 / 657**
 - Compile errors: **0**
-- Output diffs: **572**
+- Output diffs: **570**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
+- the JS-backend post-lowering simplifier now matches OCaml's treatment of
+  `Pjs_fn_make` / `Pjs_fn_make_unit` more closely for one important slice:
+  those wrappers are now transparent on the Rust JS path, so the existing local
+  beta-reduction logic can see through lowered function wrappers instead of
+  leaving avoidable `add(5, extra)`-style calls in emitted JS
+- `tests/tests/src/PartialApplicationNoRuntimeCurry.res` now matches its
+  checked-in `.mjs` snapshot exactly after that simplifier fix
+- `tests/tests/src/UncurriedAlways.res` narrowed materially:
+  the direct partial-application wrappers like `ptl`, `bar2`, and `a`
+  now lower to the same direct arithmetic/value bodies as the checked-in
+  snapshot, and the remaining drift has moved on to later backend shaping and
+  printer byte shape
 - OCaml `lam_compile.ml` continuation handling is now matched more closely on
   the Rust backend path for one important slice:
   function bodies and effect blocks no longer lower every `Lsequence` through a
@@ -183,6 +195,36 @@ Remaining internal compile errors under the measured wrapper baseline:
 - none
 
 ## Latest Session Findings
+
+- `compiler-rust/src/lambda/simplify.rs` now matches the OCaml JS backend path
+  more closely for lowered function wrappers:
+  `Pjs_fn_make` / `Pjs_fn_make_unit` are treated as transparent on the JS path,
+  so local inlineable functions wrapped by those primitives re-enter the
+  existing beta-reduction logic instead of leaking through to emitted JS as
+  avoidable direct calls
+- Verified focused guards for this cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release unwraps_pjs_fn_make_bindings_before_beta_reducing_local_calls -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release inlines_known_local_function_applications -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/PartialApplicationNoRuntimeCurry.res -o /tmp/PartialApplicationNoRuntimeCurry.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UncurriedAlways.res -o /tmp/UncurriedAlways.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+- `tests/tests/src/PartialApplicationNoRuntimeCurry.res` is now an exact
+  snapshot match.
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the simplifier change.
+- `tests/tests/src/UncurriedAlways.res` narrowed materially:
+  direct wrapper calls through lowered `Pjs_fn_make` bindings are now reduced,
+  and the remaining drift there is in later backend shaping and printer output
+  rather than this function-wrapper slice.
+- The authoritative JS snapshot baseline now reports **87 / 657** passing, **0**
+  compile errors, and **570** output diffs.
+- Interpretation:
+  the remaining broad partial-application / wrapper-call cluster is not blocked
+  on the release binary seeing through lowered `Pjs_fn_make` wrappers anymore.
+  The next signal in files like `UncurriedAlways.res`, `bench.res`, and
+  `ExternalArity.res` has shifted to later backend shaping after this
+  simplifier slice, not to the old transparent-wrapper gap itself.
 
 - `compiler-rust/src/lambda/compile.rs` now ports the OCaml
   `Js_shake.shake_program` top-level dead-code-elimination pass onto the Rust
