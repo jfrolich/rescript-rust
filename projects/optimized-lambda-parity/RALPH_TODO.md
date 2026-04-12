@@ -1031,54 +1031,99 @@ literal / exception-tail regressions it exposes.
 ## Root-Cause Frontiers
 
 1. **Continue porting `Lam_convert.convert`**
-   - module export tail shape
-   - let-kind selection (`Strict`, `Alias`, `StrictOpt`, `Variable`)
-   - remaining non-constant `Lam.if_` smart-constructor behavior
    - remaining JS-call primitive lowering
-   - remaining exception/module lowering forms outside the import/raw-JS slice
-   - module/coercion lowering forms
-2. **Use smallest failures for quick structural validation**
-   - `LetUnwrap.res`
-   - `coercion_module_alias_test.res`
-   - `UncurriedExternals.res`
-3. **Use large files to validate that a rule generalizes**
-   - `big_polyvar_test.res`
-   - `js_json_test.res`
-   - `caml_compare_test.res`
-   - `js_string_test.res`
-   - `stringmatch_test.res`
-4. **Treat later `lam_pass_*` work as out of direct parity scope**
+   - directive threading on lowered function attributes (`'use memo'`, async/no-inline variants)
+   - remaining exception/module lowering forms
+   - module/coercion lowering forms that are still truly post-raw
+2. **Keep raw-stage blockers separate from optimized work**
+   - `coercion_module_alias_test.res` still differs under `-drawlambda`
+   - do not treat that file as an optimized-lambda target until the raw shape is fixed
+3. **Use smallest optimized-only failures for quick structural validation**
+   - `adt_optimize_test.res`
+   - `alias_default_value_test.res`
+   - `function_directives.res`
+   - `function_directives_async.res`
+   - `function_directives_no_inline.res`
+4. **Use larger files to validate that a rule generalizes**
+   - `mario_game.res`
+   - `record_extension_test.res`
+   - `variant.res`
+   - `stdlib/Stdlib_IteratorTests.res`
+   - `stdlib/intl/Stdlib_IntlTests.res`
+5. **Treat later `lam_pass_*` work as out of direct parity scope**
    - only touch those passes if a shared infrastructure change requires it
    - do not spend cycles there while `raw_lambda/lower.rs` is still incomplete
 
 ## Immediate Next Milestone
 
-1. Finish the next focused optimized-lambda gaps revealed by the small-file frontier:
-   - constructor-literal recovery for `LetUnwrap.res`
-   - quoted-identifier output parity in `coercion_module_alias_test.res`
-2. Keep the larger-file watchlist on the remaining broad lowering frontier:
-   - `big_polyvar_test.res`
-   - `js_json_test.res`
-   - `caml_compare_test.res`
-   - `stringmatch_test.res`
-3. Re-test:
-   - `LetUnwrap.res`
+1. Finish the next focused optimized-only directive / function-attribute gaps:
+   - `alias_default_value_test.res`
+   - `function_directives.res`
+   - `function_directives_async.res`
+   - `function_directives_no_inline.res`
+2. Keep raw-stage coercion drift out of optimized slices for now:
    - `coercion_module_alias_test.res`
-   - `UncurriedExternals.res`
-4. Validate the same rule on:
-   - `big_polyvar_test.res`
-   - `js_json_test.res`
-   - `caml_compare_test.res`
-   - `stringmatch_test.res`
-5. Re-run:
+3. Validate the same rule on broader files that still exercise lowered JS-call and function metadata:
+   - `mario_game.res`
+   - `record_extension_test.res`
+   - `variant.res`
+   - `stdlib/Stdlib_IteratorTests.res`
+4. Re-run:
 
 ```bash
 timeout 1800 ./scripts/test_lambda_parity.sh -j1
 ```
 
-6. Commit immediately after the next verified OCaml-aligned improvement.
+5. Commit immediately after the next verified OCaml-aligned improvement.
 
 ## Session Log
+
+### 2026-04-12 (dynamic-import scope propagation into nested JS calls)
+
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests::marks_imported_js_call_as_dynamic -- --exact
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 300 ./scripts/test_lambda_parity.sh -j1 import2
+timeout 300 ./scripts/test_lambda_parity.sh -j1 --raw import2
+timeout 300 ./scripts/test_lambda_parity.sh -j1 import_external
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- OCaml compile coverage: **657/657**
+- Rust compile coverage: **657/657**
+- Optimized lambda parity: **627/657**
+- Stamp-canonicalized parity: **627/657**
+- Exact hunks: **97**
+- Stamp-canonicalized hunks: **97**
+
+Key checkpoints:
+
+- `import2.res`: passes
+- `import_external.res`: passes
+- focused `--raw import2`: passes
+- `coercion_module_alias_test.res`: still a raw-stage failure and remains outside the optimized frontier
+
+Authoritative repo-wide baseline moved from:
+
+- **625/657**, **99** hunks
+
+to:
+
+- **627/657**, **97** hunks
+
+This slice fixes the `Lam_convert.convert` dynamic-import scoping rule for nested
+JS calls under `Pimport`. Rust was already lowering imported module fields as
+dynamic, but it was preserving the raw `PjsCall.dynamic_import` bit for nested
+calls like `default` access instead of forcing the enclosing `Pimport` scope
+through. OCaml threads `~dynamic_import:true` through that subtree, so the Rust
+lowerer now ORs the surrounding import scope into lowered `PjsCall` nodes.
+
+That removes both `import2.res` and `import_external.res` from the optimized
+failure list with no raw regression on the focused import repro.
 
 ### 2026-04-12 (predef-exception lowering and plain loc strings)
 

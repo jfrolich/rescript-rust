@@ -243,7 +243,7 @@ impl LoweringContext {
         primitive: Primitive,
         args: Vec<RawLambda>,
         loc: Location,
-        dynamic_import: bool,
+        dynamic_import_scope: bool,
     ) -> Lambda {
         if let Primitive::PrawJsCode(info) = &primitive {
             let mut info = info.clone();
@@ -264,7 +264,7 @@ impl LoweringContext {
             .map(|arg| {
                 self.lower_lambda_with_dynamic_import(
                     arg,
-                    arg_dynamic_import.unwrap_or(dynamic_import),
+                    arg_dynamic_import.unwrap_or(dynamic_import_scope),
                 )
             })
             .collect::<Vec<_>>();
@@ -302,7 +302,7 @@ impl LoweringContext {
                 prim_name,
                 arg_types,
                 ffi,
-                dynamic_import,
+                dynamic_import: _call_dynamic_import,
                 transformed_jsx,
             } if is_object_create_call(&prim_name, &arg_types, &ffi) => {
                 Lambda::prim(Primitive::PjsObjectCreate(arg_types), args, loc)
@@ -311,7 +311,7 @@ impl LoweringContext {
                 prim_name,
                 arg_types,
                 ffi,
-                dynamic_import,
+                dynamic_import: call_dynamic_import,
                 transformed_jsx,
             } => {
                 let return_wrapper = ffi.return_wrapper;
@@ -320,7 +320,7 @@ impl LoweringContext {
                         prim_name,
                         arg_types,
                         ffi,
-                        dynamic_import,
+                        dynamic_import: call_dynamic_import || dynamic_import_scope,
                         transformed_jsx,
                     },
                     args,
@@ -2286,6 +2286,41 @@ mod tests {
             panic!("expected dynamic imported global module");
         };
         assert!(id.same(&module_id));
+    }
+
+    #[test]
+    fn marks_imported_js_call_as_dynamic() {
+        let raw = RawLambda::prim(
+            Primitive::Pimport,
+            vec![RawLambda::prim(
+                Primitive::PjsCall {
+                    prim_name: "default".to_string(),
+                    arg_types: Vec::new(),
+                    ffi: ExternalFfiSpec {
+                        module_name: None,
+                        kind: ExternalFfiKind::Default,
+                        return_wrapper: ExternalReturnWrapper::Identity,
+                    },
+                    dynamic_import: false,
+                    transformed_jsx: false,
+                },
+                Vec::new(),
+                Location::none(),
+            )],
+            Location::none(),
+        );
+
+        let lowered = lower_to_lambda(raw);
+        let Lambda::Lprim(import) = lowered else {
+            panic!("expected import primitive");
+        };
+        let [Lambda::Lprim(call)] = import.args.as_slice() else {
+            panic!("expected js call under import");
+        };
+        let Primitive::PjsCall { dynamic_import, .. } = &call.primitive else {
+            panic!("expected lowered js call primitive");
+        };
+        assert!(*dynamic_import);
     }
 
     #[test]
