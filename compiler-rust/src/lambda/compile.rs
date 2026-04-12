@@ -11,7 +11,7 @@ use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::js_ir::op::{
     IdentInfo, ImportAttributes as JsImportAttributes, Kind, LengthObject, MutableFlag, Number,
-    PropertyName,
+    PropertyName, UsedStats,
 };
 use crate::js_ir::printer::is_js_keyword_or_global;
 use crate::js_ir::{
@@ -95,11 +95,13 @@ impl LambdaCompiler {
             }
         };
 
-        let mut deps = apply_external_shadow_pass(apply_js_flatten_pass(DepsProgram {
-            program: Program::new(block, exports),
-            modules: vec![],
-            side_effect: module_side_effect_reason(&simplified),
-        }));
+        let mut deps = apply_js_shake_pass(apply_external_shadow_pass(apply_js_flatten_pass(
+            DepsProgram {
+                program: Program::new(block, exports),
+                modules: vec![],
+                side_effect: module_side_effect_reason(&simplified),
+            },
+        )));
         deps.modules = self.collect_required_modules(&deps.program.block);
         deps
     }
@@ -1709,10 +1711,13 @@ impl LambdaCompiler {
     fn compile_import(&self, args: Vec<Expression>) -> Expression {
         let arg = match args.as_slice() {
             [arg] => arg,
-            [arg, Expression {
-                desc: ExpressionDesc::Undefined { is_unit: true },
-                ..
-            }] => arg,
+            [
+                arg,
+                Expression {
+                    desc: ExpressionDesc::Undefined { is_unit: true },
+                    ..
+                },
+            ] => arg,
             _ => {
                 return Expression::call(
                     Expression::var(Ident::create_persistent("import")),
@@ -2596,6 +2601,376 @@ fn apply_external_shadow_pass(mut deps: DepsProgram) -> DepsProgram {
     deps
 }
 
+fn apply_js_shake_pass(mut deps: DepsProgram) -> DepsProgram {
+    deps.program = shake_program(deps.program);
+    deps
+}
+
+fn shake_program(mut program: Program) -> Program {
+    program.block = shake_block(&program.block, &program.export_set);
+    program
+}
+
+fn shake_block(block: &Block, export_set: &HashSet<Ident>) -> Block {
+    let block = flatten_toplevel_block(block);
+    let required = fixed_point_required_idents(&block, export_set);
+
+    block
+        .into_iter()
+        .filter(|stmt| match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
+                if required.contains(ident) {
+                    true
+                } else {
+                    value
+                        .as_ref()
+                        .is_some_and(|expr| !js_expr_no_side_effects(expr))
+                }
+            }
+            _ => !js_statement_no_side_effects(stmt),
+        })
+        .collect()
+}
+
+fn flatten_toplevel_block(block: &Block) -> Block {
+    let mut flattened = Vec::new();
+    flatten_toplevel_block_into(block, &mut flattened);
+    flattened
+}
+
+fn flatten_toplevel_block_into(block: &Block, flattened: &mut Block) {
+    for stmt in block {
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident_info:
+                    IdentInfo {
+                        used_stats: UsedStats::DeadPure,
+                    },
+                ..
+            })
+            | StatementDesc::Variable(VariableDeclaration {
+                ident_info:
+                    IdentInfo {
+                        used_stats: UsedStats::DeadNonPure,
+                    },
+                value: None,
+                ..
+            }) => {}
+            StatementDesc::Block(inner) => flatten_toplevel_block_into(inner, flattened),
+            _ => flattened.push(stmt.clone()),
+        }
+    }
+}
+
+fn fixed_point_required_idents(block: &Block, export_set: &HashSet<Ident>) -> HashSet<Ident> {
+    let mut required = required_idents(block, export_set, true);
+    loop {
+        let next = required_idents(block, &required, false);
+        if next.len() == required.len() && next.is_subset(&required) {
+            return required;
+        }
+        required = next;
+    }
+}
+
+fn required_idents(
+    block: &Block,
+    initial: &HashSet<Ident>,
+    count_effect_statements: bool,
+) -> HashSet<Ident> {
+    let mut required = initial.clone();
+
+    for stmt in block {
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
+                if required.contains(ident) {
+                    if let Some(value) = value {
+                        required.extend(free_variables_of_expression(value));
+                    }
+                } else if let Some(value) = value {
+                    if !js_expr_no_side_effects(value) {
+                        required.insert(ident.clone());
+                        required.extend(free_variables_of_expression(value));
+                    }
+                }
+            }
+            _ => {
+                if count_effect_statements && !js_statement_no_side_effects(stmt) {
+                    required.extend(free_variables_of_statement(stmt));
+                }
+            }
+        }
+    }
+
+    required
+}
+
+#[derive(Default)]
+struct JsIdentStats {
+    used_idents: HashSet<Ident>,
+    defined_idents: HashSet<Ident>,
+}
+
+impl JsIdentStats {
+    fn with_defined<I>(idents: I) -> Self
+    where
+        I: IntoIterator<Item = Ident>,
+    {
+        Self {
+            used_idents: HashSet::new(),
+            defined_idents: idents.into_iter().collect(),
+        }
+    }
+
+    fn add_used_ident(&mut self, ident: &Ident) {
+        if !self.defined_idents.contains(ident) {
+            self.used_idents.insert(ident.clone());
+        }
+    }
+
+    fn add_defined_ident(&mut self, ident: &Ident) {
+        self.defined_idents.insert(ident.clone());
+    }
+
+    fn extend_free_idents(&mut self, other: HashSet<Ident>) {
+        self.used_idents.extend(other);
+    }
+
+    fn free_variables(mut self) -> HashSet<Ident> {
+        self.used_idents
+            .retain(|ident| !self.defined_idents.contains(ident));
+        self.used_idents
+    }
+}
+
+fn free_variables_of_statement(stmt: &Statement) -> HashSet<Ident> {
+    let mut stats = JsIdentStats::default();
+    collect_statement_idents(stmt, &mut stats);
+    stats.free_variables()
+}
+
+fn free_variables_of_expression(expr: &Expression) -> HashSet<Ident> {
+    let mut stats = JsIdentStats::default();
+    collect_expression_idents(expr, &mut stats);
+    stats.free_variables()
+}
+
+fn free_variables_of_block_with_defined(
+    block: &Block,
+    defined: impl IntoIterator<Item = Ident>,
+) -> HashSet<Ident> {
+    let mut stats = JsIdentStats::with_defined(defined);
+    collect_block_idents(block, &mut stats);
+    stats.free_variables()
+}
+
+fn collect_block_idents(block: &Block, stats: &mut JsIdentStats) {
+    for stmt in block {
+        collect_statement_idents(stmt, stats);
+    }
+}
+
+fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
+    match &stmt.desc {
+        StatementDesc::Block(block) => collect_block_idents(block, stats),
+        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
+            stats.add_defined_ident(ident);
+            if let Some(value) = value {
+                collect_expression_idents(value, stats);
+            }
+        }
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
+            collect_expression_idents(expr, stats);
+        }
+        StatementDesc::If(cond, then_block, else_block) => {
+            collect_expression_idents(cond, stats);
+            collect_block_idents(then_block, stats);
+            collect_block_idents(else_block, stats);
+        }
+        StatementDesc::While(cond, body) => {
+            collect_expression_idents(cond, stats);
+            collect_block_idents(body, stats);
+        }
+        StatementDesc::ForRange(start, finish, loop_ident, _, body) => {
+            if let Some(start) = start {
+                collect_expression_idents(start, stats);
+            }
+            collect_expression_idents(finish, stats);
+            stats.extend_free_idents(free_variables_of_block_with_defined(
+                body,
+                std::iter::once(loop_ident.clone()),
+            ));
+        }
+        StatementDesc::IntSwitch(test, clauses, default) => {
+            collect_expression_idents(test, stats);
+            for (_, clause) in clauses {
+                collect_block_idents(&clause.body, stats);
+            }
+            if let Some(default) = default {
+                collect_block_idents(default, stats);
+            }
+        }
+        StatementDesc::StringSwitch(test, clauses, default) => {
+            collect_expression_idents(test, stats);
+            for clause in clauses {
+                collect_block_idents(&clause.clause.body, stats);
+            }
+            if let Some(default) = default {
+                collect_block_idents(default, stats);
+            }
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            collect_block_idents(body, stats);
+            if let Some((catch_ident, catch_block)) = catch {
+                stats.extend_free_idents(free_variables_of_block_with_defined(
+                    catch_block,
+                    std::iter::once(catch_ident.clone()),
+                ));
+            }
+            if let Some(finally) = finally {
+                collect_block_idents(finally, stats);
+            }
+        }
+        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+    }
+}
+
+fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
+    match &expr.desc {
+        ExpressionDesc::Var(crate::js_ir::VIdent::Id(ident)) => stats.add_used_ident(ident),
+        ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(_, _))
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::RawJsCode(_)
+        | ExpressionDesc::Number(_) => {}
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::Spread(inner) => collect_expression_idents(inner, stats),
+        ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::In(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::FlatCall(left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            collect_expression_idents(left, stats);
+            collect_expression_idents(right, stats);
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            collect_expression_idents(test, stats);
+            collect_expression_idents(consequent, stats);
+            collect_expression_idents(alternate, stats);
+        }
+        ExpressionDesc::Call(func, args, _) => {
+            collect_expression_idents(func, stats);
+            for arg in args {
+                collect_expression_idents(arg, stats);
+            }
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            collect_expression_idents(tag, stats);
+            for string in strings {
+                collect_expression_idents(string, stats);
+            }
+            for value in values {
+                collect_expression_idents(value, stats);
+            }
+        }
+        ExpressionDesc::StaticIndex(target, _, _) => collect_expression_idents(target, stats),
+        ExpressionDesc::New(target, args) => {
+            collect_expression_idents(target, stats);
+            if let Some(args) = args {
+                for arg in args {
+                    collect_expression_idents(arg, stats);
+                }
+            }
+        }
+        ExpressionDesc::Fun { params, body, .. } => {
+            stats.extend_free_idents(free_variables_of_block_with_defined(
+                body,
+                params.iter().cloned(),
+            ));
+        }
+        ExpressionDesc::Array(items, _) => {
+            for item in items {
+                collect_expression_idents(item, stats);
+            }
+        }
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            for item in items {
+                collect_expression_idents(item, stats);
+            }
+            collect_expression_idents(tag, stats);
+        }
+        ExpressionDesc::Object(dup, props) => {
+            if let Some(dup) = dup {
+                collect_expression_idents(dup, stats);
+            }
+            for (_, value) in props {
+                collect_expression_idents(value, stats);
+            }
+        }
+    }
+}
+
+fn js_block_no_side_effects(block: &Block) -> bool {
+    block.iter().all(js_statement_no_side_effects)
+}
+
+fn js_statement_no_side_effects(stmt: &Statement) -> bool {
+    match &stmt.desc {
+        StatementDesc::Throw(_)
+        | StatementDesc::Debugger
+        | StatementDesc::Break
+        | StatementDesc::Variable(_)
+        | StatementDesc::Continue => false,
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) => js_expr_no_side_effects(expr),
+        StatementDesc::Block(block) => js_block_no_side_effects(block),
+        StatementDesc::If(cond, then_block, else_block) => {
+            js_expr_no_side_effects(cond)
+                && js_block_no_side_effects(then_block)
+                && js_block_no_side_effects(else_block)
+        }
+        StatementDesc::While(cond, body) => {
+            js_expr_no_side_effects(cond) && js_block_no_side_effects(body)
+        }
+        StatementDesc::ForRange(start, finish, _, _, body) => {
+            start.as_ref().is_none_or(js_expr_no_side_effects)
+                && js_expr_no_side_effects(finish)
+                && js_block_no_side_effects(body)
+        }
+        StatementDesc::IntSwitch(test, clauses, default) => {
+            js_expr_no_side_effects(test)
+                && clauses
+                    .iter()
+                    .all(|(_, clause)| js_block_no_side_effects(&clause.body))
+                && default.as_ref().is_none_or(js_block_no_side_effects)
+        }
+        StatementDesc::StringSwitch(test, clauses, default) => {
+            js_expr_no_side_effects(test)
+                && clauses
+                    .iter()
+                    .all(|clause| js_block_no_side_effects(&clause.clause.body))
+                && default.as_ref().is_none_or(js_block_no_side_effects)
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            js_block_no_side_effects(body)
+                && catch
+                    .as_ref()
+                    .is_none_or(|(_, block)| js_block_no_side_effects(block))
+                && finally.as_ref().is_none_or(js_block_no_side_effects)
+        }
+    }
+}
+
 fn is_lexical_binding_kind(property: LetKind) -> bool {
     matches!(
         property,
@@ -3040,7 +3415,7 @@ fn collect_modules_from_expression(
 mod tests {
     use super::*;
     use crate::cmi::persistent_env::PersistentEnv;
-    use crate::js_ir::{print_block, ModulePathResolver};
+    use crate::js_ir::{ModulePathResolver, print_block};
     use crate::lambda::constant::Constant;
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
@@ -3364,7 +3739,9 @@ mod tests {
         ));
 
         let [version_decl, switch_stmt] = program.block.as_slice() else {
-            panic!("expected simplification to inline the nested binding into a declaration and switch");
+            panic!(
+                "expected simplification to inline the nested binding into a declaration and switch"
+            );
         };
 
         let StatementDesc::Variable(VariableDeclaration {
@@ -4581,6 +4958,129 @@ mod tests {
             other => {
                 panic!("expected second initializer to remain a plain process read, got {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn js_shake_pass_removes_unused_pure_toplevel_bindings_and_statements() {
+        let exported = Ident::create_local("exported");
+        let unused = Ident::create_local("unused");
+        let deps = apply_js_shake_pass(DepsProgram {
+            program: Program::new(
+                vec![
+                    Statement::exp(Expression::undefined(false)),
+                    Statement::variable(VariableDeclaration {
+                        ident: unused,
+                        value: Some(Expression::number(Number::int(1))),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }),
+                    Statement::variable(VariableDeclaration {
+                        ident: exported.clone(),
+                        value: Some(Expression::number(Number::int(2))),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }),
+                ],
+                vec![exported.clone()],
+            ),
+            modules: vec![],
+            side_effect: None,
+        });
+
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!("expected only the exported binding to remain");
+        };
+
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 2, .. }),
+                        ..
+                    }),
+                ..
+            }) => assert!(ident.same(&exported)),
+            other => panic!("expected exported number binding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn js_shake_pass_keeps_export_dependencies_and_impure_bindings() {
+        let dep = Ident::create_local("dep");
+        let exported = Ident::create_local("exported");
+        let callback = Ident::create_local("callback");
+        let side = Ident::create_local("side");
+        let deps = apply_js_shake_pass(DepsProgram {
+            program: Program::new(
+                vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: dep.clone(),
+                        value: Some(Expression::number(Number::int(1))),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }),
+                    Statement::variable(VariableDeclaration {
+                        ident: exported.clone(),
+                        value: Some(Expression::var(dep.clone())),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }),
+                    Statement::variable(VariableDeclaration {
+                        ident: side.clone(),
+                        value: Some(Expression::call(
+                            Expression::var(callback.clone()),
+                            vec![],
+                            CallInfo::default(),
+                        )),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }),
+                ],
+                vec![exported.clone()],
+            ),
+            modules: vec![],
+            side_effect: None,
+        });
+
+        let [dep_stmt, exported_stmt, side_stmt] = deps.program.block.as_slice() else {
+            panic!("expected the dependency chain and impure binding to remain");
+        };
+
+        match &dep_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&dep));
+            }
+            other => panic!("expected the dependency binding to remain, got {other:?}"),
+        }
+        match &exported_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&exported));
+            }
+            other => panic!("expected the exported binding to remain, got {other:?}"),
+        }
+        match &side_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Call(func, args, _),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&side));
+                assert!(args.is_empty());
+                assert!(matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&callback)
+                ));
+            }
+            other => panic!("expected the impure binding to remain, got {other:?}"),
         }
     }
 }

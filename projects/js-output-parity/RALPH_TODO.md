@@ -184,6 +184,36 @@ Remaining internal compile errors under the measured wrapper baseline:
 
 ## Latest Session Findings
 
+- `compiler-rust/src/lambda/compile.rs` now ports the OCaml
+  `Js_shake.shake_program` top-level dead-code-elimination pass onto the Rust
+  JS backend path after the existing `js_pass_flatten` /
+  `js_pass_external_shadow` stages.
+- The Rust pass now matches the OCaml `js_shake.ml` fixed-point shape for this
+  slice:
+  it flattens top-level blocks, computes the required identifier set from
+  exports plus effectful statements, keeps transitive dependencies of exported
+  bindings, and drops top-level pure unused statements / bindings while keeping
+  impure initializers.
+- Verified focused guards for this cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_shake_pass_removes_unused_pure_toplevel_bindings_and_statements -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_shake_pass_keeps_export_dependencies_and_impure_bindings -- --nocapture`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/inner_unused.res -o /tmp/inner_unused.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the shake pass.
+- `tests/tests/src/inner_unused.res` remains on the same small local
+  byte-shape drift (`let f` vs `let f$1` / object-literal formatting), which
+  confirms that this pass is not the active frontier for that file.
+- The authoritative JS snapshot baseline remains **85 / 657** passing, **0**
+  compile errors, and **572** output diffs after the `Js_shake` port.
+- Interpretation:
+  this verifies the OCaml-aligned top-level shake stage itself without
+  regression, but it also shows that the current checked-in snapshot corpus is
+  still bottlenecked earlier in the missing JS-pass pipeline. The next backend
+  signal remains the pre-shake stages, especially
+  `Js_pass_flatten_and_mark_dead` and `Js_pass_tailcall_inline`, not printer
+  work.
+
 - `compiler-rust/src/lambda/compile.rs` now matches the OCaml
   `lam_compile.ml` static-catch and continuation-sensitive switch lowering more
   closely on the Rust JS backend path:
