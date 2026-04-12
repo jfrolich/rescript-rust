@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 625/657 (95.1%), 32 parity failures, 99 hunks
+**Status:** 632/657 (96.2%), 25 parity failures, 91 hunks
 
 ## Goal
 
@@ -23,8 +23,8 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **625/657**
-- Parity hunks: **99**
+- Optimized lambda parity: **632/657**
+- Parity hunks: **91**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
@@ -50,7 +50,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **32** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
+There are **25** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -71,6 +71,7 @@ Current frontier characteristics:
 - `js_array_test.res` now also passes exactly as a large-file guard.
 - nullary `CstrUnboxed` constructor metadata is now preserved in raw lambda, which removed the hidden `OnlyOne` constructor-vs-unit mismatch in `UntaggedVariants.res`; that file is now down to **4** hunks, all in the existing static-exit numbering cluster.
 - `big_polyvar_test.res` now also passes exactly on the current authoritative baseline.
+- `alias_default_value_test.res`, `function_directives.res`, `function_directives_async.res`, `function_directives_no_inline.res`, and `adt_optimize_test.res` now also pass exactly on the current authoritative baseline.
 - `js_json_test.res` now also passes exactly on the current authoritative baseline.
 - `LetUnwrap.res` now also passes exactly after preserving named polyvariant hash metadata in raw match tests.
 - `polyvar_test.res` now also passes exactly on the current authoritative baseline.
@@ -128,6 +129,65 @@ Current frontier characteristics:
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### function directives and dense tag switches now lower like OCaml
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::convert::tests::function_expression_preserves_directive_attribute -- --exact
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests::marks_dense_const_only_switch_full_without_names -- --exact
+timeout 300 ./scripts/test_lambda_parity.sh -j1 'alias_default_value_test|function_directives|function_directives_async|function_directives_no_inline|adt_optimize_test'
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+timeout 1800 ./scripts/test_lambda_parity.sh -j1 --raw
+```
+
+Result:
+
+- Optimized lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Optimized lambda parity: **632/657**
+  - Exact hunks: **91**
+- Raw lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Raw lambda parity: **654/657**
+  - Exact hunks: **4**
+
+Key checkpoints:
+
+- focused optimized slice: **5/5 exact**
+- dropped exact failures:
+  - `alias_default_value_test.res`
+  - `function_directives.res`
+  - `function_directives_async.res`
+  - `function_directives_no_inline.res`
+  - `adt_optimize_test.res`
+
+OCaml `compiler/ml/translcore.ml` extracts `@directive("...")` from function
+expression attributes before building lambda function metadata. Rust
+`compiler-rust/src/raw_lambda/convert.rs` was still leaving
+`FunctionAttribute.directive` as `None`, so the raw function metadata diverged
+before lowering and every directive-bearing function printed the wrong
+optimized-lambda shape.
+
+Rust now mirrors OCaml's attribute walk directly by reading the parser
+attribute payload and threading the recovered directive string into
+`convert_function_raw`. The new unit test locks that behavior to a concrete
+`@directive("'use memo'")` example.
+
+`compiler/core/lam_convert.ml` also treats dense constant-only tag switches as
+full even when there is no explicit `sw_names` table. Rust
+`compiler-rust/src/raw_lambda/lower.rs` was only marking `sw_consts_full` from
+names or an already-set raw flag, which left `adt_optimize_test.res` with the
+wrong lowered switch metadata. The lowerer now recognizes the dense `0..n-1`
+const-only case directly, and the new unit test locks that shape in place.
+
+This slice improved the fresh authoritative optimized baseline from
+**627/657**, **97** hunks to **632/657**, **91** hunks, while keeping the full
+raw baseline at **654/657**, **4** hunks across the existing
+`coercion_module_alias_test.res`, `record_extension_test.res`, and
+`variant.res` failures.
 
 ### nullary `CstrUnboxed` constructors now keep constructor metadata
 Ran:

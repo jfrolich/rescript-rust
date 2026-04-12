@@ -389,6 +389,8 @@ impl LoweringContext {
         let lowered_scrutinee = self.lower_lambda(scrutinee);
         let simple_const_only_switch =
             switch.sw_failaction.is_none() && switch.sw_blocks.is_empty();
+        let dense_const_only_switch =
+            simple_const_only_switch && const_switch_is_dense_from_zero(&switch.sw_consts);
         let lowered_consts = switch
             .sw_consts
             .into_iter()
@@ -425,7 +427,8 @@ impl LoweringContext {
         Lambda::Lswitch(
             Box::new(lowered_scrutinee),
             LambdaSwitch {
-                sw_consts_full: switch.sw_consts_full
+                sw_consts_full: dense_const_only_switch
+                    || switch.sw_consts_full
                     || switch
                         .sw_names
                         .as_ref()
@@ -648,6 +651,13 @@ fn is_valid_hash_number(value: &str) -> bool {
         [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
         _ => false,
     }
+}
+
+fn const_switch_is_dense_from_zero(sw_consts: &[(i32, RawLambda)]) -> bool {
+    sw_consts
+        .iter()
+        .enumerate()
+        .all(|(idx, (tag, _))| *tag == idx as i32)
 }
 
 fn rename_optional_parameters(params: Vec<Ident>, body: RawLambda) -> (Vec<Ident>, RawLambda) {
@@ -2120,6 +2130,31 @@ mod tests {
                     consts: vec!["A".to_string()],
                     blocks: Vec::new(),
                 }),
+            },
+            Location::none(),
+        ));
+
+        let Lambda::Lswitch(_, switch) = lowered else {
+            panic!("expected switch");
+        };
+        assert!(switch.sw_consts_full);
+        assert!(switch.sw_blocks_full);
+    }
+
+    #[test]
+    fn marks_dense_const_only_switch_full_without_names() {
+        let lowered = lower_to_lambda(RawLambda::Lswitch(
+            Box::new(RawLambda::var(Ident::create_local("v"))),
+            RawLambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![
+                    (0, RawLambda::const_(Constant::int(7))),
+                    (1, RawLambda::const_(Constant::int(9))),
+                ],
+                sw_blocks_full: false,
+                sw_blocks: Vec::new(),
+                sw_failaction: None,
+                sw_names: None,
             },
             Location::none(),
         ));

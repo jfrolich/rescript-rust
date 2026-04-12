@@ -1059,6 +1059,39 @@ impl<'a> RawLambdaConverter<'a> {
         InlineAttribute::Default
     }
 
+    /// Extract `@directive("...")` from function expression attributes,
+    /// matching OCaml's `extract_directive_for_fn`.
+    fn get_directive_attribute_from(
+        attrs: &crate::parser::ast::Attributes,
+        arena: &ParseArena,
+    ) -> Option<String> {
+        use crate::parser::ast::{Constant, ExpressionDesc, Payload, StructureItemDesc};
+
+        for (located_name, payload) in attrs.iter() {
+            if arena.get_string(located_name.txt) != "directive" {
+                continue;
+            }
+            let Payload::PStr(items) = payload else {
+                continue;
+            };
+            let [item] = items.as_slice() else {
+                continue;
+            };
+            let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc else {
+                continue;
+            };
+            let (expr_idx, _attrs) = &**eval_inner;
+            let expr = arena.get_expr(*expr_idx);
+            let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc else {
+                continue;
+            };
+            if let Constant::String(s, _) = &**c {
+                return Some(s.to_string());
+            }
+        }
+        None
+    }
+
     /// OCaml's Lambda.make_key: normalize a RawLambda for structural comparison.
     /// - Alias lets are substituted (variable replaced by its definition)
     /// - Other let-bound variables get sequential normalized names
@@ -4369,6 +4402,7 @@ impl<'a> RawLambdaConverter<'a> {
                     .iter()
                     .map(|case| self.push_defaults_case(Vec::new(), case))
                     .collect::<Vec<_>>();
+                let directive = Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
                 self.convert_function_raw(
                     params,
                     &pushed_body,
@@ -4376,6 +4410,7 @@ impl<'a> RawLambdaConverter<'a> {
                     *arity,
                     expr.exp_type,
                     *async_,
+                    directive,
                     self.loc(expr.exp_loc),
                 )
             }
@@ -8533,6 +8568,7 @@ impl<'a> RawLambdaConverter<'a> {
         arity: Arity,
         function_type: TypeExprRef,
         async_: bool,
+        directive: Option<String>,
         loc: Location,
     ) -> RawLambda {
         let (all_params, final_body, _partial) =
@@ -8582,6 +8618,7 @@ impl<'a> RawLambdaConverter<'a> {
             FunctionAttribute {
                 return_unit,
                 async_,
+                directive,
                 ..FunctionAttribute::default()
             },
         );
@@ -9427,6 +9464,8 @@ fn ffi_marshaled_return_wrapper(value: &OcamlValue) -> Option<ExternalReturnWrap
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
+
     use crate::binary_ast::ffi_types::{ExternalSpec, FfiType, ReturnWrapper, encode_ffi_type};
     use crate::context::IdGenerator;
     use crate::parse_arena::ParseArena;
@@ -9571,6 +9610,75 @@ mod tests {
             EnvRef(0),
             Attributes::new(),
         )
+    }
+
+    #[test]
+    fn function_expression_preserves_directive_attribute() {
+        let mut arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+
+        let directive_expr = crate::parser::ast::Expression {
+            pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_constant(Box::new(
+                crate::parser::ast::Constant::String(Cow::Owned("'use memo'".to_string()), None),
+            ))),
+            pexp_loc: LocIdx::none(),
+            pexp_attributes: Attributes::new(),
+        };
+        let directive_expr_idx = arena.push_expr(directive_expr);
+        let directive_attrs = Attributes::from_vec(vec![(
+            Located::mknoloc(arena.intern_string("directive")),
+            crate::parser::ast::Payload::PStr(Box::new(vec![crate::parser::ast::StructureItem {
+                pstr_desc: Box::new(crate::parser::ast::StructureItemDesc::Pstr_eval(Box::new((
+                    directive_expr_idx,
+                    Attributes::new(),
+                )))),
+                pstr_loc: LocIdx::none(),
+            }])),
+        )]);
+
+        let param_id = Ident::create_local("name");
+        let param_pat = Pattern::new(
+            PatternDesc::Tpat_var(param_id.clone(), Located::mknoloc("name".to_string())),
+            LocIdx::none(),
+            crate::types::TypeExprRef(0),
+            EnvRef(0),
+            Attributes::new(),
+        );
+        let expr = Expression::new(
+            ExpressionDesc::Texp_function {
+                params: vec![FunctionParam {
+                    param_id: param_id.clone(),
+                    label: crate::parser::ast::ArgLabel::Nolabel,
+                    default: None,
+                    pat: FunctionParamPattern::Simple(param_pat.clone()),
+                }],
+                body: vec![Case::simple(
+                    param_pat,
+                    Expression::new(
+                        ExpressionDesc::Texp_constant(TConstant::Int(1)),
+                        LocIdx::none(),
+                        crate::types::TypeExprRef(0),
+                        EnvRef(0),
+                        Attributes::new(),
+                    ),
+                )],
+                partial: Partial::Total,
+                arity: arena.push_arity(None),
+                async_: false,
+            },
+            LocIdx::none(),
+            crate::types::TypeExprRef(0),
+            EnvRef(0),
+            directive_attrs,
+        );
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let RawLambda::Lfunction(func) = converter.convert_expr_raw(&expr) else {
+            panic!("expected raw function");
+        };
+        assert_eq!(func.attr.directive.as_deref(), Some("'use memo'"));
     }
 
     #[test]
