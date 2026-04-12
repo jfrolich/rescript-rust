@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 75 / 657 JS snapshots passing, 0 compile errors, 582 output diffs
+**Status:** 79 / 657 JS snapshots passing, 0 compile errors, 578 output diffs
 
 ## Goal
 
@@ -35,9 +35,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **75 / 657**
+- JS snapshot parity: **79 / 657**
 - Compile errors: **0**
-- Output diffs: **582**
+- Output diffs: **578**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -75,6 +75,17 @@ Interpretation:
   shadowing case
 - external-corpus sweeps remain secondary; the in-repo backend frontier still has
   ample signal
+- OCaml `lam_compile.ml` / `lam_compile_primitive.ml` dynamic-import handling is
+  now matched more closely on the Rust backend path:
+  `Pimport` no longer relies on recognizing an already-compiled JS function for
+  eta-expanded external module values; instead it ports OCaml's lambda-stage
+  special-case for a single-argument function whose body is a `Pjs_call`,
+  recompiles that body with `dynamic_import = true`, and then lowers the result
+  through the normal `import("...").then(m => m.member)` path
+- OCaml `js_dump_property.ml` property-access printing is now matched more
+  closely on the Rust printer path:
+  reserved-word properties like `.default` now emit dot access, while
+  bracket-only printing is kept for cases that actually require it
 - OCaml `js_dump_program.ml` empty-deps-program output is now matched on the Rust
   printer path:
   import-free empty modules emit the checked-in
@@ -147,6 +158,27 @@ Remaining internal compile errors under the measured wrapper baseline:
 
 ## Latest Session Findings
 
+- `compiler-rust/src/lambda/compile.rs` now ports the OCaml `Pimport`
+  lambda-stage special-case for eta-expanded externals instead of trying to
+  recover the pattern from compiled JS:
+  when the dynamic-import argument is a single-argument function whose body is a
+  `Pjs_call` (or that call followed by `undefined`), Rust now recompiles the
+  body with `dynamic_import = true` and then lowers it through the same module
+  path used for direct module values.
+- `compiler-rust/src/js_ir/printer.rs` now matches the OCaml property-access
+  printer for the `default` keyword:
+  `Es6_export.default` stays a dot-access expression instead of drifting to
+  `Es6_export["default"]`.
+- Verified focused guards for this cluster:
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release dynamic_imports -- --nocapture`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_property_access_uses_dot_for_default_keyword -- --nocapture`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/module_as_function.res -o /tmp/module_as_function.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/import_external.res -o /tmp/import_external.mjs`
+- `tests/tests/src/module_as_function.res` and
+  `tests/tests/src/import_external.res` now both match their checked-in `.mjs`
+  snapshots exactly.
+- The authoritative JS snapshot baseline now reports **79 / 657** passing, **0**
+  compile errors, and **578** output diffs.
 - `compiler-rust/src/js_ir/printer.rs` now matches the OCaml declaration-printing
   path for undefined-initialized bindings:
   when the lowered JS IR carries `Some(undefined)` for a variable declaration,

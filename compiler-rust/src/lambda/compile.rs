@@ -9,7 +9,10 @@ use std::collections::HashSet;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
-use crate::js_ir::op::{IdentInfo, Kind, LengthObject, MutableFlag, Number, PropertyName};
+use crate::js_ir::op::{
+    IdentInfo, ImportAttributes as JsImportAttributes, Kind, LengthObject, MutableFlag, Number,
+    PropertyName,
+};
 use crate::js_ir::printer::is_js_keyword_or_global;
 use crate::js_ir::{
     BinOp, Block, CallInfo, Delim, DepsProgram, Expression, ExpressionDesc, ForDirection, ModuleId,
@@ -20,7 +23,8 @@ use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
 use crate::lambda::constant::{Constant, StringDelim};
 use crate::lambda::primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-    ExternalModuleName, ExternalObjLabel, ExternalObjSpec, ExternalSpec, Mutable, Primitive,
+    ExternalModuleBindName, ExternalModuleName, ExternalObjLabel, ExternalObjSpec, ExternalSpec,
+    Mutable, Primitive,
 };
 use crate::lambda::{Apply, Lambda, LambdaSwitch, TagInfo};
 
@@ -448,7 +452,79 @@ impl LambdaCompiler {
         }
     }
 
+    fn dynamic_import_body(&self, lam: &Lambda) -> Option<Lambda> {
+        let call = match lam {
+            Lambda::Lfunction(func) => match func.body.as_ref() {
+                Lambda::Lprim(prim) => prim,
+                Lambda::Lsequence(first, second)
+                    if matches!(
+                        second.as_ref(),
+                        Lambda::Lconst(Constant::JsUndefined { .. })
+                    ) =>
+                {
+                    match first.as_ref() {
+                        Lambda::Lprim(prim) => prim,
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+
+        match &call.primitive {
+            Primitive::PjsCall {
+                prim_name,
+                arg_types,
+                ffi,
+                transformed_jsx,
+                ..
+            } => Some(Lambda::prim(
+                Primitive::PjsCall {
+                    prim_name: prim_name.clone(),
+                    arg_types: arg_types.clone(),
+                    ffi: ffi.clone(),
+                    dynamic_import: true,
+                    transformed_jsx: *transformed_jsx,
+                },
+                call.args.clone(),
+                call.loc.clone(),
+            )),
+            _ => None,
+        }
+    }
+
+    fn compile_import_primitive(&mut self, args: &[Lambda]) -> Compiled {
+        let target = match args {
+            [arg] => self
+                .dynamic_import_body(arg)
+                .unwrap_or_else(|| arg.clone()),
+            _ => {
+                let mut prelude = vec![];
+                let mut compiled_args = Vec::new();
+                for arg in args {
+                    let compiled = self.compile_expr(arg);
+                    prelude.extend(compiled.prelude);
+                    compiled_args.push(compiled.expr);
+                }
+                return Compiled {
+                    prelude,
+                    expr: self.compile_import(compiled_args),
+                };
+            }
+        };
+
+        let compiled = self.compile_expr(&target);
+        let prelude = compiled.prelude;
+        let expr = self.compile_import(vec![compiled.expr]);
+        Compiled { prelude, expr }
+    }
+
     fn compile_primitive(&mut self, prim: &Primitive, args: &[Lambda]) -> Compiled {
+        if matches!(prim, Primitive::Pimport) {
+            return self.compile_import_primitive(args);
+        }
+
         use Primitive::*;
         let mut prelude = vec![];
         let mut compiled_args = Vec::new();
@@ -679,8 +755,16 @@ impl LambdaCompiler {
                 prim_name,
                 arg_types,
                 ffi,
+                dynamic_import,
                 ..
-            } => self.compile_js_call(prim_name, arg_types, ffi, compiled_args, &mut prelude),
+            } => self.compile_js_call(
+                prim_name,
+                arg_types,
+                ffi,
+                *dynamic_import,
+                compiled_args,
+                &mut prelude,
+            ),
             Pnull => Expression::null(),
             Pundefined => Expression::undefined(false),
             _ => Expression::undefined(false),
@@ -849,6 +933,64 @@ impl LambdaCompiler {
             args,
             CallInfo::default(),
         )
+    }
+
+    fn external_module_id(
+        &self,
+        module_name: &ExternalModuleName,
+        default: bool,
+        dynamic_import: bool,
+    ) -> ModuleId {
+        ModuleId {
+            id: Ident::create_persistent(external_module_ident_name(module_name)),
+            kind: Kind::External {
+                name: module_name.bundle.clone(),
+                default,
+                import_attributes: external_module_import_attributes(module_name),
+            },
+            dynamic_import,
+        }
+    }
+
+    fn external_module_binding(
+        &self,
+        module_name: &ExternalModuleName,
+        default: bool,
+        dynamic_import: bool,
+    ) -> Expression {
+        Expression::qualified(self.external_module_id(module_name, default, dynamic_import), None)
+    }
+
+    fn translate_scoped_module_value(
+        &self,
+        module_name: Option<&ExternalModuleName>,
+        name: &str,
+        scopes: &[String],
+        dynamic_import: bool,
+    ) -> Expression {
+        match module_name {
+            Some(module_name) => match scopes.split_first() {
+                None => {
+                    let default = name == "default";
+                    let module = self.external_module_binding(module_name, default, dynamic_import);
+                    if default {
+                        module
+                    } else {
+                        self.static_index(module, name)
+                    }
+                }
+                Some((first_scope, rest_scopes)) => {
+                    let mut expr =
+                        self.external_module_binding(module_name, false, dynamic_import);
+                    expr = self.static_index(expr, first_scope);
+                    for scope in rest_scopes {
+                        expr = self.static_index(expr, scope);
+                    }
+                    self.static_index(expr, name)
+                }
+            },
+            None => self.translate_scoped_global_value(name, scopes),
+        }
     }
 
     fn optional_block(&self, value: Expression, identity: bool) -> Expression {
@@ -1050,16 +1192,22 @@ impl LambdaCompiler {
         prim_name: &str,
         arg_types: &[ExternalArgSpec],
         ffi: &crate::lambda::primitive::ExternalFfiSpec,
+        dynamic_import: bool,
         args: Vec<Expression>,
         _prelude: &mut Block,
     ) -> Expression {
         match ffi.spec.as_ref() {
             Some(ExternalSpec::JsVar {
                 name,
-                external_module_name: None,
+                external_module_name,
                 scopes,
             }) => {
-                let value = self.translate_scoped_global_value(name, scopes);
+                let value = self.translate_scoped_module_value(
+                    external_module_name.as_ref(),
+                    name,
+                    scopes,
+                    dynamic_import,
+                );
                 let args = self.assemble_external_args_no_splice(arg_types, args);
                 if args.is_empty() {
                     value
@@ -1069,22 +1217,32 @@ impl LambdaCompiler {
             }
             Some(ExternalSpec::JsCall {
                 name,
-                external_module_name: None,
+                external_module_name,
                 scopes,
                 tagged_template: false,
                 ..
             }) => Expression::call(
-                self.translate_scoped_global_value(name, scopes),
+                self.translate_scoped_module_value(
+                    external_module_name.as_ref(),
+                    name,
+                    scopes,
+                    dynamic_import,
+                ),
                 self.assemble_external_args_no_splice(arg_types, args),
                 CallInfo::default(),
             ),
             Some(ExternalSpec::JsNew {
                 name,
-                external_module_name: None,
+                external_module_name,
                 scopes,
                 ..
             }) => Expression::new(ExpressionDesc::New(
-                Box::new(self.translate_scoped_global_value(name, scopes)),
+                Box::new(self.translate_scoped_module_value(
+                    external_module_name.as_ref(),
+                    name,
+                    scopes,
+                    dynamic_import,
+                )),
                 Some(self.assemble_external_args_no_splice(arg_types, args)),
             )),
             Some(ExternalSpec::JsSend {
@@ -1169,16 +1327,27 @@ impl LambdaCompiler {
                 }
             }
             Some(ExternalSpec::JsModuleAsVar(module_name)) => {
-                self.compile_module_external_fallback(prim_name, module_name, args, false)
+                let value = self.external_module_binding(module_name, false, dynamic_import);
+                let args = self.assemble_external_args_no_splice(arg_types, args);
+                if args.is_empty() {
+                    value
+                } else {
+                    Expression::call(value, args, CallInfo::default())
+                }
             }
             Some(ExternalSpec::JsModuleAsFn {
                 external_module_name,
                 ..
-            }) => {
-                self.compile_module_external_fallback(prim_name, external_module_name, args, false)
-            }
+            }) => Expression::call(
+                self.external_module_binding(external_module_name, false, dynamic_import),
+                self.assemble_external_args_no_splice(arg_types, args),
+                CallInfo::default(),
+            ),
             Some(ExternalSpec::JsModuleAsClass(module_name)) => {
-                self.compile_module_external_fallback(prim_name, module_name, args, true)
+                Expression::new(ExpressionDesc::New(
+                    Box::new(self.external_module_binding(module_name, false, dynamic_import)),
+                    Some(self.assemble_external_args_no_splice(arg_types, args)),
+                ))
             }
             _ => self.compile_plain_js_call(prim_name, args),
         }
@@ -1193,12 +1362,19 @@ impl LambdaCompiler {
     }
 
     fn compile_import(&self, args: Vec<Expression>) -> Expression {
-        let [arg] = args.as_slice() else {
-            return Expression::call(
-                Expression::var(Ident::create_persistent("import")),
-                args,
-                CallInfo::default(),
-            );
+        let arg = match args.as_slice() {
+            [arg] => arg,
+            [arg, Expression {
+                desc: ExpressionDesc::Undefined { is_unit: true },
+                ..
+            }] => arg,
+            _ => {
+                return Expression::call(
+                    Expression::var(Ident::create_persistent("import")),
+                    args,
+                    CallInfo::default(),
+                );
+            }
         };
 
         let Some((module, member)) = self.module_of_expression(arg) else {
@@ -1209,11 +1385,15 @@ impl LambdaCompiler {
             );
         };
 
-        let Some(path) = self
-            .module_path_resolver
-            .as_ref()
-            .and_then(|resolver| resolver.resolve_module_path(&module))
-        else {
+        let path = match &module.kind {
+            Kind::External { name, .. } => Some(name.clone()),
+            _ => self
+                .module_path_resolver
+                .as_ref()
+                .and_then(|resolver| resolver.resolve_module_path(&module)),
+        };
+
+        let Some(path) = path else {
             return Expression::call(
                 Expression::var(Ident::create_persistent("import")),
                 args,
@@ -1226,6 +1406,11 @@ impl LambdaCompiler {
             vec![Expression::string(path)],
             CallInfo::default(),
         );
+
+        let member = member.or_else(|| match &module.kind {
+            Kind::External { default: true, .. } => Some("default".to_string()),
+            _ => None,
+        });
 
         match member {
             Some(member) => {
@@ -1303,24 +1488,6 @@ impl LambdaCompiler {
             field.to_string(),
             None,
         ))
-    }
-
-    fn compile_module_external_fallback(
-        &self,
-        prim_name: &str,
-        module_name: &ExternalModuleName,
-        args: Vec<Expression>,
-        is_new: bool,
-    ) -> Expression {
-        let _ = module_name;
-        if is_new {
-            Expression::new(ExpressionDesc::New(
-                Box::new(Expression::var(Ident::create_persistent(prim_name))),
-                Some(args),
-            ))
-        } else {
-            self.compile_plain_js_call(prim_name, args)
-        }
     }
 
     fn fresh_ident(&self, prefix: &str) -> Ident {
@@ -1414,6 +1581,103 @@ fn js_expr_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Await(_)
         | ExpressionDesc::Spread(_) => false,
+    }
+}
+
+fn external_module_import_attributes(
+    module_name: &ExternalModuleName,
+) -> Option<JsImportAttributes> {
+    module_name
+        .import_attributes
+        .as_ref()?
+        .iter()
+        .find_map(|(key, value)| {
+            (key == "type").then(|| JsImportAttributes {
+                type_: value.clone(),
+            })
+        })
+}
+
+fn external_module_ident_name(module_name: &ExternalModuleName) -> String {
+    match &module_name.module_bind_name {
+        ExternalModuleBindName::HintName(hint) => capitalize_ascii_first(hint),
+        ExternalModuleBindName::Nothing => js_id_name_of_hint_name(&module_name.bundle),
+    }
+}
+
+fn capitalize_ascii_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => {
+            let mut out = String::new();
+            out.push(first.to_ascii_uppercase());
+            out.push_str(chars.as_str());
+            out
+        }
+    }
+}
+
+fn good_hint_name(module_name: &str, offset: usize) -> bool {
+    let bytes = module_name.as_bytes();
+    offset < bytes.len()
+        && bytes[offset].is_ascii_alphabetic()
+        && bytes[offset + 1..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
+fn collect_start(buf: &mut String, s: &[u8], mut offset: usize) {
+    while offset < s.len() {
+        match s[offset] {
+            b'a'..=b'z' => {
+                buf.push((s[offset] as char).to_ascii_uppercase());
+                collect_next(buf, s, offset + 1);
+                return;
+            }
+            b'A'..=b'Z' => {
+                buf.push(s[offset] as char);
+                collect_next(buf, s, offset + 1);
+                return;
+            }
+            _ => offset += 1,
+        }
+    }
+}
+
+fn collect_next(buf: &mut String, s: &[u8], mut offset: usize) {
+    while offset < s.len() {
+        match s[offset] {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' => {
+                buf.push(s[offset] as char);
+                offset += 1;
+            }
+            b'.' | b'-' => {
+                collect_start(buf, s, offset + 1);
+                return;
+            }
+            _ => offset += 1,
+        }
+    }
+}
+
+fn js_id_name_of_hint_name(module_name: &str) -> String {
+    let offset = module_name.rfind('/').map_or(0, |index| index + 1);
+    if good_hint_name(module_name, offset) {
+        capitalize_ascii_first(&module_name[offset..])
+    } else {
+        let bytes = module_name.as_bytes();
+        let mut buf = String::new();
+        collect_start(&mut buf, bytes, offset);
+        if buf.is_empty() {
+            if offset == 0 {
+                module_name.to_string()
+            } else {
+                capitalize_ascii_first(module_name)
+            }
+        } else {
+            buf
+        }
     }
 }
 
@@ -1976,13 +2240,13 @@ fn collect_modules_from_expression(
 mod tests {
     use super::*;
     use crate::cmi::persistent_env::PersistentEnv;
-    use crate::js_ir::ModulePathResolver;
+    use crate::js_ir::{ModulePathResolver, print_block};
     use crate::lambda::{ApInfo, Apply, ApplyStatus, InlineAttribute, Lambda};
     use crate::lambda::constant::Constant;
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-        ExternalFfiKind, ExternalFfiSpec, ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper,
-        ExternalSpec,
+        ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
+        ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper, ExternalSpec,
     };
     use crate::location::Location;
     use std::fs;
@@ -1994,6 +2258,14 @@ mod tests {
         bytes.extend_from_slice(source_path.to_string_lossy().as_bytes());
         bytes.push(b'\n');
         fs::write(ast_path, bytes).expect("failed to write ast source stub");
+    }
+
+    fn external_module(bundle: &str) -> ExternalModuleName {
+        ExternalModuleName {
+            bundle: bundle.to_string(),
+            module_bind_name: ExternalModuleBindName::Nothing,
+            import_attributes: None,
+        }
     }
 
     #[test]
@@ -2166,6 +2438,152 @@ mod tests {
             }) => assert_eq!(id.name(), "process"),
             other => panic!("expected a plain global value, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lowers_module_external_calls_to_namespace_imports() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "describe".to_string(),
+                arg_types: vec![],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsCall {
+                        name: "describe".to_string(),
+                        external_module_name: Some(external_module("mocha")),
+                        splice: false,
+                        scopes: vec![],
+                        tagged_template: false,
+                    }),
+                    obj_params: None,
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![],
+            Location::none(),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+        assert!(matches!(
+            deps.modules.as_slice(),
+            [ModuleId {
+                kind: Kind::External { name, default, .. },
+                ..
+            }] if name == "mocha" && !default
+        ));
+
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!("expected a single expression statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                assert!(args.is_empty());
+                assert!(matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::StaticIndex(target, field, _),
+                        ..
+                    } if field == "describe"
+                        && matches!(
+                            target.as_ref(),
+                            Expression {
+                                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(
+                                    ModuleId {
+                                        kind: Kind::External { name, default, .. },
+                                        ..
+                                    },
+                                    None,
+                                )),
+                                ..
+                            } if name == "mocha" && !default
+                        )
+                ));
+            }
+            other => panic!("expected external module call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_default_module_values_in_dynamic_imports() {
+        let mut compiler = LambdaCompiler::new();
+        let external_value = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "default".to_string(),
+                arg_types: vec![],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsVar {
+                        name: "default".to_string(),
+                        external_module_name: Some(external_module("a")),
+                        scopes: vec![],
+                    }),
+                    obj_params: None,
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![],
+            Location::none(),
+        );
+        let program = compiler.compile_program(&Lambda::prim(
+            Primitive::Pimport,
+            vec![external_value],
+            Location::none(),
+        ));
+        let rendered = print_block(&program.block);
+        assert_eq!(rendered, "import(\"a\").then(m => m.default);");
+    }
+
+    #[test]
+    fn lowers_unit_returning_default_module_functions_in_dynamic_imports() {
+        let mut compiler = LambdaCompiler::new();
+        let param = Ident::create_local("prim");
+        let eta_expanded_default = Lambda::Lfunction(crate::lambda::LFunction {
+            arity: 1,
+            params: vec![param.clone()],
+            body: Box::new(Lambda::seq(
+                Lambda::prim(
+                    Primitive::PjsCall {
+                        prim_name: "default".to_string(),
+                        arg_types: vec![ExternalArgSpec::dummy()],
+                        ffi: ExternalFfiSpec {
+                            kind: ExternalFfiKind::Default,
+                            spec: Some(ExternalSpec::JsVar {
+                                name: "default".to_string(),
+                                external_module_name: Some(external_module("b")),
+                                scopes: vec![],
+                            }),
+                            obj_params: None,
+                            return_wrapper: ExternalReturnWrapper::Identity,
+                            inline_constant: None,
+                        },
+                        dynamic_import: false,
+                        transformed_jsx: false,
+                    },
+                    vec![Lambda::var(param)],
+                    Location::none(),
+                ),
+                Lambda::const_(Constant::JsUndefined { is_unit: true }),
+            )),
+            attr: crate::lambda::FunctionAttribute::default(),
+        });
+        let program = compiler.compile_program(&Lambda::prim(
+            Primitive::Pimport,
+            vec![eta_expanded_default],
+            Location::none(),
+        ));
+
+        let rendered = print_block(&program.block);
+        assert_eq!(rendered, "import(\"b\").then(m => m.default);");
     }
 
     #[test]

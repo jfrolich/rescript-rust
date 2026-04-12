@@ -1246,12 +1246,15 @@ impl JsPrinter {
 
     /// Print property access
     fn print_property_access(&mut self, name: &str) {
-        if is_valid_js_ident(name) {
+        if property_access_uses_dot(name) {
             self.write_char('.');
             self.write(name);
         } else {
             self.write_char('[');
-            self.print_string(name);
+            match name.parse::<i64>() {
+                Ok(index) if index.to_string() == name => self.write(name),
+                _ => self.print_string(name),
+            }
             self.write_char(']');
         }
     }
@@ -1480,6 +1483,20 @@ fn is_valid_js_ident(s: &str) -> bool {
     }
 
     !is_reserved_word(s)
+}
+
+fn property_access_uses_dot(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}
+        _ => return false,
+    }
+
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 /// Check if a string is a JavaScript reserved word
@@ -1947,6 +1964,17 @@ mod tests {
         );
 
         assert!(rendered.contains("export {\n  $$default as default,\n}"));
+    }
+
+    #[test]
+    fn test_print_property_access_uses_dot_for_default_keyword() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(Expression::var(Ident::create_local("Es6_export"))),
+            "default".to_string(),
+            None,
+        )));
+
+        assert_eq!(rendered, "Es6_export.default");
     }
 
     #[test]
