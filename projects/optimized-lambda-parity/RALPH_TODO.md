@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 656/657 (99.8%), 0 parity failures, 0 hunks, 1 Rust timeout (`Import.res`)
+**Status:** 657/657 (100%), 0 parity failures, 0 hunks, 0 Rust timeouts
 
 ## Goal
 
@@ -22,19 +22,18 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 ```
 
 - OCaml compile coverage: **657/657**
-- Rust compile coverage: **656/657**
-- Optimized lambda parity: **656/657**
+- Rust compile coverage: **657/657**
+- Optimized lambda parity: **657/657**
 - Parity hunks: **0**
-- Stamp-canonicalized parity: not re-baselined in this rerun
-- Stamp-canonicalized hunks: not re-baselined in this rerun
+- Stamp-canonicalized parity: **657/657**
+- Stamp-canonicalized hunks: **0**
 - Largest current exact diffs:
   - none
 - Rust timeout in the current authoritative run:
-  - `Import.res`
+  - none
 - Full raw `-drawlambda` baseline has not been re-run across all 657 files after this slice.
-- Focused raw guard after this slice on the remaining exception/control-flow cluster:
-  - `exception_raise_test.res`: **exact parity**
-  - `inner_call.res`: **exact parity**
+- Focused raw guard after this slice:
+  - `AsInUncurriedExternals.res`: **exact parity**
 
 ## Working Rules
 
@@ -48,10 +47,10 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **0** remaining optimized-lambda parity failures on the current worktree, plus **1** Rust timeout on `Import.res`.
+There are **0** remaining optimized-lambda parity failures on the current worktree and **0** Rust timeouts.
 
 Current frontier characteristics:
-- fresh 2026-04-12 reruns on this worktree put the full optimized baseline at **656/657**, **0** hunks, with a Rust timeout on `Import.res`; older `647/657`, `649/657`, `653/657`, `654/657`, and `655/657` notes below are historical.
+- fresh 2026-04-12 reruns on this worktree put the full optimized baseline at **657/657**, **0** hunks, with no Rust timeouts; older `647/657`, `649/657`, `653/657`, `654/657`, `655/657`, and `656/657` notes below are historical.
 - newly exact after the alias-`simple_for_let` static-exit allocation fix:
   - `gpr_5557.res`
   - `option_repr_test.res`
@@ -62,7 +61,7 @@ Current frontier characteristics:
 - current remaining optimized failures:
   - none
 - current Rust timeout:
-  - `Import.res`
+  - none
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
 - `raw_lambda/lower.rs` is no longer an identity shim.
 - persistent-vs-local module-path normalization is now split in `raw_lambda::convert`:
@@ -177,6 +176,44 @@ Current frontier characteristics:
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Latest Session Findings
+
+### `Import.res` was already dump-exact; the last failure was parity-harness timeout after the dump
+Ran:
+
+```bash
+cargo build --release --manifest-path compiler-rust/Cargo.toml
+timeout 120 ./scripts/test_lambda_parity.sh tests/tests/src/Import.res
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+timeout 120 ./scripts/test_lambda_parity.sh --raw tests/tests/src/AsInUncurriedExternals.res
+```
+
+Result:
+
+- Focused optimized guard on `Import.res`: **exact parity**
+- Full optimized baseline:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Optimized lambda parity: **657/657**
+  - Exact hunks: **0**
+  - Rust timeout: none
+- Focused raw smoke guard:
+  - `AsInUncurriedExternals.res`: **exact parity**
+
+The emitted `-dlambda-sexp` for `Import.res` was already byte-for-byte equal to
+OCaml. Rust still failed the parity harness because `driver.rs` kept running the
+later JS compilation pipeline after printing the dump, and that backend work hit
+the 10-second timeout on this large dynamic-import file.
+
+This slice fixes the harness boundary instead of the lowering:
+
+- `compiler-rust/src/driver.rs` now honors `RUST_LAMBDA_DUMP_ONLY` and exits
+  immediately after `-dlambda-sexp` / `-dlambda-sexp-locs` output is flushed
+- `scripts/test_lambda_parity.sh` now uses `env RUST_LAMBDA_DUMP_ONLY=1` for
+  optimized lambda runs and keeps `env RUST_RAWLAMBDA_ONLY=1` for raw runs
+
+That keeps the parity dump path aligned with the thing the harness is actually
+measuring, and it removes the last non-parity `Import.res` timeout without
+changing optimized-lambda semantics.
 
 ### constrained include typed signatures must keep the original alias path
 Ran:

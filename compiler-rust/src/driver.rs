@@ -1304,6 +1304,13 @@ pub fn compile_source_to_js_with_options(
                 crate::lambda::sexp_lambda::print_lambda_with_locs(&lowered_lambda, &mut stderr);
             let _ = stderr.flush();
         }
+
+        // Optimized-lambda parity only needs the dump output. Mirror the
+        // typedtree parity short-circuit so large JS-backend work cannot turn
+        // an exact dump match into a timeout-only failure.
+        if std::env::var_os("RUST_LAMBDA_DUMP_ONLY").is_some() {
+            std::process::exit(0);
+        }
     }
 
     // Keep the lowered JS path on the existing Lambda converter while the

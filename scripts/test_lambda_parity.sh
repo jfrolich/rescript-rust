@@ -221,7 +221,11 @@ test_single_file() {
 
     run_rust_bsc() {
         local rust_exit=0
-        timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "$@" || rust_exit=$?
+        if [[ "$TEST_RAW" == "true" ]]; then
+            env RUST_RAWLAMBDA_ONLY=1 timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "$@" || rust_exit=$?
+        else
+            env RUST_LAMBDA_DUMP_ONLY=1 timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "$@" || rust_exit=$?
+        fi
         if [[ "$rust_exit" -eq 0 ]]; then
             rust_pass=1
         elif [[ "$rust_exit" -eq 124 ]]; then
