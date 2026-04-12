@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 70 / 657 JS snapshots passing, 0 compile errors, 587 output diffs
+**Status:** 64 / 657 JS snapshots passing, 0 compile errors, 593 output diffs
 
 ## Goal
 
@@ -35,9 +35,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **70 / 657**
+- JS snapshot parity: **64 / 657**
 - Compile errors: **0**
-- Output diffs: **587**
+- Output diffs: **593**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -361,3 +361,31 @@ Remaining internal compile errors under the measured wrapper baseline:
   snapshot exactly after the list-cons port.
 - A follow-up authoritative wrapper rerun after the list-cons port remained
   **70 / 657** passing, **0** compile errors, and **587** output diffs.
+- `compiler-rust/src/lambda/compile.rs` now ports the OCaml
+  `Js_output.append_output` value-sequence behavior on the JS backend path:
+  when both sides of an `Lsequence` remain expression-valued, Rust now keeps
+  the side effect in a JS comma expression instead of eagerly hoisting it to a
+  standalone statement; when those comma expressions are later materialized in
+  effect-only top-level contexts, they are flattened back to statements so
+  setter-style sequences do not leak trailing `, undefined`.
+- Verified focused guards for this sequence-lowering cluster:
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release lowers_expression_sequences_to_js_comma_expressions --lib`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release drops_pure_sequence_prefixes_in_effect_contexts --lib`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release flattens_value_sequences_back_to_effect_statements_at_toplevel --lib`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Equality_over_optimization.res -o /tmp/Equality_over_optimization.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DictInference.res -o /tmp/DictInference.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+- `tests/tests/src/Equality_over_optimization.res` now matches its checked-in
+  `.mjs` snapshot exactly; the missing continuation-sensitive
+  `(console.log("hello"), undefined)` lowering is no longer active there.
+- `tests/tests/src/DictInference.res` also stays exact after the effect-context
+  flattening adjustment, so the sequence port no longer regresses the
+  `Js.Dict.set` assignment shape.
+- `tests/tests/src/ExternalShadow.res` still matches its checked-in `.mjs`
+  snapshot exactly after the sequence port.
+- The authoritative JS snapshot baseline now reports **64 / 657** passing, **0**
+  compile errors, and **593** output diffs.
+- This is a **temporary regression** versus the prior **70 / 657** baseline,
+  but the change is kept because the OCaml-aligned `Lsequence` behavior is now
+  correct on focused files and exposes remaining downstream effect-context / JS
+  pass mismatches elsewhere in the backend.

@@ -74,7 +74,7 @@ impl LambdaCompiler {
             ExpressionDesc::CamlBlock(_, _, _, TagInfo::ModuleExport(exports)) => exports,
             ExpressionDesc::Undefined { .. } => vec![],
             _ => {
-                block.push(Statement::exp(compiled.expr));
+                push_effect_expression(&mut block, compiled.expr);
                 vec![]
             }
         };
@@ -276,13 +276,9 @@ impl LambdaCompiler {
                 }
             }
             Lambda::Lsequence(a, b) => {
-                let mut prelude = self.compile_block(a);
-                let compiled = self.compile_expr(b);
-                prelude.extend(compiled.prelude);
-                Compiled {
-                    prelude,
-                    expr: compiled.expr,
-                }
+                let first = self.compile_expr(a);
+                let second = self.compile_expr(b);
+                self.append_effect_output(first, second)
             }
             Lambda::Lwhile(cond, body) => {
                 let cond_expr = self.compile_expr(cond).expr;
@@ -327,11 +323,38 @@ impl LambdaCompiler {
     fn compile_block(&mut self, lam: &Lambda) -> Block {
         let compiled = self.compile_expr(lam);
         let mut block = compiled.prelude;
-        // Only add the final expression if it's not undefined
         if !matches!(compiled.expr.desc, ExpressionDesc::Undefined { .. }) {
             block.push(Statement::exp(compiled.expr));
         }
         block
+    }
+
+    fn append_effect_output(&self, first: Compiled, second: Compiled) -> Compiled {
+        let first_is_pure = js_expr_no_side_effects(&first.expr);
+        if first.prelude.is_empty() {
+            if first_is_pure {
+                return second;
+            }
+            if second.prelude.is_empty() {
+                return Compiled {
+                    prelude: vec![],
+                    expr: Expression::new(ExpressionDesc::Seq(
+                        Box::new(first.expr),
+                        Box::new(second.expr),
+                    )),
+                };
+            }
+        }
+
+        let mut prelude = first.prelude;
+        if !first_is_pure {
+            push_effect_expression(&mut prelude, first.expr);
+        }
+        prelude.extend(second.prelude);
+        Compiled {
+            prelude,
+            expr: second.expr,
+        }
     }
 
     fn compile_switch(&mut self, scrut: &Lambda, switch: &LambdaSwitch) -> Compiled {
@@ -1342,6 +1365,69 @@ fn module_side_effect_reason(lam: &Lambda) -> Option<String> {
     }
 }
 
+fn js_expr_no_side_effects(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Var(_)
+        | ExpressionDesc::Fun { .. }
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Str { .. } => true,
+        ExpressionDesc::StaticIndex(target, _, _) => js_expr_no_side_effects(target),
+        ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right)
+        | ExpressionDesc::In(left, right)
+        | ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::Seq(left, right) => {
+            js_expr_no_side_effects(left) && js_expr_no_side_effects(right)
+        }
+        ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::OptionalBlock(inner, _) => js_expr_no_side_effects(inner),
+        ExpressionDesc::Array(items, _) => items.iter().all(js_expr_no_side_effects),
+        ExpressionDesc::CamlBlock(items, _, _, _) => items.iter().all(js_expr_no_side_effects),
+        ExpressionDesc::Object(dup, props) => {
+            dup.as_deref().is_none_or(js_expr_no_side_effects)
+                && props.iter().all(|(_, value)| js_expr_no_side_effects(value))
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            js_expr_no_side_effects(test)
+                && js_expr_no_side_effects(consequent)
+                && js_expr_no_side_effects(alternate)
+        }
+        ExpressionDesc::Bin(op, left, right) => {
+            *op != BinOp::Eq && js_expr_no_side_effects(left) && js_expr_no_side_effects(right)
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            js_expr_no_side_effects(tag)
+                && strings.iter().all(js_expr_no_side_effects)
+                && values.iter().all(js_expr_no_side_effects)
+        }
+        ExpressionDesc::FlatCall(_, _)
+        | ExpressionDesc::Call(_, _, _)
+        | ExpressionDesc::New(_, _)
+        | ExpressionDesc::RawJsCode(_)
+        | ExpressionDesc::Await(_)
+        | ExpressionDesc::Spread(_) => false,
+    }
+}
+
+fn push_effect_expression(block: &mut Block, expr: Expression) {
+    match expr.desc {
+        ExpressionDesc::Seq(left, right) => {
+            push_effect_expression(block, *left);
+            push_effect_expression(block, *right);
+        }
+        _ if js_expr_no_side_effects(&expr) => {}
+        _ => block.push(Statement::exp(expr)),
+    }
+}
+
 fn comparison_to_binop(cmp: Comparison) -> BinOp {
     match cmp {
         Comparison::Eq => BinOp::EqEqEq,
@@ -1891,7 +1977,7 @@ mod tests {
     use super::*;
     use crate::cmi::persistent_env::PersistentEnv;
     use crate::js_ir::ModulePathResolver;
-    use crate::lambda::Lambda;
+    use crate::lambda::{ApInfo, Apply, ApplyStatus, InlineAttribute, Lambda};
     use crate::lambda::constant::Constant;
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
@@ -1916,6 +2002,132 @@ mod tests {
         let lam = Lambda::const_(Constant::int(7));
         let program = compiler.compile_program(&lam);
         assert!(!program.block.is_empty());
+    }
+
+    #[test]
+    fn lowers_expression_sequences_to_js_comma_expressions() {
+        let mut compiler = LambdaCompiler::new();
+        let callback = Ident::create_local("callback");
+        let sequence = Lambda::Lsequence(
+            Box::new(Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::var(callback.clone())),
+                ap_args: vec![],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            })),
+            Box::new(Lambda::const_(Constant::none())),
+        );
+        let program = compiler.compile_program(&Lambda::prim(
+            Primitive::Pmakearray,
+            vec![sequence],
+            Location::none(),
+        ));
+
+        let [stmt] = program.block.as_slice() else {
+            panic!("expected a single expression statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Array(items, _),
+                ..
+            }) => {
+                let [item] = items.as_slice() else {
+                    panic!("expected a single array element");
+                };
+                match &item.desc {
+                    ExpressionDesc::Seq(first, second) => {
+                        assert!(matches!(
+                            first.as_ref(),
+                            Expression {
+                                desc: ExpressionDesc::Call(func, args, _),
+                                ..
+                            } if args.is_empty() && matches!(
+                                func.as_ref(),
+                                Expression {
+                                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                                    ..
+                                } if id.same(&callback)
+                            )
+                        ));
+                        assert!(matches!(
+                            second.as_ref(),
+                            Expression {
+                                desc: ExpressionDesc::Undefined { is_unit: false },
+                                ..
+                            }
+                        ));
+                    }
+                    other => panic!("expected comma expression inside array, got {other:?}"),
+                }
+            }
+            other => panic!("expected array literal output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drops_pure_sequence_prefixes_in_effect_contexts() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let lam = Lambda::Lsequence(
+            Box::new(Lambda::const_(Constant::int(1))),
+            Box::new(Lambda::var(value.clone())),
+        );
+        let program = compiler.compile_program(&lam);
+
+        let [stmt] = program.block.as_slice() else {
+            panic!("expected a single expression statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            }) => assert!(id.same(&value)),
+            other => panic!("expected pure sequence prefix to be removed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flattens_value_sequences_back_to_effect_statements_at_toplevel() {
+        let mut compiler = LambdaCompiler::new();
+        let callback = Ident::create_local("callback");
+        let lam = Lambda::Lsequence(
+            Box::new(Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::var(callback.clone())),
+                ap_args: vec![],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            })),
+            Box::new(Lambda::const_(Constant::none())),
+        );
+        let program = compiler.compile_program(&lam);
+
+        let [stmt] = program.block.as_slice() else {
+            panic!("expected a single expression statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                assert!(args.is_empty());
+                assert!(matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&callback)
+                ));
+            }
+            other => panic!("expected top-level sequence to flatten to a call statement, got {other:?}"),
+        }
     }
 
     #[test]
