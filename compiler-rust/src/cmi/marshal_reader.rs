@@ -40,6 +40,8 @@ const CODE_STRING8: u8 = 0x09;
 const CODE_STRING32: u8 = 0x0A;
 const CODE_DOUBLE_BIG: u8 = 0x0B;
 const CODE_DOUBLE_LITTLE: u8 = 0x0C;
+const CODE_CUSTOM_FIXED: u8 = 0x19;
+const CUSTOM_INT32_ID: &[u8] = b"_i\0";
 
 /// A generic OCaml value read from the Marshal format.
 #[derive(Debug, Clone)]
@@ -410,6 +412,17 @@ impl MarshalReader {
                 self.obj_table.push(value.clone());
                 Ok(Some(value))
             }
+            CODE_CUSTOM_FIXED => {
+                let id = read_custom_fixed_id(reader)?;
+                match id.as_slice() {
+                    CUSTOM_INT32_ID => {
+                        let value = OcamlValue::Int(read_i32_be(reader)? as i64);
+                        self.obj_table.push(value.clone());
+                        Ok(Some(value))
+                    }
+                    _ => Err(MarshalError::BadOpcode(code)),
+                }
+            }
             _ => Err(MarshalError::BadOpcode(code)),
         }
     }
@@ -446,6 +459,17 @@ fn read_i8<R: Read>(reader: &mut R) -> Result<i8, io::Error> {
     let mut buf = [0u8; 1];
     reader.read_exact(&mut buf)?;
     Ok(buf[0] as i8)
+}
+
+fn read_custom_fixed_id<R: Read>(reader: &mut R) -> Result<Vec<u8>, io::Error> {
+    let mut id = Vec::new();
+    loop {
+        let byte = read_u8(reader)?;
+        id.push(byte);
+        if byte == 0 {
+            return Ok(id);
+        }
+    }
 }
 
 fn read_u16_be<R: Read>(reader: &mut R) -> Result<u16, io::Error> {
@@ -561,5 +585,27 @@ mod tests {
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].as_int(), 1);
         assert_eq!(fields[1].as_int(), 2);
+    }
+
+    #[test]
+    fn test_read_custom_fixed_int32() {
+        let data = [
+            0x84, 0x95, 0xA6, 0xBE, // magic
+            0x00, 0x00, 0x00, 0x08, // data_len = 8
+            0x00, 0x00, 0x00, 0x01, // obj_count = 1
+            0x00, 0x00, 0x00, 0x03, // size_32 = 3 words
+            0x00, 0x00, 0x00, 0x03, // size_64 = 3 words
+            CODE_CUSTOM_FIXED,
+            b'_',
+            b'i',
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+        ];
+        let mut reader = MarshalReader::new();
+        let val = reader.read_from_bytes(&data).unwrap();
+        assert_eq!(val.as_int(), 1);
     }
 }

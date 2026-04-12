@@ -1300,6 +1300,7 @@ fn decoded_external_ffi_spec(encoded: &str) -> ExternalFfiSpec {
             .as_ref()
             .and_then(ffi_marshaled_return_wrapper)
             .unwrap_or(ExternalReturnWrapper::Identity),
+        inline_constant: None,
     }
 }
 

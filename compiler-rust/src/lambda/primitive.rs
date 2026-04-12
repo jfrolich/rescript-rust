@@ -39,7 +39,7 @@ pub struct ExternalArgSpec {
 }
 
 /// External FFI specification
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExternalFfiSpec {
     // Placeholder - actual structure from External_ffi_types
     pub module_name: Option<String>,
@@ -47,6 +47,8 @@ pub struct ExternalFfiSpec {
     pub kind: ExternalFfiKind,
     /// How the fully applied call result should be wrapped.
     pub return_wrapper: ExternalReturnWrapper,
+    /// Optional inline constant preserved from marshaled external ffi metadata.
+    pub inline_constant: Option<super::constant::Constant>,
 }
 
 /// Raw FFI kind preserved across the raw-lambda boundary.

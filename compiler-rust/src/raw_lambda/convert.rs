@@ -2498,6 +2498,9 @@ impl<'a> RawLambdaConverter<'a> {
             module_name: None,
             kind,
             return_wrapper,
+            inline_constant: ffi_marshaled
+                .as_ref()
+                .and_then(ffi_marshaled_inline_constant),
         }
     }
 
@@ -9549,12 +9552,100 @@ fn ffi_marshaled_return_wrapper(value: &OcamlValue) -> Option<ExternalReturnWrap
     }
 }
 
+fn ffi_marshaled_inline_constant(value: &OcamlValue) -> Option<Constant> {
+    let (tag, fields) = value.as_block_opt()?;
+    if tag != 2 || fields.len() != 1 {
+        return None;
+    }
+    ffi_marshaled_constant(&fields[0])
+}
+
+fn ffi_marshaled_constant(value: &OcamlValue) -> Option<Constant> {
+    match value {
+        OcamlValue::Int(0) => Some(Constant::JsNull),
+        OcamlValue::Int(1) => Some(Constant::JsTrue),
+        OcamlValue::Int(2) => Some(Constant::JsFalse),
+        OcamlValue::Int(3) => Some(Constant::ModuleAlias),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => Some(Constant::JsUndefined {
+            is_unit: fields[0].as_bool(),
+        }),
+        OcamlValue::Block(1, fields) if fields.len() == 2 => Some(Constant::Int {
+            i: fields[0].as_int() as i32,
+            comment: ffi_marshaled_pointer_info(&fields[1]),
+        }),
+        OcamlValue::Block(2, fields) if fields.len() == 1 => {
+            Some(Constant::Char(fields[0].as_int() as i32))
+        }
+        OcamlValue::Block(3, fields) if fields.len() == 2 => Some(Constant::String {
+            s: fields[0].as_string().to_string(),
+            delim: ffi_marshaled_optional_delim(&fields[1]),
+        }),
+        OcamlValue::Block(4, fields) if fields.len() == 1 => {
+            Some(Constant::Float(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(5, fields) if fields.len() == 2 => Some(Constant::BigInt {
+            negative: fields[0].as_bool(),
+            value: fields[1].as_string().to_string(),
+        }),
+        OcamlValue::Block(6, fields) if fields.len() == 1 => {
+            Some(Constant::Pointer(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(8, fields) if fields.len() == 1 => Some(Constant::Some(Box::new(
+            ffi_marshaled_constant(&fields[0])?,
+        ))),
+        _ => None,
+    }
+}
+
+fn ffi_marshaled_pointer_info(value: &OcamlValue) -> Option<PointerInfo> {
+    match value {
+        OcamlValue::Int(0) => None,
+        OcamlValue::Int(1) => Some(PointerInfo::AssertFalse),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            let (tag, fields) = fields[0].as_block_opt()?;
+            if tag != 0 || fields.len() != 3 {
+                return None;
+            }
+            Some(PointerInfo::Constructor(PointerConstructorTag {
+                name: fields[0].as_block_opt()?.1.first()?.as_string().to_string(),
+                const_: fields[1].as_int() as i32,
+                non_const: fields[2].as_int() as i32,
+                runtime_tag: None,
+            }))
+        }
+        OcamlValue::Block(1, fields) if fields.len() == 1 => {
+            Some(PointerInfo::Some(fields[0].as_string().to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn ffi_marshaled_optional_delim(value: &OcamlValue) -> Option<StringDelim> {
+    match value {
+        OcamlValue::Int(0) => None,
+        OcamlValue::Block(0, fields) if fields.len() == 1 => ffi_marshaled_delim(&fields[0]),
+        _ => None,
+    }
+}
+
+fn ffi_marshaled_delim(value: &OcamlValue) -> Option<StringDelim> {
+    match value.as_int() {
+        0 => Some(StringDelim::Plain),
+        1 => Some(StringDelim::StarJ),
+        2 => Some(StringDelim::NoQuotes),
+        3 => Some(StringDelim::Backtick),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::borrow::Cow;
 
-    use crate::binary_ast::ffi_types::{ExternalSpec, FfiType, ReturnWrapper, encode_ffi_type};
+    use crate::binary_ast::ffi_types::{
+        Delim, ExternalSpec, FfiType, LamConstant, ReturnWrapper, encode_ffi_type,
+    };
     use crate::context::IdGenerator;
     use crate::parse_arena::ParseArena;
     use crate::parser::ast::Attributes;
@@ -9888,6 +9979,62 @@ mod tests {
 
         let spec = converter.ffi_spec_for_primitive(&prim, false, false);
         assert_eq!(spec.kind, ExternalFfiKind::ObjCreate);
+    }
+
+    #[test]
+    fn ffi_spec_reads_marshaled_inline_string_constant() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let prim = crate::types::PrimitiveDescription {
+            prim_name: String::new(),
+            prim_arity: 0,
+            prim_native_name: encode_ffi_type(&FfiType::FfiInlineConst(LamConstant::ConstString {
+                s: "hello".to_string(),
+                delim: Some(Delim::DStarJ),
+            })),
+            prim_native_float: false,
+            prim_from_constructor: false,
+        };
+
+        let spec = converter.ffi_spec_for_primitive(&prim, false, false);
+        assert_eq!(
+            spec.inline_constant,
+            Some(Constant::String {
+                s: "hello".to_string(),
+                delim: Some(StringDelim::StarJ),
+            })
+        );
+    }
+
+    #[test]
+    fn ffi_spec_reads_marshaled_inline_int_constant() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let prim = crate::types::PrimitiveDescription {
+            prim_name: String::new(),
+            prim_arity: 0,
+            prim_native_name: encode_ffi_type(&FfiType::FfiInlineConst(LamConstant::ConstInt {
+                i: 1,
+                comment: crate::binary_ast::ffi_types::PointerInfo::None,
+            })),
+            prim_native_float: false,
+            prim_from_constructor: false,
+        };
+
+        let spec = converter.ffi_spec_for_primitive(&prim, false, false);
+        assert_eq!(
+            spec.inline_constant,
+            Some(Constant::Int {
+                i: 1,
+                comment: None,
+            })
+        );
     }
 
     fn type_alias_decl(manifest: TypeExprRef) -> crate::types::TypeDeclaration {

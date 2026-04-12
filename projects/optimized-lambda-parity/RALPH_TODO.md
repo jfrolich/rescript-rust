@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 636/657 (96.8%), 21 parity failures, 85 hunks
+**Status:** 638/657 (97.1%), 19 parity failures, 80 hunks
 
 ## Goal
 
@@ -23,8 +23,8 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **636/657**
-- Parity hunks: **85**
+- Optimized lambda parity: **638/657**
+- Parity hunks: **80**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
@@ -36,7 +36,6 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
   - `UntaggedVariants.res`: **4** hunks
   - `Stdlib_IntlTests.res`: **4** hunks
   - `Stdlib_TempTests.res`: **4** hunks
-  - `inline_const.res`: **4** hunks
 
 ## Working Rules
 
@@ -50,7 +49,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **21** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
+There are **19** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, but raw construction order and external-call metadata can still move whole control-flow clusters.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -69,6 +68,7 @@ Current frontier characteristics:
   - `minimal_test.res`
 - `conditional/cond_a.res` now also passes exactly as a minimal assert-failure guard.
 - `js_array_test.res` now also passes exactly as a large-file guard.
+- `inline_const.res` and `inline_const_test.res` now also pass exactly after preserving marshaled `FfiInlineConst` metadata through the raw-lambda path and teaching the marshal reader to decode OCaml's fixed custom `int32` payload.
 - nullary `CstrUnboxed` constructor metadata is now preserved in raw lambda, which removed the hidden `OnlyOne` constructor-vs-unit mismatch in `UntaggedVariants.res`; that file is now down to **4** hunks, all in the existing static-exit numbering cluster.
 - `big_polyvar_test.res` now also passes exactly on the current authoritative baseline.
 - `alias_default_value_test.res`, `function_directives.res`, `function_directives_async.res`, `function_directives_no_inline.res`, and `adt_optimize_test.res` now also pass exactly on the current authoritative baseline.
@@ -133,6 +133,56 @@ Current frontier characteristics:
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### inline FFI constants now survive the raw-lambda boundary all the way to optimized lambda
+Ran:
+
+```bash
+cargo test --release --manifest-path compiler-rust/Cargo.toml ffi_spec_reads_marshaled_inline_string_constant
+cargo test --release --manifest-path compiler-rust/Cargo.toml ffi_spec_reads_marshaled_inline_int_constant
+cargo test --release --manifest-path compiler-rust/Cargo.toml raw_lambda::lower::tests::lowers_blank_js_call_with_inline_constant_to_constant -- --exact
+cargo build --release --manifest-path compiler-rust/Cargo.toml --bin bsc
+timeout 300 ./scripts/test_lambda_parity.sh -j1 inline_const
+timeout 300 ./scripts/test_lambda_parity.sh -j1 js_array_test
+timeout 1800 ./scripts/test_lambda_parity.sh -j1
+```
+
+Result:
+
+- Optimized lambda:
+  - OCaml compile coverage: **657/657**
+  - Rust compile coverage: **657/657**
+  - Optimized lambda parity: **638/657**
+  - Exact hunks: **80**
+
+Key checkpoints:
+
+- `inline_const.res`: passes
+- `inline_const_test.res`: passes
+- `js_array_test.res`: passes
+- authoritative optimized baseline moved from **636/657**, **85** hunks to **638/657**, **80** hunks
+
+OCaml's `Lam_convert.convert` turns `Ffi_inline_const` externals directly into
+`Lam.const`, but Rust's optimized-lambda path was only preserving object-create
+and return-wrapper metadata in `ExternalFfiSpec`. That meant inline strings,
+bools, floats, and ints were still reaching `raw_lambda::lower` as zero-arg
+blank `Pjs_call` nodes. The string/bool/float cases started collapsing as soon
+as the raw FFI spec preserved the inline constant, and the remaining integer
+case exposed one more gap: `compiler-rust/src/cmi/marshal_reader.rs` did not
+decode OCaml's fixed custom `int32` payload (`_i\0`) at all, so
+`FfiInlineConst(ConstInt ...)` silently lost its payload during decode.
+
+This slice fixes both boundaries:
+
+- `raw_lambda::convert` now preserves marshaled inline constants in
+  `ExternalFfiSpec`
+- `raw_lambda::lower` now lowers zero-arg `PjsCall` nodes carrying that metadata
+  back to `Lambda::Lconst`
+- `MarshalReader` now understands the fixed custom `int32` encoding used by
+  OCaml marshal for `Lam_constant.Const_int`
+
+That is enough to remove both inline-const files from the optimized frontier
+without perturbing the `js_array_test.res` large-file guard.
 
 ### module-alias collapse now requires a zero-based field prefix like OCaml `Lam_convert.convert`
 Ran:

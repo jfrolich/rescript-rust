@@ -301,6 +301,11 @@ impl LoweringContext {
                 let arg = args.into_iter().next().unwrap_or_else(Lambda::unit);
                 Lambda::seq(arg, Lambda::unit())
             }
+            Primitive::PjsCall { ffi, .. }
+                if args.is_empty() && ffi.inline_constant.is_some() =>
+            {
+                Lambda::const_(ffi.inline_constant.expect("guarded inline constant"))
+            }
             Primitive::PjsCall {
                 prim_name,
                 arg_types,
@@ -1840,6 +1845,7 @@ mod tests {
                     module_name: None,
                     kind: ExternalFfiKind::ObjCreate,
                     return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
                 },
                 dynamic_import: false,
                 transformed_jsx: false,
@@ -1867,6 +1873,7 @@ mod tests {
                     module_name: None,
                     kind: ExternalFfiKind::Default,
                     return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
                 },
                 dynamic_import: false,
                 transformed_jsx: false,
@@ -1936,6 +1943,7 @@ mod tests {
                     module_name: None,
                     kind: ExternalFfiKind::Default,
                     return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
                 },
                 dynamic_import: false,
                 transformed_jsx: false,
@@ -1955,6 +1963,34 @@ mod tests {
     }
 
     #[test]
+    fn lowers_blank_js_call_with_inline_constant_to_constant() {
+        let lowered = lower_to_lambda(RawLambda::prim(
+            Primitive::PjsCall {
+                prim_name: String::new(),
+                arg_types: Vec::new(),
+                ffi: crate::lambda::primitive::ExternalFfiSpec {
+                    module_name: None,
+                    kind: ExternalFfiKind::Default,
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: Some(Constant::String {
+                        s: "hello".to_string(),
+                        delim: Some(crate::lambda::constant::StringDelim::StarJ),
+                    }),
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            Vec::new(),
+            Location::none(),
+        ));
+
+        assert!(matches!(
+            lowered,
+            Lambda::Lconst(Constant::String { ref s, delim: Some(crate::lambda::constant::StringDelim::StarJ) }) if s == "hello"
+        ));
+    }
+
+    #[test]
     fn wraps_null_to_opt_return_wrapper_around_js_call() {
         let lowered = lower_to_lambda(RawLambda::prim(
             Primitive::PjsCall {
@@ -1964,6 +2000,7 @@ mod tests {
                     module_name: None,
                     kind: ExternalFfiKind::Default,
                     return_wrapper: ExternalReturnWrapper::NullToOpt,
+                    inline_constant: None,
                 },
                 dynamic_import: false,
                 transformed_jsx: false,
@@ -1995,6 +2032,7 @@ mod tests {
                     module_name: None,
                     kind: ExternalFfiKind::Default,
                     return_wrapper: ExternalReturnWrapper::NullUndefinedToOpt,
+                    inline_constant: None,
                 },
                 dynamic_import: false,
                 transformed_jsx: false,
@@ -2498,6 +2536,7 @@ mod tests {
                         module_name: None,
                         kind: ExternalFfiKind::Default,
                         return_wrapper: ExternalReturnWrapper::Identity,
+                        inline_constant: None,
                     },
                     dynamic_import: false,
                     transformed_jsx: false,

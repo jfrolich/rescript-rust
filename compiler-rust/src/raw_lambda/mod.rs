@@ -405,6 +405,7 @@ impl RawLambda {
                             kind: crate::lambda::primitive::ExternalFfiKind::Default,
                             return_wrapper:
                                 crate::lambda::primitive::ExternalReturnWrapper::Identity,
+                            inline_constant: None,
                         },
                         dynamic_import: false,
                         transformed_jsx: false,
