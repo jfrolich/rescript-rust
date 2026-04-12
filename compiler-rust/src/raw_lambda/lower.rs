@@ -333,8 +333,8 @@ impl LoweringContext {
                 Lambda::prim(Primitive::PsomeNotNest, args, loc)
             }
             Primitive::Pmakeblock(_, TagInfo::Some, _) => Lambda::prim(Primitive::Psome, args, loc),
-            primitive @ Primitive::Pisout(_) => match args.as_slice() {
-                [range, Lambda::Lprim(inner)]
+            Primitive::Pisout(range) => match args.as_slice() {
+                [Lambda::Lprim(inner)]
                     if inner.args.len() == 1
                         && matches!(inner.primitive, Primitive::Poffsetint(_)) =>
                 {
@@ -343,11 +343,28 @@ impl LoweringContext {
                     };
                     Lambda::prim(
                         Primitive::Pisout(offset),
-                        vec![range.clone(), inner.args[0].clone()],
+                        vec![
+                            Lambda::const_(Constant::Int {
+                                i: range,
+                                comment: None,
+                            }),
+                            inner.args[0].clone(),
+                        ],
                         loc,
                     )
                 }
-                _ => Lambda::prim(primitive, args, loc),
+                [arg] => Lambda::prim(
+                    Primitive::Pisout(0),
+                    vec![
+                        Lambda::const_(Constant::Int {
+                            i: range,
+                            comment: None,
+                        }),
+                        arg.clone(),
+                    ],
+                    loc,
+                ),
+                _ => Lambda::prim(Primitive::Pisout(range), args, loc),
             },
             primitive @ Primitive::PinitMod => match args.as_slice() {
                 [_, shape] if is_empty_module_shape_constant(shape) => Lambda::unit(),
@@ -363,6 +380,7 @@ impl LoweringContext {
 
     fn lower_switch(&mut self, scrutinee: RawLambda, switch: RawLambdaSwitch) -> Lambda {
         let lowered_scrutinee = self.lower_lambda(scrutinee);
+        let simple_const_only_switch = switch.sw_failaction.is_none() && switch.sw_blocks.is_empty();
         let lowered_consts = switch
             .sw_consts
             .into_iter()
@@ -405,7 +423,8 @@ impl LoweringContext {
                         .as_ref()
                         .is_some_and(|names| names.consts.len() == lowered_consts.len()),
                 sw_consts: lowered_consts,
-                sw_blocks_full: switch.sw_blocks_full
+                sw_blocks_full: simple_const_only_switch
+                    || switch.sw_blocks_full
                     || switch
                         .sw_names
                         .as_ref()
@@ -1306,6 +1325,54 @@ mod tests {
         };
         assert!(switch.sw_consts_full);
         assert!(switch.sw_blocks_full);
+    }
+
+    #[test]
+    fn lowers_const_only_switch_with_full_blocks_for_if_rewrite() {
+        let loc = Location::none();
+        let scrutinee = Ident::create_local("x");
+        let exit = 1;
+        let lowered = lower_to_lambda(RawLambda::LifThenElse(
+            Box::new(RawLambda::prim(
+                Primitive::Pisout(2),
+                vec![RawLambda::prim(
+                    Primitive::Poffsetint(-1),
+                    vec![RawLambda::var(scrutinee.clone())],
+                    loc.clone(),
+                )],
+                loc.clone(),
+            )),
+            Box::new(RawLambda::LstaticRaise(exit, Vec::new())),
+            Box::new(RawLambda::Lswitch(
+                Box::new(RawLambda::var(scrutinee.clone())),
+                RawLambdaSwitch {
+                    sw_consts_full: false,
+                    sw_consts: vec![
+                        (1, RawLambda::const_(Constant::Char(97))),
+                        (2, RawLambda::const_(Constant::Char(98))),
+                        (3, RawLambda::const_(Constant::Char(99))),
+                    ],
+                    sw_blocks_full: false,
+                    sw_blocks: Vec::new(),
+                    sw_failaction: None,
+                    sw_names: None,
+                },
+                loc,
+            )),
+        ));
+
+        let Lambda::Lswitch(switch_arg, switch) = lowered else {
+            panic!("expected if/switch lowering to rewrite into a switch");
+        };
+        let Lambda::Lvar(id) = switch_arg.as_ref() else {
+            panic!("expected switch scrutinee to remain a variable");
+        };
+        assert!(id.same(&scrutinee));
+        assert!(switch.sw_blocks_full);
+        assert!(matches!(
+            switch.sw_failaction.as_deref(),
+            Some(Lambda::LstaticRaise(id, args)) if *id == exit && args.is_empty()
+        ));
     }
 
     #[test]

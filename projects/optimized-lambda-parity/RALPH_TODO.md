@@ -1,7 +1,7 @@
 # Ralph TODO: Optimized Lambda Parity
 
 **Last Updated:** 2026-04-12
-**Status:** 514/657 (78.2%), 143 parity failures, 610 hunks
+**Status:** 530/657 (80.7%), 127 parity failures, 569 hunks
 
 ## Goal
 
@@ -23,14 +23,14 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Optimized lambda parity: **514/657**
-- Exact hunks: **610**
+- Optimized lambda parity: **530/657**
+- Exact hunks: **569**
 - Stamp-canonicalized parity: not re-baselined in this rerun
 - Stamp-canonicalized hunks: not re-baselined in this rerun
 - Largest current exact diffs:
   - `js_json_test.res`: **45** hunks
   - `coercion_module_alias_test.res`: **40** hunks
-  - `mario_game.res`: **36** hunks
+  - `mario_game.res`: **21** hunks
   - `bs_unwrap_test.res`: **21** hunks
   - `uncurried_default.args.res`: **16** hunks
   - `ticker.res`: **13** hunks
@@ -47,7 +47,7 @@ timeout 1800 ./scripts/test_lambda_parity.sh -j1
 
 ## Remaining Parity Failures
 
-There are **143** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, not dump-path routing.
+There are **127** remaining optimized-lambda failures after this slice. The dominant frontier is still post-raw lowering, not dump-path routing.
 
 Current frontier characteristics:
 - `-dlambda-sexp` and `-dlambda-sexp-locs` now route through raw lambda plus `raw_lambda::lower`.
@@ -70,14 +70,63 @@ Current frontier characteristics:
 - `LetUnwrap.res` now also passes exactly after preserving named polyvariant hash metadata in raw match tests.
 - `polyvar_test.res` now also passes exactly on the current authoritative baseline.
 - export-aware alias retention now keeps OCaml's module-export alias lets, which removed both accessor-file failures.
+- the `Pisout` switch-normalization slice is now landed:
+  - `arity_infer.res`: **exact parity**
+  - `complete_parmatch_test.res`: **exact parity**
+  - `gpr_1438.res`: **exact parity**
+  - `gpr_4069_test.res`: **exact parity**
+  - `int_switch_test.res`: **exact parity**
+  - `mario_game.res`: **21 hunks** (down from **36**)
 - the focused `Lam.if_` assert-failure rewrite is now landed:
   - `stringmatch_test.res`: **exact parity** (down from **1 hunk** on the prior baseline)
   - `js_json_test.res`: **45 hunks** on a focused rerun, so its remaining diffs are no longer dominated by that one rewrite
-- the next visible optimized frontier is the current exact-diff leaders (`js_json_test.res`, `coercion_module_alias_test.res`, `mario_game.res`, `bs_unwrap_test.res`, `uncurried_default.args.res`, `ticker.res`) plus the exception static-exit numbering cluster (`test_trywith.res`, `exception_raise_test.res`).
+- the next visible optimized frontier is the current exact-diff leaders (`js_json_test.res`, `coercion_module_alias_test.res`, `mario_game.res`, `bs_unwrap_test.res`, `uncurried_default.args.res`, `ticker.res`) plus the exception static-exit numbering cluster (`test_trywith.res`, `exception_raise_test.res`) and the remaining switch-control-flow files (`set_gen.res`, `test_set.res`, `variant.res`).
 - a fresh full raw `-drawlambda` rerun reported **656/657** with one exact failure in `coercion_module_alias_test.res`; that looks separate from the assert-failure lowering slice and should be handled in a dedicated raw-parity session.
 - Stamp canonicalization needs a fresh dedicated rerun; this slice was verified against exact parity output.
 
 ## Key Findings from Session 2026-04-12
+
+### `Pisout` normalization plus const-only switch fullness moved the switch frontier
+`compiler/core/lam_convert.ml` emits `Pisout` in lowered lambda as the OCaml
+two-argument form:
+
+- primitive payload = offset
+- arguments = `[range; scrutinee]`
+
+Rust raw matching was still baking the range into `Primitive::Pisout(range)` and
+carrying only the scrutinee expression as the argument list. That meant the
+existing `Lam.if_` switch-failaction rewrite in `compiler-rust/src/lambda/mod.rs`
+never matched the lowered shape, even when the raw lambda already matched OCaml.
+
+`compiler-rust/src/raw_lambda/lower.rs` now fixes both parts of the lowering:
+
+- one-argument raw `Pisout(range)` forms are normalized into the OCaml lowered
+  representation, preserving `Poffsetint` as the primitive offset when present
+- const-only switches with no failaction now lower with `sw_blocks_full = true`,
+  matching the simple `convert_switch` branch in `lam_convert.ml`
+
+That slice is covered by the new focused unit test:
+
+- `raw_lambda::lower::tests::lowers_const_only_switch_with_full_blocks_for_if_rewrite`
+
+Verified focused checks:
+
+- `arity_infer.res`: **exact parity**
+- `complete_parmatch_test.res`: **exact parity**
+- `mario_game.res`: **21 hunks** (down from **36**)
+
+Authoritative repo-wide baseline moved from:
+
+- **514/657**, **610** hunks
+
+to:
+
+- **530/657**, **569** hunks
+
+That is a gain of **16 files** and **41 hunks**. The remaining switch frontier is
+smaller and more specific now: the files still left in that family are
+`set_gen.res`, `test_set.res`, `variant.res`, plus the non-switch residuals in
+`mario_game.res`.
 
 ### `Pextension_slot_eq` lowering moved the exception frontier
 `compiler/core/lam_convert.ml` lowers `Pextension_slot_eq` by comparing the
