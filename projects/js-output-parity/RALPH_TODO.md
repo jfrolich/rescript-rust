@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 122 / 657 JS snapshots passing, 0 compile errors, 535 output diffs
+**Status:** 123 / 657 JS snapshots passing, 0 compile errors, 534 output diffs
 
 ## Goal
 
@@ -35,13 +35,42 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **122 / 657**
+- JS snapshot parity: **123 / 657**
 - Compile errors: **0**
-- Output diffs: **535**
+- Output diffs: **534**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- `compiler-rust/src/lambda/compile.rs` now matches one more slice of
+  OCaml `core/lam_compile_main.ml` / `core/lam_module_ident.ml` /
+  `ext/ext_string.ml` on the Rust JS path:
+  after collecting required modules from the lowered JS program, Rust no longer
+  sorts them by the local module identifier name; it now sorts by OCaml's
+  `Lam_module_ident.name` key using the same length-first, then bytewise
+  comparator that `Ext_string.compare` uses
+- Added focused coverage for this slice in
+  `sorts_external_module_dependencies_by_module_name` and
+  `sorts_required_modules_by_length_before_bytes`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release sorts_ -- --test-threads=1`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalArity.res -o /tmp/ExternalArity.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/reactTestUtils.res -o /tmp/reactTestUtils.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/ExternalArity.res` now matches its checked-in `.mjs`
+  snapshot exactly after the required-module sort fix
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the change, which confirms this import-order slice does not perturb the
+  already-resolved external-shadow path
+- `tests/tests/src/reactTestUtils.res` still fails, but its leading diff stays
+  on unrelated backend shaping (`Primitive_option` / `Caml_option`, callback
+  shaping, and extra exports) rather than module-order churn
+- The authoritative JS snapshot baseline now reports **123 / 657** passing,
+  **0** compile errors, and **534** output diffs after the required-module sort
+  fix
 
 - `compiler-rust/src/js_ir/printer.rs` now matches the corresponding
   OCaml `core/js_dump.ml` call-printing rule more closely:
@@ -353,6 +382,34 @@ Remaining internal compile errors under the measured wrapper baseline:
 - none
 
 ## Latest Session Findings
+
+- `compiler-rust/src/lambda/compile.rs` now matches one more slice of
+  OCaml `core/lam_compile_main.ml` / `core/lam_module_ident.ml` /
+  `ext/ext_string.ml` on the Rust JS path:
+  required modules are now sorted by `Lam_module_ident.name` using OCaml's
+  length-first `Ext_string.compare` semantics rather than the Rust local
+  identifier name
+- Verified focused guards for this cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release sorts_ -- --test-threads=1`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalArity.res -o /tmp/ExternalArity.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/reactTestUtils.res -o /tmp/reactTestUtils.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/ExternalArity.res` dropped out of the diff set after the
+  sort fix; its import block now matches the checked-in snapshot exactly
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the change
+- `tests/tests/src/reactTestUtils.res` still fails, but the remaining drift
+  stays on unrelated backend shaping rather than module order
+- The authoritative JS snapshot baseline now reports **123 / 657** passing,
+  **0** compile errors, and **534** output diffs.
+- Interpretation:
+  this is a real OCaml backend parity improvement in the deps-program import
+  ordering stage. The first attempt exposed that OCaml's comparator is not a
+  plain lexical compare; matching the actual `Ext_string.compare`
+  implementation resolves the `ExternalArity.res` import-order drift without
+  regressing mixed `Mocha` / local-module snapshots.
 
 - `compiler-rust/src/lambda/compile.rs`,
   `compiler-rust/src/js_ir/mod.rs`, and

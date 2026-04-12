@@ -1911,9 +1911,25 @@ impl LambdaCompiler {
         let mut seen = std::collections::HashSet::new();
         collect_modules_from_block(block, &mut seen);
         let mut modules = seen.into_iter().collect::<Vec<_>>();
-        modules.sort_by(|left, right| left.id.name().cmp(right.id.name()));
+        modules.sort_by(module_sort_cmp);
         modules
     }
+}
+
+fn module_sort_name(module: &ModuleId) -> &str {
+    match &module.kind {
+        Kind::External { name, .. } => name.as_str(),
+        Kind::Runtime | Kind::Ml => module.id.name(),
+    }
+}
+
+fn module_sort_cmp(left: &ModuleId, right: &ModuleId) -> std::cmp::Ordering {
+    let left_name = module_sort_name(left).as_bytes();
+    let right_name = module_sort_name(right).as_bytes();
+    left_name
+        .len()
+        .cmp(&right_name.len())
+        .then_with(|| left_name.cmp(right_name))
 }
 
 fn module_side_effect_reason(lam: &Lambda) -> Option<String> {
@@ -6089,6 +6105,76 @@ mod tests {
         assert_eq!(deps.modules.len(), 1);
         assert_eq!(deps.modules[0].id.name(), "Belt_List");
         assert!(!deps.modules[0].dynamic_import);
+    }
+
+    #[test]
+    fn sorts_external_module_dependencies_by_module_name() {
+        let compiler = LambdaCompiler::new();
+        let block = vec![
+            Statement::exp(Expression::qualified(
+                ModuleId {
+                    id: Ident::create_persistent("JsxRuntime"),
+                    kind: Kind::External {
+                        name: "react/jsx-runtime".to_string(),
+                        default: false,
+                        import_attributes: None,
+                    },
+                    dynamic_import: false,
+                },
+                None,
+            )),
+            Statement::exp(Expression::qualified(
+                ModuleId {
+                    id: Ident::create_persistent("ReactIntl"),
+                    kind: Kind::External {
+                        name: "react-intl".to_string(),
+                        default: false,
+                        import_attributes: None,
+                    },
+                    dynamic_import: false,
+                },
+                None,
+            )),
+        ];
+
+        let modules = compiler.collect_required_modules(&block);
+
+        assert_eq!(modules.len(), 2);
+        assert_eq!(module_sort_name(&modules[0]), "react-intl");
+        assert_eq!(module_sort_name(&modules[1]), "react/jsx-runtime");
+    }
+
+    #[test]
+    fn sorts_required_modules_by_length_before_bytes() {
+        let compiler = LambdaCompiler::new();
+        let block = vec![
+            Statement::exp(Expression::qualified(
+                ModuleId {
+                    id: Ident::create_persistent("Test_utils"),
+                    kind: Kind::Ml,
+                    dynamic_import: false,
+                },
+                None,
+            )),
+            Statement::exp(Expression::qualified(
+                ModuleId {
+                    id: Ident::create_persistent("Mocha"),
+                    kind: Kind::External {
+                        name: "mocha".to_string(),
+                        default: false,
+                        import_attributes: None,
+                    },
+                    dynamic_import: false,
+                },
+                None,
+            )),
+        ];
+
+        let modules = compiler.collect_required_modules(&block);
+
+        assert_eq!(modules.len(), 2);
+        assert_eq!(module_sort_name(&modules[0]), "mocha");
+        assert_eq!(module_sort_name(&modules[1]), "Test_utils");
     }
 
     #[test]
