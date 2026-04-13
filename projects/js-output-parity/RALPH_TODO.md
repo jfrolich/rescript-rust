@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-13
-**Status:** 304 / 657 JS snapshots passing, 0 compile errors, 353 output diffs
+**Last Updated:** 2026-04-14
+**Status:** 306 / 657 JS snapshots passing, 0 compile errors, 351 output diffs
 
 ## Goal
 
@@ -27,7 +27,7 @@ JS backend only.
 
 ## Current Baseline
 
-Latest authoritative wrapper run on **2026-04-13** using:
+Latest authoritative wrapper run on **2026-04-14** using:
 
 ```bash
 timeout 1800 ./scripts/test_js_output_parity.sh
@@ -35,48 +35,59 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **304 / 657**
+- JS snapshot parity: **306 / 657**
 - Compile errors: **0**
-- Output diffs: **353**
+- Output diffs: **351**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
-  and this iteration narrowed one OCaml-backed `lam_pass_lets_dce`
-  substitution boundary in `compiler/core/lam_pass_lets_dce.ml`
-- After rereading that OCaml pass, the Rust JS-backend simplifier in
-  `compiler-rust/src/lambda/simplify.rs` now still substitutes from the
-  simplified RHS when it ends in a simple export-safe shape, but it refuses to
-  seed body substitutions when the **original** RHS was `Lapply(_)`
-- This matches the OCaml pass structure more closely: named-function results
-  like `compose(...)` can still fold to literals, but they no longer get
-  treated as if their original binding had been a literal or direct alias,
-  while module-field exports such as `each2 = O.forEach` still simplify
-  through the ordinary export path
+  and this iteration isolated one OCaml-backed printer slice in
+  `compiler/core/js_dump.ml` together with raw-JS expression classification
+  from `compiler/ml/js_raw_info.ml`
+- After rereading OCaml's `Typeof` printer, its `Raw_js_code` parenthesization
+  rule, and the dedicated `Bin (Minus, Number 0, e)` dump branch there, the
+  Rust JS printer in `compiler-rust/src/js_ir/printer.rs` now matches that
+  behavior more closely:
+  - `0 - x` and `0. - x` print as unary minus forms instead of literal
+    subtraction trees
+  - `typeof` parenthesizes function expressions but stops adding redundant
+    parentheses around raw-JS identifier/literal/function snippets
+  - raw-JS expression dumping now reuses the existing OXC-backed classifier so
+    regex literals and other OCaml-classified raw expressions keep their
+    checked-in byte shape
 - Added focused regression coverage in
-  `lambda::simplify::tests::keeps_export_bindings_reduced_from_named_function_calls`
-  and retained the existing export-payload/coercion regression tests for the
-  surrounding path
+  `js_ir::printer::tests::test_print_zero_minus_expr_as_unary_minus`,
+  `test_print_zero_float_minus_expr_as_spaced_unary_minus`,
+  `test_print_typeof_function_parenthesizes_arrow_expression`,
+  `test_print_typeof_simple_raw_js_omits_extra_parens`, and
+  `test_print_raw_js_regex_literal_omits_extra_parens`
 - Verified focused guards for this slice:
-  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release keeps_export_bindings_reduced_from_named_function_calls -- --nocapture`
-  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release simplifies_export_payloads_before_export_coercion -- --nocapture`
-  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release simplifies_module_alias_export_payloads_before_export_coercion -- --nocapture`
-  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_deps_program_rebinds_exported_constants_after_surviving_function_bindings -- --nocapture`
-  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsCurried.res -o /tmp/DerivingAccessorsCurried.mjs`
-  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_zero_minus_expr_as_unary_minus -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_zero_float_minus_expr_as_spaced_unary_minus -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_typeof_function_parenthesizes_arrow_expression -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_typeof_simple_raw_js_omits_extra_parens -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_raw_js_regex_literal_omits_extra_parens -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact harness-mode snapshot repros from `tests/tests/lib/bs` for
+    `src/gpr_977_test.ast`,
+    `src/test_per.ast`,
+    `src/ExternalExtension.ast`, and
+    `src/ExternalShadow.ast`
   - `timeout 1800 ./scripts/test_js_output_parity.sh`
 - Focused outcome:
-  `tests/tests/src/DerivingAccessorsCurried.res` is an exact direct snapshot
-  match again, `tests/tests/src/ExternalShadow.res` remains an exact guard-file
-  match, and the cached diff corpus no longer contains
-  `DerivingAccessorsCurried.res`, `DerivingAccessorsUncurried.res`,
-  `Import.res`, `Coercion.res`, or `ExternalShadow.res`
-- The authoritative JS snapshot baseline now reports **304 / 657** passing,
-  **0** compile errors, and **353** output diffs; this is a net **+2**
+  `tests/tests/src/gpr_977_test.res` and `tests/tests/src/test_per.res` now
+  match their checked-in `.mjs` snapshots exactly again,
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match, and
+  `tests/tests/src/ExternalExtension.res` is narrowed to its remaining
+  side-effect-comment reason only (`/* match Not a pure module */` vs
+  `/*  Not a pure module */`)
+- The authoritative JS snapshot baseline now reports **306 / 657** passing,
+  **0** compile errors, and **351** output diffs; this is a net **+2**
   passing snapshots and **-2** output diffs from the previously recorded
-  **302 / 657**, **0** compile errors, **355** output diffs
+  **304 / 657**, **0** compile errors, **353** output diffs
 - Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,

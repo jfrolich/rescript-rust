@@ -9,6 +9,7 @@ use super::{
     ModulePathResolver, Program, Statement, StatementDesc, StringClause, VIdent,
     VariableDeclaration,
 };
+use crate::binary_ast::ppx::{JsExpClassification, classify_js_exp};
 use crate::ident::Ident;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
@@ -900,6 +901,36 @@ impl JsPrinter {
             }
 
             ExpressionDesc::Bin(op, left, right) => {
+                if *op == BinOp::Minus {
+                    match (&left.desc, &right.desc) {
+                        (ExpressionDesc::Number(Number::Int { i: 0, .. }), _) => {
+                            let needs_paren = level > 13;
+                            if needs_paren {
+                                self.write_char('(');
+                            }
+                            self.write_char('-');
+                            self.print_expression(right, 13);
+                            if needs_paren {
+                                self.write_char(')');
+                            }
+                            return;
+                        }
+                        (ExpressionDesc::Number(Number::Float(float)), _) if float.f == "0." => {
+                            let needs_paren = level > 13;
+                            if needs_paren {
+                                self.write_char('(');
+                            }
+                            self.write("- ");
+                            self.print_expression(right, 13);
+                            if needs_paren {
+                                self.write_char(')');
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
                 let (out, lft, rght) = op_precedence(*op);
                 let needs_paren = level > out;
                 if needs_paren {
@@ -941,7 +972,13 @@ impl JsPrinter {
 
             ExpressionDesc::Typeof(e) => {
                 self.write("typeof ");
-                self.print_expression(e, 13);
+                if matches!(e.desc, ExpressionDesc::Fun { .. }) {
+                    self.write_char('(');
+                    self.print_expression(e, 13);
+                    self.write_char(')');
+                } else {
+                    self.print_expression(e, 13);
+                }
             }
 
             ExpressionDesc::In(prop, obj) => {
@@ -1673,9 +1710,14 @@ impl JsPrinter {
             self.write(&info.code);
             self.newline();
         } else {
-            self.write_char('(');
+            let needs_paren = raw_js_expression_needs_paren(&info.code);
+            if needs_paren {
+                self.write_char('(');
+            }
             self.write(&info.code);
-            self.write_char(')');
+            if needs_paren {
+                self.write_char(')');
+            }
         }
     }
 
@@ -1741,6 +1783,18 @@ fn deps_program_is_empty(program: &DepsProgram) -> bool {
         && program.side_effect.is_none()
         && program.program.block.is_empty()
         && program.program.exports.is_empty()
+}
+
+fn raw_snippet_exp_simple_enough(s: &str) -> bool {
+    s.chars()
+        .all(|c| matches!(c, 'a'..='z' | 'A'..='Z' | '_' | '.'))
+}
+
+fn raw_js_expression_needs_paren(code: &str) -> bool {
+    match classify_js_exp(code) {
+        JsExpClassification::JsLiteral | JsExpClassification::JsFunction { .. } => false,
+        JsExpClassification::JsExpUnknown => !raw_snippet_exp_simple_enough(code),
+    }
 }
 
 fn is_undefined_literal(expr: &Expression) -> bool {
@@ -2460,6 +2514,67 @@ mod tests {
         let right = Expression::number(Number::int(2));
         let expr = Expression::bin(BinOp::Plus, left, right);
         assert_eq!(print_expression(&expr), "1 + 2");
+    }
+
+    #[test]
+    fn test_print_zero_minus_expr_as_unary_minus() {
+        let expr = Expression::bin(
+            BinOp::Bor,
+            Expression::bin(
+                BinOp::Minus,
+                Expression::number(Number::int(0)),
+                Expression::var(Ident::create_local("x")),
+            ),
+            Expression::number(Number::int(0)),
+        );
+        assert_eq!(print_expression(&expr), "-x | 0");
+    }
+
+    #[test]
+    fn test_print_zero_float_minus_expr_as_spaced_unary_minus() {
+        let expr = Expression::bin(
+            BinOp::Minus,
+            Expression::number(Number::float("0.")),
+            Expression::var(Ident::create_local("x")),
+        );
+        assert_eq!(print_expression(&expr), "- x");
+    }
+
+    #[test]
+    fn test_print_typeof_function_parenthesizes_arrow_expression() {
+        let value = Ident::create_local("value");
+        let expr = Expression::new(ExpressionDesc::Typeof(Box::new(Expression::new(
+            ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![value.clone()],
+                body: vec![Statement::return_(Expression::var(value))],
+                env: Default::default(),
+                return_unit: false,
+                async_: false,
+                directive: None,
+            },
+        ))));
+        assert_eq!(print_expression(&expr), "typeof (value => value)");
+    }
+
+    #[test]
+    fn test_print_typeof_simple_raw_js_omits_extra_parens() {
+        let expr = Expression::new(ExpressionDesc::Typeof(Box::new(Expression::new(
+            ExpressionDesc::RawJsCode(JsRawInfo {
+                code: "__DEV__".to_string(),
+                is_stmt: false,
+            }),
+        ))));
+        assert_eq!(print_expression(&expr), "typeof __DEV__");
+    }
+
+    #[test]
+    fn test_print_raw_js_regex_literal_omits_extra_parens() {
+        let expr = Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
+            code: "/foo/g".to_string(),
+            is_stmt: false,
+        }));
+        assert_eq!(print_expression(&expr), "/foo/g");
     }
 
     #[test]
