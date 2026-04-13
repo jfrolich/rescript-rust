@@ -6454,7 +6454,8 @@ fn shake_program(mut program: Program) -> Program {
 }
 
 fn shake_block(block: &Block, export_set: &HashSet<Ident>) -> Block {
-    let block = flatten_toplevel_block(block);
+    let mut block = flatten_toplevel_block(block);
+    block.reverse();
     let required = fixed_point_required_idents(&block, export_set);
 
     block
@@ -7506,6 +7507,70 @@ mod tests {
                 assert!(ident.same(&source))
             }
             other => panic!("expected only the original exported binding to remain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_deps_program_reverses_retained_toplevel_binding_order_during_shake() {
+        let mut compiler = LambdaCompiler::new();
+        let first = Ident::create_local("first");
+        let second = Ident::create_local("second");
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            first.clone(),
+            Lambda::const_(Constant::int(3)),
+            Lambda::let_(
+                LetKind::Strict,
+                second.clone(),
+                Lambda::const_(Constant::int(4)),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::ModuleExport(vec![first.clone(), second.clone()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(first.clone()), Lambda::var(second.clone())],
+                    Location::none(),
+                ),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        let [first_export, second_export] = deps.program.exports.as_slice() else {
+            panic!("expected two exports");
+        };
+        assert!(first_export.same(&first));
+        assert!(second_export.same(&second));
+
+        let [first_stmt, second_stmt] = deps.program.block.as_slice() else {
+            panic!("expected the retained bindings to stay in the OCaml shake order");
+        };
+
+        match &first_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 4, .. }),
+                        ..
+                    }),
+                ..
+            }) => assert!(ident.same(&second)),
+            other => panic!("expected the later retained binding first, got {other:?}"),
+        }
+
+        match &second_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
+                        ..
+                    }),
+                ..
+            }) => assert!(ident.same(&first)),
+            other => panic!("expected the earlier retained binding second, got {other:?}"),
         }
     }
 
@@ -11011,22 +11076,10 @@ mod tests {
             side_effect: None,
         });
 
-        let [dep_stmt, exported_stmt, side_stmt] = deps.program.block.as_slice() else {
+        let [side_stmt, exported_stmt, dep_stmt] = deps.program.block.as_slice() else {
             panic!("expected the dependency chain and impure binding to remain");
         };
 
-        match &dep_stmt.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
-                assert!(ident.same(&dep));
-            }
-            other => panic!("expected the dependency binding to remain, got {other:?}"),
-        }
-        match &exported_stmt.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
-                assert!(ident.same(&exported));
-            }
-            other => panic!("expected the exported binding to remain, got {other:?}"),
-        }
         match &side_stmt.desc {
             StatementDesc::Variable(VariableDeclaration {
                 ident,
@@ -11047,7 +11100,19 @@ mod tests {
                     } if id.same(&callback)
                 ));
             }
-            other => panic!("expected the impure binding to remain, got {other:?}"),
+            other => panic!("expected the impure binding to remain first, got {other:?}"),
+        }
+        match &exported_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&exported));
+            }
+            other => panic!("expected the exported binding to remain in the middle, got {other:?}"),
+        }
+        match &dep_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&dep));
+            }
+            other => panic!("expected the dependency binding to remain last, got {other:?}"),
         }
     }
 

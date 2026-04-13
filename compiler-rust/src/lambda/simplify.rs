@@ -580,6 +580,28 @@ fn simplify_primitive(
     env: &SimplifyEnv,
     exports: &HashSet<Ident>,
 ) -> Lambda {
+    if let Primitive::Pmakeblock(_, TagInfo::ModuleExport(export_ids), _) = &info.primitive {
+        debug_assert_eq!(
+            export_ids.len(),
+            info.args.len(),
+            "module export idents and payloads must stay aligned"
+        );
+        let args = info
+            .args
+            .iter()
+            .zip(export_ids.iter())
+            .map(|(arg, export_id)| match arg {
+                // Keep the direct exported binding visible to later export
+                // coercion so Rust can reuse the original declaration the way
+                // OCaml's export-group handling does, instead of synthesizing a
+                // late rebound export after subsequent definitions.
+                Lambda::Lvar(id) if id.same(export_id) => Lambda::var(id.clone()),
+                _ => simplify_with_env(arg, env, exports),
+            })
+            .collect();
+        return Lambda::prim(info.primitive.clone(), args, info.loc.clone());
+    }
+
     let args: Vec<_> = info
         .args
         .iter()

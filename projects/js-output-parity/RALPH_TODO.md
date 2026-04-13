@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 188 / 657 JS snapshots passing, 0 compile errors, 469 output diffs
+**Status:** 170 / 657 JS snapshots passing, 0 compile errors, 487 output diffs
 
 ## Goal
 
@@ -35,13 +35,57 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **188 / 657**
+- JS snapshot parity: **170 / 657**
 - Compile errors: **0**
-- Output diffs: **469**
+- Output diffs: **487**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- This iteration stepped into **Phase 4: Port JS Passes** from `PLAN.md`
+  after tracing the surviving top-level declaration-order drift to
+  `compiler/core/js_shake.ml`, not to `Lam_compile` or the final printer
+- `compiler-rust/src/lambda/compile.rs` now matches the OCaml
+  `Js_shake.shake_program` toplevel-order rule more closely:
+  Rust now performs the same reverse top-level flatten before computing the
+  fixed-point required identifier set and filtering retained statements
+- `compiler-rust/src/lambda/simplify.rs` also keeps direct exported binding
+  references visible in module-export payloads so later export coercion can
+  still reuse the original declaration when that OCaml-aligned case occurs
+- Added focused regression coverage for this slice in:
+  - `lambda::compile::tests::compile_deps_program_reverses_retained_toplevel_binding_order_during_shake`
+  - `lambda::compile::tests::js_shake_pass_keeps_export_dependencies_and_impure_bindings`
+  - existing export-coercion guards such as
+    `lambda::compile::tests::compile_deps_program_reuses_same_name_export_targets`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release reverses_retained_toplevel_binding_order_during_shake -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_shake_pass_keeps_export_dependencies_and_impure_bindings -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_shake_pass_removes_unused_pure_toplevel_bindings_and_statements -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release reuses_same_name_export_targets -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsCurried.res -o /tmp/DerivingAccessorsCurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- The targeted accessor cluster narrowed materially:
+  `tests/tests/src/DerivingAccessorsCurried.res` now picks up the OCaml
+  `Js_shake` retention order for `_composedMyField` / `_composedNum`, and the
+  same ordering shift appears in `DerivingAccessorsUncurried.res`; the
+  remaining drift there is now `noParam` placement plus later byte-shape
+  compaction
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change, which keeps this JS-pass slice isolated from the already
+  stable external-shadow path
+- `tests/tests/src/DisambiguateOptionalFields.res` still differs with the same
+  `v` / `res` order, which shows that file also depends on an earlier
+  post-lowering ordering rule and not just the final `Js_shake` reversal
+- The authoritative JS snapshot baseline now reports **170 / 657** passing,
+  **0** compile errors, and **487** output diffs after this OCaml-aligned
+  `Js_shake` port; this is a net **-18** from the previous recorded baseline.
+  The change is kept because the reverse-top-level rule is directly verified
+  against OCaml source and already fixes a real cluster, even though the
+  surrounding Rust backend is not yet aligned enough for the full corpus to
+  benefit
 
 - Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
   from `PLAN.md`; this iteration stayed on the OCaml post-lowering safe-alias
