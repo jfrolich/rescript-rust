@@ -51,10 +51,14 @@ pub struct InMemoryModuleState {
     /// For modules with `.resi`, this comes from typechecking the `.resi`.
     /// For modules without `.resi`, this is the inferred signature from `.res`.
     pub signature: DeclSignature,
-    /// Monotonically increasing generation number. Bumped each time the
-    /// module's published interface changes. Downstream dependents compare
-    /// their recorded dependency generation against this to detect staleness.
+    /// Monotonically increasing generation number. Bumped only when the
+    /// module's published interface actually changes (fingerprint differs).
+    /// Downstream dependents compare their recorded dependency generation
+    /// against this to detect staleness.
     pub generation: u64,
+    /// Stamp-independent structural fingerprint of the published interface.
+    /// Used to detect whether a recompilation actually changed the interface.
+    pub fingerprint: u64,
     /// Whether this module's source is pure (no side effects), used for
     /// JS import resolution.
     pub is_pure: bool,
@@ -240,8 +244,8 @@ impl std::fmt::Debug for BuildCommandState {
 
 #[derive(Debug, Clone)]
 pub struct CompilerInfo {
-    pub bsc_path: PathBuf,
-    pub bsc_hash: Hash,
+    pub bsc_path: Option<PathBuf>,
+    pub bsc_hash: Option<Hash>,
     pub runtime_path: PathBuf,
 }
 
@@ -330,23 +334,33 @@ impl BuildCommandState {
     }
 
     /// Register a compiled module's interface in the in-memory registry.
-    /// Returns the generation number assigned.
+    /// Only bumps the generation counter if the interface fingerprint actually
+    /// changed (or if this is the first registration). Returns the generation
+    /// number assigned (which may be the same as before if unchanged).
     pub fn register_in_memory_interface(
         &self,
         module_name: String,
         signature: DeclSignature,
+        fingerprint: u64,
         is_pure: bool,
     ) -> u64 {
+        let mut interfaces = self.in_memory_interfaces.lock().unwrap();
+        // Check if the existing interface has the same fingerprint
+        if let Some(existing) = interfaces.get(&module_name) {
+            if existing.fingerprint == fingerprint {
+                // Interface unchanged — keep the same generation number
+                return existing.generation;
+            }
+        }
+        // Interface changed (or first registration) — bump generation
         let generation = self.next_interface_generation();
         let state = InMemoryModuleState {
             signature,
             generation,
+            fingerprint,
             is_pure,
         };
-        self.in_memory_interfaces
-            .lock()
-            .unwrap()
-            .insert(module_name, state);
+        interfaces.insert(module_name, state);
         generation
     }
 
@@ -358,6 +372,21 @@ impl BuildCommandState {
             .unwrap()
             .get(module_name)
             .map(|s| s.generation)
+    }
+
+    /// Purge deleted/renamed modules from the in-memory registries.
+    /// Must be called before compilation when modules have been removed from the
+    /// build graph (e.g., source file deleted or renamed in watch mode).
+    pub fn purge_deleted_modules(&self, deleted_modules: &ahash::AHashSet<String>) {
+        if deleted_modules.is_empty() {
+            return;
+        }
+        let mut registry = self.module_registry.lock().unwrap();
+        let mut interfaces = self.in_memory_interfaces.lock().unwrap();
+        for name in deleted_modules {
+            registry.purge_module(name);
+            interfaces.remove(name);
+        }
     }
 
     /// Take a snapshot of the module registry for use during a compilation wave.

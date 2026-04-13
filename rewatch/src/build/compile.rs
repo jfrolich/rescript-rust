@@ -120,6 +120,12 @@ pub fn compile(
     let mut sorted_modules = build_state.module_names.iter().collect::<Vec<&String>>();
     sorted_modules.sort();
 
+    // In --in-process mode, purge deleted/renamed modules from the in-memory
+    // registries so stale entries don't remain resolvable in watch mode.
+    if build_state.build_mode().is_in_process() {
+        build_state.purge_deleted_modules(&build_state.build_state.deleted_modules.clone());
+    }
+
     // In --in-process mode, synthesize namespace module signatures in memory
     // before any source modules are compiled. Source modules may use `-open Namespace`,
     // so the namespace signature must be available in the PersistentEnv first.
@@ -1220,6 +1226,11 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) {
 
             match typecheck_result {
                 Ok(result) => {
+                    let rt_fingerprint = result
+                        .pers_struct
+                        .as_ref()
+                        .map(|ps| ps.fingerprint)
+                        .unwrap_or(0);
                     if let Some(ps) = result.pers_struct {
                         build_state.update_module_registry(
                             module_name,
@@ -1234,6 +1245,7 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) {
                         build_state.register_in_memory_interface(
                             module_name.clone(),
                             result.signature,
+                            rt_fingerprint,
                             true,
                         );
                     }
@@ -1329,6 +1341,11 @@ fn compile_module_in_process(
 
         // Register the .resi's PersStruct in the local registry so the
         // .res compilation can find it for moregen constraints.
+        let intf_fingerprint = intf_result
+            .pers_struct
+            .as_ref()
+            .map(|ps| ps.fingerprint)
+            .unwrap_or(0);
         if let Some(ps) = intf_result.pers_struct {
             local_registry
                 .cached_modules
@@ -1348,6 +1365,7 @@ fn compile_module_in_process(
         build_command_state.register_in_memory_interface(
             module_name.to_string(),
             intf_result.signature,
+            intf_fingerprint,
             is_pure,
         );
     }
@@ -1384,6 +1402,11 @@ fn compile_module_in_process(
     .map_err(|e| anyhow!("Compilation failed for {}: {}", module_name, e))?;
 
     // Update the shared registry with the implementation's PersStruct
+    let impl_fingerprint = compile_result
+        .pers_struct
+        .as_ref()
+        .map(|ps| ps.fingerprint)
+        .unwrap_or(0);
     if let Some(ps) = compile_result.pers_struct {
         build_command_state.update_module_registry(
             module_name,
@@ -1400,6 +1423,7 @@ fn compile_module_in_process(
         build_command_state.register_in_memory_interface(
             module_name.to_string(),
             compile_result.signature,
+            impl_fingerprint,
             is_pure,
         );
     }

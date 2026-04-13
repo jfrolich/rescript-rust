@@ -15,6 +15,7 @@
 //!    and produces a valid `PersStruct`.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 use crate::parser::longident::Longident;
 use crate::types::asttypes::ArgLabel;
@@ -121,6 +122,206 @@ pub struct PortablePersStruct {
     pub ps_sig: Signature,
     /// Self-contained type graph.
     pub type_graph: PortableTypeGraph,
+    /// Stamp-independent structural fingerprint of the type graph.
+    /// Computed during serialization by hashing type structure with name-based
+    /// path identity (ignoring stamps). Two compilations producing the same
+    /// logical interface will have the same fingerprint even if internal stamps
+    /// differ due to dependency changes.
+    pub fingerprint: u64,
+}
+
+// ============================================================================
+// Fingerprinting: stamp-independent structural hash
+// ============================================================================
+
+/// Compute a stamp-independent structural fingerprint of a portable type graph
+/// and signature. Uses name-based identity for Paths (ignoring stamps) so that
+/// recompilations producing the same logical interface get the same fingerprint
+/// even if internal stamps shift due to dependency changes.
+/// Public API for computing a fingerprint outside of `serialize_pers_struct`
+/// (e.g., for namespace signatures synthesized directly).
+pub fn compute_type_graph_fingerprint_pub(entries: &[PortableTypeEntry], sig: &Signature) -> u64 {
+    compute_type_graph_fingerprint(entries, sig)
+}
+
+fn compute_type_graph_fingerprint(entries: &[PortableTypeEntry], sig: &Signature) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut hasher = DefaultHasher::new();
+
+    // Hash the signature structure (item names and kinds)
+    hash_signature(&mut hasher, sig);
+
+    // Hash the type graph entries
+    entries.len().hash(&mut hasher);
+    for entry in entries {
+        entry.level.hash(&mut hasher);
+        hash_portable_desc(&mut hasher, &entry.desc);
+    }
+
+    hasher.finish()
+}
+
+/// Hash a Path using only names, not stamps. This makes the fingerprint stable
+/// across recompilations where dependency stamps may shift.
+fn hash_path_by_name(hasher: &mut impl Hasher, path: &Path) {
+    use crate::types::path::Path as P;
+    match path {
+        P::Pident(ident) => {
+            0u8.hash(hasher);
+            ident.name().hash(hasher);
+        }
+        P::Pdot(base, field, _pos) => {
+            1u8.hash(hasher);
+            hash_path_by_name(hasher, base);
+            field.hash(hasher);
+        }
+        P::Papply(f, x) => {
+            2u8.hash(hasher);
+            hash_path_by_name(hasher, f);
+            hash_path_by_name(hasher, x);
+        }
+    }
+}
+
+fn hash_portable_desc(hasher: &mut impl Hasher, desc: &PortableTypeDesc) {
+    std::mem::discriminant(desc).hash(hasher);
+    match desc {
+        PortableTypeDesc::Tvar(name) => name.hash(hasher),
+        PortableTypeDesc::Tarrow {
+            arg_label,
+            arg,
+            ret,
+            arity,
+        } => {
+            arg_label.hash(hasher);
+            arg.hash(hasher);
+            ret.hash(hasher);
+            arity.hash(hasher);
+        }
+        PortableTypeDesc::Ttuple(elems) => elems.hash(hasher),
+        PortableTypeDesc::Tconstr { path, args } => {
+            hash_path_by_name(hasher, path);
+            args.hash(hasher);
+        }
+        PortableTypeDesc::Tobject { fields, name } => {
+            fields.hash(hasher);
+            if let Some((p, args)) = name {
+                true.hash(hasher);
+                hash_path_by_name(hasher, p);
+                args.hash(hasher);
+            } else {
+                false.hash(hasher);
+            }
+        }
+        PortableTypeDesc::Tfield { name, typ, rest } => {
+            name.hash(hasher);
+            typ.hash(hasher);
+            rest.hash(hasher);
+        }
+        PortableTypeDesc::Tnil => {}
+        PortableTypeDesc::Tlink(idx) => idx.hash(hasher),
+        PortableTypeDesc::Tsubst(idx) => idx.hash(hasher),
+        PortableTypeDesc::Tvariant(rd) => hash_portable_row_desc(hasher, rd),
+        PortableTypeDesc::Tunivar(name) => name.hash(hasher),
+        PortableTypeDesc::Tpoly { body, vars } => {
+            body.hash(hasher);
+            vars.hash(hasher);
+        }
+        PortableTypeDesc::Tpackage { path, lids, args } => {
+            hash_path_by_name(hasher, path);
+            // Longident contains StrIdx; hash raw discriminant + index.
+            // Same-session comparisons are correct; cross-session is best-effort.
+            lids.hash(hasher);
+            args.hash(hasher);
+        }
+    }
+}
+
+fn hash_portable_row_desc(hasher: &mut impl Hasher, rd: &PortableRowDesc) {
+    rd.row_fields.len().hash(hasher);
+    for (label, field) in &rd.row_fields {
+        label.hash(hasher);
+        hash_portable_row_field(hasher, field);
+    }
+    rd.row_more.hash(hasher);
+    rd.row_closed.hash(hasher);
+    rd.row_fixed.hash(hasher);
+    if let Some((p, args)) = &rd.row_name {
+        true.hash(hasher);
+        hash_path_by_name(hasher, p);
+        args.hash(hasher);
+    } else {
+        false.hash(hasher);
+    }
+}
+
+fn hash_portable_row_field(hasher: &mut impl Hasher, rf: &PortableRowField) {
+    std::mem::discriminant(rf).hash(hasher);
+    match rf {
+        PortableRowField::Rpresent(opt) => opt.hash(hasher),
+        PortableRowField::Reither {
+            constant,
+            types,
+            matched,
+        } => {
+            constant.hash(hasher);
+            types.hash(hasher);
+            matched.hash(hasher);
+        }
+        PortableRowField::Rabsent => {}
+    }
+}
+
+/// Hash the signature structure: item names and kinds.
+/// Uses name-based identity for all paths.
+fn hash_signature(hasher: &mut impl Hasher, sig: &Signature) {
+    sig.len().hash(hasher);
+    for item in sig {
+        hash_sig_item(hasher, item);
+    }
+}
+
+fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem) {
+    std::mem::discriminant(item).hash(hasher);
+    match item {
+        SignatureItem::SigValue(ident, _vd) => {
+            ident.name().hash(hasher);
+        }
+        SignatureItem::SigType(ident, _td, _rec) => {
+            ident.name().hash(hasher);
+        }
+        SignatureItem::SigTypext(ident, _ext, _es) => {
+            ident.name().hash(hasher);
+        }
+        SignatureItem::SigModule(ident, md, _rec) => {
+            ident.name().hash(hasher);
+            hash_module_type(hasher, &md.md_type);
+        }
+        SignatureItem::SigModtype(ident, _mtd) => {
+            ident.name().hash(hasher);
+        }
+        SignatureItem::SigClass | SignatureItem::SigClassType => {}
+    }
+}
+
+fn hash_module_type(hasher: &mut impl Hasher, mty: &ModuleType) {
+    std::mem::discriminant(mty).hash(hasher);
+    match mty {
+        ModuleType::MtyIdent(path) => hash_path_by_name(hasher, path),
+        ModuleType::MtySignature(sig) => hash_signature(hasher, sig),
+        ModuleType::MtyFunctor {
+            param,
+            param_type,
+            result,
+        } => {
+            param.name().hash(hasher);
+            if let Some(pt) = param_type {
+                hash_module_type(hasher, pt);
+            }
+            hash_module_type(hasher, result);
+        }
+        ModuleType::MtyAlias(_presence, path) => hash_path_by_name(hasher, path),
+    }
 }
 
 // ============================================================================
@@ -138,13 +339,14 @@ pub fn serialize_pers_struct(ps: &PersStruct, ctx: &TypeContext<'_>) -> Portable
     };
     let mut sig = ps.ps_sig.clone();
     ser.remap_signature(&mut sig);
+    let entries = ser.entries;
+    let fingerprint = compute_type_graph_fingerprint(&entries, &sig);
     PortablePersStruct {
         ps_name: ps.ps_name.clone(),
         ps_filename: ps.ps_filename.clone(),
         ps_sig: sig,
-        type_graph: PortableTypeGraph {
-            entries: ser.entries,
-        },
+        type_graph: PortableTypeGraph { entries },
+        fingerprint,
     }
 }
 

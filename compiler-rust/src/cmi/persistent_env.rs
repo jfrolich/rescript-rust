@@ -123,6 +123,8 @@ impl ModuleRegistry {
 
         // Namespace signatures contain only MtyAlias entries (no TypeExprRefs),
         // so the portable type graph is empty.
+        let fingerprint =
+            portable_types::compute_type_graph_fingerprint_pub(&[], &sig_items);
         let portable = PortablePersStruct {
             ps_name: namespace_name.to_string(),
             ps_filename: format!("{}.mlmap", namespace_name),
@@ -130,9 +132,22 @@ impl ModuleRegistry {
             type_graph: portable_types::PortableTypeGraph {
                 entries: Vec::new(),
             },
+            fingerprint,
         };
         self.cached_modules
             .insert(namespace_name.to_string(), portable);
+    }
+
+    /// Remove a module from the registry (for deleted/renamed modules).
+    /// Purges cached signature, module info, source fallback, and any alias
+    /// rewrites that reference this module.
+    pub fn purge_module(&mut self, name: &str) {
+        self.cached_modules.remove(name);
+        self.module_info.remove(name);
+        self.source_fallback_paths.remove(name);
+        // Remove alias rewrites that point to this module
+        self.alias_rewrites
+            .retain(|key, _| key != name);
     }
 
     /// Store a compiled module's finalized PersStruct and metadata.
