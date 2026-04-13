@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 328 / 657 JS snapshots passing, 0 compile errors, 329 output diffs
+**Status:** 329 / 657 JS snapshots passing, 0 compile errors, 328 output diffs
 
 ## Goal
 
@@ -35,13 +35,45 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **328 / 657**
+- JS snapshot parity: **329 / 657**
 - Compile errors: **0**
-- Output diffs: **329**
+- Output diffs: **328**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed JS expression-construction
+  rule in `compiler/core/js_exp_make.ml`, specifically `float_add` rewriting a
+  negative integer RHS from `Plus` into `float_minus`
+- After rereading that OCaml path, the Rust JS IR builder in
+  `compiler-rust/src/js_ir/mod.rs` now matches it more closely:
+  - `Expression::bin(BinOp::Plus, x, -1)` canonicalizes to
+    `ExpressionDesc::Bin(BinOp::Minus, x, 1)` instead of preserving
+    `x + -1`
+  - the rewrite happens before final printing, so integer and float-style
+    numeric additions share the same OCaml-aligned normalized shape
+- Added focused regression coverage in
+  `js_ir::tests::test_plus_with_negative_int_rhs_rewrites_to_minus`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::tests::test_plus_with_negative_int_rhs_rewrites_to_minus -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_858_unit2_test.res -o /tmp/gpr_858_unit2_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/gpr_858_unit2_test.res` now matches its checked-in `.mjs`
+  snapshot exactly again, `tests/tests/src/ExternalShadow.res` remains an
+  exact guard-file match, and the refreshed diff corpus no longer contains any
+  `+ -1` addition drift
+- The remaining nearby files from that cluster still fail on separate backend
+  differences after this slice, including `bench`, `earger_curry_test`,
+  `gpr_1072`, `test_fib`, and `test_u`
+- The authoritative JS snapshot baseline now reports **329 / 657** passing,
+  **0** compile errors, and **328** output diffs; this is a net **+1**
+  passing snapshot and **-1** output diff from the previously recorded
+  **328 / 657**, **0** compile errors, **329** output diffs
 
 - Re-ran the authoritative wrapper on **2026-04-14** after fixing a JS
   snapshot harness output-path collision in `scripts/test_rust_parity.sh`

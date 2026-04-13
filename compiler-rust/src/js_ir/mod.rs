@@ -571,6 +571,9 @@ impl Expression {
 
     /// Create a binary operation
     pub fn bin(op: BinOp, left: Expression, right: Expression) -> Self {
+        if let Some(expr) = rewrite_plus_negative_int_rhs(op, &left, &right) {
+            return expr;
+        }
         if let Some(value) = fold_strict_nullish_comparison(op, &left, &right) {
             return Expression::bool(value);
         }
@@ -811,6 +814,27 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Await(_)
         | ExpressionDesc::Spread(_) => false,
+    }
+}
+
+fn rewrite_plus_negative_int_rhs(
+    op: BinOp,
+    left: &Expression,
+    right: &Expression,
+) -> Option<Expression> {
+    match (op, &right.desc) {
+        (BinOp::Plus, ExpressionDesc::Number(Number::Int { i, .. })) if *i < 0 => {
+            let mut positive = right.clone();
+            if let ExpressionDesc::Number(Number::Int { i, .. }) = &mut positive.desc {
+                *i = i.wrapping_neg();
+            }
+            Some(Expression::new(ExpressionDesc::Bin(
+                BinOp::Minus,
+                Box::new(left.clone()),
+                Box::new(positive),
+            )))
+        }
+        _ => None,
     }
 }
 
@@ -1246,6 +1270,24 @@ mod tests {
         match &expr.desc {
             ExpressionDesc::Bin(BinOp::Plus, _, _) => {}
             _ => panic!("Expected Bin(Plus)"),
+        }
+    }
+
+    #[test]
+    fn test_plus_with_negative_int_rhs_rewrites_to_minus() {
+        let left = Expression::var(Ident::create_local("x"));
+        let right = Expression::number(Number::int(-1));
+        let expr = Expression::bin(BinOp::Plus, left, right);
+
+        match &expr.desc {
+            ExpressionDesc::Bin(BinOp::Minus, left, right) => {
+                assert!(matches!(left.as_ref().desc, ExpressionDesc::Var(_)));
+                assert!(matches!(
+                    right.as_ref().desc,
+                    ExpressionDesc::Number(Number::Int { i: 1, .. })
+                ));
+            }
+            other => panic!("Expected Bin(Minus, _, 1), got {other:?}"),
         }
     }
 
