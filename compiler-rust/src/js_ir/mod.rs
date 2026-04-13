@@ -134,6 +134,13 @@ impl ModulePathResolver {
     }
 
     fn is_runtime_module(&self, module_name: &str) -> bool {
+        // Check in-memory registry first (--in-process mode)
+        if let Some(env) = &self.persistent_env {
+            if let Some(info) = env.get_in_memory_module(module_name) {
+                return info.is_runtime;
+            }
+        }
+
         let Some(runtime_path) = &self.runtime_path else {
             return false;
         };

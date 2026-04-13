@@ -49,6 +49,21 @@ pub struct PersStruct {
     pub ps_filename: String,
 }
 
+/// In-memory module metadata for the `--in-process` build mode.
+///
+/// When a module is registered in the in-memory registry, these fields
+/// replace the disk-based lookups that normally read `.ast` (source path),
+/// `.cmj` (purity), and `.cmi` (interface).
+#[derive(Debug, Clone)]
+pub struct InMemoryModuleInfo {
+    /// Source file path (replaces `.ast` source-path lookup)
+    pub source_path: PathBuf,
+    /// Whether the module is side-effect free (replaces `.cmj` purity lookup)
+    pub is_pure: bool,
+    /// Whether this module belongs to `@rescript/runtime`
+    pub is_runtime: bool,
+}
+
 /// Persistent environment for module loading.
 #[derive(Clone)]
 pub struct PersistentEnv {
@@ -68,6 +83,10 @@ pub struct PersistentEnv {
     /// Cache of renamed signatures (matching OCaml's lazy Subst.signature).
     /// Each module's signature is renamed once and cached here.
     renamed_sig_cache: HashMap<String, Signature>,
+    /// In-memory module registry for `--in-process` builds.
+    /// When a module is registered here, its metadata (source path, purity)
+    /// is resolved from memory instead of from `.ast`/`.cmj` files on disk.
+    in_memory_modules: HashMap<String, InMemoryModuleInfo>,
 }
 
 impl PersistentEnv {
@@ -80,6 +99,7 @@ impl PersistentEnv {
             open_modules: Vec::new(),
             jsx_version: None,
             renamed_sig_cache: HashMap::new(),
+            in_memory_modules: HashMap::new(),
         }
     }
 
@@ -225,6 +245,11 @@ impl PersistentEnv {
     /// backend uses indirectly through cmj/package metadata when computing JS
     /// import paths.
     pub fn resolve_module_source_path(&self, name: &str) -> Option<PathBuf> {
+        // Check in-memory registry first (--in-process mode)
+        if let Some(info) = self.in_memory_modules.get(name) {
+            return Some(info.source_path.clone());
+        }
+
         for ext in ["ast", "iast"] {
             let ast_filename = format!("{name}.{ext}");
             if let Some(ast_path) = self.find_in_path_uncap(&ast_filename) {
@@ -253,7 +278,13 @@ impl PersistentEnv {
     }
 
     /// Read the `pure` flag recorded in a module's `.cmj` metadata.
+    /// In `--in-process` mode, returns the in-memory purity flag instead.
     pub fn module_cmj_is_pure(&self, name: &str) -> Option<bool> {
+        // Check in-memory registry first (--in-process mode)
+        if let Some(info) = self.in_memory_modules.get(name) {
+            return Some(info.is_pure);
+        }
+
         let path = self.resolve_module_cmj_path(name)?;
         read_cmj_pure(&path)
     }
@@ -516,6 +547,49 @@ impl PersistentEnv {
             md_loc: crate::location::Location::none(),
             md_path: None,
         })
+    }
+
+    /// Register a module's in-memory metadata for `--in-process` builds.
+    ///
+    /// This records the source path, purity, and runtime status so that
+    /// `resolve_module_source_path`, `module_cmj_is_pure`, and runtime
+    /// detection can resolve from memory instead of probing disk.
+    pub fn register_in_memory_module(&mut self, name: &str, info: InMemoryModuleInfo) {
+        self.in_memory_modules.insert(name.to_string(), info);
+    }
+
+    /// Register a module's signature directly into the cache for
+    /// `--in-process` builds, bypassing `.cmi` loading from disk.
+    ///
+    /// `source_filename` is the source file path (e.g. `/path/to/Foo.res`),
+    /// used as `ps_filename` for downstream lookups.
+    pub fn register_in_memory_signature<'a>(
+        &mut self,
+        name: &str,
+        signature: Signature,
+        source_filename: &str,
+        ctx: &'a TypeContext<'a>,
+    ) {
+        let ps = self.finalize_loaded_signature(
+            name,
+            name.to_string(),
+            signature,
+            source_filename.to_string(),
+            ctx,
+        );
+        self.cache.insert(name.to_string(), Some(ps));
+        // Invalidate any cached renamed sig so it gets re-derived
+        self.renamed_sig_cache.remove(name);
+    }
+
+    /// Look up in-memory module info by name.
+    pub fn get_in_memory_module(&self, name: &str) -> Option<&InMemoryModuleInfo> {
+        self.in_memory_modules.get(name)
+    }
+
+    /// Check whether a module is registered in the in-memory registry.
+    pub fn has_in_memory_module(&self, name: &str) -> bool {
+        self.in_memory_modules.contains_key(name)
     }
 }
 
