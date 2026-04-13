@@ -70,6 +70,54 @@ That may be an acceptable transition step, but the target architecture for this 
 
 If a change makes `PersistentEnv` more central to the in-process design, it is moving in the wrong direction.
 
+## Clean Architecture Sketch
+
+The intended `--in-process` architecture has four layers:
+
+1. `BuildCommandState` as the canonical shared state
+   - parsed ASTs
+   - published interfaces
+   - module metadata needed by downstream compilation and JS path resolution
+   - dependency graph / dirty-state bookkeeping
+2. An immutable registry snapshot per compile wave
+   - taken once when a frontier batch becomes ready
+   - contains exactly the interfaces and metadata visible to every worker in that wave
+   - read-only for the duration of that wave
+3. A per-file resolver session
+   - borrows the immutable registry snapshot
+   - owns only local memoization such as renamed-signature cache and small lookup caches
+   - must not clone the entire module/interface registry into every worker
+4. A publish step after successful compilation
+   - returns the module's new published interface, metadata, and any alias/path updates
+   - applies those updates back to `BuildCommandState`
+   - makes them visible only to later waves, not sibling workers in the same wave
+
+Key invariants:
+
+- A worker compiles only when every required dependency interface is already present in the snapshot for that wave.
+- In `--in-process`, resolver lookup is a pure registry read. It must not compile dependencies on demand and must not probe compiler assets on disk.
+- Full typedtree, type arena, and unification state remain local to one file compilation and are discarded afterward.
+- The scheduler, not the resolver, is responsible for ensuring that implicit opens, namespace bootstrap modules, and runtime bootstrap modules are available before a file starts compiling.
+
+What the worker session should look like conceptually:
+
+```text
+BuildCommandState
+  -> wave snapshot (read-only)
+       -> worker resolver session (borrowed snapshot + tiny local caches)
+            -> compile one file
+            -> return delta
+  -> publish delta to build state
+```
+
+This is the clean performance shape:
+
+- one shared snapshot per wave
+- many parallel workers borrowing it
+- no shared mutable resolver token
+- no per-file cloning of all published interfaces
+- only small per-file local memoization
+
 ## Current Review Status
 
 Do not treat the current branch as complete. Post-implementation review found four acceptance blockers:

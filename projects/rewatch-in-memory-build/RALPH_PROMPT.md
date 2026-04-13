@@ -75,6 +75,22 @@ Cleaner target for this project:
 - `--in-process` should move to a module-registry plus resolver-session design
 - `PersistentEnv` may remain only as a temporary compatibility adapter for file-backed mode during migration
 
+Clean architecture, stated more concretely:
+
+- `BuildCommandState` is the only cross-file source of truth
+- each compile wave takes an immutable snapshot of published interfaces and module metadata
+- each worker borrows that snapshot through a local resolver session
+- the worker owns only small local memoization, not a cloned copy of the whole registry
+- the worker returns a delta after compiling one file
+- `rewatch` publishes that delta back to build state for later waves
+
+The resolver session in `--in-process` must obey two hard rules:
+
+- no disk-backed module lookup
+- no on-demand dependency compilation during resolution
+
+If a module lookup misses during in-process compilation, treat that as a scheduler/build-state bug. The fix is to publish the required interface earlier, not to add a fallback loader.
+
 Known blockers that must be fixed before declaring completion:
 
 - `rewatch/tests/in-process.sh` must require a successful exit status from `rewatch build --in-process`; do not encode a known failure as a passing test.

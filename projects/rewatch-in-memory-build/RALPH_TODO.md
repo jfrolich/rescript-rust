@@ -14,6 +14,15 @@ Clean architecture target for this project:
 - per-file compilation uses a local resolver session, not a shared mutable env token
 - `PersistentEnv` may survive temporarily only as a file-backed compatibility adapter during migration, but do not extend it further for `--in-process`
 
+Clean architecture, stated operationally:
+
+- `BuildCommandState` owns the authoritative parsed AST registry, published-interface registry, and module metadata registry.
+- Each compile wave takes one immutable snapshot of that published state.
+- Each worker borrows that snapshot through a local resolver session with only small per-file memoization.
+- Resolver lookup in `--in-process` must be snapshot-only: no disk fallback and no on-demand source compilation.
+- Successful compilation returns a delta that is published back into build state for later waves.
+- Sibling workers in the same wave must not observe each other's partially-published state.
+
 ## Post-Review Blockers
 
 - `rewatch/tests/in-process.sh` currently accepts a non-zero exit from `rewatch build --in-process` by matching partial progress text like `Compiled 52 modules`. That is not acceptable as a completion signal. The in-process suite must require a successful process exit.
