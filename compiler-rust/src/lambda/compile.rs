@@ -598,6 +598,28 @@ impl LambdaCompiler {
             };
         }
 
+        if self.uses_builtin_untagged_switch(switch) {
+            let scrut_compiled = self.compile_expr(scrut);
+            let (mut prelude, scrut_expr) =
+                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
+            let tmp = self.fresh_ident("switch");
+            prelude.push(Statement::variable(VariableDeclaration {
+                ident: tmp.clone(),
+                value: None,
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }));
+            if let Some(dispatch) =
+                self.compile_builtin_untagged_switch_assignment_statements(&tmp, scrut_expr, switch)
+            {
+                prelude.extend(dispatch);
+                return Compiled {
+                    prelude,
+                    expr: Expression::var(tmp),
+                };
+            }
+        }
+
         let scrut_compiled = self.compile_expr(scrut);
         let mut prelude = scrut_compiled.prelude;
         let tmp = self.fresh_ident("switch");
@@ -711,6 +733,18 @@ impl LambdaCompiler {
                 .all(|name| is_builtin_untagged_switch_name(name))
     }
 
+    fn uses_builtin_untagged_switch(&self, switch: &LambdaSwitch) -> bool {
+        let Some(names) = switch.sw_names.as_ref() else {
+            return false;
+        };
+        !(names.consts.is_empty() && names.blocks.is_empty())
+            && names
+                .consts
+                .iter()
+                .chain(names.blocks.iter())
+                .all(|name| is_builtin_untagged_switch_name(name))
+    }
+
     fn named_const_cases<'a>(&self, switch: &'a LambdaSwitch) -> Option<Vec<(String, &'a Lambda)>> {
         let names = switch.sw_names.as_ref()?;
         switch
@@ -749,6 +783,208 @@ impl LambdaCompiler {
         } else {
             switch.sw_failaction.as_deref()
         }
+    }
+
+    fn builtin_untagged_typeof_test(&self, expr: Expression, type_name: &str) -> Expression {
+        Expression::bin(
+            BinOp::EqEqEq,
+            Expression::new(ExpressionDesc::Typeof(Box::new(expr))),
+            Expression::string(type_name),
+        )
+    }
+
+    fn builtin_untagged_instance_test(&self, expr: Expression, case_name: &str) -> Option<Expression> {
+        match case_name {
+            "Array" => Some(Expression::call(
+                self.static_index(Expression::var(Ident::create_persistent("Array")), "isArray"),
+                vec![expr],
+                CallInfo::default(),
+            )),
+            "ArrayBuffer"
+            | "BigInt64Array"
+            | "BigUint64Array"
+            | "Blob"
+            | "DataView"
+            | "Date"
+            | "File"
+            | "Float32Array"
+            | "Float64Array"
+            | "Int16Array"
+            | "Int32Array"
+            | "Int8Array"
+            | "Promise"
+            | "RegExp"
+            | "Set"
+            | "Map"
+            | "Uint16Array"
+            | "Uint32Array"
+            | "Uint8Array"
+            | "Uint8ClampedArray"
+            | "WeakSet"
+            | "WeakMap" => Some(Expression::bin(
+                BinOp::InstanceOf,
+                expr,
+                Expression::var(Ident::create_persistent(case_name)),
+            )),
+            _ => None,
+        }
+    }
+
+    fn builtin_untagged_block_test(
+        &self,
+        expr: Expression,
+        case_name: &str,
+        block_names: &[String],
+        has_null_case: bool,
+    ) -> Option<Expression> {
+        let test = match case_name {
+            "String" => self.builtin_untagged_typeof_test(expr, "string"),
+            "Number" => self.builtin_untagged_typeof_test(expr, "number"),
+            "BigInt" => self.builtin_untagged_typeof_test(expr, "bigint"),
+            "Boolean" => self.builtin_untagged_typeof_test(expr, "boolean"),
+            "Function" => self.builtin_untagged_typeof_test(expr, "function"),
+            "Object" => {
+                let mut test = self.builtin_untagged_typeof_test(expr.clone(), "object");
+                if has_null_case {
+                    test = Expression::bin(
+                        BinOp::And,
+                        test,
+                        Expression::bin(BinOp::NotEqEq, expr.clone(), Expression::null()),
+                    );
+                }
+                for other in block_names {
+                    if other == case_name {
+                        continue;
+                    }
+                    if let Some(instance_test) =
+                        self.builtin_untagged_instance_test(expr.clone(), other)
+                    {
+                        test = Expression::bin(BinOp::And, test, Expression::not(instance_test));
+                    }
+                }
+                test
+            }
+            _ => self.builtin_untagged_instance_test(expr, case_name)?,
+        };
+        Some(test)
+    }
+
+    fn compile_builtin_untagged_block_chain<F>(
+        &mut self,
+        scrut_expr: Expression,
+        switch: &LambdaSwitch,
+        block_cases: &[(String, &Lambda)],
+        default_block: Block,
+        mut build_body: F,
+    ) -> Option<Block>
+    where
+        F: FnMut(&mut Self, &Lambda) -> Block,
+    {
+        if block_cases.is_empty() {
+            return Some(default_block);
+        }
+
+        if switch.sw_blocks_full && block_cases.len() == 1 && default_block.is_empty() {
+            return Some(build_body(self, block_cases[0].1));
+        }
+
+        let has_null_case = switch
+            .sw_names
+            .as_ref()
+            .is_some_and(|names| names.consts.iter().any(|name| name == "Null"));
+        let block_names = switch.sw_names.as_ref()?.blocks.clone();
+
+        let mut current_else = default_block;
+        for (case_name, body) in block_cases.iter().rev() {
+            let test = self.builtin_untagged_block_test(
+                scrut_expr.clone(),
+                case_name,
+                &block_names,
+                has_null_case,
+            )?;
+            current_else = vec![Statement::if_(test, build_body(self, body), current_else)];
+        }
+
+        Some(current_else)
+    }
+
+    fn compile_builtin_untagged_switch_assignment_statements(
+        &mut self,
+        result: &Ident,
+        scrut_expr: Expression,
+        switch: &LambdaSwitch,
+    ) -> Option<Block> {
+        if !self.uses_builtin_untagged_switch(switch) || !switch.sw_consts.is_empty() {
+            return None;
+        }
+        let block_cases = self.named_block_cases(switch)?;
+        let default_block = self
+            .block_switch_default(switch)
+            .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+            .unwrap_or_default();
+        self.compile_builtin_untagged_block_chain(
+            scrut_expr,
+            switch,
+            &block_cases,
+            default_block,
+            |this, body| this.compile_assign_to_target_block(result, body),
+        )
+    }
+
+    fn compile_builtin_untagged_switch_return_statements(
+        &mut self,
+        scrut_expr: Expression,
+        switch: &LambdaSwitch,
+    ) -> Option<Block> {
+        if !self.uses_builtin_untagged_switch(switch) || !switch.sw_consts.is_empty() {
+            return None;
+        }
+        let block_cases = self.named_block_cases(switch)?;
+        let default_block = self
+            .block_switch_default(switch)
+            .map(|fallback| self.compile_return_block(fallback))
+            .unwrap_or_default();
+        self.compile_builtin_untagged_block_chain(
+            scrut_expr,
+            switch,
+            &block_cases,
+            default_block,
+            |this, body| this.compile_return_block(body),
+        )
+    }
+
+    fn compile_builtin_untagged_switch_effect_statements(
+        &mut self,
+        scrut_expr: Expression,
+        switch: &LambdaSwitch,
+    ) -> Option<Block> {
+        if !self.uses_builtin_untagged_switch(switch) || !switch.sw_consts.is_empty() {
+            return None;
+        }
+        let block_cases = self.named_block_cases(switch)?;
+        let default_block = self
+            .block_switch_default(switch)
+            .map(|fallback| self.compile_effect_block(fallback))
+            .unwrap_or_default();
+
+        let mut has_effectful_case = !default_block.is_empty();
+        for (_, body) in &block_cases {
+            if !self.compile_effect_block(body).is_empty() {
+                has_effectful_case = true;
+                break;
+            }
+        }
+        if !has_effectful_case {
+            return Some(vec![]);
+        }
+
+        self.compile_builtin_untagged_block_chain(
+            scrut_expr,
+            switch,
+            &block_cases,
+            default_block,
+            |this, body| this.compile_effect_block(body),
+        )
     }
 
     fn bind_switch_scrutinee_once(
@@ -1419,6 +1655,18 @@ impl LambdaCompiler {
             return block;
         }
 
+        if self.uses_builtin_untagged_switch(switch) {
+            let scrut_compiled = self.compile_expr(scrut);
+            let (mut block, scrut_expr) =
+                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
+            if let Some(dispatch) =
+                self.compile_builtin_untagged_switch_assignment_statements(result, scrut_expr, switch)
+            {
+                block.extend(dispatch);
+                return block;
+            }
+        }
+
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
 
@@ -1502,6 +1750,18 @@ impl LambdaCompiler {
                 self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
             block.extend(self.compile_named_variant_switch_return_statements(scrut_expr, switch));
             return block;
+        }
+
+        if self.uses_builtin_untagged_switch(switch) {
+            let scrut_compiled = self.compile_expr(scrut);
+            let (mut block, scrut_expr) =
+                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
+            if let Some(dispatch) =
+                self.compile_builtin_untagged_switch_return_statements(scrut_expr, switch)
+            {
+                block.extend(dispatch);
+                return block;
+            }
         }
 
         let scrut_compiled = self.compile_expr(scrut);
@@ -1590,6 +1850,22 @@ impl LambdaCompiler {
             }
             block.extend(dispatch);
             return block;
+        }
+
+        if self.uses_builtin_untagged_switch(switch) {
+            let scrut_compiled = self.compile_expr(scrut);
+            let (mut block, scrut_expr) =
+                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
+            if let Some(dispatch) =
+                self.compile_builtin_untagged_switch_effect_statements(scrut_expr.clone(), switch)
+            {
+                if dispatch.is_empty() {
+                    push_effect_expression(&mut block, scrut_expr);
+                } else {
+                    block.extend(dispatch);
+                }
+                return block;
+            }
         }
 
         let scrut_compiled = self.compile_expr(scrut);
@@ -6657,6 +6933,28 @@ fn is_builtin_untagged_switch_name(name: &str) -> bool {
             | "Object"
             | "Array"
             | "Function"
+            | "ArrayBuffer"
+            | "BigInt64Array"
+            | "BigUint64Array"
+            | "Blob"
+            | "DataView"
+            | "Date"
+            | "File"
+            | "Float32Array"
+            | "Float64Array"
+            | "Int16Array"
+            | "Int32Array"
+            | "Int8Array"
+            | "Promise"
+            | "RegExp"
+            | "Set"
+            | "Map"
+            | "Uint16Array"
+            | "Uint32Array"
+            | "Uint8Array"
+            | "Uint8ClampedArray"
+            | "WeakSet"
+            | "WeakMap"
     )
 }
 
@@ -7816,6 +8114,134 @@ mod tests {
         assert_switch_case_returns_int_result(else_block, 2);
     }
 
+    #[test]
+    fn builtin_untagged_block_switch_expressions_dispatch_on_object_runtime_shape() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let body_id = Ident::create_local("body");
+        let compiled = compiler.compile_expr(&Lambda::Lswitch(
+            Box::new(Lambda::var(value.clone())),
+            LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![],
+                sw_blocks_full: false,
+                sw_blocks: vec![(
+                    0,
+                    Lambda::let_(
+                        LetKind::Strict,
+                        body_id.clone(),
+                        Lambda::const_(Constant::int(1)),
+                        Lambda::var(body_id.clone()),
+                    ),
+                )],
+                sw_failaction: Some(Box::new(Lambda::const_(Constant::int(0)))),
+                sw_names: Some(SwitchNames {
+                    consts: vec![],
+                    blocks: vec!["Object".to_string()],
+                }),
+            },
+        ));
+
+        let [declare, dispatch] = compiled.prelude.as_slice() else {
+            panic!("expected a result declaration followed by object dispatch");
+        };
+        let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc
+        else {
+            panic!("expected the switch result declaration");
+        };
+        let StatementDesc::If(cond, then_block, else_block) = &dispatch.desc else {
+            panic!("expected an object runtime check around the block case");
+        };
+
+        assert_typeof_object_check(cond, &value, true);
+        assert!(matches!(
+            then_block.as_slice(),
+            [
+                Statement {
+                    desc: StatementDesc::Variable(VariableDeclaration {
+                        ident,
+                        value: Some(Expression {
+                            desc: ExpressionDesc::Number(Number::Int { i, .. }),
+                            ..
+                        }),
+                        ..
+                    }),
+                    ..
+                },
+                Statement {
+                    desc: StatementDesc::Exp(Expression {
+                        desc: ExpressionDesc::Bin(BinOp::Eq, left, right),
+                        ..
+                    }),
+                    ..
+                }
+            ] if ident.same(&body_id)
+                && *i == 1
+                && matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(result)
+                )
+                && matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&body_id)
+                )
+        ));
+        assert_switch_default_assigns_int_result(else_block, result, 0);
+    }
+
+    #[test]
+    fn builtin_untagged_object_switches_exclude_array_cases() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let array_seen = Ident::create_local("array_seen");
+        let object_seen = Ident::create_local("object_seen");
+        let block = compiler.compile_effect_block(&Lambda::Lswitch(
+            Box::new(Lambda::var(value.clone())),
+            LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![],
+                sw_blocks_full: false,
+                sw_blocks: vec![
+                    (
+                        0,
+                        Lambda::Lassign(array_seen.clone(), Box::new(Lambda::const_(Constant::int(1)))),
+                    ),
+                    (
+                        1,
+                        Lambda::Lassign(object_seen.clone(), Box::new(Lambda::const_(Constant::int(2)))),
+                    ),
+                ],
+                sw_failaction: Some(Box::new(Lambda::unit())),
+                sw_names: Some(SwitchNames {
+                    consts: vec![],
+                    blocks: vec!["Array".to_string(), "Object".to_string()],
+                }),
+            },
+        ));
+
+        let [dispatch] = block.as_slice() else {
+            panic!("expected an array/object dispatch chain");
+        };
+        let StatementDesc::If(array_cond, _, else_block) = &dispatch.desc else {
+            panic!("expected the array case to lower to a runtime if-check");
+        };
+        assert_array_is_array_call(array_cond, &value);
+
+        let [object_dispatch] = else_block.as_slice() else {
+            panic!("expected an object fallback after the array case");
+        };
+        let StatementDesc::If(object_cond, _, _) = &object_dispatch.desc else {
+            panic!("expected the object fallback to be another runtime if-check");
+        };
+        assert_object_check_excludes_array(object_cond, &value);
+    }
+
     fn assert_switch_case_assigns_int_result(block: &Block, result: &Ident, expected: i32) {
         let [assign, break_stmt] = block.as_slice() else {
             panic!("expected an assignment followed by break");
@@ -7920,6 +8346,46 @@ mod tests {
                 ));
             }
             other => panic!("expected a typeof-object check, got {other:?}"),
+        }
+    }
+
+    fn assert_array_is_array_call(expr: &Expression, ident: &Ident) {
+        match &expr.desc {
+            ExpressionDesc::Call(func, args, _) => {
+                assert!(matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::StaticIndex(target, field, _),
+                        ..
+                    } if field == "isArray"
+                        && matches!(
+                            target.as_ref(),
+                            Expression {
+                                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(array_ident)),
+                                ..
+                            } if array_ident.name() == "Array"
+                        )
+                ));
+                assert!(matches!(
+                    args.as_slice(),
+                    [Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    }] if id.same(ident)
+                ));
+            }
+            other => panic!("expected Array.isArray call, got {other:?}"),
+        }
+    }
+
+    fn assert_object_check_excludes_array(expr: &Expression, ident: &Ident) {
+        let ExpressionDesc::Bin(BinOp::And, left, right) = &expr.desc else {
+            panic!("expected typeof-object && !Array.isArray check, got {expr:?}");
+        };
+        assert_typeof_object_check(left, ident, true);
+        match &right.as_ref().desc {
+            ExpressionDesc::JsNot(inner) => assert_array_is_array_call(inner, ident),
+            other => panic!("expected negated Array.isArray guard, got {other:?}"),
         }
     }
 

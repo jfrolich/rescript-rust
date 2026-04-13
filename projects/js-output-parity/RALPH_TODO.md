@@ -43,6 +43,45 @@ reported:
 
 Interpretation:
 
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed inside
+  `compiler-rust/src/lambda/compile.rs` and ported another
+  `compiler/core/lam_compile.ml` runtime-dispatch slice instead of treating the
+  JS diff as a printer issue
+- `compiler-rust/src/lambda/compile.rs` now matches another OCaml backend
+  slice from `core/lam_compile.ml` and `ml/ast_untagged_variants.ml`:
+  builtin untagged switches with block-only cases no longer fall through the
+  generic const-only switch path on the JS backend, and the `Object` runtime
+  case now excludes the full OCaml set of instance-backed shapes from the
+  switch metadata instead of only the currently visited branch list
+- Added focused coverage for this slice in
+  `builtin_untagged_block_switch_expressions_dispatch_on_object_runtime_shape`
+  and `builtin_untagged_object_switches_exclude_array_cases`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release builtin_untagged_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DictPatternMatchingOptimization.res -o /tmp/DictPatternMatchingOptimization.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/DictPatternMatchingOptimization.res` now keeps the
+  `JSON.Object` branch on the JS path instead of dropping straight to the
+  default `[]` case, and the outer runtime guard now matches OCaml's object
+  exclusion shape (`typeof match !== "object" || match === null ||
+  Array.isArray(match)`)
+- The remaining drift in
+  `tests/tests/src/DictPatternMatchingOptimization.res` is further downstream:
+  Rust still emits `JSON.parse(data, undefined)` instead of `JSON.parse(data)`,
+  and the nested string-pattern body still expands into a cascade of synthetic
+  `$$switch` temporaries instead of OCaml's tighter exit-chain lowering
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  this switch-lowering change, which confirms the builtin-untagged dispatch fix
+  stayed isolated from the already-stable external/import path
+- The authoritative JS snapshot baseline remains **146 / 657** passing,
+  **0** compile errors, and **511** output diffs after this OCaml-aligned
+  builtin-untagged block-switch port; the topline stays flat because the
+  affected file is still failing on later call-lowering and nested-switch
+  shaping mismatches even though the dropped-object-branch bug is fixed
+
 - `compiler-rust/src/js_ir/mod.rs` and
   `compiler-rust/src/lambda/compile.rs` now match another OCaml backend slice
   from `core/js_exp_make.ml` more closely:
