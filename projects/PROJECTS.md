@@ -63,7 +63,7 @@ Achieve full unoptimized lambda parity between the Rust and OCaml compilers. Foc
 
 ### [rewatch-in-memory-build](./rewatch-in-memory-build/)
 
-Make `rewatch` run the compiler in-process and remove compiler assets from the build protocol entirely. Dependency interfaces should be published and resolved from in-memory build state, with only final JS emitted. `node_modules` packages remain source-backed; `@rescript/runtime` needs explicit in-memory bootstrap.
+Add a third `rewatch` mode, `--in-process`, alongside the existing default OCaml mode and `--rust` subprocess mode. In `--in-process`, dependency interfaces should be published and resolved from in-memory build state, no compiler assets should be emitted or read, and only final JS should be written. `node_modules` packages remain source-backed; `@rescript/runtime` needs explicit in-memory bootstrap.
 
 | Document | Description |
 |----------|-------------|

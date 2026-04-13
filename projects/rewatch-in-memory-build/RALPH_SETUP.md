@@ -1,5 +1,13 @@
 # Ralph Setup: Rewatch In-Memory Build
 
+## Mode Matrix
+
+- default: OCaml compiler path, file-backed compiler assets
+- `--rust`: Rust compiler via `bsc` subprocess, still file-backed
+- `--in-process`: Rust compiler in-process, memory-backed interfaces, JS-only outputs
+
+This project must preserve the first two modes while implementing the third.
+
 ## Build
 
 ```bash
@@ -13,7 +21,7 @@ Set the rewatch executable once per shell:
 export REWATCH_EXECUTABLE="$(realpath ./rewatch/target/release/rewatch)"
 ```
 
-## Authoritative Suite
+## Default-Mode Compatibility Suite
 
 Run from the project root:
 
@@ -21,9 +29,11 @@ Run from the project root:
 timeout 600 ./rewatch/tests/suite.sh "$REWATCH_EXECUTABLE"
 ```
 
-This is the top-level regression suite for compile, watch, clean, lock, suffix, format, experimental, and compiler-args behavior.
+This is the top-level regression suite for compile, watch, clean, lock, suffix, format, experimental, and compiler-args behavior in the existing file-backed modes.
 
 ## Focused Iteration
+
+Existing focused scripts:
 
 ```bash
 (cd rewatch/tests && timeout 300 ./compile.sh)
@@ -31,11 +41,20 @@ This is the top-level regression suite for compile, watch, clean, lock, suffix, 
 (cd rewatch/tests && timeout 300 ./clean.sh)
 ```
 
-If you touch compiler/runtime bootstrap logic, rerun the full suite rather than relying only on focused scripts.
+In-process-specific scripts should be added alongside these, not instead of them.
+
+If you touch compiler/runtime bootstrap logic, rerun the full default-mode suite and the new in-process suite rather than relying only on focused scripts.
+
+Target smoke commands once the new mode exists:
+
+```bash
+timeout 300 "$REWATCH_EXECUTABLE" build --in-process
+timeout 300 "$REWATCH_EXECUTABLE" watch --in-process
+```
 
 ## No-Compiler-Assets Guard
 
-After any build or watch run, verify that the test repo contains no compiler assets:
+After any `--in-process` build or watch run, verify that the test repo contains no compiler assets:
 
 ```bash
 find rewatch/testrepo -type f \
@@ -45,9 +64,17 @@ find rewatch/testrepo -type f \
 find rewatch/testrepo -type f \
   \( -name '.compiler.log' -o -name '.sourcedirs.json' -o -name 'compiler-info.json' \) \
   | sort
+
+find rewatch/testrepo -type f \
+  \( -name 'build.ninja' -o -name '*.mlmap' -o -name '*.sexp' \) \
+  | sort
+
+find rewatch/testrepo -type f \
+  \( -path '*/lib/bs/*' -o -path '*/lib/ocaml/*' \) \
+  | grep -E '\.(res|resi)$' || true
 ```
 
-Both commands should print nothing once the refactor is complete.
+These commands should print nothing in `--in-process` mode.
 
 To verify that final JS outputs still exist:
 
@@ -55,15 +82,27 @@ To verify that final JS outputs still exist:
 find rewatch/testrepo -type f \( -name '*.mjs' -o -name '*.js' -o -name '*.cjs' \) | sort | sed -n '1,80p'
 ```
 
+To verify that in-process mode is not quietly reading stale compiler assets, add poisoned files and rebuild:
+
+```bash
+printf 'stale' > rewatch/testrepo/packages/main/lib/bs/src/Main.cmi
+printf 'stale' > rewatch/testrepo/packages/main/lib/ocaml/Main.ast
+```
+
+The in-process build should still succeed or fail exactly the same way after those files are planted.
+
 ## Useful Inspection Commands
 
 ```bash
 rg -n "compile_file|bs-read-cmi|lib/ocaml|bsc" rewatch/src/build/compile.rs
 rg -n "read_ast|deps" rewatch/src/build/deps.rs rewatch/src/build/parse.rs
+rg -n "compile_mlmap|mlmap" rewatch/src/build/namespaces.rs rewatch/src/build/packages.rs
 rg -n "read_compile_state|compiler-info|sourcedirs" rewatch/src/build
 rg -n "read_raw_sig|module_cmj_is_pure|resolve_module_source_path|find_pers_struct" compiler-rust/src/cmi/persistent_env.rs
 rg -n "compile_source_to_js_with_options|typecheck_interface_source|load_pervasives" compiler-rust/src/driver.rs
 rg -n "ModulePathResolver" compiler-rust/src/js_ir/mod.rs
+rg -n "last_compiled_cmi|last_compiled_cmt|mark_modules_with_expired_deps_dirty" rewatch/src/build
+rg -n "write_build_ninja|build.ninja" rewatch/src/build.rs
 ```
 
 ## Runtime Bootstrap Notes
@@ -85,3 +124,5 @@ Pay attention to the runtime build flags:
 - `-open Pervasives`
 
 The in-process compiler API needs semantic support for those flags instead of assuming disk-backed stdlib assets.
+
+This is not late cleanup. Runtime bootstrap is an early blocker for a real no-asset `--in-process` mode.
