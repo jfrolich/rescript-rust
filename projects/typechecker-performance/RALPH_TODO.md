@@ -62,6 +62,10 @@ Detailed corpus baseline:
 - The next agent should not spend time on profiling detours or random local
   fixes before completing the `env_lazy` infrastructure rollout through the hot
   lookup paths. That rollout is the highest-impact task.
+- The next agent should not begin from "find a performance improvement." It
+  should begin from "match the OCaml algorithm and lazy forcing behavior more
+  exactly." The expectation is that removing Rust-only extra work is the real
+  win.
 
 ## Rejected Prototype
 
@@ -91,6 +95,8 @@ Detailed investigation:
   canonical recursive 657-file corpus
 - [ ] Implement `env_lazy` properly everywhere it matters before doing more
   profiling or secondary optimizations
+- [ ] Read the OCaml path closely enough to copy the same algorithm, forcing
+  order, and sharing model before attempting alternative optimizations
 - [ ] Make the lazy qualified module-components path the real source of truth,
   not a side path that `ctype` bypasses
 - [ ] Add a shared path-qualified module-signature/components helper that both
@@ -124,10 +130,12 @@ Detailed investigation:
 
 1. Implement `env_lazy` properly everywhere it matters and make the lazy
    components path the architectural backbone.
-2. Route `ctype` / `typecore` lookup through it.
-3. Cache fully qualified access-path views.
-4. Preserve sharing inside substituted type graphs.
-5. Only then optimize secondary paths like unpack recovery or revisit profiler
+2. Match the OCaml algorithm/forcing order/sharing model for that path as
+   directly as possible.
+3. Route `ctype` / `typecore` lookup through it.
+4. Cache fully qualified access-path views.
+5. Preserve sharing inside substituted type graphs.
+6. Only then optimize secondary paths like unpack recovery or revisit profiler
    outliers.
 
 ## Validation Gates

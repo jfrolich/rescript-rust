@@ -86,6 +86,11 @@ Read this first before changing code:
 
 - [IMPORT_RES_PERFORMANCE_HANDOFF.md](./IMPORT_RES_PERFORMANCE_HANDOFF.md)
 
+For this project, do not start from "what optimization can Rust add here?"
+Start from "what exact algorithm and lazy forcing path does OCaml use here?"
+The expected win comes from removing Rust-only extra work by matching OCaml more
+closely, not from inventing a different strategy first.
+
 ## Correctness Guard
 
 This project changes typing/module-resolution code. Do not accept a
