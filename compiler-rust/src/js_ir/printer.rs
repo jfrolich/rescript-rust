@@ -756,7 +756,7 @@ impl JsPrinter {
         self.write("case ");
         write!(self.output, "{}", value).unwrap();
         self.last_new_line = false;
-        self.write_char(':');
+        self.write(" :");
 
         if !clause.body.is_empty() {
             self.indent();
@@ -776,7 +776,7 @@ impl JsPrinter {
         self.newline();
         self.write("case ");
         self.print_string(&clause.tag_type);
-        self.write_char(':');
+        self.write(" :");
 
         if !clause.clause.body.is_empty() {
             self.indent();
@@ -3449,6 +3449,68 @@ mod tests {
         assert_eq!(
             rendered,
             "throw {\n  RE_EXN_ID: \"Not_found\",\n  Error: new Error()\n};"
+        );
+    }
+
+    #[test]
+    fn test_print_int_switch_cases_keep_space_before_colon() {
+        let rendered = print_block(&vec![Statement::new(StatementDesc::IntSwitch(
+            Expression::var(Ident::create_local("tag")),
+            vec![
+                (
+                    0,
+                    CaseClause {
+                        body: vec![Statement::return_(Expression::number(Number::int(1)))],
+                        should_break: false,
+                        comment: None,
+                    },
+                ),
+                (
+                    1,
+                    CaseClause {
+                        body: vec![],
+                        should_break: false,
+                        comment: None,
+                    },
+                ),
+            ],
+            Some(vec![Statement::return_(Expression::number(Number::int(2)))]),
+        ))]);
+
+        assert_eq!(
+            rendered,
+            "switch (tag) {\n  case 0 :\n    return 1;\n  case 1 :\n  default:\n    return 2;\n}"
+        );
+    }
+
+    #[test]
+    fn test_print_string_switch_cases_keep_space_before_colon() {
+        let rendered = print_block(&vec![Statement::new(StatementDesc::StringSwitch(
+            Expression::var(Ident::create_local("tag")),
+            vec![
+                StringClause {
+                    tag_type: "One".to_string(),
+                    clause: CaseClause {
+                        body: vec![Statement::return_(Expression::number(Number::int(1)))],
+                        should_break: false,
+                        comment: None,
+                    },
+                },
+                StringClause {
+                    tag_type: "Two".to_string(),
+                    clause: CaseClause {
+                        body: vec![],
+                        should_break: false,
+                        comment: None,
+                    },
+                },
+            ],
+            Some(vec![Statement::return_(Expression::number(Number::int(2)))]),
+        ))]);
+
+        assert_eq!(
+            rendered,
+            "switch (tag) {\n  case \"One\" :\n    return 1;\n  case \"Two\" :\n  default:\n    return 2;\n}"
         );
     }
 }

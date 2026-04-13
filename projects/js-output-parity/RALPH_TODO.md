@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 313 / 657 JS snapshots passing, 0 compile errors, 344 output diffs
+**Status:** 326 / 657 JS snapshots passing, 0 compile errors, 331 output diffs
 
 ## Goal
 
@@ -35,51 +35,54 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **313 / 657**
+- JS snapshot parity: **326 / 657**
 - Compile errors: **0**
-- Output diffs: **344**
+- Output diffs: **331**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
-  and this iteration isolated the remaining OCaml `Lam_compile.compile_general_cases`
-  case-grouping/default-filtering rule that earlier notes had already identified
-  as the follow-up for named-variant switch lowering
-- After rereading that OCaml path in `compiler/core/lam_compile.ml`, the Rust
-  JS backend in `compiler-rust/src/lambda/compile.rs` now mirrors it more
-  closely across value, return, effect, and tail-loop switch lowering:
-  - adjacent switch cases whose lambdas are `Lam.eq_approx`-equivalent now
-    lower as OCaml-style fallthrough labels with only the last case carrying
-    the shared body
-  - cases whose lambda is equivalent to the default arm are now filtered out
-    before building the switch clauses, matching OCaml's internal
-    `List.filter (fun (_, lam1) -> not (Lam.eq_approx lam lam1))`
-  - added focused regression coverage in
-    `lambda::compile::tests::int_switch_expressions_group_adjacent_equal_cases_and_drop_default_duplicates`
-    and
-    `lambda::compile::tests::string_switch_effects_group_adjacent_equal_cases_and_drop_default_duplicates`
+  and this iteration isolated one OCaml-backed printer rule in
+  `compiler/core/js_dump.ml`, specifically `loop_case_clauses` emitting
+  `case <expr> :` for switch labels while keeping `default:` unchanged
+- After rereading that OCaml printer path, the Rust JS printer in
+  `compiler-rust/src/js_ir/printer.rs` now matches it more closely:
+  - integer switch clauses print `case 0 :` instead of `case 0:`
+  - string switch clauses print `case "Tag" :` instead of `case "Tag":`
+  - `default:` remains unchanged, matching the OCaml printer's separate branch
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_int_switch_cases_keep_space_before_colon`
+  and
+  `js_ir::printer::tests::test_print_string_switch_cases_keep_space_before_colon`
 - Verified focused guards for this slice:
-  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release group_adjacent_equal_cases -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release space_before_colon -- --nocapture`
   - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
   - direct snapshot repros for
-    `tests/tests/src/NondetPatterMatch.res`,
-    `tests/tests/src/VariantPatternMatchingSpreads.res`,
-    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res`, and
+    `tests/tests/src/NondetPatterMatch.res` and
     `tests/tests/src/ExternalShadow.res`
   - `timeout 1800 ./scripts/test_js_output_parity.sh`
 - Focused outcome:
-  `tests/tests/src/NondetPatterMatch.res` now differs only on later
-  `case "X" :` printer spacing instead of duplicated payload-case bodies,
-  `tests/tests/src/VariantPatternMatchingSpreads.res` now groups shared switch
-  arms the same way OCaml does in `lookup2` and `lookup3`, and
-  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
-- The authoritative JS snapshot baseline remains **313 / 657** passing,
-  **0** compile errors, and **344** output diffs after this OCaml-aligned
-  switch-grouping/default-filtering port; the topline is flat, but the focused
-  switch corpus is narrowed to later printer and branch-shape drift rather than
-  the missing `compile_general_cases` grouping rule
+  the switch-label spacing fix cleared the remaining spacing-only switch corpus,
+  including
+  `tests/tests/src/NondetPatterMatch.res`,
+  `tests/tests/src/adt_optimize_test.res`,
+  `tests/tests/src/arith_syntax.res`,
+  `tests/tests/src/complete_parmatch_test.res`,
+  `tests/tests/src/gpr_3209_test.res`,
+  `tests/tests/src/gpr_4069_test.res`,
+  `tests/tests/src/int_switch_test.res`,
+  `tests/tests/src/simplify_lambda_632o.res`,
+  `tests/tests/src/test_simple_pattern_match.res`,
+  `tests/tests/src/test_string_case.res`,
+  `tests/tests/src/test_string_switch.res`, and
+  `tests/tests/src/test_switch.res`,
+  while `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
+- The authoritative JS snapshot baseline now reports **326 / 657** passing,
+  **0** compile errors, and **331** output diffs; this is a net **+13**
+  passing snapshots and **-13** output diffs from the previously recorded
+  **313 / 657**, **0** compile errors, **344** output diffs
 - Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
