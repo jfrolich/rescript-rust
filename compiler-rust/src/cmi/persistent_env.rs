@@ -23,8 +23,8 @@ use crate::ident::Ident;
 use crate::parser::{Parser, jsx_ppx, module};
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    ConstructorDescription, ConstructorTag, LabelDescription, ModuleDeclaration, ModuleType,
-    Signature, SignatureItem, TypeKind,
+    AliasPresence, ConstructorDescription, ConstructorTag, LabelDescription, ModuleDeclaration,
+    ModuleType, RecStatus, Signature, SignatureItem, TypeKind,
 };
 use crate::types::env::{Env, initial_env};
 use crate::types::path::Path;
@@ -594,6 +594,57 @@ impl PersistentEnv {
         self.cache.insert(name.to_string(), Some(ps));
         // Invalidate any cached renamed sig so it gets re-derived
         self.renamed_sig_cache.remove(name);
+    }
+
+    /// Register a namespace module's alias signature directly into the cache
+    /// for `--in-process` builds, without requiring a `TypeContext`.
+    ///
+    /// A namespace module is a synthetic module that re-exports submodules via
+    /// aliases. For example, namespace `MyApp` with modules `Foo`, `Bar` produces:
+    /// ```text
+    /// module Foo = Foo-MyApp
+    /// module Bar = Bar-MyApp
+    /// ```
+    ///
+    /// `module_aliases` is a list of `(short_name, internal_name)` pairs, e.g.
+    /// `[("Foo", "Foo-MyApp"), ("Bar", "Bar-MyApp")]`.
+    ///
+    /// This method bypasses `finalize_loaded_signature` since namespace alias
+    /// signatures contain no type declarations—only `SigModule` items with
+    /// `MtyAlias`—so type path substitution is a no-op.
+    pub fn register_namespace_in_memory(
+        &mut self,
+        namespace_name: &str,
+        module_aliases: &[(String, String)],
+    ) {
+        let mut sig_items: Signature = Vec::with_capacity(module_aliases.len());
+        for (short_name, internal_name) in module_aliases {
+            sig_items.push(SignatureItem::SigModule(
+                Ident::create_persistent(short_name.as_str()),
+                ModuleDeclaration {
+                    md_type: ModuleType::MtyAlias(
+                        AliasPresence::MtaPresent,
+                        Path::Pident(Ident::create_persistent(internal_name.as_str())),
+                    ),
+                    md_attributes: vec![],
+                    md_loc: crate::location::Location::none(),
+                    md_path: None,
+                },
+                RecStatus::TrecNot,
+            ));
+        }
+
+        // Record alias rewrites (e.g., "Foo-MyApp" → Pdot(Pident("MyApp"), "Foo"))
+        let module_path = Path::Pident(Ident::create_persistent(namespace_name));
+        collect_alias_rewrites(&sig_items, &module_path, &mut self.alias_prefix_rewrites);
+
+        let ps = PersStruct {
+            ps_name: namespace_name.to_string(),
+            ps_sig: sig_items,
+            ps_filename: format!("{}.mlmap", namespace_name),
+        };
+        self.cache.insert(namespace_name.to_string(), Some(ps));
+        self.renamed_sig_cache.remove(namespace_name);
     }
 
     /// Look up in-memory module info by name.

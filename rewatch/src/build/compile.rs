@@ -120,6 +120,13 @@ pub fn compile(
     let mut sorted_modules = build_state.module_names.iter().collect::<Vec<&String>>();
     sorted_modules.sort();
 
+    // In --in-process mode, synthesize namespace module signatures in memory
+    // before any source modules are compiled. Source modules may use `-open Namespace`,
+    // so the namespace signature must be available in the PersistentEnv first.
+    if build_state.build_mode().is_in_process() {
+        register_namespace_signatures(build_state);
+    }
+
     // this is the whole "compile universe" all modules that might be dirty
     // we get this by expanding the dependents from the dirty modules
 
@@ -898,6 +905,68 @@ fn write_js_output(
         std::fs::write(&js_path, js_output)?;
     }
     Ok(())
+}
+
+/// Register namespace module signatures in the PersistentEnv for --in-process mode.
+///
+/// For each package with a namespace, synthesizes the namespace module's
+/// alias signature (e.g., `module Foo = Foo-MyApp`) and registers it in
+/// the PersistentEnv so that `-open Namespace` works during compilation.
+///
+/// This replaces the `compile_mlmap` bsc subprocess call used in file-based modes.
+fn register_namespace_signatures(build_state: &BuildCommandState) {
+    let mut persistent_env = build_state
+        .take_persistent_env()
+        .unwrap_or_else(PersistentEnv::new);
+
+    for (_package_name, package) in build_state.packages.iter() {
+        let namespace_suffix = match package.namespace.to_suffix() {
+            Some(suffix) => suffix,
+            None => continue, // No namespace for this package
+        };
+
+        let entry = match &package.namespace {
+            packages::Namespace::NamespaceWithEntry {
+                namespace: _,
+                entry,
+            } => Some(entry.as_str()),
+            _ => None,
+        };
+
+        // Build the list of (short_name, internal_name) alias pairs.
+        // This mirrors the logic in packages::parse_packages that calls gen_mlmap.
+        let source_files = match &package.source_files {
+            Some(sf) => sf,
+            None => continue,
+        };
+
+        let module_aliases: Vec<(String, String)> = source_files
+            .keys()
+            .map(|path| {
+                helpers::file_path_to_module_name(path, &packages::Namespace::NoNamespace)
+            })
+            .filter(|module_name| {
+                // Exclude the entry module (it's not aliased in the namespace)
+                if let Some(entry) = entry {
+                    module_name != entry
+                } else {
+                    true
+                }
+            })
+            .filter(|module_name| helpers::is_non_exotic_module_name(module_name))
+            .map(|short_name| {
+                let internal_name = format!("{}-{}", short_name, namespace_suffix);
+                (short_name, internal_name)
+            })
+            .collect();
+
+        if !module_aliases.is_empty() {
+            persistent_env
+                .register_namespace_in_memory(&namespace_suffix, &module_aliases);
+        }
+    }
+
+    build_state.return_persistent_env(persistent_env);
 }
 
 /// Compile a single module fully in-process using the Rust compiler.

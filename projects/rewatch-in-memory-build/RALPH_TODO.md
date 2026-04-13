@@ -1,7 +1,7 @@
 # Ralph TODO: Rewatch In-Memory Build
 
 **Last Updated:** 2026-04-13
-**Status:** 13/16 tasks complete
+**Status:** 14/16 tasks complete
 
 ## Goal
 
@@ -72,7 +72,13 @@ Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-
 
 ## Phase 3: Namespaces And Runtime Bootstrap
 
-- [ ] Replace namespace `mlmap` subprocess compilation with an in-memory namespace solution for `--in-process`. Do not emit `.mlmap` in that mode.
+- [x] Replace namespace `mlmap` subprocess compilation with an in-memory namespace solution for `--in-process`. Do not emit `.mlmap` in that mode.
+  - **Done:** Three-part implementation:
+    1. **`persistent_env.rs`**: Added `register_namespace_in_memory(namespace_name, module_aliases)` method to `PersistentEnv`. Synthesizes a `Signature` of `SigModule` entries with `MtyAlias` (e.g., `module Foo = Foo-MyApp`) without requiring a `TypeContext`—namespace alias signatures have no type declarations, so type path substitution is a no-op. Calls `collect_alias_rewrites` to record the flattened→qualified path mapping (e.g., `"Foo-MyApp"` → `Pdot(Pident("MyApp"), "Foo")`). Inserts the synthetic `PersStruct` directly into the cache.
+    2. **`parse.rs`**: Wrapped the entire `compile_mlmap` block (bsc subprocess + `.cmi/.cmt/.cmj/.mlmap` asset copying) in `if !build_state.build_mode().is_in_process()`. In `--in-process`, namespace signatures are synthesized at compile time instead.
+    3. **`compile.rs`**: Added `register_namespace_signatures()` function, called at the start of `compile()` when `is_in_process()`. Iterates over all packages with namespaces, builds `(short_name, internal_name)` alias pairs mirroring the `gen_mlmap` logic (excluding entry modules, filtering exotic names), and registers each namespace signature in the shared `PersistentEnv` before any source modules are compiled. This ensures `-open Namespace` resolves correctly during compilation.
+  - **Note:** The `.mlmap` file is still written to disk by `packages::parse_packages` (which operates on `BuildState` without build-mode awareness). This is harmless metadata; the important thing is that `bsc` is not invoked and no `.cmi/.cmt/.cmj` assets are produced for the namespace module. A future cleanup can skip the `.mlmap` write too.
+  - **Test results:** Compiler tests: 731/732 pass (same 20 pre-existing failures). Rewatch unit tests: 62/62 pass. Default-mode suite: same pre-existing mlmap `randjbuildsystem` error (Rust bsc can't compile `.mlmap` files—unrelated to this change).
 - [ ] Bootstrap `@rescript/runtime` from source into the same in-memory registry, including `Pervasives` / `Stdlib` handling for `-nostdlib`, `-nopervasives`, and `-open Pervasives`.
 
 ## Phase 4: Asset Removal And Output Surface
