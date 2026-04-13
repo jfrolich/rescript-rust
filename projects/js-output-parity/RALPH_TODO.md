@@ -43,6 +43,46 @@ reported:
 
 Interpretation:
 
+- `compiler-rust/src/js_ir/printer.rs` now matches one more slice of
+  OCaml `core/js_dump.ml` on the Rust JS-output path:
+  exception blocks (`Blk_extension` / `Blk_record_ext`) no longer print as
+  generic arrays, and `throw` sites now add the same `Error: new Error()`
+  field that OCaml's `exn_block_as_obj ~stack:true` emits
+- Added focused coverage for this slice in
+  `test_print_exception_extension_block_as_object`,
+  `test_print_record_extension_exception_uses_named_fields`, and
+  `test_print_throw_exception_block_includes_error_stack`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_exception_extension_block_as_object -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_record_extension_exception_uses_named_fields -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_throw_exception_block_includes_error_stack -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/return_check.res -o /tmp/return_check.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/exception_value_test.res -o /tmp/exception_value_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/return_check.res` narrowed materially:
+  the old thrown `["Assert_failure", ...]` array shape is gone, and the
+  remaining drift there is now later nullable-test spelling, alias temps, and
+  block formatting rather than exception-object dumping
+- `tests/tests/src/exception_value_test.res` also moved past the old exception
+  array/object mismatch:
+  thrown `Not_found` / `Assert_failure` values and the non-thrown `u`
+  exception value now use the OCaml `RE_EXN_ID` object layout, while the
+  remaining drift is in later exception-runtime lowering
+  (`Primitive_exceptions.create`, `internalToException`, control flow, and
+  enum member naming), not final dump shape
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the exception printer change
+- The cached thrown-array exception motif is now gone from the authoritative
+  diff cache: `rg -l 'throw \\[' temp/rust-parity/diffs/*.diff | wc -l`
+  reports **0** after the rerun
+- The authoritative JS snapshot baseline remains **130 / 657** passing,
+  **0** compile errors, and **527** output diffs after this OCaml-aligned
+  exception-block dump fix; the checked-in corpus total stays flat because the
+  affected files still carry earlier backend lowering mismatches even though
+  the final exception-object shape is now aligned
+
 - `compiler-rust/src/lambda/compile.rs` now matches one more slice of
   OCaml `core/lam_compile_primitive.ml` on the Rust JS path:
   `Primitive::Poffsetref` no longer falls through the generic

@@ -485,7 +485,9 @@ impl JsPrinter {
 
             StatementDesc::Throw(expr) => {
                 self.write("throw ");
-                self.print_expression(expr, 0);
+                if !self.try_print_exception_block(expr, 0, true) {
+                    self.print_expression(expr, 0);
+                }
                 self.semi();
             }
 
@@ -1119,6 +1121,11 @@ impl JsPrinter {
             ExpressionDesc::CamlBlock(elements, _mutable, _tag, tag_info) => {
                 use crate::lambda::TagInfo;
 
+                if matches!(tag_info, TagInfo::Extension | TagInfo::RecordExt { .. }) {
+                    self.print_exception_block_literal(level, elements, tag_info, false);
+                    return;
+                }
+
                 // Check if this is a record with field names
                 match tag_info {
                     TagInfo::Record { fields, .. } if fields.len() == elements.len() => {
@@ -1165,21 +1172,6 @@ impl JsPrinter {
                                     }
                                 },
                             ),
-                            |this, (field_name, elem)| {
-                                this.print_literal_property_name(field_name);
-                                this.write(": ");
-                                this.print_expression(elem, 1);
-                            },
-                        );
-                    }
-                    TagInfo::RecordExt { fields, .. } if fields.len() == elements.len() => {
-                        self.print_object_literal(
-                            level,
-                            None,
-                            elements
-                                .iter()
-                                .zip(fields.iter())
-                                .map(|(elem, field_name)| (field_name.as_str(), elem)),
                             |this, (field_name, elem)| {
                                 this.print_literal_property_name(field_name);
                                 this.write(": ");
@@ -1262,6 +1254,74 @@ impl JsPrinter {
                 self.write(tag);
             }
         }
+    }
+
+    fn try_print_exception_block(
+        &mut self,
+        expr: &Expression,
+        level: u8,
+        include_stack: bool,
+    ) -> bool {
+        match &expr.desc {
+            ExpressionDesc::CamlBlock(elements, _, _, tag_info)
+                if matches!(
+                    tag_info,
+                    crate::lambda::TagInfo::Extension | crate::lambda::TagInfo::RecordExt { .. }
+                ) =>
+            {
+                self.print_exception_block_literal(level, elements, tag_info, include_stack);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn print_exception_block_literal(
+        &mut self,
+        level: u8,
+        elements: &[Expression],
+        tag_info: &crate::lambda::TagInfo,
+        include_stack: bool,
+    ) {
+        let mut props: Vec<(String, Option<&Expression>)> =
+            Vec::with_capacity(elements.len() + usize::from(include_stack));
+        for (index, element) in elements.iter().enumerate() {
+            let name = match tag_info {
+                crate::lambda::TagInfo::Extension => {
+                    if index == 0 {
+                        "RE_EXN_ID".to_string()
+                    } else {
+                        format!("_{index}")
+                    }
+                }
+                crate::lambda::TagInfo::RecordExt { fields, .. } => {
+                    if index == 0 {
+                        "RE_EXN_ID".to_string()
+                    } else {
+                        fields
+                            .get(index - 1)
+                            .cloned()
+                            .unwrap_or_else(|| format!("_{index}"))
+                    }
+                }
+                _ => unreachable!("exception block printer only handles exception tag kinds"),
+            };
+            props.push((name, Some(element)));
+        }
+        if include_stack {
+            props.push(("Error".to_string(), None));
+        }
+
+        self.print_object_literal(level, None, props.iter(), |this, prop| {
+            let (name, value) = prop;
+            this.print_literal_property_name(name);
+            this.write(": ");
+            if let Some(value) = value {
+                this.print_expression(value, 1);
+            } else {
+                this.write("new Error()");
+            }
+        });
     }
 
     /// Print a variable identifier
@@ -1550,9 +1610,7 @@ fn mangle_ident_char(c: char, op: bool) -> &'static str {
 
 fn printed_name_base_and_next_suffix(printed: &str) -> (String, usize) {
     match printed.rsplit_once('$') {
-        Some((base, suffix))
-            if !base.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) =>
-        {
+        Some((base, suffix)) if !base.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) => {
             (base.to_string(), suffix.parse::<usize>().unwrap_or(0) + 1)
         }
         _ => (printed.to_string(), 1),
@@ -2524,5 +2582,52 @@ mod tests {
         ));
 
         assert_eq!(print_expression(&expr), "{\n  value: 1\n}");
+    }
+
+    #[test]
+    fn test_print_exception_extension_block_as_object() {
+        let expr = Expression::new(ExpressionDesc::CamlBlock(
+            vec![Expression::string("Not_found")],
+            MutableFlag::Immutable,
+            Box::new(Expression::number(Number::int(0))),
+            TagInfo::Extension,
+        ));
+
+        assert_eq!(print_expression(&expr), "{\n  RE_EXN_ID: \"Not_found\"\n}");
+    }
+
+    #[test]
+    fn test_print_record_extension_exception_uses_named_fields() {
+        let expr = Expression::new(ExpressionDesc::CamlBlock(
+            vec![
+                Expression::var(Ident::create_local("A")),
+                Expression::number(Number::int(3)),
+            ],
+            MutableFlag::Immutable,
+            Box::new(Expression::number(Number::int(0))),
+            TagInfo::RecordExt {
+                fields: vec!["value".to_string()],
+                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+            },
+        ));
+
+        assert_eq!(print_expression(&expr), "{\n  RE_EXN_ID: A,\n  value: 3\n}");
+    }
+
+    #[test]
+    fn test_print_throw_exception_block_includes_error_stack() {
+        let rendered = print_block(&vec![Statement::throw(Expression::new(
+            ExpressionDesc::CamlBlock(
+                vec![Expression::string("Not_found")],
+                MutableFlag::Immutable,
+                Box::new(Expression::number(Number::int(0))),
+                TagInfo::Extension,
+            ),
+        ))]);
+
+        assert_eq!(
+            rendered,
+            "throw {\n  RE_EXN_ID: \"Not_found\",\n  Error: new Error()\n};"
+        );
     }
 }
