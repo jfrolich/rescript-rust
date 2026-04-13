@@ -27,19 +27,26 @@ Artifacts:
 Corrected canonical run on 2026-04-13:
 
 - Files tested: `657`
-- Comparable files: `626`
-- Rust faster or equal: `1`
-- Rust slower: `625`
-- Materially slower: `246`
-- OCaml failures: `31`
+- Comparable files: `657`
+- Rust faster or equal: `2`
+- Rust slower: `655`
+- Materially slower: `252`
+- OCaml failures: `0`
 - Rust failures: `0`
-- Aggregate OCaml total: `5039.3ms`
-- Aggregate Rust total: `24213.8ms`
-- Aggregate Rust / OCaml ratio: `4.80x`
+- Aggregate OCaml total: `6171.5ms`
+- Aggregate Rust total: `26467.1ms`
+- Aggregate Rust / OCaml ratio: `4.29x`
 
-Only file where Rust was not slower:
+Files where Rust was not slower:
 
-- `src/jsoo_485_test.res`: Rust `24.3ms`, OCaml `30.8ms`
+- `src/and_or_tailcall_test.res`: Rust `10.7ms`, OCaml `10.8ms`
+- `src/inner_define.res`: Rust `11.1ms`, OCaml `12.1ms`
+
+The earlier `31` "OCaml failures" were a harness artifact. The benchmark
+flattened temp output paths to names like `src_a_recursive_type.res.ocaml.mjs`;
+that changes the output basename away from the module stem, and OCaml `bsc`
+then fails interface `.cmi` lookup for `.resi`-backed modules. Preserving the
+original basename fixes the issue.
 
 ## Top Slower Files
 
@@ -202,43 +209,6 @@ Fix direction:
    instantiation paths.
 3. Check whether Rust is creating excess copies while expanding rows or looking
    up fields/labels.
-
-## OCaml-Failing Files
-
-These `31` files currently fail under the OCaml reference compiler in this
-benchmark mode and are excluded from direct timing comparison:
-
-- `src/a_recursive_type.res`
-- `src/abstract_type.res`
-- `src/acyc/a1_a2.res`
-- `src/alias_test.res`
-- `src/ari_regress_test.res`
-- `src/bs_abstract_test.res`
-- `src/const_block_test.res`
-- `src/demo_int_map.res`
-- `src/derive_projector_test.res`
-- `src/ext_pervasives_test.res`
-- `src/float_record.res`
-- `src/gpr_3852_alias_reify.res`
-- `src/hash_sugar_desugar.res`
-- `src/hash_utils.res`
-- `src/hello_res.res`
-- `src/infer_type_test.res`
-- `src/inline_const.res`
-- `src/inline_edge_cases.res`
-- `src/inline_map_test.res`
-- `src/inner_define.res`
-- `src/poly_variant_test.res`
-- `src/polymorphism_test.res`
-- `src/reactEvent.res`
-- `src/reactTestUtils.res`
-- `src/reasonReact.res`
-- `src/reasonReactCompat.res`
-- `src/reasonReactRouter.res`
-- `src/test_unsafe_obj_ffi.res`
-- `src/test_unsafe_obj_ffi_ppx.res`
-- `src/unboxed_use_case.res`
-- `src/uncurry_test.res`
 
 ## Required End State
 

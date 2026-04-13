@@ -385,9 +385,11 @@ def main() -> int:
                 )
                 continue
 
-            safe_name = rel_path.replace("/", "_")
-            ocaml_out = tmp_root / f"{safe_name}.ocaml.mjs"
-            rust_out = tmp_root / f"{safe_name}.rust.mjs"
+            rel_output = Path(rel_path)
+            ocaml_out = (tmp_root / rel_output).with_suffix(".ocaml.mjs")
+            rust_out = (tmp_root / rel_output).with_suffix(".rust.mjs")
+            ocaml_out.parent.mkdir(parents=True, exist_ok=True)
+            rust_out.parent.mkdir(parents=True, exist_ok=True)
 
             ocaml_ms, ocaml_error = measure_compiler(
                 paths["ocaml_bsc"],

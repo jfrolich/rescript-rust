@@ -21,13 +21,13 @@ Authoritative `Import.res` timing repro:
 Authoritative canonical-corpus benchmark:
 
 - Files tested: `657`
-- Comparable files: `626`
-- Rust faster or equal: `1`
-- Rust slower: `625`
-- Materially slower: `246`
-- OCaml failures: `31`
+- Comparable files: `657`
+- Rust faster or equal: `2`
+- Rust slower: `655`
+- Materially slower: `252`
+- OCaml failures: `0`
 - Rust failures: `0`
-- Aggregate Rust / OCaml ratio: `4.80x`
+- Aggregate Rust / OCaml ratio: `4.29x`
 
 Detailed corpus baseline:
 
@@ -38,6 +38,9 @@ Detailed corpus baseline:
 - The main cost is not JS emission.
 - The dominant root cause is repeated deep-copy and path-rewrite of module
   signatures and nested type graphs.
+- The previous `31` "OCaml failures" were a benchmark bug, not real OCaml
+  failures: the harness flattened temp output basenames in a way that broke
+  interface `.cmi` lookup for every `.resi`-backed module.
 - The hottest Rust functions are:
   - `copy_lookup_signature_for_subst`
   - `copy_lookup_type_expr`

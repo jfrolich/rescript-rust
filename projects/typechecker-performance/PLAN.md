@@ -23,11 +23,11 @@ The output JS is close. The gap is compile-time and allocation behavior.
 Authoritative canonical-corpus benchmark on 2026-04-13:
 
 - Canonical source universe: `657` files
-- Comparable files: `626`
-- Rust faster or equal: `1`
-- Rust slower: `625`
-- Materially slower: `246`
-- Aggregate Rust / OCaml ratio: `4.80x`
+- Comparable files: `657`
+- Rust faster or equal: `2`
+- Rust slower: `655`
+- Materially slower: `252`
+- Aggregate Rust / OCaml ratio: `4.29x`
 
 Detailed corpus baseline and root-cause buckets:
 
