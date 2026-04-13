@@ -87,6 +87,9 @@ pub struct PersistentEnv {
     /// When a module is registered here, its metadata (source path, purity)
     /// is resolved from memory instead of from `.ast`/`.cmj` files on disk.
     in_memory_modules: HashMap<String, InMemoryModuleInfo>,
+    /// When true, all module resolution uses the in-memory registry only.
+    /// Disk fallbacks (`.ast`, `.cmj`, `.cmi` probes) are skipped entirely.
+    in_process_mode: bool,
 }
 
 impl PersistentEnv {
@@ -100,6 +103,7 @@ impl PersistentEnv {
             jsx_version: None,
             renamed_sig_cache: HashMap::new(),
             in_memory_modules: HashMap::new(),
+            in_process_mode: false,
         }
     }
 
@@ -250,6 +254,11 @@ impl PersistentEnv {
             return Some(info.source_path.clone());
         }
 
+        // In in-process mode, the registry is authoritative — no disk fallback.
+        if self.in_process_mode {
+            return None;
+        }
+
         for ext in ["ast", "iast"] {
             let ast_filename = format!("{name}.{ext}");
             if let Some(ast_path) = self.find_in_path_uncap(&ast_filename) {
@@ -283,6 +292,11 @@ impl PersistentEnv {
         // Check in-memory registry first (--in-process mode)
         if let Some(info) = self.in_memory_modules.get(name) {
             return Some(info.is_pure);
+        }
+
+        // In in-process mode, the registry is authoritative — no disk fallback.
+        if self.in_process_mode {
+            return None;
         }
 
         let path = self.resolve_module_cmj_path(name)?;
@@ -590,6 +604,17 @@ impl PersistentEnv {
     /// Check whether a module is registered in the in-memory registry.
     pub fn has_in_memory_module(&self, name: &str) -> bool {
         self.in_memory_modules.contains_key(name)
+    }
+
+    /// Enable in-process mode: all module resolution uses the in-memory
+    /// registry only, with no disk fallbacks for `.ast`, `.cmj`, or `.cmi`.
+    pub fn set_in_process_mode(&mut self, enabled: bool) {
+        self.in_process_mode = enabled;
+    }
+
+    /// Whether in-process mode is active.
+    pub fn is_in_process_mode(&self) -> bool {
+        self.in_process_mode
     }
 }
 

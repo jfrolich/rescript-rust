@@ -1,7 +1,7 @@
 # Ralph TODO: Rewatch In-Memory Build
 
 **Last Updated:** 2026-04-13
-**Status:** 6/16 tasks complete
+**Status:** 7/16 tasks complete
 
 ## Goal
 
@@ -44,7 +44,8 @@ Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-
   - **Done:** Added `InProcessCompileResult` struct (js_output, signature, persistent_env) and `InProcessInterfaceResult` struct (signature, persistent_env). Added `compile_source_in_process()` for `.res` files — takes a caller-owned `PersistentEnv`, compiles to JS, returns the inferred `Signature` and `PersistentEnv` back. Added `typecheck_interface_in_process()` for `.resi` files — takes a caller-owned `PersistentEnv`, typechecks, extracts the `Signature` via `decl_module_type_from_typed`, returns it and `PersistentEnv`. Both use `DeclSignature` (= `Vec<SignatureItem>`) compatible with `PersistentEnv::register_in_memory_signature()`.
 - [x] Remove driver-side filesystem assumptions for sibling `.resi` lookup and interface constraints in `--in-process`; the compile API should take explicit interface information from `rewatch`.
   - **Done:** `compile_source_in_process()` takes an explicit `has_interface: bool` parameter instead of probing the filesystem for a `.resi` sibling. When `has_interface` is true, moregen constraints are applied (the .resi signature must already be registered in the PersistentEnv). When false, the inferred signature is normalized. No filesystem probing for `.resi` exists in the in-process path.
-- [ ] Move JS import resolution in `compiler-rust/src/js_ir/mod.rs` onto registry metadata instead of persistent-env compiler-asset lookups.
+- [x] Move JS import resolution in `compiler-rust/src/js_ir/mod.rs` onto registry metadata instead of persistent-env compiler-asset lookups.
+  - **Done:** Added `in_process_mode: bool` flag to `PersistentEnv` with `set_in_process_mode()`/`is_in_process_mode()` API. When enabled, `resolve_module_source_path()` and `module_cmj_is_pure()` skip all disk fallbacks (`.ast`, `.iast`, `.cmj` probes) and treat the in-memory registry as authoritative. Added `in_process: bool` flag to `ModulePathResolver`, auto-derived from `PersistentEnv::is_in_process_mode()` during construction. When set, `is_runtime_module()` skips `.cmi/.ast/.iast` disk probes and `fallback_local_module_source()` skips `fs::read_dir()` directory scanning. Both `compile_source_in_process()` and `typecheck_interface_in_process()` in `driver.rs` now call `set_in_process_mode(true)` on the PersistentEnv. Compiler tests: 732/732 pass (same 19 pre-existing failures unchanged).
 
 ## Phase 2: Rewatch Build State
 

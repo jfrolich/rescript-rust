@@ -1586,8 +1586,10 @@ pub fn compile_source_in_process(
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     let mut env = initial_env(&type_ctx);
 
-    // Use the caller-provided PersistentEnv (with in-memory modules pre-registered)
+    // Use the caller-provided PersistentEnv (with in-memory modules pre-registered).
+    // Enable in-process mode so all resolution uses the registry, not disk.
     let mut pers_env = persistent_env;
+    pers_env.set_in_process_mode(true);
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path(load_path);
@@ -1737,8 +1739,10 @@ pub fn typecheck_interface_in_process(
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     let mut env = initial_env(&type_ctx);
 
-    // Use the caller-provided PersistentEnv
+    // Use the caller-provided PersistentEnv.
+    // Enable in-process mode so all resolution uses the registry, not disk.
     let mut pers_env = persistent_env;
+    pers_env.set_in_process_mode(true);
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path(load_path);
