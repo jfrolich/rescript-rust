@@ -44,6 +44,42 @@ reported:
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed assignment-continuation slice in
+  `compiler/core/lam_compile.ml`
+- After reading OCaml's `compile_ifthenelse` handling for `Assign id`,
+  the Rust backend in `compiler-rust/src/lambda/compile.rs` now routes complex
+  value-position `if` branches through `compile_assign_to_target_block`
+  instead of compiling branch values first and assigning them afterward
+- The same Rust assignment helper now threads through `Llet` and `Lsequence`,
+  which matches the OCaml continuation flow more closely and lets nested
+  switches/conditionals assign directly into the outer result slot
+- Added focused regression coverage in
+  `lambda::compile::tests::if_value_branches_keep_assignment_continuation_through_let_bindings`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib if_value_branches_keep_assignment_continuation_through_let_bindings -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib sequence_prefix_ifs_use_effect_lowering_without_result_temps -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/json_decorders.res -o /tmp/json_decorders.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_2682_test.res -o /tmp/gpr_2682_test.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/json_decorders.res` no longer differs on the nested
+  `$$switch` temporary inside the optional-email branch; the remaining drift in
+  that file is the outer conditional-assignment shape around the final result
+  slot
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match, and
+  `tests/tests/src/gpr_2682_test.res` stays reduced to the separate raw-JS
+  formatting drift only
+- Across cached diff artifacts, files whose diffs still contain `let ifres`
+  dropped from **27** to **24** in this iteration
+- The authoritative JS snapshot baseline remains **235 / 657** passing,
+  **0** compile errors, and **422** output diffs after this OCaml-aligned
+  continuation fix; the global total is flat, but the remaining
+  value-position conditional cluster is smaller and more localized
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed effect-continuation slice in
   `compiler/core/lam_compile.ml`
 - After reading OCaml's `Lsequence` lowering there, the Rust backend in

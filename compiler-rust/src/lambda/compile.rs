@@ -356,19 +356,11 @@ impl LambdaCompiler {
                         property: LetKind::Strict,
                         ident_info: IdentInfo::default(),
                     }));
-                    let mut then_block = then_compiled.prelude;
-                    then_block.push(Statement::exp(Expression::bin(
-                        BinOp::Eq,
-                        Expression::var(tmp.clone()),
-                        then_compiled.expr,
-                    )));
-                    let mut else_block = else_compiled.prelude;
-                    else_block.push(Statement::exp(Expression::bin(
-                        BinOp::Eq,
-                        Expression::var(tmp.clone()),
-                        else_compiled.expr,
-                    )));
-                    prelude.push(Statement::if_(cond_compiled.expr, then_block, else_block));
+                    prelude.push(Statement::if_(
+                        cond_compiled.expr,
+                        self.compile_assign_to_target_block(&tmp, then_),
+                        self.compile_assign_to_target_block(&tmp, else_),
+                    ));
                     Compiled {
                         prelude,
                         expr: Expression::var(tmp),
@@ -1723,6 +1715,16 @@ impl LambdaCompiler {
 
     fn compile_assign_to_target_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
         match lam {
+            Lambda::Llet(kind, id, value, body) => {
+                let mut block = self.compile_let_binding(*kind, id, value);
+                block.extend(self.compile_assign_to_target_block(result, body));
+                block
+            }
+            Lambda::Lsequence(first, second) => {
+                let mut block = self.compile_effect_block(first);
+                block.extend(self.compile_assign_to_target_block(result, second));
+                block
+            }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 self.with_static_handler(*label, bindings, handler, |this| {
                     this.compile_assign_to_target_block(result, body)
@@ -9182,6 +9184,107 @@ mod tests {
                 desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
                 ..
             } if id.same(&value)
+        ));
+    }
+
+    #[test]
+    fn if_value_branches_keep_assignment_continuation_through_let_bindings() {
+        let mut compiler = LambdaCompiler::new();
+        let outer_cond = Ident::create_local("outerCond");
+        let inner_cond = Ident::create_local("innerCond");
+        let alias = Ident::create_local("alias");
+        let compiled = compiler.compile_expr(&Lambda::LifThenElse(
+            Box::new(Lambda::var(outer_cond.clone())),
+            Box::new(Lambda::Llet(
+                LetKind::Strict,
+                alias.clone(),
+                Box::new(Lambda::const_(Constant::int(1))),
+                Box::new(Lambda::LifThenElse(
+                    Box::new(Lambda::var(inner_cond.clone())),
+                    Box::new(Lambda::const_(Constant::int(2))),
+                    Box::new(Lambda::const_(Constant::int(3))),
+                )),
+            )),
+            Box::new(Lambda::const_(Constant::int(4))),
+        ));
+
+        let [result_decl, if_stmt] = compiled.prelude.as_slice() else {
+            panic!("expected a temp declaration and one if statement");
+        };
+
+        let result = match &result_decl.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => ident.clone(),
+            _ => panic!("expected a result temp declaration"),
+        };
+        let StatementDesc::If(_, then_block, else_block) = &if_stmt.desc else {
+            panic!("expected an if statement");
+        };
+
+        let [alias_decl, then_assign] = then_block.as_slice() else {
+            panic!("expected the then branch to bind the alias then assign");
+        };
+        assert!(matches!(
+            alias_decl,
+            Statement {
+                desc: StatementDesc::Variable(VariableDeclaration { ident, .. }),
+                ..
+            } if ident.same(&alias)
+        ));
+        assert!(matches!(
+            then_assign,
+            Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Bin(
+                        BinOp::Eq,
+                        lhs,
+                        rhs
+                    ),
+                    ..
+                }),
+                ..
+            } if matches!(
+                (&lhs.desc, &rhs.desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                    ExpressionDesc::Cond(test, consequent, alternate)
+                ) if lhs_id.same(&result)
+                    && matches!(
+                        test.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(test_id)),
+                            ..
+                        } if test_id.same(&inner_cond)
+                    )
+                    && matches!(consequent.desc, ExpressionDesc::Number(Number::Int { i: 2, .. }))
+                    && matches!(alternate.desc, ExpressionDesc::Number(Number::Int { i: 3, .. }))
+            )
+        ));
+        assert!(matches!(
+            else_block.as_slice(),
+            [Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Bin(
+                        BinOp::Eq,
+                        lhs,
+                        rhs
+                    ),
+                    ..
+                }),
+                ..
+            }] if matches!(
+                (&lhs.desc, &rhs.desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                    ExpressionDesc::Number(Number::Int { i: 4, .. })
+                ) if lhs_id.same(&result)
+            )
+        ));
+        assert!(matches!(
+            compiled.expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&result)
         ));
     }
 
