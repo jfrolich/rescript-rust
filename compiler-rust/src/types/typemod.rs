@@ -2827,18 +2827,14 @@ pub fn lookup_module_path_by_lid<'b>(
         Longident::Ldot(prefix, submod_idx) => {
             let submod_name = arena.get_string(*submod_idx);
             let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
-            let parent_type = lookup_module_type_by_lid(prefix, arena, env, pers_env, ctx)?;
-            let parent_sig = resolve_mod_type_to_sig(&parent_type, Some(env), pers_env, ctx)?;
-            if let Some((pos, _sub_md)) =
-                crate::types::decl::signature_runtime_module(&parent_sig, submod_name)
-            {
-                return Some(Path::Pdot(
-                    Box::new(parent_path.clone()),
-                    submod_name.to_string(),
-                    pos as i32,
-                ));
-            }
-            None
+            crate::types::typecore::lookup_module_in_resolved_path(
+                &parent_path,
+                submod_name,
+                env,
+                pers_env,
+                ctx,
+            )
+            .map(|(_, child_path, _)| child_path)
         }
         Longident::Lapply(functor, arg) => {
             let functor_path = lookup_module_path_by_lid(functor, arena, env, pers_env, ctx)?;
@@ -2869,16 +2865,14 @@ pub fn lookup_modtype_path_by_lid<'b>(
         Longident::Ldot(prefix, submodtype_idx) => {
             let submodtype_name = arena.get_string(*submodtype_idx);
             let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
-            let parent_type = lookup_module_type_by_lid(prefix, arena, env, pers_env, ctx)?;
-            let parent_sig = resolve_mod_type_to_sig(&parent_type, Some(env), pers_env, ctx)?;
-            for sig_item in &parent_sig {
-                if let crate::types::decl::SignatureItem::SigModtype(id, _) = sig_item {
-                    if id.name() == submodtype_name {
-                        return Some(Path::pdot(parent_path, submodtype_name));
-                    }
-                }
-            }
-            None
+            crate::types::typecore::lookup_modtype_in_resolved_path(
+                &parent_path,
+                submodtype_name,
+                env,
+                pers_env,
+                ctx,
+            )
+            .map(|(resolved_parent_path, _)| Path::pdot(resolved_parent_path, submodtype_name))
         }
         Longident::Lapply(_, _) => None,
     }
@@ -2925,12 +2919,13 @@ pub fn lookup_module_type_by_lid<'b>(
                 }
                 _ => None,
             };
-            // Resolve parent type to signature
-            let parent_sig = resolve_mod_type_to_sig(&parent_type, Some(env), pers_env, ctx)?;
-            // Find sub-module in parent signature
-            for sig_item in &parent_sig {
-                if let crate::types::decl::SignatureItem::SigModule(id, sub_md, _) = sig_item {
-                    if id.name() == submod_name {
+            crate::types::typecore::with_resolved_module_components_for_path(
+                &parent_path,
+                env,
+                pers_env,
+                ctx,
+                |components| {
+                    if let Some((_, _, sub_md)) = components.lookup_module(submod_name) {
                         if let Some((alias_presence, alias_path)) = parent_alias.clone() {
                             if let DeclMty::MtyAlias(child_presence, child_path) = &sub_md.md_type {
                                 return Some(DeclMty::MtyAlias(
@@ -2946,27 +2941,26 @@ pub fn lookup_module_type_by_lid<'b>(
                         let mut child_mty = sub_md.md_type.clone();
                         crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
                             &mut child_mty,
-                            &parent_sig,
-                            &parent_path,
+                            components.signature(),
+                            components.access_path(),
                             ctx,
                         );
                         return Some(child_mty);
                     }
-                }
-                if let crate::types::decl::SignatureItem::SigModtype(id, mtd) = sig_item {
-                    if id.name() == submod_name {
+                    if let Some((_, mtd)) = components.lookup_modtype(submod_name) {
                         let mut child_mty = mtd.mtd_type.clone()?;
                         crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
                             &mut child_mty,
-                            &parent_sig,
-                            &parent_path,
+                            components.signature(),
+                            components.access_path(),
                             ctx,
                         );
                         return Some(child_mty);
                     }
-                }
-            }
-            None
+                    None
+                },
+            )
+            .flatten()
         }
         _ => None,
     }

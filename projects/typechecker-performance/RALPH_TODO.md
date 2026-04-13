@@ -1,7 +1,7 @@
 # Ralph TODO: Typechecker Performance
 
 **Last Updated:** 2026-04-14
-**Status:** env_lazy value-lookup checkpoint landed; broader perf gap still open
+**Status:** env_lazy dotted module/module-type lookup checkpoint landed; broader perf gap still open
 
 ## Goal
 
@@ -91,53 +91,67 @@ Detailed investigation:
 
 ## Current Checkpoint
 
-Checkpoint measurements from this worktree after routing dotted value lookup
-through cached qualified module components on `2026-04-14`:
+Checkpoint measurements from this worktree after routing dotted
+module/module-type/type lookups through cached qualified module components on
+`2026-04-14`:
 
 - Full typedtree parity: Rust `657 passed`, OCaml `657 passed`, parity
-  `232/657`, `43121` hunk mismatches
+  `232/657`, `43117` hunk mismatches
 - Focused import parity: `1/4` files match, `283` hunk mismatches
 - Authoritative `Import.res` repro:
   - OCaml: `0.05s` (`/usr/bin/time -lp`)
-  - Rust: `0.65s` (`/usr/bin/time -lp`)
-  - Rust max RSS: about `536MB`
-  - Rust peak footprint: about `508MB`
+  - Rust: `0.34s` (`/usr/bin/time -lp`)
+  - Rust max RSS: about `73MB`
+  - Rust peak footprint: about `58MB`
 - Authoritative canonical corpus benchmark:
   - Files tested: `657`
   - Comparable files: `656`
   - Rust faster or equal: `1`
   - Rust slower: `655`
-  - Materially slower: `232`
+  - Materially slower: `231`
   - Rust failures: `1` (`src/ticker.res`: stack overflow)
-  - Aggregate OCaml total: `4540.7ms`
-  - Aggregate Rust total: `11795.0ms`
-  - Aggregate Rust / OCaml ratio: `2.60x`
+  - Aggregate OCaml total: `4761.9ms`
+  - Aggregate Rust total: `11277.8ms`
+  - Aggregate Rust / OCaml ratio: `2.37x`
 
 What landed in this checkpoint:
 
-- `typecore` dotted value lookup no longer routes through the old copied-value-
-  signature cache and per-lookup `Subst.value_description` emulation
-- dotted value lookup now resolves the module access path once, then reads the
-  value directly from cached `QualifiedModuleComponents`, matching OCaml's
-  `lookup_module_descr` / `get_components` shape more closely
-- the first attempted full `resolve_module_lid` reroute through the new access-
-  path helper was measured and rejected in the same session because it kept
-  parity flat while pushing `Import.res` back above `1.4s`
-- cache scoping for qualified module components stays restricted to the
-  env-sensitive local-alias cases instead of all local module paths
+- `build_module_signature_for_path` no longer clones and scans a fresh parent
+  signature just to resolve `Pdot` child modules; it now reads the child module
+  directly from cached `QualifiedModuleComponents`
+- `ctype::resolve_module_type_through_env_path` now uses the cached qualified
+  parent components as the source of truth for dotted module/module-type lookup,
+  while preserving the required parent-child substitution step for functor and
+  other non-signature child module types
+- `ctype::resolve_type_item_through_env` now reads the target `SigType`
+  directly from cached qualified components instead of resolving and scanning a
+  copied whole signature
+- `typemod::lookup_module_path_by_lid`, `lookup_modtype_path_by_lid`, and
+  `lookup_module_type_by_lid` now route dotted lookups through the same cached
+  qualified components path instead of rebuilding parent signatures for each
+  child lookup
+- the intermediate functor regression in `defunctor_make_test.res` was fixed by
+  keeping child module-type substitution against the cached parent qualified
+  signature slice rather than dropping that step entirely
 
 What this means:
 
-- the qualified module-components path is now doing real work on the value side,
-  not only on the type side
-- parity improved materially over the previous `226/657`, `43199` checkpoint,
-  which is a good sign that the new lookup shape is closer to OCaml's forcing
-  and sharing behavior
-- performance is still far from the project target, but the broader corpus is
-  slightly better than the previous `11951.8ms` aggregate checkpoint
-- the next session should continue pushing module/module-type lookup through the
-  same component-backed path without reintroducing the reverted module-lid
-  slowdown
+- the qualified module-components path is now carrying dotted module,
+  module-type, and type lookup work in both `ctype` and `typemod`, not only
+  dotted value lookup
+- `Import.res` improved from the prior `0.65s` / `536MB` checkpoint to `0.34s`
+  / `73MB`, which is the strongest sign so far that moving child lookups onto
+  the OCaml-shaped lazy path is the right direction
+- the broader corpus also improved from `11795.0ms` (`2.60x`) to `11277.8ms`
+  (`2.37x`), and the `Import.res` entry in the benchmark dropped from `30.40x`
+  slower than OCaml earlier in this worktree to `7.74x`
+- parity stayed effectively flat at the checkpoint level, which means the new
+  speedup did not require a new serializer workaround or an import-specific
+  hack
+- the next session should keep pushing allocation-sharing improvements through
+  the same cached qualified view and then re-profile the residual clusters
+  (`mario_game`, JSX-heavy files, `gpr_1150`, and the `ticker.res` stack
+  overflow)
 
 ## Task List
 
@@ -164,12 +178,12 @@ What this means:
   the lazy path is also allocation-efficient
 - [ ] Replace bandaid-style eager copies with a design that is structurally
   closer to OCaml's lazy `components_of_module_maker` path
-- [ ] Re-measure `Import.res` and capture new timing/memory numbers
+- [x] Re-measure `Import.res` and capture new timing/memory numbers
 - [ ] Re-sample the compiler and confirm the hot path moved away from
   `copy_lookup_signature_for_subst` / `copy_lookup_type_expr`
 - [ ] Land an OCaml-shaped cached module-components layer if the intermediate
   shared-helper step is still slower than OCaml
-- [ ] Re-run the full canonical corpus after the lazy-components work and record
+- [x] Re-run the full canonical corpus after the lazy-components work and record
   which slower-than-OCaml files disappear
 - [ ] Re-investigate residual slower files after the module-view fix, starting
   with `gpr_1150.res`, JSX-heavy files, and polyvariant/Intl files

@@ -1012,8 +1012,6 @@ fn resolve_module_type_through_env_path<'a>(
     path: &Path,
     visiting: &mut HashSet<Path>,
 ) -> Option<super::decl::ModuleType> {
-    use super::decl::SignatureItem;
-
     // Keep visited paths for the entire alias-resolution chain; this mirrors
     // OCaml's cycle-safe alias scraping and prevents re-entering `Mty_ident`
     // loops through `resolve_signature_through_env_module_type`.
@@ -1050,83 +1048,83 @@ fn resolve_module_type_through_env_path<'a>(
         }
         Path::Pdot(parent, name, _) => {
             let parent_mty = resolve_module_type_through_env_path(ctx, env, parent, visiting)?;
-            let parent_sig =
-                resolve_signature_through_env_module_type(ctx, env, &parent_mty, visiting)?;
             let parent_alias_target = match &parent_mty {
                 super::decl::ModuleType::MtyAlias(_, target_path) => Some(target_path.clone()),
                 _ => None,
             };
-            parent_sig.iter().find_map(|item| match item {
-                SignatureItem::SigModule(id, md, _) if id.name() == name => match &md.md_type {
-                    super::decl::ModuleType::MtySignature(sig) => {
-                        // Mirror OCaml Subst behavior for env-based nested module access:
-                        // child module signatures may reference parent-defined types/modules
-                        // using bare names (e.g. `subtype` inside `Stream.Writable`).
-                        // Rewrite those references through the parent module access path.
-                        //
-                        // IMPORTANT: deep-copy the signature before applying parent
-                        // substitutions to avoid modifying the original type expressions
-                        // in-place (which would corrupt the typed tree).  OCaml's lazy
-                        // `components_of_module_maker` naturally deep-copies via
-                        // `Subst.type_declaration`; we emulate that with copy_lookup.
-                        let copied_sig = super::typecore::copy_lookup_signature_for_subst(sig, ctx);
-                        crate::cmi::persistent_env::substitute_type_paths_in_child_sig(
-                            &copied_sig,
-                            &parent_sig,
-                            parent,
-                            ctx,
-                        );
-                        let child_sig = if let Some(target_parent_path) =
-                            parent_alias_target.as_ref()
-                        {
-                            let child_target_path = Path::pdot(target_parent_path.clone(), name);
-                            strengthen_signature_for_module_access_path(
-                                ctx,
-                                env,
-                                true,
-                                &child_target_path,
-                                &copied_sig,
-                                0,
-                            )
-                        } else {
-                            copied_sig
+            let mut no_persistent_env = None;
+            crate::types::typecore::with_resolved_module_components_for_path(
+                parent,
+                env,
+                &mut no_persistent_env,
+                ctx,
+                |components| {
+                    if let Some((_, _, md)) = components.lookup_module(name) {
+                        return match &md.md_type {
+                            super::decl::ModuleType::MtySignature(sig) => {
+                                let copied_sig =
+                                    super::typecore::copy_lookup_signature_for_subst(sig, ctx);
+                                crate::cmi::persistent_env::substitute_type_paths_in_child_sig(
+                                    &copied_sig,
+                                    components.signature(),
+                                    components.access_path(),
+                                    ctx,
+                                );
+                                let child_sig =
+                                    if let Some(target_parent_path) = parent_alias_target.as_ref() {
+                                        let child_target_path =
+                                            Path::pdot(target_parent_path.clone(), name);
+                                        strengthen_signature_for_module_access_path(
+                                            ctx,
+                                            env,
+                                            true,
+                                            &child_target_path,
+                                            &copied_sig,
+                                            0,
+                                        )
+                                    } else {
+                                        copied_sig
+                                    };
+                                Some(super::decl::ModuleType::MtySignature(child_sig))
+                            }
+                            other => {
+                                let mut child_mty = other.clone();
+                                crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+                                    &mut child_mty,
+                                    components.signature(),
+                                    components.access_path(),
+                                    ctx,
+                                );
+                                if let Some(target_parent_path) = parent_alias_target.as_ref() {
+                                    let child_target_path =
+                                        Path::pdot(target_parent_path.clone(), name);
+                                    Some(strengthen_module_type_for_module_access_path(
+                                        ctx,
+                                        env,
+                                        true,
+                                        &child_target_path,
+                                        &child_mty,
+                                    ))
+                                } else {
+                                    Some(child_mty)
+                                }
+                            }
                         };
-                        Some(super::decl::ModuleType::MtySignature(child_sig))
                     }
-                    other => {
-                        let mut child_mty = other.clone();
+                    if let Some((_, mtd)) = components.lookup_modtype(name) {
+                        let mut child_mty = mtd.mtd_type.clone()?;
                         crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
                             &mut child_mty,
-                            &parent_sig,
-                            parent,
+                            components.signature(),
+                            components.access_path(),
                             ctx,
                         );
-                        if let Some(target_parent_path) = parent_alias_target.as_ref() {
-                            let child_target_path = Path::pdot(target_parent_path.clone(), name);
-                            Some(strengthen_module_type_for_module_access_path(
-                                ctx,
-                                env,
-                                true,
-                                &child_target_path,
-                                &child_mty,
-                            ))
-                        } else {
-                            Some(child_mty)
-                        }
+                        return Some(child_mty);
                     }
+                    None
                 },
-                SignatureItem::SigModtype(id, mtd) if id.name() == name => {
-                    let mut child_mty = mtd.mtd_type.clone()?;
-                    crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
-                        &mut child_mty,
-                        &parent_sig,
-                        parent,
-                        ctx,
-                    );
-                    Some(child_mty)
-                }
-                _ => None,
-            })
+            )
+            .flatten()
         }
         Path::Papply(_, _) => None,
     };
@@ -1393,71 +1391,62 @@ fn resolve_type_item_through_env<'a>(
     };
 
     let mut no_persistent_env = None;
-    let (qualified_module_path, module_sig) = crate::types::typecore::resolve_module_signature_for_path(
-        module_path,
-        env,
-        &mut no_persistent_env,
-        ctx,
-    )?;
-    let module_access_origin_is_persistent = qualified_module_path.head().is_persistent();
-    // For alias modules, expansion should expose the alias target path
-    // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
-    let alias_target_for_strengthening = if strengthen_alias_types {
-        // Preserve local access paths like `L.t` / `V.t` instead of
-        // collapsing them back to the alias target during expansion.
-        let mut no_persistent_env = None;
-        crate::types::typecore::module_alias_target_for_path(
+    if let Some((qualified_module_path, id, decl)) =
+        crate::types::typecore::lookup_type_in_resolved_path(
             module_path,
+            type_name,
             env,
             &mut no_persistent_env,
             ctx,
         )
-        .filter(|_| module_access_origin_is_persistent)
-    } else {
-        None
-    };
+    {
+        let copied_decl = crate::types::typecore::copy_lookup_type_decl_for_subst(&decl, ctx);
+        let module_access_origin_is_persistent = qualified_module_path.head().is_persistent();
+        // For alias modules, expansion should expose the alias target path
+        // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
+        let alias_target_for_strengthening = if strengthen_alias_types {
+            // Preserve local access paths like `L.t` / `V.t` instead of
+            // collapsing them back to the alias target during expansion.
+            let mut no_persistent_env = None;
+            crate::types::typecore::module_alias_target_for_path(
+                module_path,
+                env,
+                &mut no_persistent_env,
+                ctx,
+            )
+            .filter(|_| module_access_origin_is_persistent)
+        } else {
+            None
+        };
 
-    for item in &module_sig {
-        if let SignatureItem::SigType(id, decl, _) = item {
-            if id.name() == type_name {
-                let copied_decl =
-                    crate::types::typecore::copy_lookup_type_decl_for_subst(decl, ctx);
-                let queried_type_path =
-                    Path::pdot(qualified_module_path.clone(), type_name.to_string());
-                let self_manifest = copied_decl.type_manifest.is_some_and(|manifest| {
-                    let manifest = ctx.repr(manifest);
-                    let manifest_desc = ctx.get_desc(manifest);
-                    matches!(
-                        &*manifest_desc,
-                        TypeDesc::Tconstr {
-                            path: manifest_path, ..
-                        } if manifest_path.same(&queried_type_path)
-                    )
-                });
-                if self_manifest {
-                    let raw_module_path = alias_target_for_strengthening
-                        .as_ref()
-                        .unwrap_or(module_path);
-                    if let Some((raw_id, raw_decl)) =
-                        lookup_raw_module_sig_type(env, raw_module_path, type_name)
-                    {
-                        return Some((raw_id, raw_decl));
-                    }
-                }
-                if let Some(target_path) = alias_target_for_strengthening.as_ref() {
-                    return Some((
-                        id.clone(),
-                        strengthen_type_decl_for_module_access_path(
-                            ctx,
-                            target_path,
-                            id,
-                            &copied_decl,
-                        ),
-                    ));
-                }
-                return Some((id.clone(), copied_decl));
+        let queried_type_path = Path::pdot(qualified_module_path.clone(), type_name.to_string());
+        let self_manifest = copied_decl.type_manifest.is_some_and(|manifest| {
+            let manifest = ctx.repr(manifest);
+            let manifest_desc = ctx.get_desc(manifest);
+            matches!(
+                &*manifest_desc,
+                TypeDesc::Tconstr {
+                    path: manifest_path, ..
+                } if manifest_path.same(&queried_type_path)
+            )
+        });
+        if self_manifest {
+            let raw_module_path = alias_target_for_strengthening
+                .as_ref()
+                .unwrap_or(module_path);
+            if let Some((raw_id, raw_decl)) =
+                lookup_raw_module_sig_type(env, raw_module_path, type_name)
+            {
+                return Some((raw_id, raw_decl));
             }
         }
+        if let Some(target_path) = alias_target_for_strengthening.as_ref() {
+            return Some((
+                id.clone(),
+                strengthen_type_decl_for_module_access_path(ctx, target_path, &id, &copied_decl),
+            ));
+        }
+        return Some((id, copied_decl));
     }
 
     // Fall back to CMI-based resolution if local env-based lookup didn't find
