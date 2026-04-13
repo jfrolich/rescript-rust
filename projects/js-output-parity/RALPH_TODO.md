@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 249 / 657 JS snapshots passing, 0 compile errors, 408 output diffs
+**Status:** 251 / 657 JS snapshots passing, 0 compile errors, 406 output diffs
 
 ## Goal
 
@@ -35,13 +35,50 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **249 / 657**
+- JS snapshot parity: **251 / 657**
 - Compile errors: **0**
-- Output diffs: **408**
+- Output diffs: **406**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed unreachable-let / export-body
+  lowering slice in `compiler/core/lam_compile.ml` together with
+  `compiler/core/js_output.ml`
+- After reading OCaml's `compile_lambda` handling for `Llet` there plus
+  `Js_output.append_output` / `output_finished`, the Rust backend in
+  `compiler-rust/src/lambda/compile.rs` now stops appending unreachable let
+  body preludes after a terminating RHS prelude, stops emitting unreachable
+  declarations for let-bound values whose RHS already throws, and normalizes
+  extracted export payload values to `undefined` when the surrounding block has
+  already terminated so the legacy export-extraction path matches OCaml's
+  dropped-body behavior
+- Added focused regression coverage in
+  `lambda::compile::tests::compile_deps_program_skips_unreachable_throwing_export_binding_declaration`
+  and
+  `lambda::compile::tests::compile_deps_program_skips_unreachable_nested_throwing_export_binding_declaration`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release skips_unreachable -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release coerce_toplevel_exports_skips_unreachable_undefined_placeholder_after_throw -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/conditional/cond_a.res -o /tmp/cond_a.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/conditional/cond_a_none.res -o /tmp/cond_a_none.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/conditional/cond_a.res` and
+  `tests/tests/src/conditional/cond_a_none.res` now match their checked-in
+  snapshots exactly again, which confirms the Rust backend now drops the same
+  unreachable post-raise let/export scaffolding as OCaml; meanwhile
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change
+- The authoritative JS snapshot baseline now reports **251 / 657** passing,
+  **0** compile errors, and **406** output diffs; this is a net **+2**
+  passing snapshots and **-2** output diffs from the previously recorded
+  **249 / 657**, **0** compile errors, **408** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed empty arrow-function body

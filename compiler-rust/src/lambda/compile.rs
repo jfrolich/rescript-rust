@@ -100,9 +100,17 @@ impl LambdaCompiler {
         let simplified = crate::lambda::simplify::simplify_for_js_backend(lam);
         let compiled = self.compile_expr(&simplified);
         let mut block = compiled.prelude;
-        let exports = extract_toplevel_exports(compiled.expr, &mut block)
-            .map(|exports| self.coerce_toplevel_exports(&mut block, exports))
-            .unwrap_or_default();
+        let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block)
+        {
+            if block_terminates(&block) {
+                for value in &mut exports.values {
+                    *value = Expression::undefined(false);
+                }
+            }
+            self.coerce_toplevel_exports(&mut block, exports)
+        } else {
+            vec![]
+        };
         let exports = resolve_export_aliases(&block, exports);
         let side_effect = module_side_effect_reason(&simplified);
 
@@ -283,6 +291,12 @@ impl LambdaCompiler {
             Lambda::Llet(kind, id, value, body) => {
                 let mut prelude = self.compile_let_binding(*kind, id, value);
                 let body_compiled = self.compile_expr(body);
+                if block_terminates(&prelude) {
+                    return Compiled {
+                        prelude,
+                        expr: body_compiled.expr,
+                    };
+                }
                 prelude.extend(body_compiled.prelude);
                 Compiled {
                     prelude,
@@ -446,6 +460,9 @@ impl LambdaCompiler {
         match value {
             Lambda::Llet(inner_kind, inner_id, inner_value, body) => {
                 let mut block = self.compile_let_binding(*inner_kind, inner_id, inner_value);
+                if block_terminates(&block) {
+                    return block;
+                }
                 block.extend(self.compile_let_binding(kind, id, body));
                 block
             }
@@ -485,6 +502,9 @@ impl LambdaCompiler {
             _ => {
                 let value_compiled = self.compile_expr(value);
                 let mut block = value_compiled.prelude;
+                if block_terminates(&block) {
+                    return block;
+                }
                 block.push(Statement::variable(VariableDeclaration {
                     ident: id.clone(),
                     value: Some(value_compiled.expr),
@@ -8819,6 +8839,113 @@ mod tests {
             )),
             "expected the trailing assignment effect to remain in the program block"
         );
+    }
+
+    #[test]
+    fn compile_deps_program_skips_unreachable_throwing_export_binding_declaration() {
+        let mut compiler = LambdaCompiler::new();
+        let exported = Ident::create_local("u");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![exported.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(exported.clone())],
+            Location::none(),
+        );
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            exported.clone(),
+            Lambda::prim(
+                Primitive::Praise,
+                vec![Lambda::const_(Constant::string("boom"))],
+                Location::none(),
+            ),
+            export_block,
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        assert_eq!(deps.program.exports, vec![exported.clone()]);
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!(
+                "expected the terminating throw to stay as the only statement, got {:?}",
+                deps.program.block
+            );
+        };
+        assert!(matches!(
+            stmt,
+            Statement {
+                desc: StatementDesc::Throw(Expression {
+                    desc: ExpressionDesc::Str { txt, .. },
+                    ..
+                }),
+                ..
+            } if txt == "boom"
+        ));
+    }
+
+    #[test]
+    fn compile_deps_program_skips_unreachable_nested_throwing_export_binding_declaration() {
+        let mut compiler = LambdaCompiler::new();
+        let exported = Ident::create_local("A");
+        let nested = Ident::create_local("u");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![exported.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(exported.clone())],
+            Location::none(),
+        );
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            exported.clone(),
+            Lambda::let_(
+                LetKind::Strict,
+                nested.clone(),
+                Lambda::prim(
+                    Primitive::Praise,
+                    vec![Lambda::const_(Constant::string("boom"))],
+                    Location::none(),
+                ),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::record(
+                            vec![(nested.name().to_string(), false)],
+                            crate::parser::ast::MutableFlag::Immutable,
+                        ),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(nested)],
+                    Location::none(),
+                ),
+            ),
+            export_block,
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        assert_eq!(deps.program.exports, vec![exported.clone()]);
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!(
+                "expected the terminating throw to stay as the only statement, got {:?}",
+                deps.program.block
+            );
+        };
+        assert!(matches!(
+            stmt,
+            Statement {
+                desc: StatementDesc::Throw(Expression {
+                    desc: ExpressionDesc::Str { txt, .. },
+                    ..
+                }),
+                ..
+            } if txt == "boom"
+        ), "expected a terminating throw, got {:?}", stmt);
     }
 
     #[test]
