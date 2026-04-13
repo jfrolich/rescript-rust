@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 260 / 657 JS snapshots passing, 0 compile errors, 397 output diffs
+**Status:** 261 / 657 JS snapshots passing, 0 compile errors, 396 output diffs
 
 ## Goal
 
@@ -35,13 +35,50 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **260 / 657**
+- JS snapshot parity: **261 / 657**
 - Compile errors: **0**
-- Output diffs: **397**
+- Output diffs: **396**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed nullable-option lowering slice
+  in `compiler/core/lam_compile_primitive.ml` together with
+  `compiler/core/js_of_lam_option.ml`
+- After reading OCaml's `Pnull_to_opt` / `Pnull_undefined_to_opt` lowering
+  there, which only inlines `null_to_opt` / `null_undef_to_opt` for
+  `Var | Undefined | Null` and otherwise emits
+  `Primitive_option.fromNull` / `Primitive_option.fromNullable`, the Rust
+  backend in `compiler-rust/src/lambda/compile.rs` now follows the same split
+  instead of always lowering these primitives into ternaries
+- Added focused regression coverage in
+  `lambda::compile::tests::lowers_pnull_to_opt_non_inline_operand_to_primitive_option_from_null`
+  and
+  `lambda::compile::tests::lowers_pnull_undefined_to_opt_non_inline_operand_to_primitive_option_from_nullable`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release pnull_to_opt_non_inline -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release pnull_undefined_to_opt_non_inline -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_974_test.res -o /tmp/gpr_974_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/gpr_974_test.res` now matches its checked-in snapshot
+  exactly again, `tests/tests/src/ExternalShadow.res` remains an exact
+  guard-file match, the cached `Primitive_option.fromNull` motif shrank from
+  **5** failing files to **4**, and the cached
+  `Primitive_option.fromNullable` motif shrank from **3** failing files to
+  **2**; the remaining nullable-option files are now
+  `js_null_test.res`, `js_null_undefined_test.res`, `js_string_test.res`, and
+  `js_re_test.res`, which are on separate constant-fold / `some(undefined)` /
+  regex-emission issues rather than the wrong helper-vs-inline split
+- The authoritative JS snapshot baseline now reports **261 / 657** passing,
+  **0** compile errors, and **396** output diffs; this is a net **+1**
+  passing snapshot and **-1** output diff from the previously recorded
+  **260 / 657**, **0** compile errors, **397** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed option-runtime emission slice

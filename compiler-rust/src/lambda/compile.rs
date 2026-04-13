@@ -2543,16 +2543,8 @@ impl LambdaCompiler {
                 Box::new(compiled_args[0].clone()),
                 Box::new(compiled_args[1].clone()),
             )),
-            PnullToOpt => Expression::cond(
-                self.is_null_expr(compiled_args[0].clone()),
-                Expression::undefined(false),
-                self.optional_block(compiled_args[0].clone(), false),
-            ),
-            PnullUndefinedToOpt => Expression::cond(
-                self.is_null_or_undefined_expr(compiled_args[0].clone()),
-                Expression::undefined(false),
-                self.optional_block(compiled_args[0].clone(), false),
-            ),
+            PnullToOpt => self.null_to_opt_expr(compiled_args[0].clone()),
+            PnullUndefinedToOpt => self.null_undefined_to_opt_expr(compiled_args[0].clone()),
             PisNotNone => self.is_not_none_expr(compiled_args[0].clone()),
             PisNull => self.is_null_expr(compiled_args[0].clone()),
             PisUndefined => self.is_undefined_expr(compiled_args[0].clone()),
@@ -3033,6 +3025,37 @@ impl LambdaCompiler {
 
     fn optional_block(&self, value: Expression, identity: bool) -> Expression {
         Expression::new(ExpressionDesc::OptionalBlock(Box::new(value), identity))
+    }
+
+    fn can_inline_null_to_opt(&self, expr: &Expression) -> bool {
+        matches!(
+            expr.desc,
+            ExpressionDesc::Var(_) | ExpressionDesc::Undefined { .. } | ExpressionDesc::Null
+        )
+    }
+
+    fn null_to_opt_expr(&self, expr: Expression) -> Expression {
+        if self.can_inline_null_to_opt(&expr) {
+            Expression::cond(
+                self.is_null_expr(expr.clone()),
+                Expression::undefined(false),
+                self.optional_block(expr, false),
+            )
+        } else {
+            self.runtime_call_expr("Primitive_option", "fromNull", vec![expr])
+        }
+    }
+
+    fn null_undefined_to_opt_expr(&self, expr: Expression) -> Expression {
+        if self.can_inline_null_to_opt(&expr) {
+            Expression::cond(
+                self.is_null_or_undefined_expr(expr.clone()),
+                Expression::undefined(false),
+                self.optional_block(expr, false),
+            )
+        } else {
+            self.runtime_call_expr("Primitive_option", "fromNullable", vec![expr])
+        }
     }
 
     fn is_null_expr(&self, expr: Expression) -> Expression {
@@ -12496,6 +12519,72 @@ mod tests {
         assert_eq!(
             print_expression(&compiled.expr),
             "Primitive_option.valFromOption(value)"
+        );
+    }
+
+    #[test]
+    fn lowers_pnull_to_opt_non_inline_operand_to_primitive_option_from_null() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PnullToOpt,
+            vec![Lambda::const_(Constant::string("value"))],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        let ExpressionDesc::Call(func, args, _) = &compiled.expr.desc else {
+            panic!("expected null-to-option lowering to use the runtime helper");
+        };
+        assert!(matches!(
+            func.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, Some(member))),
+                ..
+            } if module.id.name() == "Primitive_option" && member == "fromNull"
+        ));
+        assert!(matches!(
+            args.as_slice(),
+            [Expression {
+                desc: ExpressionDesc::Str { txt, .. },
+                ..
+            }] if txt == "value"
+        ));
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_option.fromNull(\"value\")"
+        );
+    }
+
+    #[test]
+    fn lowers_pnull_undefined_to_opt_non_inline_operand_to_primitive_option_from_nullable() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PnullUndefinedToOpt,
+            vec![Lambda::const_(Constant::string("value"))],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        let ExpressionDesc::Call(func, args, _) = &compiled.expr.desc else {
+            panic!("expected nullable-to-option lowering to use the runtime helper");
+        };
+        assert!(matches!(
+            func.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, Some(member))),
+                ..
+            } if module.id.name() == "Primitive_option" && member == "fromNullable"
+        ));
+        assert!(matches!(
+            args.as_slice(),
+            [Expression {
+                desc: ExpressionDesc::Str { txt, .. },
+                ..
+            }] if txt == "value"
+        ));
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_option.fromNullable(\"value\")"
         );
     }
 
