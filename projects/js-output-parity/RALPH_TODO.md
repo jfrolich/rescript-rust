@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 235 / 657 JS snapshots passing, 0 compile errors, 422 output diffs
+**Status:** 237 / 657 JS snapshots passing, 0 compile errors, 420 output diffs
 
 ## Goal
 
@@ -35,13 +35,45 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **235 / 657**
+- JS snapshot parity: **237 / 657**
 - Compile errors: **0**
-- Output diffs: **422**
+- Output diffs: **420**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed declaration-continuation slice
+  in `compiler/core/lam_compile.ml` together with `compiler/core/js_stmt_make.ml`
+- After reading OCaml's `Declare` continuation for `Lifthenelse` plus the
+  `Js_stmt_make.if_ ~declaration` merge rule for same-target assignments, the
+  Rust backend in `compiler-rust/src/lambda/compile.rs` now preserves that
+  declared-binding path for let-bound `if` values instead of always emitting
+  an uninitialized binding followed by a conditional assignment
+- Added focused regression coverage in
+  `lambda::compile::tests::let_bindings_merge_direct_if_assignments_into_initialized_declarations`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release let_bindings_merge_direct_if_assignments_into_initialized_declarations -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release let_bindings_lower_ifs_without_a_result_temp -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/alias_test.res -o /tmp/alias_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/alias_test.res` no longer differs on the split
+  `let v; v = ...` declaration/assignment shape; Rust now emits the same
+  initialized binding form as OCaml for that cluster
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same backend change
+- Across the authoritative parity run, `tests/tests/src/DictInternalRepresentation.res`
+  dropped out of `temp/rust-parity/diffs`, which confirms this declaration
+  slice reached at least one previously failing in-repo snapshot end-to-end
+- The authoritative JS snapshot baseline now reports **237 / 657** passing,
+  **0** compile errors, and **420** output diffs; this is a net **+2**
+  passing snapshots and **-2** output diffs from the previously recorded
+  **235 / 657**, **0** compile errors, **422** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed primitive-lowering slice in

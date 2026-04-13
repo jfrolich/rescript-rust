@@ -434,14 +434,7 @@ impl LambdaCompiler {
                 })
             }
             Lambda::LifThenElse(cond, then_, else_) => {
-                let mut block = vec![Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
-                    value: None,
-                    property: kind,
-                    ident_info: IdentInfo::default(),
-                })];
-                block.extend(self.compile_if_assignment_block(id, cond, then_, else_));
-                block
+                self.compile_if_binding_block(kind, id, cond, then_, else_)
             }
             Lambda::Lswitch(scrut, switch) => {
                 let mut block = vec![Statement::variable(VariableDeclaration {
@@ -511,6 +504,29 @@ impl LambdaCompiler {
                 self.compiled_to_effect_block(compiled)
             }
         }
+    }
+
+    fn compile_if_binding_block(
+        &mut self,
+        kind: LetKind,
+        id: &Ident,
+        cond: &Lambda,
+        then_: &Lambda,
+        else_: &Lambda,
+    ) -> Block {
+        let cond_compiled = self.compile_expr(cond);
+        let then_block = self.compile_assign_to_target_block(id, then_);
+        let else_block = self.compile_assign_to_target_block(id, else_);
+
+        let mut block = cond_compiled.prelude;
+        block.extend(self.compile_declared_if_block(
+            kind,
+            id,
+            cond_compiled.expr,
+            then_block,
+            else_block,
+        ));
+        block
     }
 
     fn compile_return_block(&mut self, lam: &Lambda) -> Block {
@@ -1691,6 +1707,58 @@ impl LambdaCompiler {
             self.compile_assign_to_target_block(result, else_),
         ));
         block
+    }
+
+    fn compile_declared_if_block(
+        &self,
+        kind: LetKind,
+        id: &Ident,
+        cond: Expression,
+        then_block: Block,
+        else_block: Block,
+    ) -> Block {
+        if let (Some(then_expr), Some(else_expr)) = (
+            self.single_result_assignment(id, &then_block),
+            self.single_result_assignment(id, &else_block),
+        ) {
+            return vec![Statement::variable(VariableDeclaration {
+                ident: id.clone(),
+                value: Some(Expression::cond(cond, then_expr, else_expr)),
+                property: kind,
+                ident_info: IdentInfo::default(),
+            })];
+        }
+
+        vec![
+            Statement::variable(VariableDeclaration {
+                ident: id.clone(),
+                value: None,
+                property: kind,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::if_(cond, then_block, else_block),
+        ]
+    }
+
+    fn single_result_assignment(&self, id: &Ident, block: &Block) -> Option<Expression> {
+        let [stmt] = block.as_slice() else {
+            return None;
+        };
+        let StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Bin(BinOp::Eq, lhs, rhs),
+            ..
+        }) = &stmt.desc
+        else {
+            return None;
+        };
+        let ExpressionDesc::Var(crate::js_ir::VIdent::Id(target)) = &lhs.desc else {
+            return None;
+        };
+        if !target.same(id) {
+            return None;
+        }
+
+        Some((**rhs).clone())
     }
 
     fn compile_if_return_block(&mut self, cond: &Lambda, then_: &Lambda, else_: &Lambda) -> Block {
@@ -9179,6 +9247,61 @@ mod tests {
                     ExpressionDesc::Number(Number::Int { i: 0, .. })
                 ) if lhs_id.same(&result)
             )
+        ));
+    }
+
+    #[test]
+    fn let_bindings_merge_direct_if_assignments_into_initialized_declarations() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let result = Ident::create_local("result");
+        let compiled = compiler.compile_expr(&Lambda::Llet(
+            LetKind::Strict,
+            result.clone(),
+            Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::var(cond.clone())),
+                Box::new(Lambda::const_(Constant::int(1))),
+                Box::new(Lambda::const_(Constant::int(0))),
+            )),
+            Box::new(Lambda::var(result.clone())),
+        ));
+
+        let [result_decl] = compiled.prelude.as_slice() else {
+            panic!("expected the let-bound if to collapse into one initialized declaration");
+        };
+        let StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::Cond(test, then_expr, else_expr),
+                    ..
+                }),
+            ..
+        }) = &result_decl.desc
+        else {
+            panic!("expected a single initialized declaration for the let-bound result");
+        };
+        assert!(ident.same(&result));
+        assert!(matches!(
+            test.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&cond)
+        ));
+        assert!(matches!(
+            then_expr.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                ..
+            }
+        ));
+        assert!(matches!(
+            else_expr.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
+                ..
+            }
         ));
     }
 
