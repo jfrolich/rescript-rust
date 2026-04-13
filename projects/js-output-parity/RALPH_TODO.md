@@ -416,6 +416,43 @@ Remaining internal compile errors under the measured wrapper baseline:
 ## Latest Session Findings
 
 - `compiler-rust/src/lambda/compile.rs` now matches one more slice of
+  OCaml `core/lam_compile.ml` on the Rust JS path:
+  named variant switches no longer drop payload-carrying `sw_blocks` during
+  JS lowering, and the backend now splits ordinary named variants the same way
+  OCaml does between non-object constructor cases and object `TAG` cases across
+  value, return, and effect continuations
+- Added focused coverage for this slice in
+  `named_variant_switch_expressions_split_const_and_block_dispatch` and
+  `named_variant_effect_switches_keep_payload_cases`
+- Verified focused guards for this cluster:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release named_variant -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/NondetPatterMatch.res -o /tmp/NondetPatterMatch.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/variant.res -o /tmp/variant.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/NondetPatterMatch.res` narrowed materially:
+  the missing payload-constructor branch is gone, and the file now differs only
+  on later case-grouping / byte-shape cleanup instead of dropping the switch
+  body entirely
+- `tests/tests/src/variant.res` also narrowed materially:
+  ordinary named constructors no longer compile through raw integer switches,
+  and the remaining drift is now later backend shaping around grouped cases,
+  exception/runtime lowering, and other downstream gaps rather than this switch
+  routing failure
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the named-switch change
+- The authoritative JS snapshot baseline remains **123 / 657** passing,
+  **0** compile errors, and **534** output diffs after this OCaml-aligned
+  named-variant switch fix
+- Interpretation:
+  this is a real OCaml backend improvement in the `Lam_compile.compile_switch`
+  stage. It removes one major structural backend bug by restoring named payload
+  switch lowering on the JS path, but the current corpus still needs the later
+  OCaml case-grouping and printer cleanup that collapse duplicated `case`
+  bodies into the exact checked-in snapshot shape.
+
+- `compiler-rust/src/lambda/compile.rs` now matches one more slice of
   OCaml `core/lam_compile_main.ml` / `core/lam_module_ident.ml` /
   `ext/ext_string.ml` on the Rust JS path:
   required modules are now sorted by `Lam_module_ident.name` using OCaml's
