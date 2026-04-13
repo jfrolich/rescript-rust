@@ -411,6 +411,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             )
         }
         Lambda::Llet(kind, id, value, body) => {
+            let original_value = value.as_ref();
             let value = simplify_with_env(value, env, exports);
             let mut body_env = env.without_ident(id);
             if let Some(block_info) = immutable_block_elements(&value) {
@@ -419,7 +420,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             if let Some(optional_info) = optional_block_info(&value) {
                 body_env.optional_blocks.insert(id.clone(), optional_info);
             }
-            if let Some(substitution) = substitution_candidate(*kind, &value) {
+            if let Some(substitution) = substitution_candidate(*kind, original_value, &value) {
                 body_env.substitutions.insert(id.clone(), substitution);
             }
             if *kind != LetKind::Variable {
@@ -1533,14 +1534,14 @@ fn collect_inlineable_functions(lam: &Lambda) -> HashMap<Ident, LFunction> {
     functions
 }
 
-fn substitution_candidate(kind: LetKind, value: &Lambda) -> Option<Lambda> {
+fn substitution_candidate(kind: LetKind, original_value: &Lambda, simplified_value: &Lambda) -> Option<Lambda> {
     if kind == LetKind::Variable {
         return None;
     }
 
-    match value {
-        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) => Some(value.clone()),
-        Lambda::Lconst(constant) if !constant.is_allocating() => Some(value.clone()),
+    match original_value {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) => Some(simplified_value.clone()),
+        Lambda::Lconst(constant) if !constant.is_allocating() => Some(simplified_value.clone()),
         Lambda::Lprim(info)
             if matches!(
                 (&info.primitive, info.args.as_slice()),
@@ -1550,7 +1551,7 @@ fn substitution_candidate(kind: LetKind, value: &Lambda) -> Option<Lambda> {
                 )
             ) =>
         {
-            Some(value.clone())
+            Some(simplified_value.clone())
         }
         _ => None,
     }
@@ -2044,6 +2045,67 @@ mod tests {
                 Lambda::Lconst(Constant::Int { i: 1, .. })
             ]
         ));
+    }
+
+    #[test]
+    fn keeps_export_bindings_reduced_from_named_function_calls() {
+        let compose = Ident::create_local("compose");
+        let composed = Ident::create_local("composed");
+        let param = Ident::create_local("param");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![composed.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(composed.clone())],
+            Location::none(),
+        );
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            compose.clone(),
+            Lambda::function_(
+                1,
+                vec![param.clone()],
+                Lambda::var(param),
+                FunctionAttribute::default(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                composed.clone(),
+                Lambda::Lapply(Apply {
+                    ap_func: Box::new(Lambda::var(compose)),
+                    ap_args: vec![Lambda::const_(Constant::int(1))],
+                    ap_info: ApInfo {
+                        loc: Location::none(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Na,
+                    },
+                    ap_transformed_jsx: false,
+                }),
+                export_block,
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(_, kept_binding, kept_value, body) = simplified else {
+            panic!("expected the reduced export binding to remain");
+        };
+        assert_eq!(kept_binding, composed);
+        assert!(matches!(
+            *kept_value,
+            Lambda::Lconst(Constant::Int { i: 1, .. })
+        ));
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(export_ids), _),
+            args,
+            ..
+        }) = *body
+        else {
+            panic!("expected the export block to remain at the tail");
+        };
+        assert_eq!(export_ids, vec![kept_binding.clone()]);
+        assert!(matches!(args.as_slice(), [Lambda::Lvar(id)] if *id == kept_binding));
     }
 
     #[test]

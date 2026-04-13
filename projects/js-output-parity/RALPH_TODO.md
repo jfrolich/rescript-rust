@@ -44,6 +44,50 @@ reported:
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed `lam_pass_lets_dce`
+  substitution boundary in `compiler/core/lam_pass_lets_dce.ml`
+- After reading that OCaml pass, the Rust JS-backend simplifier in
+  `compiler-rust/src/lambda/simplify.rs` now only seeds body substitutions
+  from bindings whose **original** RHS was already a direct simple candidate
+  (`Lvar`, non-allocating `Lconst`, or the module-field form), instead of
+  treating any RHS that merely *simplified into* a simple value as equivalent
+- This matches the OCaml pass structure, where the substitution cases inspect
+  the original lambda shape before simplification; reduced results from named
+  function calls like `compose(...)` are still folded, but they no longer get
+  dropped into the export payload as if they had started life as literals
+- Added focused regression coverage in
+  `lambda::simplify::tests::keeps_export_bindings_reduced_from_named_function_calls`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release keeps_export_bindings_reduced_from_named_function_calls -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release simplifies_export_payloads_before_export_coercion -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release simplifies_module_alias_export_payloads_before_export_coercion -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_deps_program_rebinds_exported_constants_after_surviving_function_bindings -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsCurried.res -o /tmp/DerivingAccessorsCurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsUncurried.res -o /tmp/DerivingAccessorsUncurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Coercion.res -o /tmp/Coercion.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/DerivingAccessorsCurried.res` and
+  `tests/tests/src/DerivingAccessorsUncurried.res` now match their checked-in
+  `.mjs` snapshots exactly again, while
+  `tests/tests/src/Coercion.res` and
+  `tests/tests/src/ExternalShadow.res` remain exact guard-file matches
+- Resolved checked-in snapshot files for this slice:
+  `tests/tests/src/DerivingAccessorsCurried.res` and
+  `tests/tests/src/DerivingAccessorsUncurried.res` no longer appear under
+  `temp/rust-parity/diffs`
+- The authoritative JS snapshot baseline remains **302 / 657** passing,
+  **0** compile errors, and **355** output diffs; this is a net **0**
+  baseline delta from the previously recorded run because the accessor pair
+  was offset by new regressions elsewhere, with
+  `tests/tests/src/Import.res` now showing the same kind of top-level export
+  placement sensitivity (`each2 = O.forEach` moved earlier than the OCaml
+  snapshot)
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated the OCaml exported-binding simplification
   boundary across `compiler/core/lam_pass_lets_dce.ml` together with the later
   export rebound behavior in `compiler/core/lam_coercion.ml`
