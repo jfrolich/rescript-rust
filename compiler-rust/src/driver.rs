@@ -1809,6 +1809,105 @@ pub fn typecheck_interface_in_process(
     })
 }
 
+/// Type-check a `.res` implementation file in-process WITHOUT lambda/JS codegen.
+///
+/// Returns the module's published signature and PersStruct, suitable for
+/// populating the module registry with the interface only. Used for
+/// pre-compiling runtime modules where we need the type information but
+/// don't need JS output (the JS is already pre-built).
+pub fn typecheck_implementation_in_process(
+    source: &str,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    has_interface: bool,
+) -> Result<InProcessInterfaceResult> {
+    let original_alias_count = registry.alias_rewrites.len();
+
+    // Parse
+    let mut parser = Parser::new(filename, source);
+    let structure = module::parse_structure(&mut parser);
+    if parser.has_errors() {
+        return Err(anyhow!(
+            "Parse failed with {} error(s)",
+            parser.diagnostics().len()
+        ));
+    }
+    let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
+    let structure = if let Some(jsx_version) = jsx_version {
+        jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
+    } else {
+        structure
+    };
+    let structure = ppx::expand_extensions(&structure, parser.arena_mut());
+    let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
+        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+
+    // Type check
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    let _ = id_gen.next_stamp();
+    let type_ctx = TypeContext::new(&id_gen);
+    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+    let mut env = initial_env(&type_ctx);
+
+    let mut pers_env = PersistentEnv::from_registry(registry);
+    let load_path = build_load_path(options);
+    type_ctx.set_load_paths(load_path.clone());
+    pers_env.set_load_path(load_path);
+    pers_env.set_open_modules(options.open_modules.clone());
+    pers_env.set_jsx_version(options.jsx_version);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+
+    tctx.set_persistent_env(pers_env);
+
+    let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
+        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+
+    if has_interface {
+        apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
+    }
+
+    if !has_interface {
+        normalize_signature_types(&type_ctx, &typed_structure, &final_env);
+    }
+
+    prepare_inferred_signature_for_saving(
+        &type_ctx,
+        &typed_structure,
+        options.source_filename.as_deref(),
+        has_interface,
+    );
+
+    let published_signature =
+        crate::types::includemod::simplify_signature(&typed_structure.str_type);
+
+    // Register and extract PersStruct (no lambda/JS conversion)
+    let mut internal_env = tctx
+        .persistent_env
+        .take()
+        .unwrap_or_else(PersistentEnv::new);
+
+    if !has_interface {
+        internal_env.register_in_memory_signature(
+            module_name,
+            published_signature.clone(),
+            filename,
+            &type_ctx,
+        );
+    }
+
+    let (pers_struct, new_alias_rewrites) =
+        internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);
+
+    Ok(InProcessInterfaceResult {
+        signature: published_signature,
+        pers_struct,
+        new_alias_rewrites,
+    })
+}
+
 /// Build the load path from compiler options.
 ///
 /// Matches OCaml's `res_compmisc.ml:init_path()`:

@@ -125,10 +125,23 @@ pub fn compile(
     // so the namespace signature must be available in the PersistentEnv first.
     if build_state.build_mode().is_in_process() {
         register_namespace_signatures(build_state);
-        // Register source paths for ALL modules so the compiler can lazily
-        // type-check implicit dependencies (e.g., via `-open Pervasives`)
-        // that aren't in the explicit AST dep graph.
+        // Register source paths for ALL modules so the pre-compilation can
+        // type-check implicit dependencies (e.g., via `-open Pervasives`).
         register_source_fallback_paths(build_state);
+        // Pre-compile @rescript/runtime modules into the registry so the
+        // main parallel loop doesn't need source-fallback (which overflows
+        // worker thread stacks due to deep recursion).
+        pre_compile_runtime_modules(build_state);
+        // Clear source-fallback paths after pre-compilation. The main compile
+        // loop must NOT use source-fallback (it causes stack overflow on Rayon
+        // workers). Modules not pre-compiled into the registry will fail to
+        // load, producing type errors instead of crashes.
+        build_state
+            .module_registry
+            .lock()
+            .unwrap()
+            .source_fallback_paths
+            .clear();
     }
 
     // this is the whole "compile universe" all modules that might be dirty
@@ -1065,6 +1078,180 @@ fn register_source_fallback_paths(build_state: &BuildCommandState) {
         .source_fallback_paths = fallback_paths;
 }
 
+/// Pre-compile all @rescript/runtime modules into the ModuleRegistry before the
+/// main compile loop. This eliminates source-fallback recursion during parallel
+/// compilation: without pre-compilation, every module that implicitly needs
+/// Pervasives (via `-open Pervasives`) would trigger recursive source-fallback
+/// type-checking, creating deep stack frames that overflow worker thread stacks.
+///
+/// After this step, all runtime modules (Pervasives, Js, Belt, etc.) are in the
+/// registry and found directly without any source-fallback.
+///
+/// Runs on a dedicated thread with a large stack to handle any remaining
+/// source-fallback chains during the pre-compilation itself.
+fn pre_compile_runtime_modules(build_state: &BuildCommandState) {
+    let runtime_path = &build_state.build_state.compiler_info.runtime_path;
+
+    // Collect all runtime .res files and check for .resi siblings
+    let mut runtime_modules: Vec<(String, PathBuf, Option<PathBuf>)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(runtime_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("res") {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                let module_name = {
+                    let mut chars = stem.chars();
+                    match chars.next() {
+                        None => continue,
+                        Some(ch) => format!("{}{}", ch.to_uppercase(), chars.as_str()),
+                    }
+                };
+                let resi_path = path.with_extension("resi");
+                let has_resi = resi_path.exists();
+                runtime_modules.push((
+                    module_name,
+                    path.clone(),
+                    if has_resi { Some(resi_path) } else { None },
+                ));
+            }
+        }
+    }
+
+    if runtime_modules.is_empty() {
+        return;
+    }
+
+    // Sort for deterministic compilation order.
+    // Put Pervasives first since everything depends on it.
+    runtime_modules.sort_by(|a, b| {
+        let a_priority = if a.0 == "Pervasives" { 0 } else { 1 };
+        let b_priority = if b.0 == "Pervasives" { 0 } else { 1 };
+        a_priority.cmp(&b_priority).then_with(|| a.0.cmp(&b.0))
+    });
+
+    let root_config = build_state.get_root_config();
+    let runtime_path_for_opts = runtime_path.clone();
+    let jsx_version = root_config
+        .jsx
+        .as_ref()
+        .and_then(|jsx| jsx.version)
+        .filter(|&v| v == 4);
+
+    let module_count = runtime_modules.len();
+
+    // Compile sequentially. After each module compiles, its result is in
+    // the registry, so subsequent modules find deps directly without
+    // deep source-fallback chains. Pervasives compiles first (sorted above)
+    // so all other runtime modules find it immediately.
+    let mut compiled = 0;
+    for (module_name, res_path, resi_path) in &runtime_modules {
+        let options = rescript_compiler::driver::CompilerOptions {
+            nopervasives: true,
+            open_modules: vec!["Pervasives".to_string()],
+            module_name: Some(module_name.clone()),
+            runtime_path: Some(runtime_path_for_opts.clone()),
+            jsx_version,
+            source_filename: Some(res_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let registry = build_state.snapshot_module_registry();
+
+        // Register this module's metadata in the registry before compilation
+        // so the compiler can find its own source info
+        {
+            let mut reg = build_state.module_registry.lock().unwrap();
+            reg.module_info.insert(
+                module_name.clone(),
+                rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
+                    source_path: res_path.clone(),
+                    is_pure: true,
+                    is_runtime: true,
+                },
+            );
+        }
+
+        // Step 1: If .resi exists, typecheck the interface first
+        let mut local_registry = registry.clone();
+        if let Some(resi) = resi_path {
+            if let Ok(intf_source) = std::fs::read_to_string(resi) {
+                let intf_result = rescript_compiler::driver::typecheck_interface_in_process(
+                    &intf_source,
+                    &resi.to_string_lossy(),
+                    module_name,
+                    &options,
+                    &local_registry,
+                );
+                match intf_result {
+                    Ok(result) => {
+                        if let Some(ps) = result.pers_struct {
+                            local_registry.cached_modules.insert(module_name.clone(), ps.clone());
+                            build_state.update_module_registry(
+                                module_name,
+                                ps,
+                                res_path.clone(),
+                                true,
+                                true,
+                                result.new_alias_rewrites,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Runtime interface typecheck failed for {}: {}", module_name, e);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Step 2: Type-check the implementation (no lambda/JS — we only need the interface)
+        let has_interface = resi_path.is_some();
+        if let Ok(impl_source) = std::fs::read_to_string(res_path) {
+            let typecheck_result = rescript_compiler::driver::typecheck_implementation_in_process(
+                &impl_source,
+                &res_path.to_string_lossy(),
+                module_name,
+                &options,
+                &local_registry,
+                has_interface,
+            );
+
+            match typecheck_result {
+                Ok(result) => {
+                    if let Some(ps) = result.pers_struct {
+                        build_state.update_module_registry(
+                            module_name,
+                            ps,
+                            res_path.clone(),
+                            true,
+                            true,
+                            result.new_alias_rewrites,
+                        );
+                    }
+                    if !has_interface {
+                        build_state.register_in_memory_interface(
+                            module_name.clone(),
+                            result.signature,
+                            true,
+                        );
+                    }
+                    compiled += 1;
+                }
+                Err(e) => {
+                    debug!("Runtime typecheck failed for {}: {}", module_name, e);
+                }
+            }
+        }
+    }
+
+    debug!(
+        "Pre-compiled {}/{} runtime modules into registry",
+        compiled, module_count
+    );
+}
+
 /// Compile a single module fully in-process using the Rust compiler.
 ///
 /// This replaces the bsc subprocess path for `--in-process` mode:
@@ -1326,7 +1513,7 @@ fn compile_file(
             None
         };
 
-        match Command::new(&compiler_info.bsc_path)
+        match Command::new(compiler_info.bsc_path.as_ref().expect("bsc_path required for file-based mode"))
             .current_dir(&cwd)
             .args(&to_mjs_args)
             .stdout(std::process::Stdio::null())
@@ -1393,7 +1580,7 @@ fn compile_file(
         None
     };
 
-    let to_mjs = Command::new(&compiler_info.bsc_path)
+    let to_mjs = Command::new(compiler_info.bsc_path.as_ref().expect("bsc_path required for file-based mode"))
         .current_dir(&cwd)
         .args(to_mjs_args)
         .stderr(match sexp_file {
