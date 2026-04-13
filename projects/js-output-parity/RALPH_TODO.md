@@ -44,6 +44,36 @@ reported:
 Interpretation:
 
 - `compiler-rust/src/lambda/compile.rs` now matches one more slice of
+  OCaml `core/js_pass_get_used.ml` and `core/js_pass_tailcall_inline.ml`
+  on the Rust JS path:
+  the missing JS pass is now threaded between `external_shadow` and
+  `flatten_and_mark_dead`, Rust now computes OCaml-style `Used` /
+  `OncePure` / `DeadPure` / `DeadNonPure` statuses for JS bindings,
+  single-return calls to `OncePure` local functions now inline through
+  the pass, and direct return-IIFEs now inline through the same
+  return-block rule instead of surviving as extra wrapper calls
+- Added focused coverage for this slice in
+  `js_tailcall_inline_inlines_once_pure_named_calls` and
+  `js_tailcall_inline_inlines_direct_return_iifes`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_tailcall_inline_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UncurriedAlways.res -o /tmp/UncurriedAlways.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the new pass, which confirms this JS-pass addition does not perturb the
+  already-stable external-shadow/import path
+- `tests/tests/src/UncurriedAlways.res` still fails on later backend shaping:
+  its remaining drift stays on array/object byte shape, callback lowering,
+  and tuple/app lowering, so this tailcall-inline pass does not move that
+  file by itself
+- The authoritative JS snapshot baseline remains **130 / 657** passing,
+  **0** compile errors, and **527** output diffs after the
+  `Js_pass_tailcall_inline` port; this keeps the Rust backend pass order
+  closer to OCaml even though the checked-in corpus does not move yet
+
+- `compiler-rust/src/lambda/compile.rs` now matches one more slice of
   OCaml `core/lam_compile_main.ml` more closely on the Rust JS path:
   deps-program export recovery no longer assumes the final lowered JS
   expression is a bare `ModuleExport` block; it now peels a trailing
