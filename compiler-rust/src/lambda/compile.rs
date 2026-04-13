@@ -2302,6 +2302,16 @@ impl LambdaCompiler {
                 .cloned()
                 .unwrap_or_else(|| Expression::undefined(false)),
             Pawait => Expression::new(ExpressionDesc::Await(Box::new(compiled_args[0].clone()))),
+            PwrapExn => self.runtime_call_expr(
+                "Primitive_exceptions",
+                "internalToException",
+                compiled_args,
+            ),
+            PcreateExtension(name) => self.pure_runtime_call_expr(
+                "Primitive_exceptions",
+                "create",
+                vec![Expression::string(name.clone())],
+            ),
             PjsObjectCreate(obj_params) => {
                 self.compile_js_object_create(obj_params, compiled_args, &mut prelude)
             }
@@ -2558,6 +2568,22 @@ impl LambdaCompiler {
             self.runtime_member_expr(module_name, member),
             args,
             CallInfo::default(),
+        )
+    }
+
+    fn pure_runtime_call_expr(
+        &self,
+        module_name: &str,
+        member: &str,
+        args: Vec<Expression>,
+    ) -> Expression {
+        Expression::with_comment(
+            ExpressionDesc::Call(
+                Box::new(self.runtime_member_expr(module_name, member)),
+                args,
+                CallInfo::default(),
+            ),
+            "@__PURE__",
         )
     }
 
@@ -6454,8 +6480,7 @@ fn shake_program(mut program: Program) -> Program {
 }
 
 fn shake_block(block: &Block, export_set: &HashSet<Ident>) -> Block {
-    let mut block = flatten_toplevel_block(block);
-    block.reverse();
+    let block = flatten_toplevel_block(block);
     let required = fixed_point_required_idents(&block, export_set);
 
     block
@@ -7457,6 +7482,70 @@ mod tests {
     }
 
     #[test]
+    fn compile_create_extension_uses_primitive_exceptions_create() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PcreateExtension("Local_exception_test.A".to_string()),
+            vec![],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        let ExpressionDesc::Call(func, args, _) = &compiled.expr.desc else {
+            panic!("expected extension constructors to lower to a runtime call");
+        };
+        assert!(matches!(
+            func.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, Some(member))),
+                ..
+            } if module.id.name() == "Primitive_exceptions" && member == "create"
+        ));
+        assert!(matches!(
+            args.as_slice(),
+            [Expression {
+                desc: ExpressionDesc::Str { txt, .. },
+                ..
+            }] if txt == "Local_exception_test.A"
+        ));
+        assert_eq!(compiled.expr.comment.as_deref(), Some("@__PURE__"));
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "/* @__PURE__ */Primitive_exceptions.create(\"Local_exception_test.A\")"
+        );
+    }
+
+    #[test]
+    fn compile_wrap_exn_uses_primitive_exceptions_internal_to_exception() {
+        let mut compiler = LambdaCompiler::new();
+        let exn = Ident::create_local("exn");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PwrapExn,
+            vec![Lambda::var(exn.clone())],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        let ExpressionDesc::Call(func, args, _) = &compiled.expr.desc else {
+            panic!("expected exception wrapping to lower to a runtime call");
+        };
+        assert!(matches!(
+            func.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, Some(member))),
+                ..
+            } if module.id.name() == "Primitive_exceptions" && member == "internalToException"
+        ));
+        assert!(matches!(
+            args.as_slice(),
+            [Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            }] if id.same(&exn)
+        ));
+    }
+
+    #[test]
     fn compile_deps_program_reuses_same_name_export_targets() {
         let mut compiler = LambdaCompiler::new();
         let source = Ident::create_local("value");
@@ -7511,7 +7600,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_deps_program_reverses_retained_toplevel_binding_order_during_shake() {
+    fn compile_deps_program_preserves_toplevel_binding_order_during_shake() {
         let mut compiler = LambdaCompiler::new();
         let first = Ident::create_local("first");
         let second = Ident::create_local("second");
@@ -7552,12 +7641,12 @@ mod tests {
                 ident,
                 value:
                     Some(Expression {
-                        desc: ExpressionDesc::Number(Number::Int { i: 4, .. }),
+                        desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
                         ..
                     }),
                 ..
-            }) => assert!(ident.same(&second)),
-            other => panic!("expected the later retained binding first, got {other:?}"),
+            }) => assert!(ident.same(&first)),
+            other => panic!("expected the earlier retained binding first, got {other:?}"),
         }
 
         match &second_stmt.desc {
@@ -7565,12 +7654,12 @@ mod tests {
                 ident,
                 value:
                     Some(Expression {
-                        desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
+                        desc: ExpressionDesc::Number(Number::Int { i: 4, .. }),
                         ..
                     }),
                 ..
-            }) => assert!(ident.same(&first)),
-            other => panic!("expected the earlier retained binding second, got {other:?}"),
+            }) => assert!(ident.same(&second)),
+            other => panic!("expected the later retained binding second, got {other:?}"),
         }
     }
 

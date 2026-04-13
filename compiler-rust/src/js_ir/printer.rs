@@ -720,7 +720,7 @@ impl JsPrinter {
         if let Some(ref comment) = expr.comment {
             self.write("/* ");
             self.write(comment);
-            self.write(" */ ");
+            self.write(" */");
         }
 
         self.print_expression_desc(&expr.desc, level);
