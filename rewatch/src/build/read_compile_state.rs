@@ -8,6 +8,18 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub fn read(build_state: &mut BuildCommandState) -> anyhow::Result<CompileAssetsState> {
+    // In --in-process mode, there are no compiler assets on disk to reconstruct
+    // state from. Return an empty state so all modules stay dirty (full rebuild).
+    if build_state.build_mode().is_in_process() {
+        return Ok(CompileAssetsState {
+            ast_modules: AHashMap::new(),
+            cmi_modules: AHashMap::new(),
+            cmt_modules: AHashMap::new(),
+            ast_rescript_file_locations: AHashSet::new(),
+            rescript_file_locations: AHashSet::new(),
+        });
+    }
+
     let mut ast_modules: AHashMap<PathBuf, AstModule> = AHashMap::new();
     let mut cmi_modules: AHashMap<String, SystemTime> = AHashMap::new();
     let mut cmt_modules: AHashMap<String, SystemTime> = AHashMap::new();

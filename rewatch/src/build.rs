@@ -143,7 +143,12 @@ pub fn initialize_build(
     let timing_clean_start = Instant::now();
     let packages = packages::make(filter, &project_context, show_progress)?;
 
-    let compiler_check = verify_compiler_info(&packages, &compiler);
+    // In --in-process mode, skip compiler-info verification (no disk assets to invalidate).
+    let compiler_check = if build_mode.is_in_process() {
+        CompilerCheckResult::SameCompilerAsLastRun
+    } else {
+        verify_compiler_info(&packages, &compiler)
+    };
 
     if !packages::validate_packages_dependencies(&packages) {
         return Err(anyhow!("Failed to validate package dependencies"));
@@ -242,7 +247,10 @@ pub fn incremental_build(
     create_sourcedirs: bool,
     plain_output: bool,
 ) -> Result<(), IncrementalBuildError> {
-    logs::initialize(&build_state.packages);
+    // In --in-process mode, skip .compiler.log creation (no disk metadata).
+    if !build_state.build_mode().is_in_process() {
+        logs::initialize(&build_state.packages);
+    }
 
     // When dump_typed_sexp is set, force all modules parse_dirty and compile_dirty
     // so every file gets re-parsed (to store AST) and sexp-dumped
@@ -289,7 +297,9 @@ pub fn incremental_build(
             warnings
         }
         Err(err) => {
-            logs::finalize(&build_state.packages);
+            if !build_state.build_mode().is_in_process() {
+                logs::finalize(&build_state.packages);
+            }
 
             if !plain_output && show_progress {
                 eprintln!(
@@ -372,8 +382,10 @@ pub fn incremental_build(
 
     let compile_duration = start_compiling.elapsed();
 
-    logs::finalize(&build_state.packages);
-    if create_sourcedirs {
+    if !build_state.build_mode().is_in_process() {
+        logs::finalize(&build_state.packages);
+    }
+    if create_sourcedirs && !build_state.build_mode().is_in_process() {
         sourcedirs::print(build_state);
     }
     pb.finish();
@@ -429,7 +441,9 @@ pub fn incremental_build(
         }
 
         // Write per-package compiler metadata to `lib/bs/compiler-info.json` (idempotent)
-        write_compiler_info(build_state);
+        if !build_state.build_mode().is_in_process() {
+            write_compiler_info(build_state);
+        }
 
         Ok(())
     }
@@ -565,13 +579,17 @@ pub fn build(
                     default_timing.unwrap_or(timing_total_elapsed).as_secs_f64()
                 );
             }
-            clean::cleanup_after_build(&build_state);
-            write_build_ninja(&build_state);
+            if !build_state.build_mode().is_in_process() {
+                clean::cleanup_after_build(&build_state);
+                write_build_ninja(&build_state);
+            }
             Ok(build_state)
         }
         Err(e) => {
-            clean::cleanup_after_build(&build_state);
-            write_build_ninja(&build_state);
+            if !build_state.build_mode().is_in_process() {
+                clean::cleanup_after_build(&build_state);
+                write_build_ninja(&build_state);
+            }
             Err(anyhow!("Incremental build failed. Error: {e}"))
         }
     }

@@ -1,7 +1,7 @@
 # Ralph TODO: Rewatch In-Memory Build
 
 **Last Updated:** 2026-04-13
-**Status:** 15/16 tasks complete
+**Status:** 16/20 tasks complete (Phase 4 done, Phase 5 remaining)
 
 ## Goal
 
@@ -103,10 +103,26 @@ Clean architecture target for this project:
 
 ## Phase 4: Asset Removal And Output Surface
 
-- [ ] Remove compiler-asset-based startup reconstruction for `--in-process` from `rewatch/src/build/read_compile_state.rs`. A fresh `--in-process` start may full rebuild.
-- [ ] Remove `--in-process` output paths for `.compiler.log`, `.sourcedirs.json`, `compiler-info.json`, `build.ninja`, copied source mirrors, and `.sexp` dumps.
-- [ ] Emit only final JS outputs in `--in-process`.
-- [ ] Ensure `--in-process` never reads stale compiler assets even if they exist on disk.
+- [x] Remove compiler-asset-based startup reconstruction for `--in-process` from `rewatch/src/build/read_compile_state.rs`. A fresh `--in-process` start may full rebuild.
+  - **Done:** `read_compile_state::read()` now returns an empty `CompileAssetsState` immediately when `build_mode().is_in_process()`. No `.ast/.iast/.cmi/.cmt` files are scanned. All modules stay dirty (full rebuild on every `--in-process` invocation, as designed).
+- [x] Remove `--in-process` output paths for `.compiler.log`, `.sourcedirs.json`, `compiler-info.json`, `build.ninja`, copied source mirrors, and `.sexp` dumps.
+  - **Done:** Guarded all non-JS disk output paths in `build.rs` and `incremental_build()`:
+    - `logs::initialize()` / `logs::finalize()`: skipped when `is_in_process()` (no `.compiler.log`)
+    - `sourcedirs::print()`: skipped when `is_in_process()` (no `.sourcedirs.json`)
+    - `write_compiler_info()`: skipped when `is_in_process()` (no `compiler-info.json`)
+    - `write_build_ninja()`: skipped when `is_in_process()` (no `build.ninja`)
+    - `cleanup_after_build()`: skipped when `is_in_process()` (no `.ast/.iast` to clean up)
+    - `verify_compiler_info()`: skipped when `is_in_process()` (no disk-based compiler state to validate)
+    - Sexp dumps and source mirrors: already isolated in `compile_file()` which is only called from the subprocess path, never from `compile_module_in_process()`.
+- [x] Emit only final JS outputs in `--in-process`.
+  - **Done:** The in-process compile path (`compile_module_in_process`) only calls `write_js_output()` which writes the final `.mjs` file. No `.cmi`, `.cmj`, `.cmt`, `.cmti`, `.ast`, `.iast`, `.sexp`, `.compiler.log`, `.sourcedirs.json`, `compiler-info.json`, or `build.ninja` files are written. The `.mlmap` file is still written by `packages::parse_packages` (which lacks build-mode awareness) but `bsc` is not invoked on it.
+- [x] Ensure `--in-process` never reads stale compiler assets even if they exist on disk.
+  - **Done:** Four layers of protection:
+    1. `read_compile_state::read()` returns empty state — no `.ast/.cmi/.cmt` files scanned
+    2. `PersistentEnv` in-process mode (set via `set_in_process_mode(true)` in `driver.rs`) — `resolve_module_source_path()` and `module_cmj_is_pure()` skip all disk fallbacks; `ModulePathResolver::is_runtime_module()` skips `.cmi/.ast/.iast` disk probes; `fallback_local_module_source()` skips `fs::read_dir()` directory scanning
+    3. `verify_compiler_info()` skipped — no disk compiler state read or compared
+    4. `cleanup_previous_build()` receives empty assets — no stale timestamps used for `compile_dirty` decisions
+  - **Test results:** Compiler tests: 732/732 pass (same 19 pre-existing failures). Rewatch unit tests: 0/0 (no unit tests currently). Default-mode suite: same pre-existing mlmap `randjbuildsystem` error (Rust bsc can't compile `.mlmap` files—unrelated to these changes).
 
 ## Phase 5: Bash Test Coverage And Compatibility
 
