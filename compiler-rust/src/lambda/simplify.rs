@@ -804,6 +804,34 @@ fn inlineable_local_function(value: &Lambda) -> Option<LFunction> {
     }
 }
 
+fn inlineable_direct_wrapper_function(value: &Lambda) -> Option<LFunction> {
+    match value {
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::PjsFnMake(arity),
+            args,
+            ..
+        }) => match args.as_slice() {
+            [Lambda::Lfunction(func)] if func.arity == *arity => Some(func.clone()),
+            _ => None,
+        },
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::PjsFnMakeUnit,
+            args,
+            ..
+        }) => match args.as_slice() {
+            [Lambda::Lfunction(func)] => {
+                let mut func = func.clone();
+                if matches!(func.params.as_slice(), [param] if param.name() == "param") {
+                    func.attr.one_unit_arg = true;
+                }
+                Some(func)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn block_element_of_lambda(value: &Lambda) -> BlockElement {
     match value {
         Lambda::Lvar(_) | Lambda::Lconst(_) => BlockElement::Simple(value.clone()),
@@ -895,7 +923,7 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
     if let Lambda::Lvar(id) = &*apply.ap_func {
         if !args.iter().any(|arg| lambda_hits_variable(id, arg)) {
             if let Some(func) = env.functions.get(id) {
-                if should_inline_function(func, &args) {
+                if should_inline_named_function(func, &args) {
                     let reduced =
                         beta_reduce::no_names_beta_reduce(&func.params, &func.body, &args);
                     return simplify_with_env(&reduced, env, exports);
@@ -908,7 +936,7 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
     if let Lambda::Lvar(id) = &func {
         if !args.iter().any(|arg| lambda_hits_variable(id, arg)) {
             if let Some(func) = env.functions.get(id) {
-                if should_inline_function(func, &args) {
+                if should_inline_named_function(func, &args) {
                     let reduced =
                         beta_reduce::no_names_beta_reduce(&func.params, &func.body, &args);
                     return simplify_with_env(&reduced, env, exports);
@@ -916,8 +944,17 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
             }
         }
     }
+    if !matches!(apply.ap_func.as_ref(), Lambda::Lapply(_)) {
+        if let Some(inline_func) = inlineable_direct_wrapper_function(&func) {
+            if should_inline_direct_function(&inline_func, &args) {
+                let reduced =
+                    beta_reduce::no_names_beta_reduce(&inline_func.params, &inline_func.body, &args);
+                return simplify_with_env(&reduced, env, exports);
+            }
+        }
+    }
     if let Lambda::Lfunction(inline_func) = &func {
-        if should_inline_function(inline_func, &args) {
+        if should_inline_direct_function(inline_func, &args) {
             let reduced =
                 beta_reduce::no_names_beta_reduce(&inline_func.params, &inline_func.body, &args);
             return simplify_with_env(&reduced, env, exports);
@@ -932,10 +969,14 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
     })
 }
 
-fn should_inline_function(func: &LFunction, args: &[Lambda]) -> bool {
+fn should_inline_named_function(func: &LFunction, args: &[Lambda]) -> bool {
     func.params.len() == args.len()
         && analysis::lfunction_can_be_inlined(func)
         && analysis::ok_to_inline_fun_when_app(func, args)
+}
+
+fn should_inline_direct_function(func: &LFunction, args: &[Lambda]) -> bool {
+    func.params.len() == args.len() && analysis::lfunction_can_be_inlined(func)
 }
 
 fn collect_inlineable_functions(lam: &Lambda) -> HashMap<Ident, LFunction> {
@@ -1291,6 +1332,42 @@ mod tests {
             panic!("expected exported xx binding");
         };
         assert!(matches!(*value, Lambda::Lconst(Constant::Int { i: 1, .. })));
+    }
+
+    #[test]
+    fn inlines_direct_function_applications_without_named_call_profitability_gate() {
+        let outer = Ident::create_local("x");
+        let inner = Ident::create_local("f");
+        let lambda = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::function_(
+                1,
+                vec![outer],
+                Lambda::function_(
+                    1,
+                    vec![inner.clone()],
+                    Lambda::const_(Constant::int(0)),
+                    FunctionAttribute::default(),
+                ),
+                FunctionAttribute::default(),
+            )),
+            ap_args: vec![Lambda::const_(Constant::String {
+                s: "".to_string(),
+                delim: None,
+            })],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: crate::lambda::ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lfunction(func) = simplified else {
+            panic!("expected the direct function application to beta-reduce");
+        };
+        assert_eq!(func.params, vec![inner]);
+        assert!(matches!(*func.body, Lambda::Lconst(Constant::Int { i: 0, .. })));
     }
 
     #[test]
@@ -1975,7 +2052,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_direct_pjs_fn_make_applications_for_backend_codegen() {
+    fn beta_reduces_direct_pjs_fn_make_callees_but_keeps_returned_wrapper_calls() {
         let h = Ident::create_local("h");
         let x = Ident::create_local("x");
         let j = Ident::create_local("j");
@@ -2046,21 +2123,14 @@ mod tests {
 
         let simplified = simplify_for_js_backend(&lambda);
         let Lambda::Lapply(outer) = simplified else {
-            panic!("expected direct js-fn-make applications to remain visible to codegen");
+            panic!("expected the returned wrapper application to remain visible");
         };
         assert!(matches!(
             outer.ap_args.as_slice(),
             [Lambda::Lconst(Constant::String { .. })]
         ));
-        let Lambda::Lapply(inner) = outer.ap_func.as_ref() else {
-            panic!("expected the outer application to still wrap an inner application");
-        };
         assert!(matches!(
-            inner.ap_args.as_slice(),
-            [Lambda::Lconst(Constant::String { .. })]
-        ));
-        assert!(matches!(
-            inner.ap_func.as_ref(),
+            outer.ap_func.as_ref(),
             Lambda::Lprim(crate::lambda::PrimInfo {
                 primitive: Primitive::PjsFnMake(1),
                 ..

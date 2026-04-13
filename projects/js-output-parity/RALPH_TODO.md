@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 168 / 657 JS snapshots passing, 0 compile errors, 489 output diffs
+**Status:** 171 / 657 JS snapshots passing, 0 compile errors, 486 output diffs
 
 ## Goal
 
@@ -35,13 +35,51 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **168 / 657**
+- JS snapshot parity: **171 / 657**
 - Compile errors: **0**
-- Output diffs: **489**
+- Output diffs: **486**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed on the surviving direct
+  `Pjs_fn_make` call frontier from `gpr_1692_test.res` instead of treating the
+  extra wrapper call as printer-only drift
+- `compiler-rust/src/lambda/simplify.rs` now matches another slice of
+  OCaml `compiler/core/lam_pass_alpha_conversion.ml` and
+  `compiler/core/lam_pass_remove_alias.ml` more closely on the Rust JS path:
+  direct `Pjs_fn_make` / `Pjs_fn_make_unit` callees are now beta-reduced
+  through the wrapper when the current call site is itself the direct callee,
+  but wrappers returned from an already-simplified inner application stay
+  visible to later backend/codegen stages
+- This keeps the earlier OCaml-aligned wrapper-preservation behavior intact
+  while removing the specific extra outer wrapper application that remained in
+  `gpr_1692_test.res`; the new unit coverage captures that exact one-step
+  reduction boundary so we do not regress back to globally erasing wrapper
+  structure
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::simplify::tests::beta_reduces_direct_pjs_fn_make_callees_but_keeps_returned_wrapper_calls -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::simplify::tests::inlines_direct_function_applications_without_named_call_profitability_gate -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_1692_test.res -o /tmp/gpr_1692_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/PartialApplicationNoRuntimeCurry.res -o /tmp/PartialApplicationNoRuntimeCurry.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/gpr_1692_test.res` now matches its checked-in `.mjs`
+  snapshot exactly; the old extra outer call
+  ``(x => (f => 0))("")("")`` is gone, while the returned inner wrapper call
+  still survives exactly where the checked-in OCaml snapshot keeps it
+- `tests/tests/src/PartialApplicationNoRuntimeCurry.res` and
+  `tests/tests/src/ExternalShadow.res` remain exact guard-file matches after
+  the same change, which confirms this slice stays on the direct wrapper-call
+  boundary rather than reopening the earlier lowered-wrapper or external-shadow
+  paths
+- The authoritative JS snapshot baseline now reports **171 / 657** passing,
+  **0** compile errors, and **486** output diffs after this OCaml-aligned
+  direct-`Pjs_fn_make` call reduction slice; this is a net **+3** over the
+  previous recorded baseline
 
 - Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
   from `PLAN.md`; this iteration stayed in the OCaml post-flatten
