@@ -15,7 +15,7 @@ use anyhow::{Result, anyhow};
 use console::style;
 use log::{debug, trace};
 use rayon::prelude::*;
-use rescript_compiler::cmi::persistent_env::PersistentEnv;
+use rescript_compiler::cmi::persistent_env::ModuleRegistry;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -125,6 +125,10 @@ pub fn compile(
     // so the namespace signature must be available in the PersistentEnv first.
     if build_state.build_mode().is_in_process() {
         register_namespace_signatures(build_state);
+        // Register source paths for ALL modules so the compiler can lazily
+        // type-check implicit dependencies (e.g., via `-open Pervasives`)
+        // that aren't in the explicit AST dep graph.
+        register_source_fallback_paths(build_state);
     }
 
     // this is the whole "compile universe" all modules that might be dirty
@@ -177,10 +181,14 @@ pub fn compile(
         let is_in_process = build_state.build_mode().is_in_process();
 
         let results: Vec<(String, Result<Option<String>>, Option<Result<Option<String>>>, bool, bool)> = if is_in_process {
-            // --in-process: sequential compilation using the Rust compiler directly.
+            // --in-process: parallel compilation using the Rust compiler directly.
             // No compiler assets are emitted or read; interfaces are kept in memory.
-            let mut batch_results = Vec::new();
-            for module_name in current_in_progres_modules.iter() {
+            // Each worker gets a read-only snapshot of the ModuleRegistry and creates
+            // its own fresh PersistentEnv from it.
+            let registry = build_state.snapshot_module_registry();
+            current_in_progres_modules
+            .par_iter()
+            .filter_map(|module_name| {
                 let module = build_state.get_module(module_name).unwrap();
                 let package = build_state
                     .get_package(&module.package_name)
@@ -191,24 +199,23 @@ pub fn compile(
                     .intersection(&compile_universe)
                     .all(|dep| compiled_modules.contains(dep))
                 {
-                    continue;
+                    return None;
                 }
 
                 if !module.compile_dirty {
-                    batch_results.push((module_name.to_string(), Ok(None), Some(Ok(None)), true, false));
                     if show_progress { inc(); }
-                    continue;
+                    return Some((module_name.to_string(), Ok(None), Some(Ok(None)), true, false));
                 }
 
                 match &module.source_type {
                     SourceType::MlMap(_) => {
-                        batch_results.push((
+                        Some((
                             package.namespace.to_suffix().unwrap(),
                             Ok(None),
                             Some(Ok(None)),
                             false,
                             false,
-                        ));
+                        ))
                     }
                     SourceType::SourceFile(_) => {
                         // Record interface generation before compilation for staleness detection
@@ -218,35 +225,34 @@ pub fn compile(
                             package,
                             module,
                             module_name,
+                            &registry,
+                            &build_state.build_state,
                             build_state,
                         );
 
                         let gen_after = build_state.get_interface_generation(module_name);
 
                         // Interface is "clean" if the generation didn't change
-                        // (meaning the module wasn't recompiled or its interface is unchanged)
                         let is_clean = gen_before == gen_after;
 
-                        // compile_module_in_process handles both .resi and .res in one call.
-                        // Map the result into the expected tuple format.
                         let (impl_result, intf_result) = match result {
                             Ok(warning) => (Ok(warning), Some(Ok(None))),
                             Err(e) => (Err(e), None),
                         };
 
-                        batch_results.push((
+                        if show_progress { inc(); }
+
+                        Some((
                             module_name.to_string(),
                             impl_result,
                             intf_result,
                             is_clean,
                             true,
-                        ));
+                        ))
                     }
                 }
-
-                if show_progress { inc(); }
-            }
-            batch_results
+            })
+            .collect()
         } else {
             // Default / --rust: parallel compilation via bsc subprocess
             current_in_progres_modules
@@ -939,14 +945,10 @@ fn write_js_output(
 ///
 /// For each package with a namespace, synthesizes the namespace module's
 /// alias signature (e.g., `module Foo = Foo-MyApp`) and registers it in
-/// the PersistentEnv so that `-open Namespace` works during compilation.
+/// the shared ModuleRegistry so that `-open Namespace` works during compilation.
 ///
 /// This replaces the `compile_mlmap` bsc subprocess call used in file-based modes.
 fn register_namespace_signatures(build_state: &BuildCommandState) {
-    let mut persistent_env = build_state
-        .take_persistent_env()
-        .unwrap_or_else(PersistentEnv::new);
-
     for (_package_name, package) in build_state.packages.iter() {
         let namespace_suffix = match package.namespace.to_suffix() {
             Some(suffix) => suffix,
@@ -989,12 +991,85 @@ fn register_namespace_signatures(build_state: &BuildCommandState) {
             .collect();
 
         if !module_aliases.is_empty() {
-            persistent_env
-                .register_namespace_in_memory(&namespace_suffix, &module_aliases);
+            build_state.register_namespace_in_registry(&namespace_suffix, &module_aliases);
+        }
+    }
+}
+
+/// Register source file paths for all modules in the ModuleRegistry.
+///
+/// This enables on-demand source-based type checking for implicit dependencies
+/// (modules accessed via `-open Pervasives`, namespace opens, etc.) that aren't
+/// captured by the AST-based dep graph. Without these fallback paths, modules
+/// needed as implicit deps but not yet compiled in the current wave would be
+/// unfindable by the in-process PersistentEnv.
+fn register_source_fallback_paths(build_state: &BuildCommandState) {
+    let mut fallback_paths = ahash::AHashMap::new();
+
+    // Register source paths for all modules in the build graph
+    for (module_name, module) in build_state.modules.iter() {
+        if let SourceType::SourceFile(source_file) = &module.source_type {
+            let package = build_state
+                .get_package(&module.package_name)
+                .expect("Package not found");
+
+            // Prefer .resi if it exists, otherwise use .res
+            let source_path = if let Some(interface) = &source_file.interface {
+                Path::new(&package.path).join(&interface.path)
+            } else {
+                Path::new(&package.path).join(&source_file.implementation.path)
+            };
+
+            fallback_paths.insert(module_name.clone(), source_path);
         }
     }
 
-    build_state.return_persistent_env(persistent_env);
+    // Register source paths for @rescript/runtime modules.
+    // The runtime is NOT a regular dependency in the build graph — it's
+    // resolved via RESCRIPT_RUNTIME. In file-based mode, runtime modules
+    // are loaded from .cmi files on the load path. In --in-process mode,
+    // we need source fallback paths so they can be type-checked on demand.
+    let runtime_path = &build_state.build_state.compiler_info.runtime_path;
+    if let Ok(entries) = std::fs::read_dir(runtime_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if ext == "res" || ext == "resi" {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        // Capitalize the module name (Pervasives, Js, etc.)
+                        let module_name = {
+                            let mut chars = stem.chars();
+                            match chars.next() {
+                                None => continue,
+                                Some(ch) => {
+                                    format!("{}{}", ch.to_uppercase(), chars.as_str())
+                                }
+                            }
+                        };
+
+                        // For .res files, check if a .resi exists and prefer it
+                        if ext == "res" {
+                            let resi_path = path.with_extension("resi");
+                            if resi_path.exists() {
+                                fallback_paths.insert(module_name, resi_path);
+                            } else {
+                                fallback_paths.entry(module_name).or_insert(path.clone());
+                            }
+                        } else {
+                            // .resi always takes precedence
+                            fallback_paths.insert(module_name, path.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    build_state
+        .module_registry
+        .lock()
+        .unwrap()
+        .source_fallback_paths = fallback_paths;
 }
 
 /// Compile a single module fully in-process using the Rust compiler.
@@ -1004,7 +1079,12 @@ fn register_namespace_signatures(build_state: &BuildCommandState) {
 /// - If .resi exists, typechecks it first and registers the interface
 /// - Compiles the .res implementation
 /// - Writes only JS output (no .cmi, .cmj, .cmt, .cmti)
-/// - Registers the module's interface in the shared PersistentEnv
+/// - Returns the finalized PersStruct and signature for the caller to
+///   update the shared ModuleRegistry.
+///
+/// Takes a `&ModuleRegistry` (read-only snapshot from the current wave)
+/// instead of a shared mutable `PersistentEnv`. Each call creates its own
+/// fresh `PersistentEnv` internally, enabling parallel compilation.
 ///
 /// Returns Ok(None) on success, Ok(Some(warning)) on success with warnings,
 /// Err on failure.
@@ -1012,6 +1092,8 @@ fn compile_module_in_process(
     package: &packages::Package,
     module: &Module,
     module_name: &str,
+    registry: &ModuleRegistry,
+    build_state: &BuildState,
     build_command_state: &BuildCommandState,
 ) -> Result<Option<String>> {
     let source_file = match &module.source_type {
@@ -1025,23 +1107,19 @@ fn compile_module_in_process(
 
     // Build compiler options from package config
     let options =
-        build_compiler_options(package, module_name, implementation_path, &build_command_state.build_state)?;
+        build_compiler_options(package, module_name, implementation_path, build_state)?;
 
-    // Take the shared PersistentEnv
-    let mut persistent_env = build_command_state
-        .take_persistent_env()
-        .unwrap_or_else(PersistentEnv::new);
-
-    // Register this module's metadata in the PersistentEnv for JS import resolution
     let source_abs = Path::new(&package.path).join(implementation_path);
     let is_runtime = package.name == "@rescript/runtime";
-
-    // Determine purity: ReScript files are generally pure unless they have side effects.
-    // For now, treat all modules as pure (the compiler will determine actual purity).
     let is_pure = true;
 
-    persistent_env.register_in_memory_module(
-        module_name,
+    // For .resi + .res, we need the .resi to be in the registry before compiling .res.
+    // Build a local registry that includes the .resi result (if any).
+    let mut local_registry = registry.clone();
+
+    // Register this module's metadata in the local registry
+    local_registry.module_info.insert(
+        module_name.to_string(),
         rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
             source_path: source_abs.clone(),
             is_pure,
@@ -1065,11 +1143,26 @@ fn compile_module_in_process(
             &intf_source_abs.to_string_lossy(),
             module_name,
             &options,
-            persistent_env,
+            &local_registry,
         )
         .map_err(|e| anyhow!("Interface typecheck failed for {}: {}", module_name, e))?;
 
-        persistent_env = intf_result.persistent_env;
+        // Register the .resi's PersStruct in the local registry so the
+        // .res compilation can find it for moregen constraints.
+        if let Some(ps) = intf_result.pers_struct {
+            local_registry
+                .cached_modules
+                .insert(module_name.to_string(), ps.clone());
+            // Update the shared registry with the .resi result
+            build_command_state.update_module_registry(
+                module_name,
+                ps,
+                source_abs.clone(),
+                is_pure,
+                is_runtime,
+                intf_result.new_alias_rewrites,
+            );
+        }
 
         // Register the interface signature in rewatch's in-memory registry
         build_command_state.register_in_memory_interface(
@@ -1088,18 +1181,39 @@ fn compile_module_in_process(
         )
     })?;
 
-    let compile_result = rescript_compiler::driver::compile_source_in_process(
-        &impl_source,
-        &source_abs.to_string_lossy(),
-        module_name,
-        &options,
-        persistent_env,
-        has_interface,
-    )
+    let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rescript_compiler::driver::compile_source_in_process(
+            &impl_source,
+            &source_abs.to_string_lossy(),
+            module_name,
+            &options,
+            &local_registry,
+            has_interface,
+        )
+    }))
+    .map_err(|panic| {
+        let msg = if let Some(s) = panic.downcast_ref::<String>() {
+            s.clone()
+        } else if let Some(s) = panic.downcast_ref::<&str>() {
+            s.to_string()
+        } else {
+            "unknown panic".to_string()
+        };
+        anyhow!("Compilation panicked for {}: {}", module_name, msg)
+    })?
     .map_err(|e| anyhow!("Compilation failed for {}: {}", module_name, e))?;
 
-    // Return the PersistentEnv for subsequent compilations
-    build_command_state.return_persistent_env(compile_result.persistent_env);
+    // Update the shared registry with the implementation's PersStruct
+    if let Some(ps) = compile_result.pers_struct {
+        build_command_state.update_module_registry(
+            module_name,
+            ps,
+            source_abs.clone(),
+            is_pure,
+            is_runtime,
+            compile_result.new_alias_rewrites,
+        );
+    }
 
     // Register the implementation's inferred signature if no .resi
     if !has_interface {

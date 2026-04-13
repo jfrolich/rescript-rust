@@ -4,7 +4,7 @@ use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
 use blake3::Hash;
 use rescript_compiler::binary_ast::Dependencies;
-use rescript_compiler::cmi::persistent_env::PersistentEnv;
+use rescript_compiler::cmi::persistent_env::{ModuleRegistry, PersStruct};
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
 use rescript_compiler::types::Signature as DeclSignature;
@@ -208,9 +208,9 @@ pub struct BuildCommandState {
     // Monotonically increasing generation counter for in-memory interface invalidation.
     // Each compilation that produces a new interface bumps this counter.
     pub interface_generation: AtomicU64,
-    // Shared PersistentEnv for --in-process mode. Holds cached module interfaces
-    // and metadata needed by the compiler for dependency resolution.
-    pub persistent_env: Mutex<Option<PersistentEnv>>,
+    // Shared module registry for --in-process mode. Contains all previously-published
+    // module interfaces, metadata, and namespace aliases. Shared across parallel waves.
+    pub module_registry: Mutex<ModuleRegistry>,
     // In-memory extracted dependencies from the parse phase for --in-process mode.
     // Keyed by "{module_name}:impl" or "{module_name}:intf" (matching stored_asts convention).
     // Values are the raw module names extracted from the parsed AST.
@@ -231,7 +231,7 @@ impl std::fmt::Debug for BuildCommandState {
                 "interface_generation",
                 &self.interface_generation.load(Ordering::Relaxed),
             )
-            .field("persistent_env", &"<Mutex<Option<PersistentEnv>>>")
+            .field("module_registry", &"<Mutex<ModuleRegistry>>")
             .field("in_memory_deps", &"<Mutex<..>>")
             .finish()
     }
@@ -298,7 +298,7 @@ impl BuildCommandState {
             stored_asts: Mutex::new(AHashMap::new()),
             in_memory_interfaces: Mutex::new(AHashMap::new()),
             interface_generation: AtomicU64::new(0),
-            persistent_env: Mutex::new(None),
+            module_registry: Mutex::new(ModuleRegistry::new()),
             in_memory_deps: Mutex::new(AHashMap::new()),
         }
     }
@@ -359,15 +359,43 @@ impl BuildCommandState {
             .map(|s| s.generation)
     }
 
-    /// Take ownership of the PersistentEnv for use during compilation.
-    /// Returns None if no PersistentEnv has been initialized or it's already taken.
-    pub fn take_persistent_env(&self) -> Option<PersistentEnv> {
-        self.persistent_env.lock().unwrap().take()
+    /// Take a snapshot of the module registry for use during a compilation wave.
+    /// Each worker in a parallel wave gets a clone of this snapshot.
+    pub fn snapshot_module_registry(&self) -> ModuleRegistry {
+        self.module_registry.lock().unwrap().clone()
     }
 
-    /// Return the PersistentEnv after compilation.
-    pub fn return_persistent_env(&self, env: PersistentEnv) {
-        *self.persistent_env.lock().unwrap() = Some(env);
+    /// Update the module registry with a compiled module's finalized PersStruct.
+    pub fn update_module_registry(
+        &self,
+        module_name: &str,
+        pers_struct: PersStruct,
+        source_path: std::path::PathBuf,
+        is_pure: bool,
+        is_runtime: bool,
+        new_alias_rewrites: ahash::AHashMap<String, rescript_compiler::types::path::Path>,
+    ) {
+        let info = rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
+            source_path,
+            is_pure,
+            is_runtime,
+        };
+        self.module_registry
+            .lock()
+            .unwrap()
+            .register_module(module_name, pers_struct, info, new_alias_rewrites);
+    }
+
+    /// Register a namespace in the module registry.
+    pub fn register_namespace_in_registry(
+        &self,
+        namespace_name: &str,
+        module_aliases: &[(String, String)],
+    ) {
+        self.module_registry
+            .lock()
+            .unwrap()
+            .register_namespace(namespace_name, module_aliases);
     }
 
     /// Store extracted dependencies from the parse phase for a module file.

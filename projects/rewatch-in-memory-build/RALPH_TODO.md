@@ -1,7 +1,7 @@
 # Ralph TODO: Rewatch In-Memory Build
 
 **Last Updated:** 2026-04-13
-**Status:** 16/20 tasks complete (Phase 4 done, Phase 5 remaining)
+**Status:** 17/20 tasks complete (Phase 1 registry done, Phase 5 remaining)
 
 ## Goal
 
@@ -49,11 +49,15 @@ Clean architecture target for this project:
 
 ## Phase 1: Compiler-Rust Memory Protocol
 
-- [ ] Introduce a clean module-resolution abstraction for `--in-process`:
+- [x] Introduce a clean module-resolution abstraction for `--in-process`:
   - a canonical module/interface registry shared across files
   - a per-file resolver session for derived state and lazy memoization
   - no `PersistentEnv` argument/return value in the in-process compiler API
   - `PersistentEnv` can remain temporarily only behind the file-backed/default path
+  - **Done:** Introduced `ModuleRegistry` struct in `persistent_env.rs` — contains `cached_modules` (finalized PersStructs), `module_info` (InMemoryModuleInfo), `alias_rewrites`, and `source_fallback_paths` (for lazy type-checking implicit deps). Added `PersistentEnv::from_registry(&ModuleRegistry)` constructor that creates a fresh env per compilation. Updated `compile_source_in_process()` and `typecheck_interface_in_process()` to take `&ModuleRegistry` instead of `PersistentEnv` — each creates its own `PersistentEnv` internally. `InProcessCompileResult` and `InProcessInterfaceResult` return `PersStruct` + alias rewrites instead of `PersistentEnv`. In rewatch: replaced `persistent_env: Mutex<Option<PersistentEnv>>` with `module_registry: Mutex<ModuleRegistry>` in `BuildCommandState`. Added `snapshot_module_registry()` for read-only clones, `update_module_registry()` for post-compilation updates, `register_namespace_in_registry()`. Compile loop now uses `par_iter` for `--in-process` (dependency-independent modules within a wave compile in parallel). Each worker gets a cloned `ModuleRegistry` snapshot, creates its own `PersistentEnv` from it, and updates the shared registry after compilation. Added source fallback paths for `@rescript/runtime` modules (not in the build graph, but needed for lazy type-checking implicit deps like Pervasives/Stdlib/Js).
+  - **Parallelism:** `--in-process` now uses `par_iter` for each wave, same as the file-backed modes. Each file gets a fresh `PersistentEnv` from the registry snapshot — no shared mutable env.
+  - **Source fallback:** `PersistentEnv::load_module_from_source_path_fallback` provides on-demand type-checking for modules not yet in the registry (implicit deps via `-open Pervasives`). The `source_fallback_paths` map includes both build-graph modules and `@rescript/runtime` source files.
+  - **Test results:** Compiler tests: 732/732 pass (same 19 pre-existing failures). In-process testrepo: 52/53 modules compile, 1 failure (Array) due to pre-existing lambda compiler panic on Belt.Array functor code. Default-mode suite: same pre-existing mlmap `randjbuildsystem` error.
 - [x] Add a memory-backed module/interface provider abstraction to `compiler-rust/src/cmi/persistent_env.rs`, so module interfaces, source paths, and purity can come from an in-memory registry instead of compiler assets on disk.
   - **Done:** Added `InMemoryModuleInfo` struct (source_path, is_pure, is_runtime) and `in_memory_modules: HashMap<String, InMemoryModuleInfo>` to `PersistentEnv`. Added `register_in_memory_module()` for metadata, `register_in_memory_signature()` for direct cache population bypassing `.cmi` loading. Modified `resolve_module_source_path()`, `module_cmj_is_pure()` to check in-memory registry first. Modified `ModulePathResolver::is_runtime_module()` in `js_ir/mod.rs` to check in-memory registry before probing disk for `.cmi/.ast/.iast` files. All existing tests pass (732/732, same 19 pre-existing failures from missing runtime artifacts).
 - [x] Extend `compiler-rust/src/driver.rs` with an in-process API that returns final JS plus the published interface, interface fingerprint/generation, and any metadata the backend still needs for downstream compilation.

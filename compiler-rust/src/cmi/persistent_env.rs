@@ -64,6 +64,82 @@ pub struct InMemoryModuleInfo {
     pub is_runtime: bool,
 }
 
+/// Read-only module registry for `--in-process` builds.
+///
+/// Contains all previously-published module interfaces and metadata.
+/// Shared (by reference) across parallel compilations within a wave.
+/// Each worker creates a fresh `PersistentEnv` from this registry.
+#[derive(Clone, Default)]
+pub struct ModuleRegistry {
+    /// Cached module structures (finalized PersStructs from previous compilations).
+    /// Keyed by module name.
+    pub cached_modules: HashMap<String, PersStruct>,
+    /// Module metadata (source paths, purity, runtime status).
+    pub module_info: HashMap<String, InMemoryModuleInfo>,
+    /// Alias prefix rewrites (flattened_name -> qualified_path).
+    pub alias_rewrites: HashMap<String, Path>,
+    /// Source file paths for ALL modules, including those not yet compiled.
+    /// Used for on-demand source-based type checking when a module is needed
+    /// as an implicit dependency (e.g., via `-open Pervasives`) but hasn't
+    /// been compiled yet in the current wave.
+    pub source_fallback_paths: HashMap<String, PathBuf>,
+}
+
+impl ModuleRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a namespace module's alias signature directly.
+    /// This is the registry-level equivalent of `PersistentEnv::register_namespace_in_memory`.
+    pub fn register_namespace(
+        &mut self,
+        namespace_name: &str,
+        module_aliases: &[(String, String)],
+    ) {
+        let mut sig_items: Signature = Vec::with_capacity(module_aliases.len());
+        for (short_name, internal_name) in module_aliases {
+            sig_items.push(SignatureItem::SigModule(
+                Ident::create_persistent(short_name.as_str()),
+                ModuleDeclaration {
+                    md_type: ModuleType::MtyAlias(
+                        AliasPresence::MtaPresent,
+                        Path::Pident(Ident::create_persistent(internal_name.as_str())),
+                    ),
+                    md_attributes: vec![],
+                    md_loc: crate::location::Location::none(),
+                    md_path: None,
+                },
+                RecStatus::TrecNot,
+            ));
+        }
+
+        // Record alias rewrites
+        let module_path = Path::Pident(Ident::create_persistent(namespace_name));
+        collect_alias_rewrites(&sig_items, &module_path, &mut self.alias_rewrites);
+
+        let ps = PersStruct {
+            ps_name: namespace_name.to_string(),
+            ps_sig: sig_items,
+            ps_filename: format!("{}.mlmap", namespace_name),
+        };
+        self.cached_modules.insert(namespace_name.to_string(), ps);
+    }
+
+    /// Store a compiled module's finalized PersStruct and metadata.
+    pub fn register_module(
+        &mut self,
+        name: &str,
+        pers_struct: PersStruct,
+        info: InMemoryModuleInfo,
+        new_alias_rewrites: HashMap<String, Path>,
+    ) {
+        self.cached_modules.insert(name.to_string(), pers_struct);
+        self.module_info.insert(name.to_string(), info);
+        self.alias_rewrites.extend(new_alias_rewrites);
+    }
+}
+
 /// Persistent environment for module loading.
 #[derive(Clone)]
 pub struct PersistentEnv {
@@ -90,6 +166,10 @@ pub struct PersistentEnv {
     /// When true, all module resolution uses the in-memory registry only.
     /// Disk fallbacks (`.ast`, `.cmj`, `.cmi` probes) are skipped entirely.
     in_process_mode: bool,
+    /// Source file paths for on-demand lazy type checking in `--in-process` mode.
+    /// When `find_pers_struct` can't find a module in the cache and this map
+    /// has its source path, the module is type-checked from source on the fly.
+    source_fallback_paths: HashMap<String, PathBuf>,
 }
 
 impl PersistentEnv {
@@ -104,7 +184,54 @@ impl PersistentEnv {
             renamed_sig_cache: HashMap::new(),
             in_memory_modules: HashMap::new(),
             in_process_mode: false,
+            source_fallback_paths: HashMap::new(),
         }
+    }
+
+    /// Create a PersistentEnv seeded from a ModuleRegistry.
+    ///
+    /// Each worker in a parallel wave gets its own PersistentEnv via this
+    /// constructor. The registry's cached modules and metadata are cloned
+    /// into the env so that `find_pers_struct` can resolve dependencies
+    /// without disk I/O. The env is automatically in in-process mode.
+    pub fn from_registry(registry: &ModuleRegistry) -> Self {
+        let cache = registry
+            .cached_modules
+            .iter()
+            .map(|(k, v)| (k.clone(), Some(v.clone())))
+            .collect();
+        PersistentEnv {
+            cache,
+            load_path: Vec::new(),
+            alias_prefix_rewrites: registry.alias_rewrites.clone(),
+            open_modules: Vec::new(),
+            jsx_version: None,
+            renamed_sig_cache: HashMap::new(),
+            in_memory_modules: registry.module_info.clone(),
+            in_process_mode: true,
+            source_fallback_paths: registry.source_fallback_paths.clone(),
+        }
+    }
+
+    /// Extract the diff produced by this compilation: the newly-registered
+    /// PersStruct and any new alias rewrites that weren't in the original
+    /// registry. Used to update the shared ModuleRegistry after compilation.
+    pub fn extract_module_update(
+        &self,
+        module_name: &str,
+        original_alias_count: usize,
+    ) -> (Option<PersStruct>, HashMap<String, Path>) {
+        let ps = self
+            .cache
+            .get(module_name)
+            .and_then(|opt| opt.clone());
+        // New alias rewrites are any beyond what was in the original registry
+        let new_rewrites = if self.alias_prefix_rewrites.len() > original_alias_count {
+            self.alias_prefix_rewrites.clone()
+        } else {
+            HashMap::new()
+        };
+        (ps, new_rewrites)
     }
 
     /// Set the load path (list of directories to search for .cmi files).
@@ -463,7 +590,50 @@ impl PersistentEnv {
             ));
         }
 
+        // In in-process mode, try source-based type checking as a fallback.
+        // This handles implicit dependencies (e.g., modules accessed via
+        // `-open Pervasives`) that aren't in the explicit dep graph and
+        // haven't been compiled yet in the current wave.
+        if self.in_process_mode {
+            return self.load_module_from_source_path_fallback(name, ctx);
+        }
+
         self.load_module_from_source_fallback(name, ctx)
+    }
+
+    /// Load a module by type-checking its source file directly in `--in-process` mode.
+    ///
+    /// Unlike `load_module_from_source_fallback` (which reads `.ast` files),
+    /// this reads the source `.res`/`.resi` file path from `source_fallback_paths`.
+    fn load_module_from_source_path_fallback<'a>(
+        &mut self,
+        name: &str,
+        ctx: &'a TypeContext<'a>,
+    ) -> Option<PersStruct> {
+        let source_path = self.source_fallback_paths.get(name)?.clone();
+
+        // The source_fallback_paths already points to the preferred file
+        // (.resi if it exists, .res otherwise), set by rewatch when
+        // registering the paths.
+        let (signature, fallback_pers) =
+            self.typecheck_source_signature(&source_path, ctx)?;
+
+        // Merge any modules the fallback discovered
+        self.alias_prefix_rewrites
+            .extend(fallback_pers.alias_prefix_rewrites.clone());
+        for (module_name, loaded) in fallback_pers.cache {
+            if module_name != name && loaded.is_some() && !self.cache.contains_key(&module_name) {
+                self.cache.insert(module_name, loaded);
+            }
+        }
+
+        Some(self.finalize_loaded_signature(
+            name,
+            name.to_string(),
+            signature,
+            source_path.to_string_lossy().into_owned(),
+            ctx,
+        ))
     }
 
     /// Read a module's signature from CMI without applying path substitution.

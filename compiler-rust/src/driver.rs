@@ -3,6 +3,7 @@
 //! This module wires together parsing, type-checking, Lambda conversion, and
 //! JS IR codegen to produce JavaScript output.
 
+use ahash::AHashMap as HashMap;
 use std::ffi::OsString;
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1517,55 +1518,57 @@ pub fn compile_file_to_js_with_options(
 // orchestrator owns the `PersistentEnv` and dependency interfaces live in
 // memory rather than on disk as `.cmi` files.
 
+use crate::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry, PersStruct};
 use crate::types::decl::Signature as DeclSignature;
 
 /// Result of an in-process `.res` compilation.
 ///
-/// Contains the generated JavaScript, the module's published interface
-/// (for downstream dependents), and the `PersistentEnv` (returned so the
-/// caller can continue to use it for subsequent compilations).
+/// Contains the generated JavaScript and everything needed to update the
+/// shared `ModuleRegistry` for downstream dependents.
 pub struct InProcessCompileResult {
     /// Generated JavaScript source text.
     pub js_output: String,
     /// The module's published signature (inferred from `.res`).
-    /// Suitable for passing to `PersistentEnv::register_in_memory_signature`.
     pub signature: DeclSignature,
-    /// The `PersistentEnv` after compilation, with any new modules loaded
-    /// during this compilation cached inside.
-    pub persistent_env: PersistentEnv,
+    /// The finalized PersStruct for this module, ready for the registry.
+    pub pers_struct: Option<PersStruct>,
+    /// Any new alias rewrites discovered during this compilation.
+    pub new_alias_rewrites: HashMap<String, crate::types::path::Path>,
 }
 
 /// Result of an in-process `.resi` interface type-check.
 ///
-/// Contains the interface signature and the `PersistentEnv`.
+/// Contains the interface signature and everything needed to update the
+/// shared `ModuleRegistry`.
 pub struct InProcessInterfaceResult {
     /// The module's published signature (from the `.resi` file).
-    /// Suitable for passing to `PersistentEnv::register_in_memory_signature`.
     pub signature: DeclSignature,
-    /// The `PersistentEnv` after type-checking.
-    pub persistent_env: PersistentEnv,
+    /// The finalized PersStruct for this module, ready for the registry.
+    pub pers_struct: Option<PersStruct>,
+    /// Any new alias rewrites discovered during this compilation.
+    pub new_alias_rewrites: HashMap<String, crate::types::path::Path>,
 }
 
 /// Compile a `.res` source file fully in-process, returning JS output and
 /// the module's published interface.
 ///
 /// Unlike `compile_source_to_js_with_options`, this function:
-/// - Takes ownership of a caller-provided `PersistentEnv` (with in-memory
-///   module interfaces already registered for dependencies).
+/// - Creates a fresh `PersistentEnv` internally from the shared `ModuleRegistry`.
 /// - Does NOT probe the filesystem for a sibling `.resi` file. Instead, the
 ///   caller passes `has_interface: true` when a `.resi` exists and has
-///   already been typechecked and registered in `persistent_env`.
-/// - Returns the inferred `Signature` so the caller can register it for
-///   downstream dependents.
-/// - Returns the `PersistentEnv` back to the caller.
+///   already been typechecked and registered in the registry.
+/// - Returns the inferred `Signature` and finalized `PersStruct` so the
+///   caller can update the registry for downstream dependents.
 pub fn compile_source_in_process(
     source: &str,
     filename: &str,
     module_name: &str,
     options: &CompilerOptions,
-    persistent_env: PersistentEnv,
+    registry: &ModuleRegistry,
     has_interface: bool,
 ) -> Result<InProcessCompileResult> {
+    let original_alias_count = registry.alias_rewrites.len();
+
     // Parse
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);
@@ -1594,10 +1597,8 @@ pub fn compile_source_in_process(
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     let mut env = initial_env(&type_ctx);
 
-    // Use the caller-provided PersistentEnv (with in-memory modules pre-registered).
-    // Enable in-process mode so all resolution uses the registry, not disk.
-    let mut pers_env = persistent_env;
-    pers_env.set_in_process_mode(true);
+    // Create a fresh PersistentEnv from the shared registry.
+    let mut pers_env = PersistentEnv::from_registry(registry);
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path(load_path);
@@ -1611,9 +1612,6 @@ pub fn compile_source_in_process(
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
 
     // Apply interface constraints if a .resi was pre-registered.
-    // In --in-process mode we don't probe the filesystem; `has_interface` is
-    // set by the caller when the .resi has already been typechecked and its
-    // signature registered in the PersistentEnv.
     if has_interface {
         apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
     }
@@ -1632,15 +1630,8 @@ pub fn compile_source_in_process(
     );
 
     // Extract the published signature.
-    let published_signature = if has_interface {
-        // When .resi exists, the published interface comes from the .resi
-        // (already registered in pers_env). Return the simplified impl sig
-        // for completeness — the caller should use the .resi signature.
-        crate::types::includemod::simplify_signature(&typed_structure.str_type)
-    } else {
-        // No .resi: the published interface is the inferred signature.
-        crate::types::includemod::simplify_signature(&typed_structure.str_type)
-    };
+    let published_signature =
+        crate::types::includemod::simplify_signature(&typed_structure.str_type);
 
     // Lambda conversion
     let lambda_start_stamp = type_ctx
@@ -1702,18 +1693,15 @@ pub fn compile_source_in_process(
     let js =
         print_deps_program_with_directives(&program, Some(&module_path_resolver), &file_directives);
 
-    // Self-register the module's published interface into the PersistentEnv
-    // so downstream modules can resolve it without disk I/O.
-    // When .resi exists, the .resi signature was already registered by
-    // typecheck_interface_in_process, so we only register here when there's
-    // no .resi (the inferred signature is the published interface).
-    let mut returned_env = tctx
+    // Register the module's published interface in the internal PersistentEnv
+    // and extract the finalized PersStruct for the caller's registry.
+    let mut internal_env = tctx
         .persistent_env
         .take()
         .unwrap_or_else(PersistentEnv::new);
 
     if !has_interface {
-        returned_env.register_in_memory_signature(
+        internal_env.register_in_memory_signature(
             module_name,
             published_signature.clone(),
             filename,
@@ -1721,10 +1709,14 @@ pub fn compile_source_in_process(
         );
     }
 
+    let (pers_struct, new_alias_rewrites) =
+        internal_env.extract_module_update(module_name, original_alias_count);
+
     Ok(InProcessCompileResult {
         js_output: js,
         signature: published_signature,
-        persistent_env: returned_env,
+        pers_struct,
+        new_alias_rewrites,
     })
 }
 
@@ -1732,17 +1724,18 @@ pub fn compile_source_in_process(
 /// module's published signature.
 ///
 /// Unlike `typecheck_interface_source`, this function:
-/// - Takes ownership of a caller-provided `PersistentEnv`.
-/// - Returns the `Signature` so the caller can register it for downstream
-///   dependents via `PersistentEnv::register_in_memory_signature`.
-/// - Returns the `PersistentEnv` back to the caller.
+/// - Creates a fresh `PersistentEnv` internally from the shared `ModuleRegistry`.
+/// - Returns the `Signature` and finalized `PersStruct` so the caller can
+///   update the registry for downstream dependents.
 pub fn typecheck_interface_in_process(
     source: &str,
     filename: &str,
     module_name: &str,
     options: &CompilerOptions,
-    persistent_env: PersistentEnv,
+    registry: &ModuleRegistry,
 ) -> Result<InProcessInterfaceResult> {
+    let original_alias_count = registry.alias_rewrites.len();
+
     // Parse as signature
     let mut parser = Parser::new(filename, source);
     let signature = module::parse_signature(&mut parser);
@@ -1761,10 +1754,8 @@ pub fn typecheck_interface_in_process(
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     let mut env = initial_env(&type_ctx);
 
-    // Use the caller-provided PersistentEnv.
-    // Enable in-process mode so all resolution uses the registry, not disk.
-    let mut pers_env = persistent_env;
-    pers_env.set_in_process_mode(true);
+    // Create a fresh PersistentEnv from the shared registry.
+    let mut pers_env = PersistentEnv::from_registry(registry);
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path(load_path);
@@ -1778,8 +1769,6 @@ pub fn typecheck_interface_in_process(
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
 
     // Extract the Signature (Vec<SignatureItem>) from the TypedSignature.
-    // This mirrors the pattern used in PersistentEnv::typecheck_source_fallback:
-    // wrap in TypedModuleType, then convert via decl_module_type_from_typed.
     let typed_module_type = crate::types::typedtree::ModuleType {
         mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature),
         mty_loc: crate::parse_arena::LocIdx(0),
@@ -1795,23 +1784,27 @@ pub fn typecheck_interface_in_process(
             }
         };
 
-    // Self-register the interface signature into the PersistentEnv so
-    // downstream modules (and the matching .res implementation) can resolve it.
-    let mut returned_env = tctx
+    // Register the interface signature in the internal PersistentEnv
+    // and extract the finalized PersStruct for the caller's registry.
+    let mut internal_env = tctx
         .persistent_env
         .take()
         .unwrap_or_else(PersistentEnv::new);
 
-    returned_env.register_in_memory_signature(
+    internal_env.register_in_memory_signature(
         module_name,
         published_signature.clone(),
         filename,
         &type_ctx,
     );
 
+    let (pers_struct, new_alias_rewrites) =
+        internal_env.extract_module_update(module_name, original_alias_count);
+
     Ok(InProcessInterfaceResult {
         signature: published_signature,
-        persistent_env: returned_env,
+        pers_struct,
+        new_alias_rewrites,
     })
 }
 
