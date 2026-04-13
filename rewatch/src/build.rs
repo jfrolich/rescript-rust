@@ -133,7 +133,7 @@ pub fn initialize_build(
     path: &Path,
     plain_output: bool,
     warn_error: Option<String>,
-    use_rust_parser: bool,
+    build_mode: build_types::BuildMode,
     subprocess: bool,
     dump_typed_sexp: bool,
 ) -> Result<BuildCommandState> {
@@ -150,7 +150,7 @@ pub fn initialize_build(
     }
 
     let mut build_state =
-        BuildCommandState::new(project_context, packages, compiler, warn_error, use_rust_parser, subprocess, dump_typed_sexp);
+        BuildCommandState::new(project_context, packages, compiler, warn_error, build_mode, subprocess, dump_typed_sexp);
     packages::parse_packages(&mut build_state)?;
 
     let compile_assets_state = read_compile_state::read(&mut build_state)?;
@@ -523,7 +523,7 @@ pub fn build(
     create_sourcedirs: bool,
     plain_output: bool,
     warn_error: Option<String>,
-    use_rust_parser: bool,
+    build_mode: build_types::BuildMode,
     subprocess: bool,
     dump_typed_sexp: bool,
 ) -> Result<BuildCommandState> {
@@ -540,7 +540,7 @@ pub fn build(
         path,
         plain_output,
         warn_error,
-        use_rust_parser,
+        build_mode,
         subprocess,
         dump_typed_sexp,
     )

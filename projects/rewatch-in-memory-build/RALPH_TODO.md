@@ -1,7 +1,7 @@
 # Ralph TODO: Rewatch In-Memory Build
 
 **Last Updated:** 2026-04-13
-**Status:** 0/16 tasks complete
+**Status:** 3/16 tasks complete
 
 ## Goal
 
@@ -26,12 +26,15 @@ Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-
 
 ## Phase 0: Mode Model And CLI
 
-- [ ] Replace the current boolean flag model with an explicit build mode enum:
+- [x] Replace the current boolean flag model with an explicit build mode enum:
   - default: OCaml/file-backed
   - `--rust`: Rust via `bsc` subprocess/file-backed
   - `--in-process`: Rust in-process/memory-backed
-- [ ] Keep no-arg behavior unchanged and preserve `--rust` compatibility.
-- [ ] Define the parse/compile behavior per mode explicitly, including how `compiler-args` should behave.
+  - **Done:** Added `BuildMode` enum (Default/Rust/InProcess) to `build_types.rs`, `--in-process` CLI flag to `cli.rs`, `resolve_build_mode()` for mutual exclusivity with `--rust`. Replaced `use_rust_parser: bool` field with `build_mode: BuildMode` in `BuildCommandState`. The `use_rust_parser()` method now delegates to `build_mode.use_rust_parser()` so all downstream code (parse.rs, compile.rs) keeps working.
+- [x] Keep no-arg behavior unchanged and preserve `--rust` compatibility.
+  - **Done:** Default mode (no flags) resolves to `BuildMode::Default`. `--rust` resolves to `BuildMode::Rust`. Both exercise the same code paths as before. Build compiles clean, `--help` shows all three options.
+- [x] Define the parse/compile behavior per mode explicitly, including how `compiler-args` should behave.
+  - **Done:** `BuildMode` has `use_rust_parser()` (true for Rust+InProcess) and `is_in_process()` (true for InProcess only). `compiler-args` contract unchanged for now — will be revisited in Phase 5.
 
 ## Phase 1: Compiler-Rust Memory Protocol
 

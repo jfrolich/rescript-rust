@@ -65,6 +65,15 @@ fn main() -> Result<()> {
                 );
             }
 
+            let build_mode = cli::resolve_build_mode(
+                *build_args.rust,
+                build_args.in_process.in_process,
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            });
+
             match build::build(
                 &build_args.filter,
                 Path::new(&build_args.folder as &str),
@@ -73,7 +82,7 @@ fn main() -> Result<()> {
                 true, // create_sourcedirs is now always enabled
                 plain_output,
                 (*build_args.warn_error).clone(),
-                *build_args.rust,
+                build_mode,
                 build_args.subprocess.subprocess,
                 build_args.dump_typed_sexp_arg.dump_typed_sexp,
             ) {
@@ -104,6 +113,15 @@ fn main() -> Result<()> {
                 );
             }
 
+            let build_mode = cli::resolve_build_mode(
+                *watch_args.rust,
+                watch_args.in_process.in_process,
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            });
+
             match watcher::start(
                 &watch_args.filter,
                 show_progress,
@@ -112,7 +130,7 @@ fn main() -> Result<()> {
                 true, // create_sourcedirs is now always enabled
                 plain_output,
                 (*watch_args.warn_error).clone(),
-                *watch_args.rust,
+                build_mode,
                 watch_args.subprocess.subprocess,
                 watch_args.dump_typed_sexp_arg.dump_typed_sexp,
             ) {

@@ -8,6 +8,33 @@ use rescript_compiler::parser::ast::{Signature, Structure};
 use std::sync::Mutex;
 use std::{fmt::Display, ops::Deref, path::PathBuf, time::SystemTime};
 
+/// The three explicit build modes for rewatch.
+///
+/// - `Default`: OCaml/file-backed build (no special flags)
+/// - `Rust`: Rust parser with bsc compilation, file-backed (`--rust`)
+/// - `InProcess`: Rust compiler fully in-process, memory-backed (`--in-process`)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BuildMode {
+    /// Current OCaml/file-based build (default, no flags)
+    Default,
+    /// Rust parser, bsc compilation, file-backed (`--rust`)
+    Rust,
+    /// Rust compiler fully in-process, memory-backed (`--in-process`)
+    InProcess,
+}
+
+impl BuildMode {
+    /// Whether this mode uses the Rust parser (true for Rust and InProcess)
+    pub fn use_rust_parser(&self) -> bool {
+        matches!(self, BuildMode::Rust | BuildMode::InProcess)
+    }
+
+    /// Whether this mode uses in-process compilation with no disk artifacts
+    pub fn is_in_process(&self) -> bool {
+        matches!(self, BuildMode::InProcess)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseState {
     Pending,
@@ -134,8 +161,8 @@ pub struct BuildCommandState {
     pub build_state: BuildState,
     // Command-line --warn-error flag override (takes precedence over rescript.json config)
     pub warn_error_override: Option<String>,
-    // Command-line --rust flag: parse in-process with Rust parser.
-    pub use_rust_parser: bool,
+    // The explicit build mode (Default, Rust, or InProcess)
+    pub build_mode: BuildMode,
     // Command-line --subprocess flag: run bsc as subprocess with timeout (instead of in-process).
     pub subprocess: bool,
     // Command-line --dump-typed-sexp flag: add -dtyped-sexp to bsc invocations.
@@ -192,14 +219,14 @@ impl BuildCommandState {
         packages: AHashMap<String, Package>,
         compiler: CompilerInfo,
         warn_error_override: Option<String>,
-        use_rust_parser: bool,
+        build_mode: BuildMode,
         subprocess: bool,
         dump_typed_sexp: bool,
     ) -> Self {
         Self {
             build_state: BuildState::new(project_context, packages, compiler),
             warn_error_override,
-            use_rust_parser,
+            build_mode,
             subprocess,
             dump_typed_sexp,
             stored_asts: Mutex::new(AHashMap::new()),
@@ -210,8 +237,12 @@ impl BuildCommandState {
         self.warn_error_override.clone()
     }
 
+    pub fn build_mode(&self) -> BuildMode {
+        self.build_mode
+    }
+
     pub fn use_rust_parser(&self) -> bool {
-        self.use_rust_parser
+        self.build_mode.use_rust_parser()
     }
 
     pub fn subprocess(&self) -> bool {
