@@ -86,14 +86,7 @@ impl LambdaCompiler {
         let simplified = crate::lambda::simplify::simplify_for_js_backend(lam);
         let compiled = self.compile_expr(&simplified);
         let mut block = compiled.prelude;
-        let exports = match compiled.expr.desc {
-            ExpressionDesc::CamlBlock(_, _, _, TagInfo::ModuleExport(exports)) => exports,
-            ExpressionDesc::Undefined { .. } => vec![],
-            _ => {
-                push_effect_expression(&mut block, compiled.expr);
-                vec![]
-            }
-        };
+        let exports = extract_toplevel_exports(compiled.expr, &mut block).unwrap_or_default();
         let exports = resolve_export_aliases(&block, exports);
         let side_effect = module_side_effect_reason(&simplified);
 
@@ -2676,6 +2669,41 @@ fn resolve_export_alias(
     current
 }
 
+fn extract_toplevel_exports(expr: Expression, block: &mut Block) -> Option<Vec<Ident>> {
+    let Expression { desc, comment } = expr;
+    match desc {
+        ExpressionDesc::CamlBlock(_, _, _, TagInfo::ModuleExport(exports)) => Some(exports),
+        ExpressionDesc::Undefined { .. } => None,
+        ExpressionDesc::Seq(left, right) => {
+            let mut right_block = Vec::new();
+            if let Some(exports) = extract_toplevel_exports((*right).clone(), &mut right_block) {
+                push_effect_expression(block, *left);
+                block.extend(right_block);
+                Some(exports)
+            } else {
+                push_effect_expression(
+                    block,
+                    Expression {
+                        desc: ExpressionDesc::Seq(left, right),
+                        comment,
+                    },
+                );
+                None
+            }
+        }
+        other => {
+            push_effect_expression(
+                block,
+                Expression {
+                    desc: other,
+                    comment,
+                },
+            );
+            None
+        }
+    }
+}
+
 fn push_effect_expression(block: &mut Block, expr: Expression) {
     match expr.desc {
         ExpressionDesc::Seq(left, right) => {
@@ -5139,6 +5167,67 @@ mod tests {
             }
             other => panic!("expected the rebound export binding to remain, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compile_deps_program_keeps_exports_after_trailing_effect_sequence() {
+        let mut compiler = LambdaCompiler::new();
+        let exported = Ident::create_local("foo");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![exported.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(exported.clone())],
+            Location::none(),
+        );
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            exported.clone(),
+            Lambda::const_(Constant::int(1)),
+            Lambda::seq(
+                Lambda::assign(exported.clone(), Lambda::const_(Constant::int(2))),
+                export_block,
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        let [exported_ident] = deps.program.exports.as_slice() else {
+            panic!("expected a single export after the trailing effect");
+        };
+        assert!(exported_ident.same(&exported));
+
+        assert!(
+            deps.program
+                .block
+                .iter()
+                .any(|stmt| matches!(
+                    &stmt.desc,
+                    StatementDesc::Exp(Expression {
+                        desc: ExpressionDesc::Bin(
+                            BinOp::Eq,
+                            left,
+                            right,
+                        ),
+                        ..
+                    }) if matches!(
+                        left.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(VIdent::Id(id)),
+                            ..
+                        } if id.same(&exported)
+                    ) && matches!(
+                        right.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Number(Number::Int { i: 2, .. }),
+                            ..
+                        }
+                    )
+                )),
+            "expected the trailing assignment effect to remain in the program block"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 123 / 657 JS snapshots passing, 0 compile errors, 534 output diffs
+**Status:** 130 / 657 JS snapshots passing, 0 compile errors, 527 output diffs
 
 ## Goal
 
@@ -35,13 +35,42 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **123 / 657**
+- JS snapshot parity: **130 / 657**
 - Compile errors: **0**
-- Output diffs: **534**
+- Output diffs: **527**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- `compiler-rust/src/lambda/compile.rs` now matches one more slice of
+  OCaml `core/lam_compile_main.ml` more closely on the Rust JS path:
+  deps-program export recovery no longer assumes the final lowered JS
+  expression is a bare `ModuleExport` block; it now peels a trailing
+  top-level sequence whose right-hand side is `ModuleExport`, which matches
+  the OCaml backend's separate `meta.exports` path instead of dropping exports
+  that follow top-level side effects
+- Added focused coverage for this slice in
+  `compile_deps_program_keeps_exports_after_trailing_effect_sequence`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::compile::tests::compile_deps_program_keeps_exports_after_trailing_effect_sequence -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/raw_arity.res -o /tmp/raw_arity.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/async_inside_loop.res -o /tmp/async_inside_loop.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/raw_arity.res` and
+  `tests/tests/src/async_inside_loop.res` now both match their checked-in
+  `.mjs` snapshots exactly after the export-sequence fix
+- `tests/tests/src/print_alpha_test.res` also dropped out of the authoritative
+  diff set after the same change; its missing trailing `export { f }` block was
+  the same root cause rather than a separate printer issue
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the change, which confirms this export recovery fix does not perturb the
+  already-resolved external/global lowering path
+- The authoritative JS snapshot baseline now reports **130 / 657** passing,
+  **0** compile errors, and **527** output diffs after this OCaml-aligned
+  export-sequence recovery fix
 
 - OCaml `core/lam_pass_deep_flatten.ml` / `core/lam_pass_remove_alias.ml` /
   `core/lam_compile_primitive.ml` nullable-option cleanup is now matched more
