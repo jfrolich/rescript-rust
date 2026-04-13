@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 148 / 657 JS snapshots passing, 0 compile errors, 509 output diffs
+**Status:** 164 / 657 JS snapshots passing, 0 compile errors, 493 output diffs
 
 ## Goal
 
@@ -35,13 +35,54 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **148 / 657**
+- JS snapshot parity: **164 / 657**
 - Compile errors: **0**
-- Output diffs: **509**
+- Output diffs: **493**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed in the OCaml export-coercion path
+  instead of treating `ExternalScopeShadow.res` as a local statement-ordering
+  printer diff
+- `compiler-rust/src/lambda/compile.rs` now matches the OCaml
+  `compiler/core/lam_coercion.ml` `handle_exports` slice more closely on the
+  Rust JS path:
+  module-export extraction now preserves the payload expressions from
+  `Pmakeblock(..., TagInfo::ModuleExport, ...)`, and the JS backend now
+  synthesizes fresh trailing export bindings for mismatched export payloads
+  before shake runs, which mirrors OCaml's rename-and-rebind export coercion
+  instead of keeping inert exported placeholders at their original source
+  positions
+- The same export-coercion path now also preserves OCaml's same-name behavior
+  on both sides of the alias split:
+  same-name exports still reuse declared local bindings when available, and
+  same-name aliases to unbound globals keep the local export binding instead of
+  being rewritten to the global identifier
+- Added focused coverage for this slice in
+  `compile_deps_program_rebinds_different_name_exports_after_effects`,
+  alongside the existing same-name export regression tests
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib compile_deps_program_rebinds_different_name_exports_after_effects -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib compile_deps_program_reuses_same_name_export_targets -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib compile_deps_program_keeps_same_name_export_aliases_for_unbound_globals -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalScopeShadow.res -o /tmp/ExternalScopeShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/ExternalScopeShadow.res` now matches its checked-in `.mjs`
+  snapshot exactly; the old misplaced trailing `let MyURL;` was caused by the
+  missing OCaml export-coercion stage rather than a final printer ordering bug
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the change, which confirms the export-coercion port stays isolated from the
+  already-stable external-shadow/import path
+- The authoritative JS snapshot baseline now reports **164 / 657** passing,
+  **0** compile errors, and **493** output diffs after this OCaml-aligned
+  export-coercion port; this iteration removes a broad export-placeholder
+  cluster from the checked-in corpus rather than only fixing the single focused
+  file
 
 - Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
   from `PLAN.md`; this iteration stayed in the OCaml module-field lowering

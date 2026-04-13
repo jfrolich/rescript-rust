@@ -100,7 +100,9 @@ impl LambdaCompiler {
         let simplified = crate::lambda::simplify::simplify_for_js_backend(lam);
         let compiled = self.compile_expr(&simplified);
         let mut block = compiled.prelude;
-        let exports = extract_toplevel_exports(compiled.expr, &mut block).unwrap_or_default();
+        let exports = extract_toplevel_exports(compiled.expr, &mut block)
+            .map(|exports| self.coerce_toplevel_exports(&mut block, exports))
+            .unwrap_or_default();
         let exports = resolve_export_aliases(&block, exports);
         let side_effect = module_side_effect_reason(&simplified);
 
@@ -127,6 +129,59 @@ impl LambdaCompiler {
             );
         }
         deps
+    }
+
+    fn coerce_toplevel_exports(
+        &mut self,
+        block: &mut Block,
+        extracted: ExtractedExports,
+    ) -> Vec<Ident> {
+        let mut max_stamp = max_ident_stamp_in_block(block);
+        for export in &extracted.exports {
+            max_stamp = max_stamp.max(export.stamp());
+        }
+        for value in &extracted.values {
+            max_stamp = max_stamp.max(max_ident_stamp_in_expression(value));
+        }
+        self.id_gen.set_current_stamp(max_stamp);
+
+        let mut declared = HashSet::new();
+        collect_declared_idents(block, &mut declared);
+
+        let mut exports = Vec::with_capacity(extracted.exports.len());
+        let mut rebound_exports = Vec::new();
+
+        for (export, value) in extracted.exports.into_iter().zip(extracted.values) {
+            if let ExpressionDesc::Var(VIdent::Id(target)) = &value.desc {
+                if target.name() == export.name() {
+                    if declared.contains(target) {
+                        exports.push(target.clone());
+                        continue;
+                    }
+                    if declared.contains(&export) {
+                        exports.push(export);
+                        continue;
+                    }
+                }
+            }
+
+            let rebound = self.id_gen.create(export.name());
+            let property = if matches!(value.desc, ExpressionDesc::Var(VIdent::Id(_))) {
+                LetKind::Alias
+            } else {
+                LetKind::Strict
+            };
+            exports.push(rebound.clone());
+            rebound_exports.push(Statement::variable(VariableDeclaration {
+                ident: rebound,
+                value: Some(value),
+                property,
+                ident_info: IdentInfo::default(),
+            }));
+        }
+
+        block.extend(rebound_exports);
+        exports
     }
 
     fn compile_expr(&mut self, lam: &Lambda) -> Compiled {
@@ -3588,6 +3643,149 @@ fn collect_export_aliases(block: &Block, aliases: &mut HashMap<Ident, Ident>) {
     }
 }
 
+fn max_ident_stamp_in_block(block: &Block) -> i32 {
+    block.iter().fold(0, |max_stamp, stmt| {
+        max_stamp.max(max_ident_stamp_in_statement(stmt))
+    })
+}
+
+fn max_ident_stamp_in_statement(stmt: &Statement) -> i32 {
+    match &stmt.desc {
+        StatementDesc::Block(block) => max_ident_stamp_in_block(block),
+        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => value
+            .as_ref()
+            .map(max_ident_stamp_in_expression)
+            .unwrap_or(0)
+            .max(ident.stamp()),
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
+            max_ident_stamp_in_expression(expr)
+        }
+        StatementDesc::If(cond, then_block, else_block) => max_ident_stamp_in_expression(cond)
+            .max(max_ident_stamp_in_block(then_block))
+            .max(max_ident_stamp_in_block(else_block)),
+        StatementDesc::While(cond, body) => {
+            max_ident_stamp_in_expression(cond).max(max_ident_stamp_in_block(body))
+        }
+        StatementDesc::ForRange(start, finish, ident, _, body) => start
+            .as_ref()
+            .map(max_ident_stamp_in_expression)
+            .unwrap_or(0)
+            .max(max_ident_stamp_in_expression(finish))
+            .max(ident.stamp())
+            .max(max_ident_stamp_in_block(body)),
+        StatementDesc::IntSwitch(test, clauses, default) => {
+            let mut max_stamp = max_ident_stamp_in_expression(test);
+            for (_, clause) in clauses {
+                max_stamp = max_stamp.max(max_ident_stamp_in_block(&clause.body));
+            }
+            if let Some(default) = default {
+                max_stamp = max_stamp.max(max_ident_stamp_in_block(default));
+            }
+            max_stamp
+        }
+        StatementDesc::StringSwitch(test, clauses, default) => {
+            let mut max_stamp = max_ident_stamp_in_expression(test);
+            for clause in clauses {
+                max_stamp = max_stamp.max(max_ident_stamp_in_block(&clause.clause.body));
+            }
+            if let Some(default) = default {
+                max_stamp = max_stamp.max(max_ident_stamp_in_block(default));
+            }
+            max_stamp
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            let mut max_stamp = max_ident_stamp_in_block(body);
+            if let Some((ident, catch_block)) = catch {
+                max_stamp = max_stamp.max(ident.stamp()).max(max_ident_stamp_in_block(catch_block));
+            }
+            if let Some(finally) = finally {
+                max_stamp = max_stamp.max(max_ident_stamp_in_block(finally));
+            }
+            max_stamp
+        }
+        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => 0,
+    }
+}
+
+fn max_ident_stamp_in_expression(expr: &Expression) -> i32 {
+    match &expr.desc {
+        ExpressionDesc::Var(VIdent::Id(ident)) => ident.stamp(),
+        ExpressionDesc::Var(VIdent::Qualified(module, _)) => module.id.stamp(),
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::Spread(inner) => max_ident_stamp_in_expression(inner),
+        ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::In(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::FlatCall(left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => max_ident_stamp_in_expression(left)
+            .max(max_ident_stamp_in_expression(right)),
+        ExpressionDesc::Cond(test, consequent, alternate) => max_ident_stamp_in_expression(test)
+            .max(max_ident_stamp_in_expression(consequent))
+            .max(max_ident_stamp_in_expression(alternate)),
+        ExpressionDesc::Call(func, args, _) => args.iter().fold(max_ident_stamp_in_expression(func), |max_stamp, arg| {
+            max_stamp.max(max_ident_stamp_in_expression(arg))
+        }),
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            let mut max_stamp = max_ident_stamp_in_expression(tag);
+            for string in strings {
+                max_stamp = max_stamp.max(max_ident_stamp_in_expression(string));
+            }
+            for value in values {
+                max_stamp = max_stamp.max(max_ident_stamp_in_expression(value));
+            }
+            max_stamp
+        }
+        ExpressionDesc::StaticIndex(target, _, _) => max_ident_stamp_in_expression(target),
+        ExpressionDesc::New(target, args) => {
+            let mut max_stamp = max_ident_stamp_in_expression(target);
+            if let Some(args) = args {
+                for arg in args {
+                    max_stamp = max_stamp.max(max_ident_stamp_in_expression(arg));
+                }
+            }
+            max_stamp
+        }
+        ExpressionDesc::Fun { params, body, .. } => params
+            .iter()
+            .fold(max_ident_stamp_in_block(body), |max_stamp, param| {
+                max_stamp.max(param.stamp())
+            }),
+        ExpressionDesc::Array(items, _) => items.iter().fold(0, |max_stamp, item| {
+            max_stamp.max(max_ident_stamp_in_expression(item))
+        }),
+        ExpressionDesc::CamlBlock(items, _, tag, _) => items
+            .iter()
+            .fold(max_ident_stamp_in_expression(tag), |max_stamp, item| {
+                max_stamp.max(max_ident_stamp_in_expression(item))
+            }),
+        ExpressionDesc::Object(dup, props) => {
+            let mut max_stamp = dup
+                .as_ref()
+                .map(|dup| max_ident_stamp_in_expression(dup))
+                .unwrap_or(0);
+            for (_, value) in props {
+                max_stamp = max_stamp.max(max_ident_stamp_in_expression(value));
+            }
+            max_stamp
+        }
+        ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::RawJsCode(_)
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null => 0,
+    }
+}
+
 fn resolve_export_alias(
     export: &Ident,
     aliases: &HashMap<Ident, Ident>,
@@ -3609,10 +3807,23 @@ fn resolve_export_alias(
     current
 }
 
-fn extract_toplevel_exports(expr: Expression, block: &mut Block) -> Option<Vec<Ident>> {
+#[derive(Debug)]
+struct ExtractedExports {
+    exports: Vec<Ident>,
+    values: Vec<Expression>,
+}
+
+fn extract_toplevel_exports(expr: Expression, block: &mut Block) -> Option<ExtractedExports> {
     let Expression { desc, comment } = expr;
     match desc {
-        ExpressionDesc::CamlBlock(_, _, _, TagInfo::ModuleExport(exports)) => Some(exports),
+        ExpressionDesc::CamlBlock(values, _, _, TagInfo::ModuleExport(exports)) => {
+            debug_assert_eq!(
+                exports.len(),
+                values.len(),
+                "module export idents and payloads must stay aligned"
+            );
+            Some(ExtractedExports { exports, values })
+        }
         ExpressionDesc::Undefined { .. } => None,
         ExpressionDesc::Seq(left, right) => {
             let mut right_block = Vec::new();
@@ -7255,6 +7466,58 @@ mod tests {
                 assert!(ident.same(&source))
             }
             other => panic!("expected only the original exported binding to remain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_deps_program_rebinds_different_name_exports_after_effects() {
+        let mut compiler = LambdaCompiler::new();
+        let original_export = Ident::create_local("MyURL");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![original_export.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::unit()],
+            Location::none(),
+        );
+        let lam = Lambda::let_(
+            LetKind::Alias,
+            original_export.clone(),
+            Lambda::unit(),
+            Lambda::seq(
+                Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
+                export_block,
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        let [exported] = deps.program.exports.as_slice() else {
+            panic!("expected a single export");
+        };
+        assert_eq!(exported.name(), "MyURL");
+        assert!(
+            !exported.same(&original_export),
+            "expected export coercion to rename the trailing export binding"
+        );
+
+        let [debugger, rebound] = deps.program.block.as_slice() else {
+            panic!("expected the original placeholder to shake away and the rebound export to remain");
+        };
+        assert!(matches!(debugger.desc, StatementDesc::Debugger));
+        match &rebound.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Undefined { is_unit: true },
+                        ..
+                    }),
+                ..
+            }) => assert!(ident.same(exported)),
+            other => panic!("expected trailing undefined export placeholder, got {other:?}"),
         }
     }
 
