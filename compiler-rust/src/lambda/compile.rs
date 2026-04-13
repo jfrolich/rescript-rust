@@ -411,6 +411,9 @@ impl LambdaCompiler {
                 block.extend(self.compile_effect_block(body));
                 block
             }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                self.compile_if_effect_block(cond, then_, else_)
+            }
             Lambda::Lsequence(first, second) => {
                 let mut block = self.compile_effect_block(first);
                 block.extend(self.compile_effect_block(second));
@@ -427,9 +430,7 @@ impl LambdaCompiler {
             }
             _ => {
                 let compiled = self.compile_expr(lam);
-                let mut block = compiled.prelude;
-                push_effect_expression(&mut block, compiled.expr);
-                block
+                self.compiled_to_effect_block(compiled)
             }
         }
     }
@@ -495,6 +496,83 @@ impl LambdaCompiler {
             prelude,
             expr: second.expr,
         }
+    }
+
+    fn compiled_to_effect_block(&self, compiled: Compiled) -> Block {
+        let mut block = compiled.prelude;
+        push_effect_expression(&mut block, compiled.expr);
+        block
+    }
+
+    fn compile_if_effect_block(&mut self, cond: &Lambda, then_: &Lambda, else_: &Lambda) -> Block {
+        let cond_compiled = self.compile_expr(cond);
+        let then_compiled = self.compile_expr(then_);
+        let else_compiled = self.compile_expr(else_);
+
+        let then_prelude_empty = then_compiled.prelude.is_empty();
+        let else_prelude_empty = else_compiled.prelude.is_empty();
+        let then_expr_pure = js_expr_no_side_effects(&then_compiled.expr);
+        let else_expr_pure = js_expr_no_side_effects(&else_compiled.expr);
+
+        let mut block = cond_compiled.prelude;
+        let cond_expr = cond_compiled.expr;
+
+        if then_prelude_empty && else_prelude_empty {
+            match (then_expr_pure, else_expr_pure) {
+                (true, true) => {
+                    push_effect_expression(&mut block, cond_expr);
+                    return block;
+                }
+                (false, false) => {
+                    push_effect_expression(
+                        &mut block,
+                        Expression::cond(cond_expr, then_compiled.expr, else_compiled.expr),
+                    );
+                    return block;
+                }
+                (false, true) => {
+                    block.push(Statement::if_(
+                        cond_expr,
+                        self.compiled_to_effect_block(then_compiled),
+                        vec![],
+                    ));
+                    return block;
+                }
+                (true, false) => {
+                    block.push(Statement::if_(
+                        Expression::new(ExpressionDesc::JsNot(Box::new(cond_expr))),
+                        self.compiled_to_effect_block(else_compiled),
+                        vec![],
+                    ));
+                    return block;
+                }
+            }
+        }
+
+        if then_prelude_empty && then_expr_pure {
+            block.push(Statement::if_(
+                Expression::new(ExpressionDesc::JsNot(Box::new(cond_expr))),
+                self.compiled_to_effect_block(else_compiled),
+                vec![],
+            ));
+            return block;
+        }
+
+        if else_prelude_empty && else_expr_pure {
+            block.push(Statement::if_(
+                cond_expr,
+                self.compiled_to_effect_block(then_compiled),
+                vec![],
+            ));
+            return block;
+        }
+
+        block.push(Statement::if_(
+            cond_expr,
+            self.compiled_to_effect_block(then_compiled),
+            self.compiled_to_effect_block(else_compiled),
+        ));
+        block
     }
 
     fn compile_switch(&mut self, scrut: &Lambda, switch: &LambdaSwitch) -> Compiled {
@@ -7024,6 +7102,127 @@ mod tests {
                     ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
                     ExpressionDesc::Number(Number::Int { i: 0, .. })
                 ) if lhs_id.same(&result)
+            )
+        ));
+    }
+
+    #[test]
+    fn effect_blocks_lower_ifs_without_a_result_temp() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let slot = Ident::create_local("slot");
+        let block = compiler.compile_effect_block(&Lambda::LifThenElse(
+            Box::new(Lambda::var(cond.clone())),
+            Box::new(Lambda::Lsequence(
+                Box::new(Lambda::Lassign(
+                    slot.clone(),
+                    Box::new(Lambda::const_(Constant::int(1))),
+                )),
+                Box::new(Lambda::const_(Constant::int(42))),
+            )),
+            Box::new(Lambda::const_(Constant::int(0))),
+        ));
+
+        let [if_stmt] = block.as_slice() else {
+            panic!("expected a single direct if statement in effect context");
+        };
+        let StatementDesc::If(test, then_block, else_block) = &if_stmt.desc else {
+            panic!("expected effect-position if lowering");
+        };
+        assert!(matches!(
+            test,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&cond)
+        ));
+        assert!(else_block.is_empty());
+
+        let [assign_stmt] = then_block.as_slice() else {
+            panic!("expected the pure branch value to be dropped");
+        };
+        assert!(matches!(
+            assign_stmt,
+            Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Bin(
+                        BinOp::Eq,
+                        lhs,
+                        rhs
+                    ),
+                    ..
+                }),
+                ..
+            } if matches!(
+                (&lhs.desc, &rhs.desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                    ExpressionDesc::Number(Number::Int { i: 1, .. })
+                ) if lhs_id.same(&slot)
+            )
+        ));
+    }
+
+    #[test]
+    fn effect_blocks_keep_conditional_expressions_when_both_branches_are_effectful() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let lhs = Ident::create_local("lhs");
+        let rhs = Ident::create_local("rhs");
+        let block = compiler.compile_effect_block(&Lambda::LifThenElse(
+            Box::new(Lambda::var(cond.clone())),
+            Box::new(Lambda::Lassign(
+                lhs.clone(),
+                Box::new(Lambda::const_(Constant::int(1))),
+            )),
+            Box::new(Lambda::Lassign(
+                rhs.clone(),
+                Box::new(Lambda::const_(Constant::int(2))),
+            )),
+        ));
+
+        let [stmt] = block.as_slice() else {
+            panic!("expected a single expression statement");
+        };
+        let StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Cond(test, then_expr, else_expr),
+            ..
+        }) = &stmt.desc
+        else {
+            panic!("expected an effectful conditional expression");
+        };
+        assert!(matches!(
+            test.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&cond)
+        ));
+        assert!(matches!(
+            (&then_expr.desc, &else_expr.desc),
+            (
+                ExpressionDesc::Bin(
+                    BinOp::Eq,
+                    then_lhs,
+                    then_rhs
+                ),
+                ExpressionDesc::Bin(
+                    BinOp::Eq,
+                    else_lhs,
+                    else_rhs
+                )
+            ) if matches!(
+                (&then_lhs.desc, &then_rhs.desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                    ExpressionDesc::Number(Number::Int { i: 1, .. })
+                ) if lhs_id.same(&lhs)
+            ) && matches!(
+                (&else_lhs.desc, &else_rhs.desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(rhs_id)),
+                    ExpressionDesc::Number(Number::Int { i: 2, .. })
+                ) if rhs_id.same(&rhs)
             )
         ));
     }

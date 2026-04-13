@@ -506,6 +506,39 @@ Remaining internal compile errors under the measured wrapper baseline:
 
 ## Latest Session Findings
 
+- `compiler-rust/src/lambda/compile.rs` now matches the OCaml
+  `core/lam_compile.ml` `compile_ifthenelse` `EffectCall Not_tail` path more
+  closely on the Rust JS backend:
+  effect-context `LifThenElse` nodes no longer fall through the generic
+  expression compiler and manufacture synthetic `let ifres` temporaries;
+  instead, Rust now drops pure branch results, keeps direct effect-only `if`
+  statements when one branch is pure, and preserves the conditional-expression
+  form when both branches are effectful and statement-free, just as OCaml's
+  continuation-sensitive split does
+- Added focused coverage for this slice in
+  `effect_blocks_lower_ifs_without_a_result_temp` and
+  `effect_blocks_keep_conditional_expressions_when_both_branches_are_effectful`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release effect_blocks_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_4491_test.res -o /tmp/gpr_4491_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/gpr_4491_test.res` narrowed materially:
+  the synthetic `let ifres` result temporary is gone, and the file now differs
+  only on the still-missing OCaml empty `else {}` byte shape instead of
+  backend continuation lowering
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the effect-context `if` change
+- the cached `let ifres` diff motif collapsed from **59** files to **37**
+  files after the authoritative rerun, which confirms this was a broad
+  continuation-context backend gap rather than a local snapshot accident
+- The authoritative JS snapshot baseline remains **130 / 657** passing,
+  **0** compile errors, and **527** output diffs after this OCaml-aligned
+  effect-context `if` lowering fix; the change is kept because it materially
+  reduces a real backend drift cluster even though the checked-in corpus total
+  stays flat
+
 - `compiler-rust/src/lambda/compile.rs` now matches one more slice of
   OCaml `core/lam_compile.ml` on the Rust JS path:
   named variant switches no longer drop payload-carrying `sw_blocks` during
