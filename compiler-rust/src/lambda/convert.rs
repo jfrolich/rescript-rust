@@ -13,9 +13,8 @@ use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::constant::{Constant, StringDelim};
 use crate::lambda::primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-    ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
-    ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, ImportAttributes,
-    Mutable, Primitive,
+    ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel,
+    ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, ImportAttributes, Mutable, Primitive,
 };
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::{
@@ -1379,8 +1378,17 @@ fn ffi_marshaled_obj_params(value: &OcamlValue) -> Option<Vec<ExternalObjSpec>> 
 fn decode_params(value: &OcamlValue) -> Option<Vec<ExternalArgSpec>> {
     let (tag, fields) = value.as_block_opt()?;
     match (tag, fields) {
-        (0, [params]) => Some(params.as_list().into_iter().filter_map(decode_param).collect()),
-        (1, [arity]) => Some(vec![ExternalArgSpec::dummy(); arity.as_int().max(0) as usize]),
+        (0, [params]) => Some(
+            params
+                .as_list()
+                .into_iter()
+                .filter_map(decode_param)
+                .collect(),
+        ),
+        (1, [arity]) => Some(vec![
+            ExternalArgSpec::dummy();
+            arity.as_int().max(0) as usize
+        ]),
         _ => None,
     }
 }
@@ -1435,7 +1443,10 @@ fn decode_arg_attr(value: &OcamlValue) -> Option<ExternalArgAttr> {
                     if entry_tag != 0 || entry_fields.len() != 2 {
                         return None;
                     }
-                    Some((entry_fields[0].as_string().to_string(), entry_fields[1].as_int()))
+                    Some((
+                        entry_fields[0].as_string().to_string(),
+                        entry_fields[1].as_int(),
+                    ))
                 })
                 .collect(),
         )),
@@ -1579,10 +1590,14 @@ fn decode_module_bind_name(value: &OcamlValue) -> Option<ExternalModuleBindName>
 
 fn decode_import_attributes(value: &OcamlValue) -> Option<ImportAttributes> {
     let (tag, fields) = value.as_block_opt()?;
-    if tag != 0 || fields.len() != 1 {
+    if tag != 0 {
         return None;
     }
-    let (_, buckets) = fields[0].as_block_opt()?;
+    let bucket_array = match fields {
+        [_, bucket_array, _] | [_, bucket_array, _, _] => bucket_array,
+        _ => return None,
+    };
+    let (_, buckets) = bucket_array.as_block_opt()?;
     let mut attrs = Vec::new();
     for bucket in buckets {
         decode_bucket_list(bucket, &mut attrs)?;
@@ -1632,7 +1647,7 @@ fn decode_string_pair_list(value: &OcamlValue) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::binary_ast::ffi_types::{encode_ffi_type, ExternalSpec, FfiType, ReturnWrapper};
+    use crate::binary_ast::ffi_types::{ExternalSpec, FfiType, ReturnWrapper, encode_ffi_type};
     use crate::ident::Ident;
     use crate::parse_arena::{Located, ParseArena};
     use crate::parser::longident::Longident;

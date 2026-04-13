@@ -3446,15 +3446,8 @@ fn js_expr_no_side_effects(expr: &Expression) -> bool {
 fn external_module_import_attributes(
     module_name: &ExternalModuleName,
 ) -> Option<JsImportAttributes> {
-    module_name
-        .import_attributes
-        .as_ref()?
-        .iter()
-        .find_map(|(key, value)| {
-            (key == "type").then(|| JsImportAttributes {
-                type_: value.clone(),
-            })
-        })
+    let entries = module_name.import_attributes.clone()?;
+    Some(JsImportAttributes { entries })
 }
 
 fn external_module_ident_name(module_name: &ExternalModuleName) -> String {
@@ -9834,6 +9827,29 @@ mod tests {
         assert_eq!(deps.modules.len(), 1);
         assert_eq!(deps.modules[0].id.name(), "Belt_List");
         assert!(!deps.modules[0].dynamic_import);
+    }
+
+    #[test]
+    fn external_module_import_attributes_preserve_all_fields() {
+        let module = ExternalModuleName {
+            bundle: "./myJson.json".to_string(),
+            module_bind_name: ExternalModuleBindName::Nothing,
+            import_attributes: Some(vec![
+                ("type".to_string(), "json".to_string()),
+                ("some-identifier".to_string(), "yep".to_string()),
+            ]),
+        };
+
+        let attrs =
+            external_module_import_attributes(&module).expect("expected import attributes");
+
+        assert_eq!(
+            attrs.entries,
+            vec![
+                ("type".to_string(), "json".to_string()),
+                ("some-identifier".to_string(), "yep".to_string()),
+            ]
+        );
     }
 
     #[test]

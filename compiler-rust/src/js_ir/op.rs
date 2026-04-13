@@ -198,8 +198,8 @@ pub enum Kind {
 /// Import attributes for ES modules
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ImportAttributes {
-    /// Attribute type (e.g., "json")
-    pub type_: String,
+    /// Attribute key-value pairs in OCaml hashtable traversal order.
+    pub entries: Vec<(String, String)>,
 }
 
 /// Variable property (let binding semantics)

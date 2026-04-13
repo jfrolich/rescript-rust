@@ -246,8 +246,15 @@ impl JsPrinter {
             } = &module.kind
             {
                 self.write(" with ");
-                self.write("{type: ");
-                self.print_string(&import_attributes.type_);
+                self.write("{");
+                for (index, (key, value)) in import_attributes.entries.iter().enumerate() {
+                    if index > 0 {
+                        self.write(", ");
+                    }
+                    self.print_string(key);
+                    self.write(": ");
+                    self.print_string(value);
+                }
                 self.write("}");
             }
 
@@ -2047,7 +2054,7 @@ pub fn print_block(block: &Block) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::js_ir::op::MutableFlag;
+    use crate::js_ir::op::{ImportAttributes, MutableFlag};
     use crate::js_ir::{CallInfo, Expression, ModuleId, ModulePathResolver, Statement};
     use crate::lambda::TagInfo;
     use std::path::Path;
@@ -2137,7 +2144,11 @@ mod tests {
     #[test]
     fn test_print_call_keeps_plain_undefined_argument() {
         let func = Expression::var(Ident::create_local("foo"));
-        let expr = Expression::call(func, vec![Expression::undefined(false)], CallInfo::default());
+        let expr = Expression::call(
+            func,
+            vec![Expression::undefined(false)],
+            CallInfo::default(),
+        );
         assert_eq!(print_expression(&expr), "foo(undefined)");
     }
 
@@ -2373,6 +2384,38 @@ mod tests {
         assert!(rendered.contains(
             "import * as Js_dict from \"@rescript/runtime/lib/es6/Js_dict.js\";\n\nlet dict = {};"
         ));
+    }
+
+    #[test]
+    fn test_print_deps_program_preserves_all_import_attributes() {
+        let import_id = Ident::create_local("MyJsonJson");
+        let resolver = ModulePathResolver::from_compile_options(
+            None,
+            Some(Path::new("/tmp/ImportAttributes.mjs")),
+            None,
+            None,
+        );
+        let mut printer = JsPrinter::with_module_path_resolver(Some(&resolver));
+        let printed = printer.print_module_imports(&[ModuleId {
+            id: import_id,
+            kind: Kind::External {
+                name: "./myJson.json".to_string(),
+                default: true,
+                import_attributes: Some(ImportAttributes {
+                    entries: vec![
+                        ("type".to_string(), "json".to_string()),
+                        ("some-identifier".to_string(), "yep".to_string()),
+                    ],
+                }),
+            },
+            dynamic_import: false,
+        }]);
+
+        assert!(printed);
+        assert_eq!(
+            printer.into_output(),
+            "import MyJsonJson from \"./myJson.json\" with {\"type\": \"json\", \"some-identifier\": \"yep\"};"
+        );
     }
 
     #[test]

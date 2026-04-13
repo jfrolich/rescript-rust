@@ -10271,10 +10271,14 @@ fn decode_module_bind_name(value: &OcamlValue) -> Option<ExternalModuleBindName>
 
 fn decode_import_attributes(value: &OcamlValue) -> Option<ImportAttributes> {
     let (tag, fields) = value.as_block_opt()?;
-    if tag != 0 || fields.len() != 1 {
+    if tag != 0 {
         return None;
     }
-    let (_, buckets) = fields[0].as_block_opt()?;
+    let bucket_array = match fields {
+        [_, bucket_array, _] | [_, bucket_array, _, _] => bucket_array,
+        _ => return None,
+    };
+    let (_, buckets) = bucket_array.as_block_opt()?;
     let mut attrs = Vec::new();
     for bucket in buckets {
         decode_bucket_list(bucket, &mut attrs)?;
@@ -10415,9 +10419,12 @@ mod tests {
     use crate::binary_ast::ffi_types::{
         encode_ffi_type, Delim, ExternalSpec, FfiType, LamConstant, ReturnWrapper,
     };
+    use crate::binary_ast::ppx;
     use crate::context::IdGenerator;
     use crate::parse_arena::ParseArena;
+    use crate::parser::module;
     use crate::parser::ast::Attributes;
+    use crate::parser::Parser;
     use crate::types::env::initial_env;
 
     #[test]
@@ -10967,6 +10974,103 @@ mod tests {
                 ref scopes,
             }) if name == "process" && scopes.is_empty()
         ));
+    }
+
+    #[test]
+    fn ffi_spec_preserves_marshaled_import_attributes() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let prim = crate::types::PrimitiveDescription {
+            prim_name: "default".to_string(),
+            prim_arity: 0,
+            prim_native_name: encode_ffi_type(&FfiType::FfiBs {
+                params: crate::binary_ast::ffi_types::Params::ParamNumber(0),
+                return_wrapper: ReturnWrapper::ReturnIdentity,
+                external_spec: ExternalSpec::JsModuleAsVar(
+                    crate::binary_ast::ffi_types::ExternalModuleName {
+                        bundle: "./myJson.json".to_string(),
+                        module_bind_name: crate::binary_ast::ffi_types::ModuleBindName::PhintNothing,
+                        import_attributes: Some(vec![
+                            ("type".to_string(), "json".to_string()),
+                            ("some-identifier".to_string(), "yep".to_string()),
+                        ]),
+                    },
+                ),
+            }),
+            prim_native_float: false,
+            prim_from_constructor: false,
+        };
+
+        let spec = converter.ffi_spec_for_primitive(&prim, false, false);
+        assert!(matches!(
+            spec.spec,
+            Some(crate::lambda::primitive::ExternalSpec::JsModuleAsVar(
+                crate::lambda::primitive::ExternalModuleName {
+                    ref bundle,
+                    import_attributes: Some(ref attrs),
+                    ..
+                }
+            )) if bundle == "./myJson.json"
+                && attrs == &vec![
+                    ("type".to_string(), "json".to_string()),
+                    ("some-identifier".to_string(), "yep".to_string()),
+                ]
+        ));
+    }
+
+    #[test]
+    fn ffi_spec_preserves_import_attributes_from_rewritten_external() {
+        let source = r#"
+@module({from: "./myJson.json", with: {type_: "json", \"some-identifier": "yep"}})
+external myJson: Js.Json.t = "default"
+"#;
+        let mut parser = Parser::new("test.res", source);
+        let structure = module::parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "parse errors: {:?}", parser.take_diagnostics());
+
+        let primitive = structure
+            .iter()
+            .find_map(|item| match &*item.pstr_desc {
+                crate::parser::ast::StructureItemDesc::Pstr_primitive(vd) => Some(vd),
+                _ => None,
+            })
+            .expect("expected parsed external primitive");
+        let encoded = ppx::encode_external(primitive, parser.arena_mut());
+        let prim_name = parser.arena().get_string(encoded.pval_prim[0]).to_string();
+        let encoded = parser.arena().get_string(encoded.pval_prim[1]).to_string();
+
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let converter = RawLambdaConverter::new(parser.arena(), &ctx, &env);
+        let prim = crate::types::PrimitiveDescription {
+            prim_name,
+            prim_arity: 0,
+            prim_native_name: encoded,
+            prim_native_float: false,
+            prim_from_constructor: false,
+        };
+
+        let spec = converter.ffi_spec_for_primitive(&prim, false, false);
+        let module_name = match spec.spec {
+            Some(crate::lambda::primitive::ExternalSpec::JsModuleAsVar(module_name)) => module_name,
+            Some(crate::lambda::primitive::ExternalSpec::JsVar {
+                external_module_name: Some(module_name),
+                ..
+            }) => module_name,
+            other => panic!("expected module import metadata, got {other:?}"),
+        };
+        assert_eq!(module_name.bundle, "./myJson.json");
+        assert_eq!(
+            module_name.import_attributes,
+            Some(vec![
+                ("type".to_string(), "json".to_string()),
+                ("some-identifier".to_string(), "yep".to_string()),
+            ])
+        );
     }
 
     #[test]

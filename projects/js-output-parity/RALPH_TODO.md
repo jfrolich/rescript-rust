@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 146 / 657 JS snapshots passing, 0 compile errors, 511 output diffs
+**Status:** 147 / 657 JS snapshots passing, 0 compile errors, 510 output diffs
 
 ## Goal
 
@@ -35,13 +35,50 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **146 / 657**
+- JS snapshot parity: **147 / 657**
 - Compile errors: **0**
-- Output diffs: **511**
+- Output diffs: **510**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed in the external-module metadata path
+  instead of treating `ImportAttributes.res` as a printer-only diff
+- `compiler-rust/src/raw_lambda/convert.rs` and
+  `compiler-rust/src/lambda/convert.rs` now match the OCaml external-FFI
+  metadata path more closely when import attributes come from marshaled PPX
+  externals: the decoder now reads the OCaml hashtable bucket array from the
+  real marshaled block shape instead of dropping the metadata before backend
+  lowering
+- `compiler-rust/src/lambda/compile.rs`,
+  `compiler-rust/src/js_ir/op.rs`, and
+  `compiler-rust/src/js_ir/printer.rs` now preserve and emit the full ordered
+  import-attribute list on ES-module imports instead of special-casing only
+  the `type` field, so Rust now follows the same `with {"type": "...", ...}`
+  metadata shape as the OCaml backend for `J.deps_program`
+- Added focused coverage for this slice in
+  `external_module_import_attributes_preserve_all_fields`,
+  `test_print_deps_program_preserves_all_import_attributes`,
+  `ffi_spec_preserves_marshaled_import_attributes`, and
+  `ffi_spec_preserves_import_attributes_from_rewritten_external`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release import_attributes -- --nocapture --skip binary_ast::ffi_types::tests::test_import_attributes_hashtbl_matches_ocaml_marshal`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ImportAttributes.res -o /tmp/ImportAttributes.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/ImportAttributes.res` now matches its checked-in `.mjs`
+  snapshot exactly, including both import-attribute entries and OCaml's quoted
+  `with { ... }` object shape
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the metadata fix, which confirms the change stayed isolated from the already
+  stable external/import path
+- The authoritative JS snapshot baseline now reports **147 / 657** passing,
+  **0** compile errors, and **510** output diffs after this OCaml-aligned
+  import-attribute metadata fix; this iteration moves one file from diff to
+  exact snapshot match
 
 - Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
   from `PLAN.md`; this iteration stayed in the raw-lambda to deps-program
