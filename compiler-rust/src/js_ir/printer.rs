@@ -793,10 +793,12 @@ impl JsPrinter {
 
     /// Check if an expression needs parentheses when used as a statement
     fn expr_needs_paren(&self, expr: &Expression) -> bool {
-        matches!(
-            expr.desc,
-            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _)
-        )
+        match &expr.desc {
+            ExpressionDesc::Call(func, _, _) => matches!(func.desc, ExpressionDesc::RawJsCode(_)),
+            ExpressionDesc::RawJsCode(info) => !info.is_stmt,
+            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) => true,
+            _ => false,
+        }
     }
 
     fn arrow_expr_needs_paren(&self, expr: &Expression) -> bool {
@@ -1792,8 +1794,10 @@ fn raw_snippet_exp_simple_enough(s: &str) -> bool {
 
 fn raw_js_expression_needs_paren(code: &str) -> bool {
     match classify_js_exp(code) {
-        JsExpClassification::JsLiteral | JsExpClassification::JsFunction { .. } => false,
-        JsExpClassification::JsExpUnknown => !raw_snippet_exp_simple_enough(code),
+        JsExpClassification::JsLiteral => false,
+        JsExpClassification::JsFunction { .. } | JsExpClassification::JsExpUnknown => {
+            !raw_snippet_exp_simple_enough(code)
+        }
     }
 }
 
@@ -2575,6 +2579,32 @@ mod tests {
             is_stmt: false,
         }));
         assert_eq!(print_expression(&expr), "/foo/g");
+    }
+
+    #[test]
+    fn test_print_raw_js_function_expression_adds_parens() {
+        let expr = Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
+            code: "(a) => typeof a".to_string(),
+            is_stmt: false,
+        }));
+        assert_eq!(print_expression(&expr), "((a) => typeof a)");
+    }
+
+    #[test]
+    fn test_print_statement_calling_raw_js_function_expression_adds_statement_parens() {
+        let expr = Expression::call(
+            Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
+                code: "(_)=> console.log('should works')".to_string(),
+                is_stmt: false,
+            })),
+            vec![],
+            CallInfo::default(),
+        );
+        let block = vec![Statement::exp(expr)];
+        assert_eq!(
+            print_block(&block),
+            "(((_)=> console.log('should works'))());"
+        );
     }
 
     #[test]

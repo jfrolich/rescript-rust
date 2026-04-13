@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 306 / 657 JS snapshots passing, 0 compile errors, 351 output diffs
+**Status:** 313 / 657 JS snapshots passing, 0 compile errors, 344 output diffs
 
 ## Goal
 
@@ -35,13 +35,55 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **306 / 657**
+- JS snapshot parity: **313 / 657**
 - Compile errors: **0**
-- Output diffs: **351**
+- Output diffs: **344**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed raw-JS parenthesization slice
+  in `compiler/core/js_dump.ml`, specifically its statement-position
+  `exp_need_paren` rule and its `Raw_js_code` dump branch, together with the
+  raw-expression classification contract in `compiler/ml/js_raw_info.ml`
+- After rereading those OCaml rules, the Rust JS printer in
+  `compiler-rust/src/js_ir/printer.rs` now matches that behavior more closely:
+  - raw-JS function expressions only omit parentheses when the snippet is
+    syntactically simple enough, instead of treating every classified
+    function snippet as paren-free
+  - statement-position raw-JS expressions and `Call(Raw_js_code, ...)`
+    expressions now receive the same extra statement parens that OCaml emits
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_raw_js_function_expression_adds_parens`
+  and
+  `js_ir::printer::tests::test_print_statement_calling_raw_js_function_expression_adds_statement_parens`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_raw_js_function_expression_adds_parens -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_statement_calling_raw_js_function_expression_adds_statement_parens -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_raw_js_regex_literal_omits_extra_parens -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_typeof_simple_raw_js_omits_extra_parens -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct snapshot repros for
+    `tests/tests/src/raw_output_test.res`,
+    `tests/tests/src/raw_arity.res`, and
+    `tests/tests/src/ExternalShadow.res`
+  - exact harness-mode snapshot repros from `tests/tests/lib/bs` for
+    `src/polymorphic_raw_test.ast` and
+    `src/raw_output_test.ast`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/raw_output_test.res`,
+  `tests/tests/src/raw_arity.res`, and
+  `tests/tests/src/polymorphic_raw_test.res` now match their checked-in `.mjs`
+  snapshots exactly again, while
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
+- The authoritative JS snapshot baseline now reports **313 / 657** passing,
+  **0** compile errors, and **344** output diffs; this is a net **+7**
+  passing snapshots and **-7** output diffs from the previously recorded
+  **306 / 657**, **0** compile errors, **351** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed printer slice in
