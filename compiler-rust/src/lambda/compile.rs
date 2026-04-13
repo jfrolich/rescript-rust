@@ -241,6 +241,12 @@ impl LambdaCompiler {
                 }
             }
             Lambda::Lfunction(func) => {
+                if let Some(expr) = self.compile_eta_wrapped_runtime_alias(func) {
+                    return Compiled {
+                        prelude: vec![],
+                        expr,
+                    };
+                }
                 let params = if func.attr.one_unit_arg {
                     vec![]
                 } else {
@@ -2408,11 +2414,9 @@ impl LambdaCompiler {
                 .cloned()
                 .unwrap_or_else(|| Expression::undefined(false)),
             Pawait => Expression::new(ExpressionDesc::Await(Box::new(compiled_args[0].clone()))),
-            PwrapExn => self.runtime_call_expr(
-                "Primitive_exceptions",
-                "internalToException",
-                compiled_args,
-            ),
+            PwrapExn => {
+                self.runtime_call_expr("Primitive_exceptions", "internalToException", compiled_args)
+            }
             PcreateExtension(name) => self.pure_runtime_call_expr(
                 "Primitive_exceptions",
                 "create",
@@ -2691,6 +2695,21 @@ impl LambdaCompiler {
             ),
             "@__PURE__",
         )
+    }
+
+    fn compile_eta_wrapped_runtime_alias(&self, func: &crate::lambda::LFunction) -> Option<Expression> {
+        if func.attr.one_unit_arg || func.attr.async_ || func.attr.directive.is_some() {
+            return None;
+        }
+
+        let Lambda::Lprim(info) = func.body.as_ref() else {
+            return None;
+        };
+        if !eta_wrapped_args_match_params(&func.params, &info.args) {
+            return None;
+        }
+        let (module_name, member) = runtime_member_for_eta_wrapped_primitive(&info.primitive)?;
+        Some(self.runtime_member_expr(module_name, member))
     }
 
     fn compile_object_comparison(
@@ -3110,13 +3129,16 @@ impl LambdaCompiler {
 
                 if *tagged_template {
                     match args.as_slice() {
-                        [Expression {
-                            desc: ExpressionDesc::Array(strings, _),
-                            ..
-                        }, Expression {
-                            desc: ExpressionDesc::Array(values, _),
-                            ..
-                        }] => {
+                        [
+                            Expression {
+                                desc: ExpressionDesc::Array(strings, _),
+                                ..
+                            },
+                            Expression {
+                                desc: ExpressionDesc::Array(values, _),
+                                ..
+                            },
+                        ] => {
                             return Expression::new(ExpressionDesc::TaggedTemplate(
                                 Box::new(target),
                                 strings.clone(),
@@ -3269,10 +3291,13 @@ impl LambdaCompiler {
     fn compile_import(&self, args: Vec<Expression>) -> Expression {
         let arg = match args.as_slice() {
             [arg] => arg,
-            [arg, Expression {
-                desc: ExpressionDesc::Undefined { is_unit: true },
-                ..
-            }] => arg,
+            [
+                arg,
+                Expression {
+                    desc: ExpressionDesc::Undefined { is_unit: true },
+                    ..
+                },
+            ] => arg,
             _ => {
                 return Expression::call(
                     Expression::var(Ident::create_persistent("import")),
@@ -3868,7 +3893,9 @@ fn max_ident_stamp_in_statement(stmt: &Statement) -> i32 {
         StatementDesc::Try(body, catch, finally) => {
             let mut max_stamp = max_ident_stamp_in_block(body);
             if let Some((ident, catch_block)) = catch {
-                max_stamp = max_stamp.max(ident.stamp()).max(max_ident_stamp_in_block(catch_block));
+                max_stamp = max_stamp
+                    .max(ident.stamp())
+                    .max(max_ident_stamp_in_block(catch_block));
             }
             if let Some(finally) = finally {
                 max_stamp = max_stamp.max(max_ident_stamp_in_block(finally));
@@ -3898,14 +3925,17 @@ fn max_ident_stamp_in_expression(expr: &Expression) -> i32 {
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
         | ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => max_ident_stamp_in_expression(left)
-            .max(max_ident_stamp_in_expression(right)),
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            max_ident_stamp_in_expression(left).max(max_ident_stamp_in_expression(right))
+        }
         ExpressionDesc::Cond(test, consequent, alternate) => max_ident_stamp_in_expression(test)
             .max(max_ident_stamp_in_expression(consequent))
             .max(max_ident_stamp_in_expression(alternate)),
-        ExpressionDesc::Call(func, args, _) => args.iter().fold(max_ident_stamp_in_expression(func), |max_stamp, arg| {
-            max_stamp.max(max_ident_stamp_in_expression(arg))
-        }),
+        ExpressionDesc::Call(func, args, _) => args
+            .iter()
+            .fold(max_ident_stamp_in_expression(func), |max_stamp, arg| {
+                max_stamp.max(max_ident_stamp_in_expression(arg))
+            }),
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
             let mut max_stamp = max_ident_stamp_in_expression(tag);
             for string in strings {
@@ -4093,6 +4123,44 @@ fn comparison_to_runtime_member(cmp: Comparison) -> &'static str {
         Comparison::Gt => "greaterthan",
         Comparison::Ge => "greaterequal",
     }
+}
+
+fn runtime_member_for_eta_wrapped_primitive(primitive: &Primitive) -> Option<(&'static str, &'static str)> {
+    match primitive {
+        Primitive::Pobjcomp(cmp) => Some(("Primitive_object", comparison_to_runtime_member(*cmp))),
+        Primitive::Pobjorder => Some(("Primitive_object", "compare")),
+        Primitive::Pobjmin => Some(("Primitive_object", "min")),
+        Primitive::Pobjmax => Some(("Primitive_object", "max")),
+        Primitive::Pboolorder => Some(("Primitive_bool", "compare")),
+        Primitive::Pboolmin => Some(("Primitive_bool", "min")),
+        Primitive::Pboolmax => Some(("Primitive_bool", "max")),
+        Primitive::Pintorder => Some(("Primitive_int", "compare")),
+        Primitive::Pintmin => Some(("Primitive_int", "min")),
+        Primitive::Pintmax => Some(("Primitive_int", "max")),
+        Primitive::Pfloatorder => Some(("Primitive_float", "compare")),
+        Primitive::Pfloatmin => Some(("Primitive_float", "min")),
+        Primitive::Pfloatmax => Some(("Primitive_float", "max")),
+        Primitive::Pbigintorder => Some(("Primitive_bigint", "compare")),
+        Primitive::Pbigintmin => Some(("Primitive_bigint", "min")),
+        Primitive::Pbigintmax => Some(("Primitive_bigint", "max")),
+        Primitive::Pstringorder => Some(("Primitive_string", "compare")),
+        Primitive::Pstringmin => Some(("Primitive_string", "min")),
+        Primitive::Pstringmax => Some(("Primitive_string", "max")),
+        _ => None,
+    }
+}
+
+fn eta_wrapped_args_match_params(params: &[Ident], args: &[Lambda]) -> bool {
+    params.len() == args.len()
+        && params.iter().zip(args).all(|(param, arg)| match arg {
+            Lambda::Lvar(id) => id.same(param),
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit,
+                args: inner_args,
+                ..
+            }) => matches!(inner_args.as_slice(), [Lambda::Lvar(id)] if id.same(param)),
+            _ => false,
+        })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -7561,7 +7629,7 @@ fn is_builtin_untagged_switch_name(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::cmi::persistent_env::PersistentEnv;
-    use crate::js_ir::{print_block, print_expression, ModulePathResolver};
+    use crate::js_ir::{ModulePathResolver, print_block, print_expression};
     use crate::lambda::constant::{Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo};
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
@@ -7715,7 +7783,10 @@ mod tests {
             )
         ));
         let printed = print_expression(&compiled.expr);
-        assert!(printed.contains("**"), "expected exponentiation operator, got {printed}");
+        assert!(
+            printed.contains("**"),
+            "expected exponentiation operator, got {printed}"
+        );
         assert!(
             !printed.contains("Math.pow"),
             "expected float pow lowering to avoid Math.pow, got {printed}"
@@ -7881,6 +7952,66 @@ mod tests {
             print_expression(&compiled.expr),
             "Primitive_object.compare(left, right)"
         );
+    }
+
+    #[test]
+    fn compile_eta_wrapped_object_compare_function_aliases_runtime_member() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("left");
+        let right = Ident::create_local("right");
+        let compiled = compiler.compile_expr(&Lambda::function_(
+            2,
+            vec![left.clone(), right.clone()],
+            Lambda::prim(
+                Primitive::Pobjorder,
+                vec![Lambda::var(left), Lambda::var(right)],
+                Location::none(),
+            ),
+            Default::default(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "Primitive_object.compare");
+    }
+
+    #[test]
+    fn compile_eta_wrapped_float_compare_function_aliases_runtime_member() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("x");
+        let right = Ident::create_local("y");
+        let compiled = compiler.compile_expr(&Lambda::function_(
+            2,
+            vec![left.clone(), right.clone()],
+            Lambda::prim(
+                Primitive::Pfloatorder,
+                vec![Lambda::var(left), Lambda::var(right)],
+                Location::none(),
+            ),
+            Default::default(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "Primitive_float.compare");
+    }
+
+    #[test]
+    fn compile_eta_wrapped_float_equality_stays_as_function() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("x");
+        let right = Ident::create_local("y");
+        let compiled = compiler.compile_expr(&Lambda::function_(
+            2,
+            vec![left.clone(), right.clone()],
+            Lambda::prim(
+                Primitive::Pfloatcomp(Comparison::Eq),
+                vec![Lambda::var(left), Lambda::var(right)],
+                Location::none(),
+            ),
+            Default::default(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert!(matches!(compiled.expr.desc, ExpressionDesc::Fun { .. }));
     }
 
     #[test]
@@ -8058,7 +8189,9 @@ mod tests {
         );
 
         let [debugger, rebound] = deps.program.block.as_slice() else {
-            panic!("expected the original placeholder to shake away and the rebound export to remain");
+            panic!(
+                "expected the original placeholder to shake away and the rebound export to remain"
+            );
         };
         assert!(matches!(debugger.desc, StatementDesc::Debugger));
         match &rebound.desc {
@@ -11337,9 +11470,9 @@ mod tests {
                 assert!(matches!(module.kind, Kind::Ml));
                 assert_eq!(member, "default");
             }
-            other => panic!(
-                "expected qualified ml-module access for default export, got {other:?}"
-            ),
+            other => {
+                panic!("expected qualified ml-module access for default export, got {other:?}")
+            }
         }
 
         assert_eq!(print_expression(&expr), "Es6_export.default");
@@ -11369,9 +11502,9 @@ mod tests {
                 assert!(matches!(module.kind, Kind::Ml));
                 assert_eq!(member, "catch");
             }
-            other => panic!(
-                "expected qualified ml-module access for reserved field, got {other:?}"
-            ),
+            other => {
+                panic!("expected qualified ml-module access for reserved field, got {other:?}")
+            }
         }
 
         assert_eq!(print_expression(&expr), "Js_promise2.$$catch");

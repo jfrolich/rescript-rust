@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 185 / 657 JS snapshots passing, 0 compile errors, 472 output diffs
+**Status:** 188 / 657 JS snapshots passing, 0 compile errors, 469 output diffs
 
 ## Goal
 
@@ -35,13 +35,66 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **185 / 657**
+- JS snapshot parity: **188 / 657**
 - Compile errors: **0**
-- Output diffs: **472**
+- Output diffs: **469**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-aligned eta-wrapper slice on the JS
+  backend path: value-level functions that do nothing except forward their
+  parameters into the same `Primitive_*` runtime compare/equal/order/min/max
+  helpers OCaml later emits as direct member aliases
+- After reading the OCaml backend path around
+  `compiler/core/lam_compile_primitive.ml`,
+  `compiler/core/lam_compile.ml`,
+  `compiler/core/lam.ml`, and
+  `compiler/core/lam_eta_conversion.ml`, the Rust fix landed in
+  `compiler-rust/src/lambda/compile.rs`:
+  eta-wrapped runtime-helper functions now lower directly to the corresponding
+  qualified runtime member expression instead of always materializing a JS
+  wrapper function
+- The new Rust-side aliasing covers the same runtime-helper family visible in
+  the OCaml snapshots for value-level compare helpers:
+  `Primitive_object.{compare,equal,notequal,lessthan,lessequal,greaterthan,greaterequal}`,
+  `Primitive_bool.{compare,min,max}`,
+  `Primitive_int.{compare,min,max}`,
+  `Primitive_float.{compare,min,max}`,
+  `Primitive_bigint.{compare,min,max}`, and
+  `Primitive_string.{compare,min,max}`
+- Added focused regression coverage in:
+  `lambda::compile::tests::compile_eta_wrapped_object_compare_function_aliases_runtime_member`,
+  `compile_eta_wrapped_float_compare_function_aliases_runtime_member`, and
+  `compile_eta_wrapped_float_equality_stays_as_function`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release eta_wrapped_ -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_obj_order_uses_primitive_object_compare -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/console_log_test.res -o /tmp/console_log_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/console_log_test.res` now matches its checked-in snapshot
+  exactly again, and `tests/tests/src/ExternalShadow.res` remains an exact
+  guard-file match after the same change
+- The direct helper-alias drift is gone from the remaining diff artifacts:
+  there are now **0** snapshot diffs left whose first mismatch is an expected
+  `let ... = Primitive_*.{compare,equal,notequal,lessthan,lessequal,greaterthan,greaterequal,min,max};`
+  alias replaced by a Rust wrapper function
+- `tests/tests/src/float_test.res` improved materially but still fails on a
+  later callback/destructuring cleanup shape around
+  `[[1, 3], [2, 1], [3, 2]].map(...)`; the old top-of-file runtime-helper alias
+  wrappers are gone there
+- `tests/tests/src/int_map.res` also improved inside this cluster: the compare
+  alias is now correct, and the remaining drift is a later temporary-binding
+  shape (`let call = ...; let IntCmp = call;`) rather than missing helper
+  aliasing
+- The authoritative JS snapshot baseline now reports **188 / 657** passing,
+  **0** compile errors, and **469** output diffs after this eta-wrapped
+  runtime-helper alias port; this is a net **+3** over the previously recorded
+  baseline
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed comparison/runtime-helper slice
