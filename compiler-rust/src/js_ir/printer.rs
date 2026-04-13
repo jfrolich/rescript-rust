@@ -1457,7 +1457,7 @@ impl JsPrinter {
         let s = match n {
             Number::Float(f) => f.f.clone(),
             Number::Int { i, c: Some(c) } => {
-                format!("/* {} */{}", char::from_u32(*c as u32).unwrap_or('?'), i)
+                format!("/* {} */{}", format_char_comment(*c), i)
             }
             Number::Int { i, c: None } => format!("{}", i),
             Number::BigInt(b) => {
@@ -1632,6 +1632,20 @@ fn single_arrow_function_expr(body: &Block) -> Option<&Expression> {
         }] => Some(expr),
         _ => None,
     }
+}
+
+fn format_char_comment(codepoint: i32) -> String {
+    let escaped = match char::from_u32(codepoint as u32) {
+        Some('\'') => "\\'".to_string(),
+        Some('\\') => "\\\\".to_string(),
+        Some('\n') => "\\n".to_string(),
+        Some('\t') => "\\t".to_string(),
+        Some('\r') => "\\r".to_string(),
+        Some('\u{8}') => "\\b".to_string(),
+        Some(c) => c.to_string(),
+        None => "?".to_string(),
+    };
+    format!("'{escaped}'")
 }
 
 fn record_uses_array_syntax(fields: &[(String, bool)]) -> bool {
@@ -2174,6 +2188,12 @@ mod tests {
 
         let expr = Expression::number(Number::float("3.14"));
         assert_eq!(print_expression(&expr), "3.14");
+
+        let expr = Expression::number(Number::char('A'));
+        assert_eq!(print_expression(&expr), "/* 'A' */65");
+
+        let expr = Expression::number(Number::char('文'));
+        assert_eq!(print_expression(&expr), "/* '文' */25991");
     }
 
     #[test]

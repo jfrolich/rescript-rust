@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 182 / 657 JS snapshots passing, 0 compile errors, 475 output diffs
+**Status:** 184 / 657 JS snapshots passing, 0 compile errors, 473 output diffs
 
 ## Goal
 
@@ -35,13 +35,39 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **182 / 657**
+- JS snapshot parity: **184 / 657**
 - Compile errors: **0**
-- Output diffs: **475**
+- Output diffs: **473**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- This iteration stayed on another small OCaml printer cluster instead of
+  treating the surviving char-literal comment diffs as arbitrary formatting:
+  `compiler-rust/src/js_ir/printer.rs` now matches the
+  `compiler/core/js_dump.ml` `Number (Int {c = Some _})` path more closely by
+  printing character-code comments with the same quoted literal shape OCaml
+  uses, e.g. `/* 'a' */97` and `/* '文' */25991`, rather than dropping the
+  quotes around the character payload
+- Added focused regression coverage to `js_ir::printer::tests::test_print_number`
+  for both ASCII and Unicode character-number comments so this stays tied to
+  the OCaml literal-comment behavior instead of a single snapshot file
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_number -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_5753.res -o /tmp/gpr_5753.mjs`
+  - exact `compiler-args` repro for `tests/tests/src/cross_module_inline_test.res`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/gpr_5753.res` and
+  `tests/tests/src/cross_module_inline_test.res` now match their checked-in
+  `.mjs` snapshots exactly, while `tests/tests/src/ExternalShadow.res` remains
+  an exact guard-file match after the same literal-comment change
+- The authoritative JS snapshot baseline now reports **184 / 657** passing,
+  **0** compile errors, and **473** output diffs after this OCaml-aligned
+  character-literal comment printer fix; this is a net **+2** over the
+  previous recorded baseline
 
 - This iteration stayed on an OCaml-backed repeated printer cluster instead of
   treating the extra trailing `return` statements as file-local drift:
