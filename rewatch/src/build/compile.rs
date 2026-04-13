@@ -859,30 +859,12 @@ fn build_compiler_options(
         .filter(|&v| v == 4);
 
     // Build open_modules: namespace opens first, then explicit -open flags from compiler-flags.
+    // In the file-based mode, `-bs-ns Namespace` is passed to all namespaced modules.
+    // In --in-process, we translate that to `-open Namespace` so sibling modules
+    // are resolvable through the namespace.
     let mut open_modules: Vec<String> = Vec::new();
-    match &package.config.get_namespace() {
-        packages::Namespace::NamespaceWithEntry { namespace: _, entry }
-            if entry
-                == &helpers::file_path_to_module_name(
-                    source_file_path,
-                    &package.config.get_namespace(),
-                ) =>
-        {
-            // Entry module opens the namespace
-            open_modules.push(
-                package
-                    .config
-                    .get_namespace()
-                    .to_suffix()
-                    .unwrap()
-                    .to_string(),
-            );
-        }
-        _ => {
-            // Non-entry namespaced modules: the -bs-ns flag is handled by the compiler's
-            // module name prefixing. For in-process, the module name already includes
-            // the namespace suffix from rewatch's module resolution.
-        }
+    if let Some(ns_suffix) = package.config.get_namespace().to_suffix() {
+        open_modules.push(ns_suffix.to_string());
     }
 
     // Append explicit -open flags from package compiler-flags.

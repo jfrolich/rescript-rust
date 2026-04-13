@@ -6,6 +6,14 @@ use std::{io::Write, path::Path};
 use rescript::{build, cli, cmd, format, lock, watcher};
 
 fn main() -> Result<()> {
+    // Set a larger stack size for Rayon worker threads. The --in-process mode
+    // uses source-fallback type checking which can recurse deeply for modules
+    // with many transitive dependencies.
+    rayon::ThreadPoolBuilder::new()
+        .stack_size(64 * 1024 * 1024)
+        .build_global()
+        .ok();
+
     let cli = cli::parse_with_default().unwrap_or_else(|err| err.exit());
 
     let log_level_filter = cli.verbose.log_level_filter();

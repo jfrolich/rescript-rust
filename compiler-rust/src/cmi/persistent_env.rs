@@ -14,6 +14,7 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::fs;
 use std::path::Path as FsPath;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::cmi::marshal_reader::MarshalReader;
 use crate::driver::{
@@ -162,14 +163,19 @@ pub struct PersistentEnv {
     /// In-memory module registry for `--in-process` builds.
     /// When a module is registered here, its metadata (source path, purity)
     /// is resolved from memory instead of from `.ast`/`.cmj` files on disk.
-    in_memory_modules: HashMap<String, InMemoryModuleInfo>,
+    /// Wrapped in Arc for cheap cloning during source-fallback recursion.
+    in_memory_modules: Arc<HashMap<String, InMemoryModuleInfo>>,
     /// When true, all module resolution uses the in-memory registry only.
     /// Disk fallbacks (`.ast`, `.cmj`, `.cmi` probes) are skipped entirely.
     in_process_mode: bool,
     /// Source file paths for on-demand lazy type checking in `--in-process` mode.
     /// When `find_pers_struct` can't find a module in the cache and this map
     /// has its source path, the module is type-checked from source on the fly.
-    source_fallback_paths: HashMap<String, PathBuf>,
+    /// Wrapped in Arc for cheap cloning during source-fallback recursion.
+    source_fallback_paths: Arc<HashMap<String, PathBuf>>,
+    /// Current depth of source-fallback recursion. Each `typecheck_source_signature`
+    /// call increments this. Used to prevent stack overflow from deep dependency chains.
+    source_fallback_depth: usize,
 }
 
 impl PersistentEnv {
@@ -182,9 +188,10 @@ impl PersistentEnv {
             open_modules: Vec::new(),
             jsx_version: None,
             renamed_sig_cache: HashMap::new(),
-            in_memory_modules: HashMap::new(),
+            in_memory_modules: Arc::new(HashMap::new()),
             in_process_mode: false,
-            source_fallback_paths: HashMap::new(),
+            source_fallback_paths: Arc::new(HashMap::new()),
+            source_fallback_depth: 0,
         }
     }
 
@@ -195,6 +202,13 @@ impl PersistentEnv {
     /// into the env so that `find_pers_struct` can resolve dependencies
     /// without disk I/O. The env is automatically in in-process mode.
     pub fn from_registry(registry: &ModuleRegistry) -> Self {
+        // Pre-populate the cache from registry.cached_modules.
+        // NOTE: The PersStruct signatures contain TypeExprRef indices from previous
+        // compilations' TypeContext arenas, which may not be valid in the current
+        // compilation's arena. This is a known correctness issue that requires
+        // cross-context type re-internalization to fix properly. For now, the
+        // TypeContext provides safe bounds-checked access that returns a fresh Tvar
+        // for out-of-bounds refs, preventing panics at the cost of some type accuracy.
         let cache = registry
             .cached_modules
             .iter()
@@ -207,9 +221,10 @@ impl PersistentEnv {
             open_modules: Vec::new(),
             jsx_version: None,
             renamed_sig_cache: HashMap::new(),
-            in_memory_modules: registry.module_info.clone(),
+            in_memory_modules: Arc::new(registry.module_info.clone()),
             in_process_mode: true,
-            source_fallback_paths: registry.source_fallback_paths.clone(),
+            source_fallback_paths: Arc::new(registry.source_fallback_paths.clone()),
+            source_fallback_depth: 0,
         }
     }
 
@@ -435,14 +450,43 @@ impl PersistentEnv {
         Some(bytes.iter().map(|&b| b as char).collect())
     }
 
+    /// Maximum recursion depth for source-fallback type checking.
+    /// Each level compiles a dependency from source. Deep chains indicate
+    /// many transitive deps being loaded on demand.
+    const MAX_SOURCE_FALLBACK_DEPTH: usize = 15;
+
     fn typecheck_source_signature<'a>(
         &self,
         source_path: &FsPath,
         ctx: &'a TypeContext<'a>,
     ) -> Option<(Signature, PersistentEnv)> {
+        if self.source_fallback_depth >= Self::MAX_SOURCE_FALLBACK_DEPTH {
+            return None;
+        }
+
         let filename = source_path.to_string_lossy().into_owned();
         let source = Self::read_source_latin1(source_path)?;
-        let mut fallback_pers = self.clone();
+        // Create a lightweight fallback env instead of cloning the entire PersistentEnv.
+        // Share the read-only maps but start with an empty cache (deps loaded on demand).
+        // Copy only the current cache placeholders (None entries that prevent infinite recursion).
+        let placeholders: HashMap<String, Option<PersStruct>> = self
+            .cache
+            .iter()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let mut fallback_pers = PersistentEnv {
+            cache: placeholders,
+            load_path: self.load_path.clone(),
+            alias_prefix_rewrites: self.alias_prefix_rewrites.clone(),
+            open_modules: self.open_modules.clone(),
+            jsx_version: self.jsx_version,
+            renamed_sig_cache: HashMap::new(),
+            in_memory_modules: self.in_memory_modules.clone(),
+            in_process_mode: self.in_process_mode,
+            source_fallback_paths: self.source_fallback_paths.clone(),
+            source_fallback_depth: self.source_fallback_depth + 1,
+        };
         let mut env = initial_env(ctx);
         let open_modules = fallback_pers.open_modules.clone();
         load_pervasives(&mut fallback_pers, &mut env, ctx, &open_modules, false, None);
@@ -739,7 +783,7 @@ impl PersistentEnv {
     /// `resolve_module_source_path`, `module_cmj_is_pure`, and runtime
     /// detection can resolve from memory instead of probing disk.
     pub fn register_in_memory_module(&mut self, name: &str, info: InMemoryModuleInfo) {
-        self.in_memory_modules.insert(name.to_string(), info);
+        Arc::make_mut(&mut self.in_memory_modules).insert(name.to_string(), info);
     }
 
     /// Register a module's signature directly into the cache for

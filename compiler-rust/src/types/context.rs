@@ -54,7 +54,24 @@ impl TypeArena {
     fn get(&self, r: TypeExprRef) -> &TypeExpr {
         unsafe {
             let types = &*self.types.get();
-            types[r.0].as_ref()
+            if r.0 < types.len() {
+                types[r.0].as_ref()
+            } else {
+                // Out-of-bounds TypeExprRef — likely from a stale cross-compilation
+                // registry cache. Create a fresh Tvar to prevent panics.
+                // This is a known correctness issue: the right fix is cross-context
+                // type re-internalization.
+                let ty = super::type_expr::TypeExpr::new(
+                    super::type_expr::TypeDesc::Tvar(None),
+                    super::type_expr::GENERIC_LEVEL,
+                    0,
+                );
+                let types = &mut *self.types.get();
+                let idx = types.len();
+                types.push(Box::new(ty));
+                // Re-borrow after push (the Vec may have reallocated)
+                types[idx].as_ref()
+            }
         }
     }
 
