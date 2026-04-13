@@ -693,8 +693,19 @@ run_js_compilation_tests() {
             continue
         fi
 
-        # Create output directory
-        local output_dir="$TEMP_DIR/js/$(dirname "$res_file")"
+        # Create output directory.
+        #
+        # For project-owned compiler-args runs we compile checked-in `.ast`
+        # files from `<project>/lib/bs` with `-bs-package-output ...:src:...`.
+        # Pointing `-o` at another temp directory literally named `src`
+        # causes some modules (for example `Import.res`) to skip creating the
+        # requested output file even though compilation succeeds. Keep the
+        # output basename identical to the snapshot, but place it under a
+        # neutral per-file directory so the harness measures the emitted JS
+        # instead of a package-output path collision.
+        local safe_output_dir
+        safe_output_dir=$(echo "$res_file" | tr '/:' '__')
+        local output_dir="$TEMP_DIR/js/generated/$safe_output_dir"
         mkdir -p "$output_dir"
 
         # Compile with Rust bsc

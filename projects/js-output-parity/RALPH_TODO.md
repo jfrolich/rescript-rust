@@ -43,6 +43,37 @@ reported:
 
 Interpretation:
 
+- Re-ran the authoritative wrapper on **2026-04-14** after fixing a JS
+  snapshot harness output-path collision in `scripts/test_rust_parity.sh`
+- The measured baseline remains **328 / 657** passing, **0** compile errors,
+  and **329** output diffs; this iteration restores the previously recorded
+  baseline instead of changing the backend topline
+- Root cause:
+  when the harness compiled checked-in `.ast` files with project-owned
+  `compiler-args`, it wrote `-o` targets under
+  `temp/rust-parity/js/src/...`, which collides with the same `src` segment in
+  `-bs-package-output esmodule:src:.mjs`
+- In that shape, modules such as `tests/tests/src/Import.res` could compile
+  successfully yet skip materializing the requested temp output file, so the
+  harness misclassified them as compile errors even though the emitted JS
+  matched the checked-in snapshot byte-for-byte
+- The harness now writes per-file snapshot outputs under a neutral directory
+  shape:
+  `temp/rust-parity/js/generated/<safe-file-key>/<Module>.mjs`
+  while preserving the module basename that the `.ast` compile path expects
+- Verified focused guards for this measurement fix:
+  - exact project-args `.ast` snapshot repro for `tests/tests/src/Import.res`
+    into `temp/rust-parity/js/generated/src_Import.res/Import.mjs`
+  - exact project-args `.ast` snapshot repro for
+    `tests/tests/src/ExternalShadow.res` into
+    `temp/rust-parity/js/generated/src_ExternalShadow.res/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Outcome:
+  `tests/tests/src/Import.res` is back out of the false compile-error bucket,
+  the authoritative wrapper again reports a pure diff set, and future Phase 4
+  backend work can trust the JS snapshot counts without this path-shape
+  artifact
+
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed JS printer rule in
   `compiler/core/js_dump.ml`, specifically the `Bin (op, e1, e2)` branch that
