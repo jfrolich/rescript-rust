@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 187 / 657 JS snapshots passing, 0 compile errors, 470 output diffs
+**Status:** 188 / 657 JS snapshots passing, 0 compile errors, 469 output diffs
 
 ## Goal
 
@@ -35,13 +35,51 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **187 / 657**
+- JS snapshot parity: **188 / 657**
 - Compile errors: **0**
-- Output diffs: **470**
+- Output diffs: **469**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed on the OCaml post-lowering safe-alias
+  path for module field reads instead of treating the surviving import/module
+  alias temporaries as printer drift
+- `compiler-rust/src/lambda/simplify.rs` now matches another slice of
+  `compiler/core/lam_util.ml` `refine_let` / `is_safe_to_alias` more closely on
+  the Rust JS path: module-field reads are now considered substitutable not
+  just when they come from `Lglobal_module`, but also when they come from a
+  local module variable (`Lvar`) like the awaited import bindings OCaml already
+  aliases through
+- This removes another OCaml-backed class of redundant locals before JS
+  lowering, including shapes like `let each = O.forEach` inside module blocks
+  and `let b = MS.forEach` before grouped tuple returns; Rust now lowers those
+  through the same direct member-access shape OCaml uses
+- Added focused regression coverage in
+  `lambda::simplify::tests::aliases_module_field_reads_from_local_module_bindings_into_tuple_blocks`
+  and reran
+  `lambda::simplify::tests::refines_immediate_module_field_reads_over_awaited_imports`
+  so this stays pinned to the OCaml `SafeAlias` predicate rather than a single
+  snapshot file
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release module_field_reads -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Import.res -o /tmp/Import.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/Import.res` now narrows again: the extra Rust-side alias
+  locals around awaited module field reads in the grouped/module-return path are
+  gone, including the old `let b = MS.forEach` helper in `f6`; the remaining
+  drift in that file is now later compaction and list-formatting byte shape
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change, which confirms this aliasing slice stays isolated from the
+  already-stable external-shadow path
+- The authoritative JS snapshot baseline now reports **188 / 657** passing,
+  **0** compile errors, and **469** output diffs after this OCaml-aligned local
+  module-field alias port; this is a net **+1** over the previous recorded
+  baseline
 
 - Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
   from `PLAN.md`; this iteration stayed on the OCaml post-lowering let

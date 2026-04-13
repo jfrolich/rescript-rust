@@ -1104,7 +1104,7 @@ fn substitution_candidate(kind: LetKind, value: &Lambda) -> Option<Lambda> {
                 (&info.primitive, info.args.as_slice()),
                 (
                     Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
-                    [Lambda::LglobalModule(_, _)]
+                    [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]
                 )
             ) =>
         {
@@ -1351,6 +1351,87 @@ mod tests {
                     [Lambda::LglobalModule(id, true)] if id.name() == "Belt_List"
                 )
             )
+        ));
+    }
+
+    #[test]
+    fn aliases_module_field_reads_from_local_module_bindings_into_tuple_blocks() {
+        let imported = Ident::create_local("MS");
+        let projected = Ident::create_local("b");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            imported.clone(),
+            Lambda::prim(
+                Primitive::Pawait,
+                vec![Lambda::prim(
+                    Primitive::Pimport,
+                    vec![Lambda::global_module(
+                        Ident::create_persistent("Belt_MapString"),
+                        true,
+                    )],
+                    Location::none(),
+                )],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                projected.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        36,
+                        FieldDbgInfo::Module {
+                            name: "forEach".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(imported.clone())],
+                    Location::none(),
+                ),
+                Lambda::prim(
+                    Primitive::Pmakeblock(0, TagInfo::Tuple, crate::lambda::primitive::Mutable::Immutable),
+                    vec![Lambda::const_(Constant::int(0)), Lambda::var(projected.clone())],
+                    Location::none(),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(_, kept_id, kept_value, kept_body) = simplified else {
+            panic!("expected the awaited import binding to remain");
+        };
+        assert_eq!(kept_id, imported);
+        assert!(matches!(
+            *kept_value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pawait,
+                ..
+            })
+        ));
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive:
+                Primitive::Pmakeblock(0, TagInfo::Tuple, crate::lambda::primitive::Mutable::Immutable),
+            args,
+            ..
+        }) = *kept_body
+        else {
+            panic!("expected the local module field alias to inline into the tuple block");
+        };
+        assert!(matches!(
+            args.as_slice(),
+            [
+                Lambda::Lconst(Constant::Int { i: 0, .. }),
+                Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive:
+                        Primitive::Pfield(
+                            36,
+                            FieldDbgInfo::Module {
+                                name,
+                            },
+                        ),
+                    args,
+                    ..
+                })
+            ] if name == "forEach"
+                && matches!(args.as_slice(), [Lambda::Lvar(id)] if id == &imported)
         ));
     }
 
