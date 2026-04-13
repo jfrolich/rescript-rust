@@ -2102,7 +2102,11 @@ impl LambdaCompiler {
         Compiled { prelude, expr }
     }
 
-    fn compile_primitive(&mut self, prim: &Primitive, args: &[Lambda]) -> Compiled {
+    fn compile_primitive(
+        &mut self,
+        prim: &Primitive,
+        args: &[Lambda],
+    ) -> Compiled {
         if matches!(prim, Primitive::Pimport) {
             return self.compile_import_primitive(args);
         }

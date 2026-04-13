@@ -44,6 +44,52 @@ reported:
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration verified one OCaml-backed `Pjs_fn_make`/method-function
+  slice without changing the authoritative wrapper baseline yet
+- After reading `compiler/core/lam_compile.ml`,
+  `compiler/core/lam_eta_conversion.ml`, and `compiler/core/js_dump.ml`,
+  the Rust backend now moves direct `PjsFnMake` arity adjustment into
+  `compiler-rust/src/lambda/simplify.rs`, matching the OCaml stage boundary
+  more closely instead of doing the adjustment late during JS IR lowering in
+  `compiler-rust/src/lambda/compile.rs`
+- `compiler-rust/src/js_ir/printer.rs` now matches OCaml method-function
+  dumping more closely for this slice:
+  method expressions omit the synthetic leading `this` parameter from the
+  printed formal argument list, emit a `let <ident> = this;` binding only when
+  that synthetic parameter is actually used, and print top-level method-valued
+  bindings as named `function ...` declarations
+- The printer follow-up in the same file also removes the transient
+  `=>  {` arrow-body spacing regression introduced while wiring the method
+  body printer, restoring the wrapper baseline after the backend change
+- Added focused regression coverage in:
+  `lambda::simplify::tests::adjusts_direct_pjs_fn_make_callbacks_to_requested_arity_during_simplify`,
+  `beta_reduces_downarity_pjs_fn_make_calls_before_js_lowering`,
+  `beta_reduces_fully_applied_returned_pjs_fn_make_wrappers`,
+  plus the existing method printer tests in `js_ir::printer`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release pjs_fn_make -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release method_function -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release function_expression_preserves_raw_directive -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UncurriedExternals.res -o /tmp/UncurriedExternals.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/arity_deopt.res` no longer shows the old extra
+  callback-wrapper drift from late `PjsFnMake` lowering; after the printer
+  spacing fix it is back to the same global baseline accounting as before
+- `tests/tests/src/UncurriedExternals.res` now matches the OCaml callback shape
+  more closely in the `@this` / direct-callback cluster; the remaining drift in
+  that file is the `let <ident> = this ;` spacing detail plus the separate
+  `React.useState` destructuring/binding-order issue
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change
+- The authoritative JS snapshot baseline remains **188 / 657** passing,
+  **0** compile errors, and **469** output diffs after this OCaml-aligned
+  backend/printer cleanup; this is a net **0** from the previously recorded
+  baseline, but the late-wrapper drift in this cluster is no longer the
+  active blocker
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-aligned eta-wrapper slice on the JS
   backend path: value-level functions that do nothing except forward their
   parameters into the same `Primitive_*` runtime compare/equal/order/min/max

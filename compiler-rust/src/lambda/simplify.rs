@@ -10,7 +10,10 @@ use crate::lambda::compile_context::BoxedNullable;
 use crate::lambda::constant::Constant;
 use crate::lambda::free_variables::free_variables;
 use crate::lambda::primitive::Primitive;
-use crate::lambda::{Apply, LFunction, Lambda, LambdaSwitch, TagInfo};
+use crate::lambda::{
+    Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda, LambdaSwitch,
+    TagInfo,
+};
 use crate::location::Location;
 
 #[derive(Clone, Default)]
@@ -616,6 +619,11 @@ fn simplify_primitive(
         .collect();
 
     match (&info.primitive, args.as_slice()) {
+        (Primitive::PjsFnMake(arity), [Lambda::Lfunction(func)]) => simplify_with_env(
+            &adjust_direct_js_fn_make_function(func, *arity, &info.loc),
+            env,
+            exports,
+        ),
         (Primitive::PjsFnMakeUnit, [Lambda::Lfunction(func)])
             if func.arity == 1
                 && matches!(func.params.as_slice(), [param] if param.name() == "param") =>
@@ -651,6 +659,80 @@ fn simplify_primitive(
         }),
         _ => Lambda::prim(info.primitive.clone(), args, info.loc.clone()),
     }
+}
+
+fn adjust_direct_js_fn_make_function(func: &LFunction, to_: i32, loc: &Location) -> Lambda {
+    let from = func.arity;
+    if from == to_ || func.attr.async_ {
+        return Lambda::Lfunction(func.clone());
+    }
+
+    if to_ == 0 {
+        let [param] = func.params.as_slice() else {
+            unreachable!("direct js fn make arity adjustment should preserve a function body");
+        };
+        return Lambda::function_(
+            0,
+            vec![],
+            Lambda::let_(
+                LetKind::Alias,
+                param.clone(),
+                Lambda::unit(),
+                (*func.body).clone(),
+            ),
+            FunctionAttribute::default(),
+        );
+    }
+
+    if to_ > from {
+        let extra_args = fresh_js_fn_params((to_ - from) as usize);
+        let mut body = (*func.body).clone();
+        for extra_arg in &extra_args {
+            body = apply_lambda_with_default_info(
+                body,
+                vec![Lambda::var(extra_arg.clone())],
+                loc,
+                ApplyStatus::Na,
+            );
+        }
+
+        let mut params = func.params.clone();
+        params.extend(extra_args);
+        return Lambda::function_(to_, params, body, FunctionAttribute::default());
+    }
+
+    let outer_arity = to_ as usize;
+    let outer_params = func.params[..outer_arity].to_vec();
+    let inner_params = func.params[outer_arity..].to_vec();
+    let inner = Lambda::function_(
+        from - to_,
+        inner_params,
+        (*func.body).clone(),
+        FunctionAttribute::default(),
+    );
+    Lambda::function_(to_, outer_params, inner, FunctionAttribute::default())
+}
+
+fn fresh_js_fn_params(count: usize) -> Vec<Ident> {
+    (0..count).map(|_| Ident::create_local("param")).collect()
+}
+
+fn apply_lambda_with_default_info(
+    func: Lambda,
+    args: Vec<Lambda>,
+    loc: &Location,
+    status: ApplyStatus,
+) -> Lambda {
+    Lambda::Lapply(Apply {
+        ap_func: Box::new(func),
+        ap_args: args,
+        ap_info: crate::lambda::ApInfo {
+            loc: loc.clone(),
+            inlined: InlineAttribute::Default,
+            status,
+        },
+        ap_transformed_jsx: false,
+    })
 }
 
 fn simplify_field_access(
@@ -1244,7 +1326,9 @@ mod tests {
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalObjLabel, ExternalObjSpec, Mutable, Primitive,
     };
-    use crate::lambda::{ApInfo, Apply, FunctionAttribute, InlineAttribute, Lambda, TagInfo};
+    use crate::lambda::{
+        ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, Lambda, TagInfo,
+    };
     use crate::location::Location;
 
     use super::simplify_for_js_backend;
@@ -2297,12 +2381,17 @@ mod tests {
         );
 
         let simplified = simplify_for_js_backend(&lambda);
-        let Lambda::Llet(_, id, value, body) = simplified else {
-            panic!("expected the add5 binding to remain after simplification");
-        };
-        assert_eq!(id, add5);
-        let Lambda::Lfunction(func) = *value else {
-            panic!("expected add5 to stay a function");
+        let func = match simplified {
+            Lambda::Llet(_, id, value, body)
+                if id == add5 && matches!(*body, Lambda::Lvar(ref body_id) if body_id == &add5) =>
+            {
+                let Lambda::Lfunction(func) = *value else {
+                    panic!("expected add5 to stay a function");
+                };
+                func
+            }
+            Lambda::Lfunction(func) => func,
+            other => panic!("expected simplification to leave a direct function, got {other:?}"),
         };
         assert_eq!(func.params, vec![extra.clone()]);
         assert!(matches!(
@@ -2316,11 +2405,138 @@ mod tests {
                 Lambda::Lvar(id)
             ] if *id == extra)
         ));
-        assert!(matches!(*body, Lambda::Lvar(id) if id == add5));
     }
 
     #[test]
-    fn beta_reduces_direct_pjs_fn_make_callees_but_keeps_returned_wrapper_calls() {
+    fn adjusts_direct_pjs_fn_make_callbacks_to_requested_arity_during_simplify() {
+        let this_param = Ident::create_local("this");
+        let async_arg = Ident::create_local("arg");
+
+        let simplified = simplify_for_js_backend(&Lambda::prim(
+            Primitive::PjsFnMake(2),
+            vec![Lambda::function_(
+                1,
+                vec![this_param.clone()],
+                Lambda::function_(
+                    1,
+                    vec![async_arg.clone()],
+                    Lambda::prim(
+                        Primitive::Paddint,
+                        vec![Lambda::var(this_param.clone()), Lambda::var(async_arg.clone())],
+                        Location::none(),
+                    ),
+                    FunctionAttribute {
+                        async_: true,
+                        ..FunctionAttribute::default()
+                    },
+                ),
+                FunctionAttribute::default(),
+            )],
+            Location::none(),
+        ));
+
+        let Lambda::Lfunction(func) = simplified else {
+            panic!("expected eta-adjusted callback to stay a function");
+        };
+        assert_eq!(func.arity, 2);
+        assert_eq!(func.params.len(), 2);
+        assert!(func.params[0].same(&this_param));
+
+        let Lambda::Lapply(apply) = *func.body else {
+            panic!("expected the expanded callback body to apply the async inner function");
+        };
+        assert_eq!(apply.ap_args.len(), 1);
+        assert!(matches!(
+            apply.ap_args.as_slice(),
+            [Lambda::Lvar(id)] if id.same(&func.params[1])
+        ));
+        assert!(matches!(
+            apply.ap_func.as_ref(),
+            Lambda::Lfunction(inner)
+                if inner.attr.async_
+                    && matches!(inner.params.as_slice(), [param] if param.same(&async_arg))
+        ));
+    }
+
+    #[test]
+    fn beta_reduces_downarity_pjs_fn_make_calls_before_js_lowering() {
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let z = Ident::create_local("z");
+
+        let simplified = simplify_for_js_backend(&Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::prim(
+                    Primitive::PjsFnMake(1),
+                    vec![Lambda::function_(
+                        3,
+                        vec![x.clone(), y.clone(), z.clone()],
+                        Lambda::prim(
+                            Primitive::Paddint,
+                            vec![
+                                Lambda::prim(
+                                    Primitive::Paddint,
+                                    vec![Lambda::var(x), Lambda::var(y)],
+                                    Location::none(),
+                                ),
+                                Lambda::var(z),
+                            ],
+                            Location::none(),
+                        ),
+                        FunctionAttribute::default(),
+                    )],
+                    Location::none(),
+                )),
+                ap_args: vec![Lambda::const_(Constant::int(1))],
+                ap_info: crate::lambda::ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Uncurry,
+                },
+                ap_transformed_jsx: false,
+            })),
+            ap_args: vec![
+                Lambda::const_(Constant::int(2)),
+                Lambda::const_(Constant::int(3)),
+            ],
+            ap_info: crate::lambda::ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Uncurry,
+            },
+            ap_transformed_jsx: false,
+        }));
+
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Paddint,
+            args,
+            ..
+        }) = simplified
+        else {
+            panic!("expected the fully-applied wrapper call to simplify to an integer addition");
+        };
+        let [left, Lambda::Lconst(Constant::Int { i: 3, .. })] = args.as_slice() else {
+            panic!("expected the final argument to remain the trailing constant");
+        };
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Paddint,
+            args,
+            ..
+        }) = left
+        else {
+            panic!("expected the remaining wrapper to disappear into the left-hand addition");
+        };
+        assert!(matches!(
+            args.as_slice(),
+            [
+                Lambda::Lconst(Constant::Int { i: 1, .. }),
+                Lambda::Lconst(Constant::Int { i: 2, .. })
+            ]
+        ));
+    }
+
+    #[test]
+    fn beta_reduces_fully_applied_returned_pjs_fn_make_wrappers() {
         let h = Ident::create_local("h");
         let x = Ident::create_local("x");
         let j = Ident::create_local("j");
@@ -2390,20 +2606,7 @@ mod tests {
         });
 
         let simplified = simplify_for_js_backend(&lambda);
-        let Lambda::Lapply(outer) = simplified else {
-            panic!("expected the returned wrapper application to remain visible");
-        };
-        assert!(matches!(
-            outer.ap_args.as_slice(),
-            [Lambda::Lconst(Constant::String { .. })]
-        ));
-        assert!(matches!(
-            outer.ap_func.as_ref(),
-            Lambda::Lprim(crate::lambda::PrimInfo {
-                primitive: Primitive::PjsFnMake(1),
-                ..
-            })
-        ));
+        assert!(matches!(simplified, Lambda::Lconst(Constant::Int { i: 0, .. })));
     }
 
     #[test]

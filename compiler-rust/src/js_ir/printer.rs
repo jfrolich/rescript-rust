@@ -306,7 +306,7 @@ impl JsPrinter {
                     if let Some(Expression {
                         desc:
                             ExpressionDesc::Fun {
-                                is_method: false,
+                                is_method,
                                 params,
                                 body,
                                 return_unit,
@@ -319,6 +319,7 @@ impl JsPrinter {
                     {
                         self.print_function_declaration(
                             &decl.ident,
+                            *is_method,
                             params,
                             body,
                             *return_unit,
@@ -597,6 +598,7 @@ impl JsPrinter {
     fn print_function_declaration(
         &mut self,
         ident: &Ident,
+        is_method: bool,
         params: &[Ident],
         body: &Block,
         return_unit: bool,
@@ -610,24 +612,64 @@ impl JsPrinter {
         let fn_name = self.ident_name(ident);
         self.write(&fn_name);
         self.with_function_ident_scope(params, body, Some(ident), |this| {
+            let (this_binding, rendered_params) = this.method_params_and_binding(is_method, params, body);
             this.write_char('(');
-            for (i, param) in params.iter().enumerate() {
+            for (i, param_name) in rendered_params.iter().enumerate() {
                 if i > 0 {
                     this.write(", ");
                 }
-                let param_name = this.ident_name(param);
-                this.write(&param_name);
+                this.write(param_name);
             }
-            this.write(") {");
-            if !body.is_empty() || directive.is_some() {
-                this.indent();
-                this.print_function_directive(directive, !body.is_empty());
-                this.print_function_body(body, return_unit);
-                this.dedent();
-                this.newline();
-            }
-            this.write_char('}');
+            this.write_char(')');
+            this.print_function_body_block(body, return_unit, directive, this_binding.as_ref());
         });
+    }
+
+    fn method_params_and_binding(
+        &mut self,
+        is_method: bool,
+        params: &[Ident],
+        body: &Block,
+    ) -> (Option<String>, Vec<String>) {
+        if !is_method {
+            let rendered_params = params.iter().map(|param| self.ident_name(param)).collect();
+            return (None, rendered_params);
+        }
+
+        let (this_param, args) = params
+            .split_first()
+            .expect("method functions must carry an explicit `this` parameter");
+        let free = free_variables_of_block_with_defined(body, std::iter::empty());
+        let this_binding = free.contains(this_param).then(|| self.ident_name(this_param));
+        let rendered_params = args.iter().map(|param| self.ident_name(param)).collect();
+        (this_binding, rendered_params)
+    }
+
+    fn print_function_body_block(
+        &mut self,
+        body: &Block,
+        return_unit: bool,
+        directive: Option<&str>,
+        this_binding: Option<&String>,
+    ) {
+        self.write(" {");
+        if this_binding.is_some() || !body.is_empty() || directive.is_some() {
+            self.indent();
+            if let Some(this_binding) = this_binding {
+                self.newline();
+                self.write("let ");
+                self.write(this_binding);
+                self.write(" = this");
+                self.semi();
+            }
+            if directive.is_some() || !body.is_empty() {
+                self.print_function_directive(directive, !body.is_empty());
+                self.print_function_body(body, return_unit);
+            }
+            self.dedent();
+            self.newline();
+        }
+        self.write_char('}');
     }
 
     fn print_esmodule_exports(&mut self, exports: &[Ident]) {
@@ -1013,9 +1055,8 @@ impl JsPrinter {
             } => {
                 let use_arrow = !*is_method;
                 self.with_function_ident_scope(params, body, None, |this| {
-                    // Collect param names upfront to avoid borrow issues
-                    let param_names: Vec<String> =
-                        params.iter().map(|p| this.ident_name(p)).collect();
+                    let (this_binding, param_names) =
+                        this.method_params_and_binding(*is_method, params, body);
 
                     // Async prefix
                     if *async_ {
@@ -1025,6 +1066,7 @@ impl JsPrinter {
                     // Function keyword or arrow
                     if !use_arrow {
                         this.write("function");
+                        this.write(" ");
                     }
 
                     // Parameters
@@ -1041,10 +1083,8 @@ impl JsPrinter {
                         this.write_char(')');
                     }
 
-                    this.space();
-
                     if use_arrow {
-                        this.write("=> ");
+                        this.write(" =>");
                     }
 
                     // Body
@@ -1052,6 +1092,7 @@ impl JsPrinter {
                         && directive.is_none()
                         && let Some(expr) = single_arrow_function_expr(body)
                     {
+                        this.write(" ");
                         let needs_paren = this.expr_needs_paren(expr);
                         if needs_paren {
                             this.write_char('(');
@@ -1063,15 +1104,12 @@ impl JsPrinter {
                         return;
                     }
 
-                    this.write_char('{');
-                    if !body.is_empty() || directive.is_some() {
-                        this.indent();
-                        this.print_function_directive(directive.as_deref(), !body.is_empty());
-                        this.print_function_body(body, *return_unit);
-                        this.dedent();
-                        this.newline();
-                    }
-                    this.write_char('}');
+                    this.print_function_body_block(
+                        body,
+                        *return_unit,
+                        directive.as_deref(),
+                        this_binding.as_ref(),
+                    );
                 });
             }
 
@@ -2879,6 +2917,53 @@ mod tests {
         assert_eq!(
             rendered,
             "name => {\n  'use cache';\n  return \"Hello\";\n}"
+        );
+    }
+
+    #[test]
+    fn test_print_method_function_expression_omits_the_this_parameter() {
+        let this_param = Ident::create_local("me");
+        let amount = Ident::create_local("amount");
+
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
+            is_method: true,
+            params: vec![this_param.clone(), amount],
+            body: vec![Statement::return_(Expression::var(this_param))],
+            env: Default::default(),
+            return_unit: false,
+            async_: false,
+            directive: None,
+        }));
+
+        assert_eq!(
+            rendered,
+            "function (amount) {\n  let me = this;\n  return me;\n}"
+        );
+    }
+
+    #[test]
+    fn test_print_top_level_method_function_as_named_declaration() {
+        let this_param = Ident::create_local("self");
+        let value = Ident::create_local("value");
+
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: Ident::create_local("methodWithThis"),
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: true,
+                params: vec![this_param.clone(), value.clone()],
+                body: vec![Statement::return_(Expression::var(this_param))],
+                env: Default::default(),
+                return_unit: false,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert_eq!(
+            rendered,
+            "function methodWithThis(value) {\n  let self = this;\n  return self;\n}"
         );
     }
 
