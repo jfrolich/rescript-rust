@@ -25,6 +25,8 @@ pub struct JsPrinter {
     output: String,
     /// Current indentation level
     indent: usize,
+    /// Matches OCaml's Ext_pp.last_new_line state.
+    last_new_line: bool,
     /// Indentation string (2 spaces)
     indent_str: &'static str,
     /// Assigned printable names for identifiers in the active lexical scopes.
@@ -45,6 +47,7 @@ impl JsPrinter {
         Self {
             output: String::new(),
             indent: 0,
+            last_new_line: false,
             indent_str: "  ",
             name_scopes: vec![NameScope::default()],
             module_path_resolver: None,
@@ -71,19 +74,36 @@ impl JsPrinter {
     /// Write a string
     fn write(&mut self, s: &str) {
         self.output.push_str(s);
+        self.last_new_line = false;
     }
 
     /// Write a character
     fn write_char(&mut self, c: char) {
         self.output.push(c);
+        self.last_new_line = false;
     }
 
     /// Write a newline with current indentation
     fn newline(&mut self) {
+        if !self.last_new_line {
+            self.output.push('\n');
+            for _ in 0..self.indent {
+                self.output.push_str(self.indent_str);
+            }
+            self.last_new_line = true;
+        }
+    }
+
+    /// Match OCaml's Ext_pp.at_least_two_lines.
+    fn at_least_two_lines(&mut self) {
+        if !self.last_new_line {
+            self.output.push('\n');
+        }
         self.output.push('\n');
         for _ in 0..self.indent {
             self.output.push_str(self.indent_str);
         }
+        self.last_new_line = true;
     }
 
     /// Write a space
@@ -94,6 +114,7 @@ impl JsPrinter {
     /// Write a semicolon
     fn semi(&mut self) {
         self.output.push(';');
+        self.last_new_line = false;
     }
 
     /// Increase indentation
@@ -155,6 +176,7 @@ impl JsPrinter {
 
     /// Print a program
     pub fn print_program(&mut self, program: &Program) {
+        self.at_least_two_lines();
         self.print_statements(&program.block, true);
     }
 
@@ -181,22 +203,14 @@ impl JsPrinter {
             self.newline();
             return;
         }
-        self.newline();
-        let printed_imports = self.print_module_imports(&program.modules);
-        if printed_imports {
-            self.newline();
-            self.newline();
-        } else {
-            self.newline();
-        }
+        self.at_least_two_lines();
+        let _printed_imports = self.print_module_imports(&program.modules);
+        self.at_least_two_lines();
         self.print_statements(&program.program.block, true);
 
+        self.at_least_two_lines();
         if !program.program.exports.is_empty() {
-            self.newline();
-            self.newline();
             self.print_esmodule_exports(&program.program.exports);
-        } else if !program.program.block.is_empty() {
-            self.newline();
         }
 
         self.newline();
@@ -204,6 +218,7 @@ impl JsPrinter {
             None => self.write("/* No side effect */"),
             Some(reason) => {
                 let _ = write!(self.output, "/* {} Not a pure module */", reason);
+                self.last_new_line = false;
             }
         }
         self.newline();
@@ -270,9 +285,10 @@ impl JsPrinter {
         for (i, stmt) in stmts.iter().enumerate() {
             if i > 0 {
                 if top_level {
+                    self.at_least_two_lines();
+                } else {
                     self.newline();
                 }
-                self.newline();
             }
             self.print_statement(stmt, top_level);
         }
@@ -612,7 +628,8 @@ impl JsPrinter {
         let fn_name = self.ident_name(ident);
         self.write(&fn_name);
         self.with_function_ident_scope(params, body, Some(ident), |this| {
-            let (this_binding, rendered_params) = this.method_params_and_binding(is_method, params, body);
+            let (this_binding, rendered_params) =
+                this.method_params_and_binding(is_method, params, body);
             this.write_char('(');
             for (i, param_name) in rendered_params.iter().enumerate() {
                 if i > 0 {
@@ -640,7 +657,9 @@ impl JsPrinter {
             .split_first()
             .expect("method functions must carry an explicit `this` parameter");
         let free = free_variables_of_block_with_defined(body, std::iter::empty());
-        let this_binding = free.contains(this_param).then(|| self.ident_name(this_param));
+        let this_binding = free
+            .contains(this_param)
+            .then(|| self.ident_name(this_param));
         let rendered_params = args.iter().map(|param| self.ident_name(param)).collect();
         (this_binding, rendered_params)
     }
@@ -713,6 +732,7 @@ impl JsPrinter {
         self.newline();
         self.write("case ");
         write!(self.output, "{}", value).unwrap();
+        self.last_new_line = false;
         self.write_char(':');
 
         if !clause.body.is_empty() {
@@ -1294,10 +1314,12 @@ impl JsPrinter {
                             self.print_object_literal(
                                 level,
                                 None,
-                                std::iter::once((None, None))
-                                    .chain(elements.iter().enumerate().map(|(i, elem)| {
-                                        (Some(i), Some(elem))
-                                    })),
+                                std::iter::once((None, None)).chain(
+                                    elements
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, elem)| (Some(i), Some(elem))),
+                                ),
                                 |this, prop| match prop {
                                     (None, None) => {
                                         this.write("TAG: ");
@@ -1309,7 +1331,9 @@ impl JsPrinter {
                                         this.write(": ");
                                         this.print_expression(elem, 1);
                                     }
-                                    _ => unreachable!("constructor literal properties stay aligned"),
+                                    _ => {
+                                        unreachable!("constructor literal properties stay aligned")
+                                    }
                                 },
                             );
                         }
@@ -1319,10 +1343,7 @@ impl JsPrinter {
                             level,
                             None,
                             std::iter::once((false, None)).chain(
-                                elements
-                                    .get(1)
-                                    .into_iter()
-                                    .map(|value| (true, Some(value))),
+                                elements.get(1).into_iter().map(|value| (true, Some(value))),
                             ),
                             |this, (is_value, value)| {
                                 if is_value {
@@ -1597,6 +1618,7 @@ impl JsPrinter {
                 '\t' => self.write("\\t"),
                 c if c < ' ' => {
                     write!(self.output, "\\x{:02x}", c as u32).unwrap();
+                    self.last_new_line = false;
                 }
                 c => self.write_char(c),
             }

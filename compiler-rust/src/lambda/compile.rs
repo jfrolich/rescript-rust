@@ -2584,7 +2584,7 @@ impl LambdaCompiler {
             }
             PrawJsCode(info) => {
                 Expression::new(ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
-                    code: info.code.clone(),
+                    code: info.code.trim().to_string(),
                     is_stmt: info.is_stmt,
                 }))
             }
@@ -8052,7 +8052,8 @@ mod tests {
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
         ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
-        ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper, ExternalSpec,
+        ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, JsRawInfo,
+        Primitive,
     };
     use crate::lambda::{
         ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, Lambda, SwitchNames,
@@ -8103,6 +8104,34 @@ mod tests {
         let lam = Lambda::const_(Constant::int(7));
         let program = compiler.compile_program(&lam);
         assert!(!program.block.is_empty());
+    }
+
+    #[test]
+    fn compile_raw_js_trims_outer_whitespace_before_js_ir_printing() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::prim(
+            Primitive::PrawJsCode(JsRawInfo {
+                code: "\nif (import.meta.hot){\n  console.log('es6')\n}\n".to_string(),
+                is_stmt: true,
+            }),
+            vec![],
+            Location::none(),
+        );
+
+        let program = compiler.compile_program(&lam);
+        let raw_code = program
+            .block
+            .iter()
+            .find_map(|stmt| match &stmt.desc {
+                StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::RawJsCode(info),
+                    ..
+                }) => Some(info.code.as_str()),
+                _ => None,
+            })
+            .expect("compiled raw js statement");
+
+        assert_eq!(raw_code, "if (import.meta.hot){\n  console.log('es6')\n}");
     }
 
     #[test]

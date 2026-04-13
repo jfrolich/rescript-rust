@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 251 / 657 JS snapshots passing, 0 compile errors, 406 output diffs
+**Status:** 256 / 657 JS snapshots passing, 0 compile errors, 401 output diffs
 
 ## Goal
 
@@ -35,13 +35,49 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **251 / 657**
+- JS snapshot parity: **256 / 657**
 - Compile errors: **0**
-- Output diffs: **406**
+- Output diffs: **401**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed raw-`%%raw` payload
+  normalization slice across `compiler/core/js_exp_make.ml` together with the
+  `Ext_pp` newline-state behavior used by `compiler/core/js_dump.ml`
+- After reading OCaml's `raw_js_code` there, which builds
+  `Raw_js_code {code = String.trim s; ...}`, plus `compiler/ext/ext_pp.ml`
+  for `newline` / `at_least_two_lines`, the Rust backend now trims raw-JS
+  payloads at the matching JS-IR construction point in
+  `compiler-rust/src/lambda/compile.rs`, and the JS printer in
+  `compiler-rust/src/js_ir/printer.rs` now tracks OCaml's `last_new_line`
+  state so raw statement printers and purity trailers stop injecting extra
+  blank lines or dropping the final trailing newline
+- Added focused regression coverage in
+  `lambda::compile::tests::compile_raw_js_trims_outer_whitespace_before_js_ir_printing`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'lambda::compile::tests::compile_raw_js_trims_outer_whitespace_before_js_ir_printing' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_deps_program_keeps_blank_line_after_imports' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_4931.res -o /tmp/gpr_4931.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/gpr_4931.res` now matches its checked-in snapshot exactly
+  again, `tests/tests/src/ExternalShadow.res` remains an exact guard-file
+  match, and the raw-snippet diff files
+  `gpr_4931.res`, `gpr_4931_allow.res`, `bs_auto_uncurry_test.res`, and
+  `gpr_3492_test.res` all dropped out of `temp/rust-parity/diffs` after the
+  authoritative rerun; meanwhile `gpr_1692_test.res` still fails for the
+  separate pure-module elimination / dead-code issue, so that cluster remains
+  open
+- The authoritative JS snapshot baseline now reports **256 / 657** passing,
+  **0** compile errors, and **401** output diffs; this is a net **+5**
+  passing snapshots and **-5** output diffs from the previously recorded
+  **251 / 657**, **0** compile errors, **406** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed unreachable-let / export-body
