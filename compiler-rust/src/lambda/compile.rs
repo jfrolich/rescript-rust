@@ -64,6 +64,14 @@ impl TailLoopState {
     }
 }
 
+fn empty_switch_case_clause() -> CaseClause {
+    CaseClause {
+        body: vec![],
+        should_break: false,
+        comment: None,
+    }
+}
+
 /// Lambda compiler to JS IR.
 pub struct LambdaCompiler {
     id_gen: IdGenerator,
@@ -79,6 +87,76 @@ impl Default for LambdaCompiler {
 }
 
 impl LambdaCompiler {
+    fn grouped_switch_cases<'a, T: Clone, F>(
+        &self,
+        cases: &'a [(T, Lambda)],
+        default: Option<&'a Lambda>,
+        merge_cases: F,
+    ) -> Vec<(T, &'a Lambda, bool)>
+    where
+        F: Fn(&T, &T) -> bool,
+    {
+        let filtered: Vec<_> = cases
+            .iter()
+            .filter(|(_, lam)| default.map_or(true, |default| !super::lambda_eq_approx(lam, default)))
+            .collect();
+
+        let mut grouped = Vec::with_capacity(filtered.len());
+        let mut start = 0;
+        while start < filtered.len() {
+            let mut end = start + 1;
+            while end < filtered.len()
+                && merge_cases(&filtered[end - 1].0, &filtered[end].0)
+                && super::lambda_eq_approx(&filtered[end - 1].1, &filtered[end].1)
+            {
+                end += 1;
+            }
+
+            for idx in start..end {
+                let (tag, lam) = filtered[idx];
+                grouped.push((tag.clone(), lam, idx + 1 == end));
+            }
+            start = end;
+        }
+
+        grouped
+    }
+
+    fn grouped_switch_case_refs<'a, T: Clone, F>(
+        &self,
+        cases: &'a [(T, &'a Lambda)],
+        default: Option<&'a Lambda>,
+        merge_cases: F,
+    ) -> Vec<(T, &'a Lambda, bool)>
+    where
+        F: Fn(&T, &T) -> bool,
+    {
+        let filtered: Vec<_> = cases
+            .iter()
+            .filter(|(_, lam)| default.map_or(true, |default| !super::lambda_eq_approx(lam, default)))
+            .collect();
+
+        let mut grouped = Vec::with_capacity(filtered.len());
+        let mut start = 0;
+        while start < filtered.len() {
+            let mut end = start + 1;
+            while end < filtered.len()
+                && merge_cases(&filtered[end - 1].0, &filtered[end].0)
+                && super::lambda_eq_approx(filtered[end - 1].1, filtered[end].1)
+            {
+                end += 1;
+            }
+
+            for idx in start..end {
+                let (tag, lam) = filtered[idx];
+                grouped.push((tag.clone(), *lam, idx + 1 == end));
+            }
+            start = end;
+        }
+
+        grouped
+    }
+
     /// Create a new compiler.
     pub fn new() -> Self {
         Self {
@@ -786,18 +864,24 @@ impl LambdaCompiler {
     ) -> Block {
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
-        let mut cases = Vec::new();
-
-        for (tag, body) in &switch.sw_consts {
-            cases.push((
-                *tag,
-                CaseClause {
-                    body: self.compile_tail_loop_return_block(body, tail_loop),
-                    should_break: false,
-                    comment: None,
-                },
-            ));
-        }
+        let cases: Vec<_> = self
+            .grouped_switch_cases(&switch.sw_consts, switch.sw_failaction.as_deref(), |_, _| true)
+            .into_iter()
+            .map(|(tag, body, is_last)| {
+                (
+                    tag,
+                    if is_last {
+                        CaseClause {
+                            body: self.compile_tail_loop_return_block(body, tail_loop),
+                            should_break: false,
+                            comment: None,
+                        }
+                    } else {
+                        empty_switch_case_clause()
+                    },
+                )
+            })
+            .collect();
 
         let default_block = switch
             .sw_failaction
@@ -821,18 +905,22 @@ impl LambdaCompiler {
     ) -> Block {
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
-        let mut clauses = Vec::new();
-
-        for (tag, body) in cases {
-            clauses.push(StringClause {
-                tag_type: tag.clone(),
-                clause: CaseClause {
-                    body: self.compile_tail_loop_return_block(body, tail_loop),
-                    should_break: false,
-                    comment: None,
+        let clauses = self
+            .grouped_switch_cases(cases, default, |_, _| true)
+            .into_iter()
+            .map(|(tag, body, is_last)| StringClause {
+                tag_type: tag,
+                clause: if is_last {
+                    CaseClause {
+                        body: self.compile_tail_loop_return_block(body, tail_loop),
+                        should_break: false,
+                        comment: None,
+                    }
+                } else {
+                    empty_switch_case_clause()
                 },
-            });
-        }
+            })
+            .collect();
 
         let default_block =
             default.map(|fallback| self.compile_tail_loop_return_block(fallback, tail_loop));
@@ -1094,18 +1182,24 @@ impl LambdaCompiler {
             ident_info: IdentInfo::default(),
         }));
 
-        let mut cases = Vec::new();
-        for (tag, body) in &switch.sw_consts {
-            let body_block = self.compile_switch_value_block(&tmp, body);
-            cases.push((
-                *tag,
-                crate::js_ir::CaseClause {
-                    body: body_block,
-                    should_break: false,
-                    comment: None,
-                },
-            ));
-        }
+        let cases: Vec<_> = self
+            .grouped_switch_cases(&switch.sw_consts, switch.sw_failaction.as_deref(), |_, _| true)
+            .into_iter()
+            .map(|(tag, body, is_last)| {
+                (
+                    tag,
+                    if is_last {
+                        crate::js_ir::CaseClause {
+                            body: self.compile_switch_value_block(&tmp, body),
+                            should_break: false,
+                            comment: None,
+                        }
+                    } else {
+                        empty_switch_case_clause()
+                    },
+                )
+            })
+            .collect();
 
         let default_block = switch
             .sw_failaction
@@ -1158,18 +1252,22 @@ impl LambdaCompiler {
             };
         }
 
-        let mut clauses = Vec::new();
-        for (tag, body) in cases {
-            let body_block = self.compile_switch_value_block(&tmp, body);
-            clauses.push(crate::js_ir::StringClause {
-                tag_type: tag.clone(),
-                clause: crate::js_ir::CaseClause {
-                    body: body_block,
-                    should_break: false,
-                    comment: None,
+        let clauses: Vec<_> = self
+            .grouped_switch_cases(cases, default, |_, _| true)
+            .into_iter()
+            .map(|(tag, body, is_last)| crate::js_ir::StringClause {
+                tag_type: tag,
+                clause: if is_last {
+                    crate::js_ir::CaseClause {
+                        body: self.compile_switch_value_block(&tmp, body),
+                        should_break: false,
+                        comment: None,
+                    }
+                } else {
+                    empty_switch_case_clause()
                 },
-            });
-        }
+            })
+            .collect();
 
         let default_block = default.map(|fallback| self.compile_switch_value_block(&tmp, fallback));
 
@@ -1624,14 +1722,19 @@ impl LambdaCompiler {
             return block;
         }
 
-        let clauses = cases
-            .iter()
-            .map(|(tag, body)| StringClause {
-                tag_type: tag.clone(),
-                clause: CaseClause {
-                    body: self.compile_switch_value_block(result, body),
-                    should_break: false,
-                    comment: None,
+        let clauses = self
+            .grouped_switch_case_refs(cases, default, |_, _| true)
+            .into_iter()
+            .map(|(tag, body, is_last)| StringClause {
+                tag_type: tag,
+                clause: if is_last {
+                    CaseClause {
+                        body: self.compile_switch_value_block(result, body),
+                        should_break: false,
+                        comment: None,
+                    }
+                } else {
+                    empty_switch_case_clause()
                 },
             })
             .collect();
@@ -1658,14 +1761,19 @@ impl LambdaCompiler {
             return block;
         }
 
-        let clauses = cases
-            .iter()
-            .map(|(tag, body)| StringClause {
-                tag_type: tag.clone(),
-                clause: CaseClause {
-                    body: self.compile_return_block(body),
-                    should_break: false,
-                    comment: None,
+        let clauses = self
+            .grouped_switch_case_refs(cases, default, |_, _| true)
+            .into_iter()
+            .map(|(tag, body, is_last)| StringClause {
+                tag_type: tag,
+                clause: if is_last {
+                    CaseClause {
+                        body: self.compile_return_block(body),
+                        should_break: false,
+                        comment: None,
+                    }
+                } else {
+                    empty_switch_case_clause()
                 },
             })
             .collect();
@@ -1691,17 +1799,23 @@ impl LambdaCompiler {
             return block;
         }
 
-        let clauses: Vec<_> = cases
-            .iter()
-            .map(|(tag, body)| {
-                let body = self.compile_effect_block(body);
-                StringClause {
-                    tag_type: tag.clone(),
-                    clause: CaseClause {
+        let clauses: Vec<_> = self
+            .grouped_switch_case_refs(cases, default, |_, _| true)
+            .into_iter()
+            .map(|(tag, body, is_last)| {
+                let clause = if is_last {
+                    let body = self.compile_effect_block(body);
+                    CaseClause {
                         should_break: !block_terminates(&body),
                         body,
                         comment: None,
-                    },
+                    }
+                } else {
+                    empty_switch_case_clause()
+                };
+                StringClause {
+                    tag_type: tag,
+                    clause,
                 }
             })
             .collect();
@@ -2197,17 +2311,24 @@ impl LambdaCompiler {
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
 
-        let mut cases = Vec::new();
-        for (tag, body) in &switch.sw_consts {
-            cases.push((
-                *tag,
-                crate::js_ir::CaseClause {
-                    body: self.compile_switch_value_block(result, body),
-                    should_break: false,
-                    comment: None,
-                },
-            ));
-        }
+        let cases: Vec<_> = self
+            .grouped_switch_cases(&switch.sw_consts, switch.sw_failaction.as_deref(), |_, _| true)
+            .into_iter()
+            .map(|(tag, body, is_last)| {
+                (
+                    tag,
+                    if is_last {
+                        crate::js_ir::CaseClause {
+                            body: self.compile_switch_value_block(result, body),
+                            should_break: false,
+                            comment: None,
+                        }
+                    } else {
+                        empty_switch_case_clause()
+                    },
+                )
+            })
+            .collect();
 
         let default_block = switch
             .sw_failaction
@@ -2247,17 +2368,22 @@ impl LambdaCompiler {
             return block;
         }
 
-        let mut clauses = Vec::new();
-        for (tag, body) in cases {
-            clauses.push(crate::js_ir::StringClause {
-                tag_type: tag.clone(),
-                clause: crate::js_ir::CaseClause {
-                    body: self.compile_switch_value_block(result, body),
-                    should_break: false,
-                    comment: None,
+        let clauses: Vec<_> = self
+            .grouped_switch_cases(cases, default, |_, _| true)
+            .into_iter()
+            .map(|(tag, body, is_last)| crate::js_ir::StringClause {
+                tag_type: tag,
+                clause: if is_last {
+                    crate::js_ir::CaseClause {
+                        body: self.compile_switch_value_block(result, body),
+                        should_break: false,
+                        comment: None,
+                    }
+                } else {
+                    empty_switch_case_clause()
                 },
-            });
-        }
+            })
+            .collect();
 
         let default_block =
             default.map(|fallback| self.compile_assign_to_target_block(result, fallback));
@@ -2294,17 +2420,24 @@ impl LambdaCompiler {
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
 
-        let mut cases = Vec::new();
-        for (tag, body) in &switch.sw_consts {
-            cases.push((
-                *tag,
-                crate::js_ir::CaseClause {
-                    body: self.compile_return_block(body),
-                    should_break: false,
-                    comment: None,
-                },
-            ));
-        }
+        let cases = self
+            .grouped_switch_cases(&switch.sw_consts, switch.sw_failaction.as_deref(), |_, _| true)
+            .into_iter()
+            .map(|(tag, body, is_last)| {
+                (
+                    tag,
+                    if is_last {
+                        crate::js_ir::CaseClause {
+                            body: self.compile_return_block(body),
+                            should_break: false,
+                            comment: None,
+                        }
+                    } else {
+                        empty_switch_case_clause()
+                    },
+                )
+            })
+            .collect();
 
         let default_block = switch
             .sw_failaction
@@ -2342,17 +2475,22 @@ impl LambdaCompiler {
             return block;
         }
 
-        let mut clauses = Vec::new();
-        for (tag, body) in cases {
-            clauses.push(crate::js_ir::StringClause {
-                tag_type: tag.clone(),
-                clause: crate::js_ir::CaseClause {
-                    body: self.compile_return_block(body),
-                    should_break: false,
-                    comment: None,
+        let clauses: Vec<_> = self
+            .grouped_switch_cases(cases, default, |_, _| true)
+            .into_iter()
+            .map(|(tag, body, is_last)| crate::js_ir::StringClause {
+                tag_type: tag,
+                clause: if is_last {
+                    crate::js_ir::CaseClause {
+                        body: self.compile_return_block(body),
+                        should_break: false,
+                        comment: None,
+                    }
+                } else {
+                    empty_switch_case_clause()
                 },
-            });
-        }
+            })
+            .collect();
 
         let default_block = default.map(|fallback| self.compile_return_block(fallback));
 
@@ -2398,18 +2536,23 @@ impl LambdaCompiler {
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
 
-        let mut cases = Vec::new();
-        for (tag, body) in &switch.sw_consts {
-            let body = self.compile_effect_block(body);
-            cases.push((
-                *tag,
-                crate::js_ir::CaseClause {
-                    should_break: !block_terminates(&body),
-                    body,
-                    comment: None,
-                },
-            ));
-        }
+        let cases: Vec<_> = self
+            .grouped_switch_cases(&switch.sw_consts, switch.sw_failaction.as_deref(), |_, _| true)
+            .into_iter()
+            .map(|(tag, body, is_last)| {
+                let clause = if is_last {
+                    let body = self.compile_effect_block(body);
+                    crate::js_ir::CaseClause {
+                        should_break: !block_terminates(&body),
+                        body,
+                        comment: None,
+                    }
+                } else {
+                    empty_switch_case_clause()
+                };
+                (tag, clause)
+            })
+            .collect();
 
         let default_block = switch
             .sw_failaction
@@ -2459,18 +2602,26 @@ impl LambdaCompiler {
             return block;
         }
 
-        let mut clauses = Vec::new();
-        for (tag, body) in cases {
-            let body = self.compile_effect_block(body);
-            clauses.push(crate::js_ir::StringClause {
-                tag_type: tag.clone(),
-                clause: crate::js_ir::CaseClause {
-                    should_break: !block_terminates(&body),
-                    body,
-                    comment: None,
-                },
-            });
-        }
+        let clauses: Vec<_> = self
+            .grouped_switch_cases(cases, default, |_, _| true)
+            .into_iter()
+            .map(|(tag, body, is_last)| {
+                let clause = if is_last {
+                    let body = self.compile_effect_block(body);
+                    crate::js_ir::CaseClause {
+                        should_break: !block_terminates(&body),
+                        body,
+                        comment: None,
+                    }
+                } else {
+                    empty_switch_case_clause()
+                };
+                crate::js_ir::StringClause {
+                    tag_type: tag,
+                    clause,
+                }
+            })
+            .collect();
 
         let default_block = default
             .map(|fallback| self.compile_effect_block(fallback))
@@ -9740,6 +9891,106 @@ mod tests {
     }
 
     #[test]
+    fn int_switch_expressions_group_adjacent_equal_cases_and_drop_default_duplicates() {
+        let mut compiler = LambdaCompiler::new();
+        let scrutinee = Ident::create_local("scrutinee");
+        let compiled = compiler.compile_expr(&Lambda::Lswitch(
+            Box::new(Lambda::var(scrutinee.clone())),
+            LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![
+                    (0, Lambda::const_(Constant::int(1))),
+                    (1, Lambda::const_(Constant::int(1))),
+                    (2, Lambda::const_(Constant::int(2))),
+                ],
+                sw_blocks_full: false,
+                sw_blocks: vec![],
+                sw_failaction: Some(Box::new(Lambda::const_(Constant::int(2)))),
+                sw_names: None,
+            },
+        ));
+
+        let [declare, switch_stmt] = compiled.prelude.as_slice() else {
+            panic!("expected a declaration and switch statement");
+        };
+        let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc
+        else {
+            panic!("expected the switch temporary declaration");
+        };
+        let StatementDesc::IntSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
+            panic!("expected an integer switch with a default block");
+        };
+        assert!(matches!(
+            test,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&scrutinee)
+        ));
+        assert_eq!(clauses.len(), 2, "expected the default-duplicate case to be filtered");
+        assert_eq!(clauses[0].0, 0);
+        assert!(clauses[0].1.body.is_empty(), "expected the first grouped case to fall through");
+        assert!(!clauses[0].1.should_break);
+        assert_eq!(clauses[1].0, 1);
+        assert_switch_case_assigns_int_result(&clauses[1].1.body, result, 1);
+        assert_switch_case_assigns_int_result(default_block, result, 2);
+    }
+
+    #[test]
+    fn string_switch_effects_group_adjacent_equal_cases_and_drop_default_duplicates() {
+        let mut compiler = LambdaCompiler::new();
+        let scrutinee = Ident::create_local("scrutinee");
+        let captured = Ident::create_local("captured");
+        let block = compiler.compile_effect_block(&Lambda::LstringSwitch(
+            Box::new(Lambda::var(scrutinee.clone())),
+            vec![
+                (
+                    "A".to_string(),
+                    Lambda::Lassign(captured.clone(), Box::new(Lambda::const_(Constant::int(1)))),
+                ),
+                (
+                    "B".to_string(),
+                    Lambda::Lassign(captured.clone(), Box::new(Lambda::const_(Constant::int(1)))),
+                ),
+                (
+                    "C".to_string(),
+                    Lambda::Lassign(captured.clone(), Box::new(Lambda::const_(Constant::int(2)))),
+                ),
+            ],
+            Some(Box::new(Lambda::Lassign(
+                captured.clone(),
+                Box::new(Lambda::const_(Constant::int(2))),
+            ))),
+        ));
+
+        let [switch_stmt] = block.as_slice() else {
+            panic!("expected a single string switch");
+        };
+        let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc
+        else {
+            panic!("expected a string switch with a default block");
+        };
+        assert!(matches!(
+            test,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&scrutinee)
+        ));
+        assert_eq!(clauses.len(), 2, "expected the default-duplicate case to be filtered");
+        assert_eq!(clauses[0].tag_type, "A");
+        assert!(
+            clauses[0].clause.body.is_empty(),
+            "expected the first grouped case to fall through"
+        );
+        assert!(!clauses[0].clause.should_break);
+        assert_eq!(clauses[1].tag_type, "B");
+        assert!(clauses[1].clause.should_break);
+        assert_effect_assignment_writes_int(&clauses[1].clause.body, &captured, 1);
+        assert_effect_assignment_writes_int(default_block, &captured, 2);
+    }
+
+    #[test]
     fn let_bindings_lower_string_switches_directly_into_the_declared_binding() {
         let mut compiler = LambdaCompiler::new();
         let version = Ident::create_local("version");
@@ -10857,6 +11108,34 @@ mod tests {
                 ));
             }
             other => panic!("expected a default assignment, got {other:?}"),
+        }
+    }
+
+    fn assert_effect_assignment_writes_int(block: &Block, ident: &Ident, expected: i32) {
+        let [assign] = block.as_slice() else {
+            panic!("expected a single effect assignment");
+        };
+        match &assign.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Bin(BinOp::Eq, left, right),
+                ..
+            }) => {
+                assert!(matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(ident)
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i, .. }),
+                        ..
+                    } if *i == expected
+                ));
+            }
+            other => panic!("expected an effect assignment, got {other:?}"),
         }
     }
 
