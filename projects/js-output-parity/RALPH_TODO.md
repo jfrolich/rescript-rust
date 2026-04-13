@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 175 / 657 JS snapshots passing, 0 compile errors, 482 output diffs
+**Status:** 180 / 657 JS snapshots passing, 0 compile errors, 477 output diffs
 
 ## Goal
 
@@ -35,13 +35,47 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **175 / 657**
+- JS snapshot parity: **180 / 657**
 - Compile errors: **0**
-- Output diffs: **482**
+- Output diffs: **477**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration took a contained OCaml-aligned printer slice that was
+  still blocking exact JS snapshots across several files
+- `compiler-rust/src/js_ir/printer.rs` now matches
+  `compiler/core/js_dump.ml` `Number (Float {f})` more closely by routing float
+  literals through the OCaml `compiler/core/js_number.ml`
+  `caml_float_literal_to_js_string` behavior instead of printing the raw parsed
+  literal text unchanged
+- Rust now strips OCaml-only float-literal syntax that should not survive into
+  emitted JS byte-for-byte, including trailing dots and underscores on
+  integral-valued float literals, and it also normalizes simple hexadecimal
+  float-literal tokens like `0x10` to the decimal JS shape OCaml prints
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_number` for integral float-literal
+  normalization cases: `1. -> 1`, `0012. -> 12`, `-0. -> -0`, and
+  `0x10 -> 16`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_number -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/b.res -o /tmp/b.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/attr_test.res -o /tmp/attr_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/external_ppx.res -o /tmp/external_ppx.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/b.res`, `tests/tests/src/attr_test.res`,
+  `tests/tests/src/external_ppx.res`, and `tests/tests/src/js_math_test.res`
+  now match their checked-in snapshots exactly, while
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same printer change
+- The authoritative JS snapshot baseline now reports **180 / 657** passing,
+  **0** compile errors, and **477** output diffs after this OCaml-aligned
+  float-literal printer port; this is a net **+5** over the previous recorded
+  baseline
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   but this iteration also fixed one still-missing late-Phase-3 primitive slice

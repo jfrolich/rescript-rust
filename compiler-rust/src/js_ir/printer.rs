@@ -880,10 +880,12 @@ impl JsPrinter {
                 let printed_args = match args.as_slice() {
                     // OCaml's js_dump.ml omits the synthetic unit argument so `f(())`
                     // prints as `f()`, while plain `undefined` stays explicit.
-                    [Expression {
-                        desc: ExpressionDesc::Undefined { is_unit: true },
-                        ..
-                    }] => &[][..],
+                    [
+                        Expression {
+                            desc: ExpressionDesc::Undefined { is_unit: true },
+                            ..
+                        },
+                    ] => &[][..],
                     _ => args.as_slice(),
                 };
                 for (i, arg) in printed_args.iter().enumerate() {
@@ -1455,7 +1457,7 @@ impl JsPrinter {
     /// Print a number
     fn print_number(&mut self, n: &Number, level: u8) {
         let s = match n {
-            Number::Float(f) => f.f.clone(),
+            Number::Float(f) => normalize_float_literal_for_js(&f.f),
             Number::Int { i, c: Some(c) } => {
                 format!("/* {} */{}", format_char_comment(*c), i)
             }
@@ -1600,11 +1602,10 @@ fn else_is_single_return_undefined(block: &Block) -> bool {
     matches!(
         block.as_slice(),
         [Statement {
-            desc:
-                StatementDesc::Return(Expression {
-                    desc: ExpressionDesc::Undefined { .. },
-                    ..
-                }),
+            desc: StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Undefined { .. },
+                ..
+            }),
             ..
         }]
     )
@@ -1622,14 +1623,18 @@ fn function_tail_statement_prints(stmt: &Statement) -> bool {
 
 fn single_arrow_function_expr(body: &Block) -> Option<&Expression> {
     match body.as_slice() {
-        [Statement {
-            desc: StatementDesc::Return(expr),
-            ..
-        }] if !matches!(expr.desc, ExpressionDesc::Undefined { .. }) => Some(expr),
-        [Statement {
-            desc: StatementDesc::Exp(expr),
-            ..
-        }] => Some(expr),
+        [
+            Statement {
+                desc: StatementDesc::Return(expr),
+                ..
+            },
+        ] if !matches!(expr.desc, ExpressionDesc::Undefined { .. }) => Some(expr),
+        [
+            Statement {
+                desc: StatementDesc::Exp(expr),
+                ..
+            },
+        ] => Some(expr),
         _ => None,
     }
 }
@@ -1646,6 +1651,70 @@ fn format_char_comment(codepoint: i32) -> String {
         None => "?".to_string(),
     };
     format!("'{escaped}'")
+}
+
+fn normalize_float_literal_for_js(float_str: &str) -> String {
+    if is_hex_float_literal(float_str) {
+        normalize_hex_float_literal(float_str).unwrap_or_else(|| transform_float_literal(float_str))
+    } else {
+        transform_float_literal(float_str)
+    }
+}
+
+fn is_hex_float_literal(float_str: &str) -> bool {
+    let bytes = float_str.as_bytes();
+    let mut cur = 0;
+    if matches!(bytes.first(), Some(b'-' | b'+')) {
+        cur += 1;
+    }
+    matches!(bytes.get(cur), Some(b'0')) && matches!(bytes.get(cur + 1), Some(b'x' | b'X'))
+}
+
+fn normalize_hex_float_literal(float_str: &str) -> Option<String> {
+    let (negative, digits) = if let Some(rest) = float_str.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = float_str.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, float_str)
+    };
+
+    let digits = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))?;
+    let digits = digits.replace('_', "");
+    if digits.is_empty() || digits.contains('.') || digits.contains('p') || digits.contains('P') {
+        return None;
+    }
+
+    let value = u128::from_str_radix(&digits, 16).ok()?;
+    let rendered = value.to_string();
+    Some(if negative {
+        format!("-{rendered}")
+    } else {
+        rendered
+    })
+}
+
+fn transform_float_literal(float_str: &str) -> String {
+    let bytes = float_str.as_bytes();
+    let len = bytes.len();
+    let mut start = 0;
+    while start + 1 < len && bytes[start] == b'0' && bytes[start + 1] != b'.' {
+        start += 1;
+    }
+
+    let mut out = String::with_capacity(len.saturating_sub(start));
+    for (idx, byte) in bytes[start..].iter().copied().enumerate() {
+        if byte == b'_' {
+            continue;
+        }
+        if byte == b'.' && start + idx == len - 1 {
+            continue;
+        }
+        out.push(byte as char);
+    }
+    out
 }
 
 fn record_uses_array_syntax(fields: &[(String, bool)]) -> bool {
@@ -2188,6 +2257,18 @@ mod tests {
 
         let expr = Expression::number(Number::float("3.14"));
         assert_eq!(print_expression(&expr), "3.14");
+
+        let expr = Expression::number(Number::float("1."));
+        assert_eq!(print_expression(&expr), "1");
+
+        let expr = Expression::number(Number::float("0012."));
+        assert_eq!(print_expression(&expr), "12");
+
+        let expr = Expression::number(Number::float("-0."));
+        assert_eq!(print_expression(&expr), "-0");
+
+        let expr = Expression::number(Number::float("0x10"));
+        assert_eq!(print_expression(&expr), "16");
 
         let expr = Expression::number(Number::char('A'));
         assert_eq!(print_expression(&expr), "/* 'A' */65");
