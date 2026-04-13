@@ -530,6 +530,43 @@ Remaining internal compile errors under the measured wrapper baseline:
 
 ## Latest Session Findings
 
+- `compiler-rust/src/lambda/compile.rs` now matches one more slice of
+  OCaml `core/lam_compile.ml` more closely on the Rust JS path:
+  string/tag switches now honor the same small-case `compile_general_cases`
+  lowering for the backend cases Rust can prove locally, and named-variant
+  dispatch now follows OCaml's saturation checks before deciding whether it
+  needs an object/non-object split
+- Concretely:
+  - single-case `LstringSwitch` nodes with a default now lower through direct
+    `if/else` assignment instead of always forcing a `switch`
+  - block-only named-variant switches with a saturated const side no longer
+    emit a redundant `typeof ... === "object"` gate before switching on `TAG`
+  - the same direct-tag decision now applies consistently across value,
+    return, and effect continuations
+- Added focused coverage for this slice in
+  `single_case_string_switches_with_default_lower_to_if_else` and
+  `named_variant_return_switches_with_only_payload_cases_skip_object_split`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml --release single_case_string_switches_with_default_lower_to_if_else -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml --release named_variant_return_switches_with_only_payload_cases_skip_object_split -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/LetUnwrap.res -o /tmp/LetUnwrap.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/LetUnwrap.res` narrowed materially:
+  the old `switch (s)` / `switch (x.TAG)` / `typeof x === "object"` scaffolding
+  is gone from the result/option unwrap path, and the remaining drift has moved
+  on to later backend or printer shaping such as branch polarity, compact object
+  literal layout, and statement-vs-expression byte shape
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the small-case switch change, which confirms this `lam_compile` slice does
+  not perturb the already-stable external-shadow path
+- The authoritative JS snapshot baseline remains **130 / 657** passing,
+  **0** compile errors, and **527** output diffs after this OCaml-aligned
+  small-case string-switch / named-variant dispatch fix; the change is kept
+  because it removes a real backend lowering gap even though the checked-in
+  corpus total stays flat
+
 - `compiler-rust/src/lambda/simplify.rs` now matches one more slice of
   OCaml `core/lam_pass_alpha_conversion.ml` /
   `core/lam_pass_lets_dce.ml` more closely on the Rust JS path:

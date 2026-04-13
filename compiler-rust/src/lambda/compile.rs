@@ -653,6 +653,24 @@ impl LambdaCompiler {
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
         }));
+        let borrowed_cases: Vec<_> = cases
+            .iter()
+            .map(|(tag, body)| (tag.clone(), body))
+            .collect();
+
+        if let Some(small) = self.compile_small_string_switch_assignment(
+            &tmp,
+            scrut_compiled.expr.clone(),
+            &borrowed_cases,
+            default,
+            false,
+        ) {
+            prelude.extend(small);
+            return Compiled {
+                prelude,
+                expr: Expression::var(tmp),
+            };
+        }
 
         let mut clauses = Vec::new();
         for (tag, body) in cases {
@@ -776,17 +794,147 @@ impl LambdaCompiler {
         ))
     }
 
+    fn string_switch_test(&self, test: Expression, tag: &str) -> Expression {
+        Expression::bin(BinOp::EqEqEq, test, Expression::string(tag))
+    }
+
+    fn compile_small_string_switch_assignment(
+        &mut self,
+        result: &Ident,
+        test: Expression,
+        cases: &[(String, &Lambda)],
+        default: Option<&Lambda>,
+        complete: bool,
+    ) -> Option<Block> {
+        match cases {
+            [] => Some(
+                default
+                    .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                    .unwrap_or_default(),
+            ),
+            [(_tag, body)] if complete && default.is_none() => {
+                Some(self.compile_assign_to_target_block(result, body))
+            }
+            [(tag, body)] => Some(vec![Statement::if_(
+                self.string_switch_test(test, tag),
+                self.compile_assign_to_target_block(result, body),
+                default
+                    .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                    .unwrap_or_default(),
+            )]),
+            [(tag, then_body), (_, else_body)] if complete && default.is_none() => {
+                Some(vec![Statement::if_(
+                    self.string_switch_test(test, tag),
+                    self.compile_assign_to_target_block(result, then_body),
+                    self.compile_assign_to_target_block(result, else_body),
+                )])
+            }
+            _ => None,
+        }
+    }
+
+    fn compile_small_string_switch_return(
+        &mut self,
+        test: Expression,
+        cases: &[(String, &Lambda)],
+        default: Option<&Lambda>,
+        complete: bool,
+    ) -> Option<Block> {
+        match cases {
+            [] => Some(
+                default
+                    .map(|fallback| self.compile_return_block(fallback))
+                    .unwrap_or_default(),
+            ),
+            [(_tag, body)] if complete && default.is_none() => {
+                Some(self.compile_return_block(body))
+            }
+            [(tag, body)] => Some(vec![Statement::if_(
+                self.string_switch_test(test, tag),
+                self.compile_return_block(body),
+                default
+                    .map(|fallback| self.compile_return_block(fallback))
+                    .unwrap_or_default(),
+            )]),
+            [(tag, then_body), (_, else_body)] if complete && default.is_none() => {
+                Some(vec![Statement::if_(
+                    self.string_switch_test(test, tag),
+                    self.compile_return_block(then_body),
+                    self.compile_return_block(else_body),
+                )])
+            }
+            _ => None,
+        }
+    }
+
+    fn compile_effect_if(&self, cond: Expression, then_block: Block, else_block: Block) -> Block {
+        if then_block.is_empty() {
+            if else_block.is_empty() {
+                vec![]
+            } else {
+                vec![Statement::if_(
+                    Expression::new(ExpressionDesc::JsNot(Box::new(cond))),
+                    else_block,
+                    vec![],
+                )]
+            }
+        } else if else_block.is_empty() {
+            vec![Statement::if_(cond, then_block, vec![])]
+        } else {
+            vec![Statement::if_(cond, then_block, else_block)]
+        }
+    }
+
+    fn compile_small_string_switch_effect(
+        &mut self,
+        test: Expression,
+        cases: &[(String, &Lambda)],
+        default: Option<&Lambda>,
+        complete: bool,
+    ) -> Option<Block> {
+        match cases {
+            [] => Some(
+                default
+                    .map(|fallback| self.compile_effect_block(fallback))
+                    .unwrap_or_default(),
+            ),
+            [(_tag, body)] if complete && default.is_none() => {
+                Some(self.compile_effect_block(body))
+            }
+            [(tag, body)] => {
+                let cond = self.string_switch_test(test, tag);
+                let then_block = self.compile_effect_block(body);
+                let else_block = default
+                    .map(|fallback| self.compile_effect_block(fallback))
+                    .unwrap_or_default();
+                Some(self.compile_effect_if(cond, then_block, else_block))
+            }
+            [(tag, then_body), (_, else_body)] if complete && default.is_none() => {
+                let cond = self.string_switch_test(test, tag);
+                let then_block = self.compile_effect_block(then_body);
+                let else_block = self.compile_effect_block(else_body);
+                Some(self.compile_effect_if(cond, then_block, else_block))
+            }
+            _ => None,
+        }
+    }
+
     fn compile_named_string_switch_assignment(
         &mut self,
         result: &Ident,
         test: Expression,
         cases: &[(String, &Lambda)],
         default: Option<&Lambda>,
+        complete: bool,
     ) -> Block {
-        if cases.is_empty() {
-            return default
-                .map(|fallback| self.compile_assign_to_target_block(result, fallback))
-                .unwrap_or_default();
+        if let Some(block) = self.compile_small_string_switch_assignment(
+            result,
+            test.clone(),
+            cases,
+            default,
+            complete,
+        ) {
+            return block;
         }
 
         let clauses = cases
@@ -815,11 +963,12 @@ impl LambdaCompiler {
         test: Expression,
         cases: &[(String, &Lambda)],
         default: Option<&Lambda>,
+        complete: bool,
     ) -> Block {
-        if cases.is_empty() {
-            return default
-                .map(|fallback| self.compile_return_block(fallback))
-                .unwrap_or_default();
+        if let Some(block) =
+            self.compile_small_string_switch_return(test.clone(), cases, default, complete)
+        {
+            return block;
         }
 
         let clauses = cases
@@ -847,11 +996,12 @@ impl LambdaCompiler {
         test: Expression,
         cases: &[(String, &Lambda)],
         default: Option<&Lambda>,
+        complete: bool,
     ) -> Block {
-        if cases.is_empty() {
-            return default
-                .map(|fallback| self.compile_effect_block(fallback))
-                .unwrap_or_default();
+        if let Some(block) =
+            self.compile_small_string_switch_effect(test.clone(), cases, default, complete)
+        {
+            return block;
         }
 
         let clauses: Vec<_> = cases
@@ -908,12 +1058,14 @@ impl LambdaCompiler {
                     scrut_expr.clone(),
                     &const_cases,
                     const_default,
+                    switch.sw_consts_full,
                 );
                 let block_branch = self.compile_named_string_switch_assignment(
                     result,
                     self.variant_tag_expr(scrut_expr.clone()),
                     &block_cases,
                     block_default,
+                    switch.sw_blocks_full,
                 );
                 if const_branch.is_empty() {
                     vec![Statement::if_(
@@ -935,24 +1087,46 @@ impl LambdaCompiler {
                     )]
                 }
             }
-            (false, true) => self.compile_named_string_switch_assignment(
-                result,
-                scrut_expr,
-                &const_cases,
-                const_default,
-            ),
-            (true, false) => vec![Statement::if_(
-                self.variant_object_test(scrut_expr.clone()),
-                self.compile_named_string_switch_assignment(
+            (false, true) => {
+                let const_branch = self.compile_named_string_switch_assignment(
                     result,
-                    self.variant_tag_expr(scrut_expr),
+                    scrut_expr.clone(),
+                    &const_cases,
+                    const_default,
+                    switch.sw_consts_full,
+                );
+                if switch.sw_blocks_full {
+                    const_branch
+                } else {
+                    vec![Statement::if_(
+                        self.variant_non_object_test(scrut_expr),
+                        const_branch,
+                        block_default
+                            .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                            .unwrap_or_default(),
+                    )]
+                }
+            }
+            (true, false) => {
+                let block_branch = self.compile_named_string_switch_assignment(
+                    result,
+                    self.variant_tag_expr(scrut_expr.clone()),
                     &block_cases,
                     block_default,
-                ),
-                const_default
-                    .map(|fallback| self.compile_assign_to_target_block(result, fallback))
-                    .unwrap_or_default(),
-            )],
+                    switch.sw_blocks_full,
+                );
+                if switch.sw_consts_full {
+                    block_branch
+                } else {
+                    vec![Statement::if_(
+                        self.variant_object_test(scrut_expr),
+                        block_branch,
+                        const_default
+                            .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                            .unwrap_or_default(),
+                    )]
+                }
+            }
             (true, true) => const_default
                 .map(|fallback| self.compile_assign_to_target_block(result, fallback))
                 .unwrap_or_default(),
@@ -980,11 +1154,13 @@ impl LambdaCompiler {
                     scrut_expr.clone(),
                     &const_cases,
                     const_default,
+                    switch.sw_consts_full,
                 );
                 let block_branch = self.compile_named_string_switch_return(
                     self.variant_tag_expr(scrut_expr.clone()),
                     &block_cases,
                     block_default,
+                    switch.sw_blocks_full,
                 );
                 if const_branch.is_empty() {
                     vec![Statement::if_(
@@ -1007,19 +1183,43 @@ impl LambdaCompiler {
                 }
             }
             (false, true) => {
-                self.compile_named_string_switch_return(scrut_expr, &const_cases, const_default)
+                let const_branch = self.compile_named_string_switch_return(
+                    scrut_expr.clone(),
+                    &const_cases,
+                    const_default,
+                    switch.sw_consts_full,
+                );
+                if switch.sw_blocks_full {
+                    const_branch
+                } else {
+                    vec![Statement::if_(
+                        self.variant_non_object_test(scrut_expr),
+                        const_branch,
+                        block_default
+                            .map(|fallback| self.compile_return_block(fallback))
+                            .unwrap_or_default(),
+                    )]
+                }
             }
-            (true, false) => vec![Statement::if_(
-                self.variant_object_test(scrut_expr.clone()),
-                self.compile_named_string_switch_return(
-                    self.variant_tag_expr(scrut_expr),
+            (true, false) => {
+                let block_branch = self.compile_named_string_switch_return(
+                    self.variant_tag_expr(scrut_expr.clone()),
                     &block_cases,
                     block_default,
-                ),
-                const_default
-                    .map(|fallback| self.compile_return_block(fallback))
-                    .unwrap_or_default(),
-            )],
+                    switch.sw_blocks_full,
+                );
+                if switch.sw_consts_full {
+                    block_branch
+                } else {
+                    vec![Statement::if_(
+                        self.variant_object_test(scrut_expr),
+                        block_branch,
+                        const_default
+                            .map(|fallback| self.compile_return_block(fallback))
+                            .unwrap_or_default(),
+                    )]
+                }
+            }
             (true, true) => const_default
                 .map(|fallback| self.compile_return_block(fallback))
                 .unwrap_or_default(),
@@ -1047,11 +1247,13 @@ impl LambdaCompiler {
                     scrut_expr.clone(),
                     &const_cases,
                     const_default,
+                    switch.sw_consts_full,
                 );
                 let block_branch = self.compile_named_string_switch_effect(
                     self.variant_tag_expr(scrut_expr.clone()),
                     &block_cases,
                     block_default,
+                    switch.sw_blocks_full,
                 );
                 if const_branch.is_empty() {
                     vec![Statement::if_(
@@ -1074,19 +1276,39 @@ impl LambdaCompiler {
                 }
             }
             (false, true) => {
-                self.compile_named_string_switch_effect(scrut_expr, &const_cases, const_default)
+                let const_branch = self.compile_named_string_switch_effect(
+                    scrut_expr.clone(),
+                    &const_cases,
+                    const_default,
+                    switch.sw_consts_full,
+                );
+                if switch.sw_blocks_full {
+                    const_branch
+                } else {
+                    let cond = self.variant_non_object_test(scrut_expr);
+                    let else_block = block_default
+                        .map(|fallback| self.compile_effect_block(fallback))
+                        .unwrap_or_default();
+                    self.compile_effect_if(cond, const_branch, else_block)
+                }
             }
-            (true, false) => vec![Statement::if_(
-                self.variant_object_test(scrut_expr.clone()),
-                self.compile_named_string_switch_effect(
-                    self.variant_tag_expr(scrut_expr),
+            (true, false) => {
+                let block_branch = self.compile_named_string_switch_effect(
+                    self.variant_tag_expr(scrut_expr.clone()),
                     &block_cases,
                     block_default,
-                ),
-                const_default
-                    .map(|fallback| self.compile_effect_block(fallback))
-                    .unwrap_or_default(),
-            )],
+                    switch.sw_blocks_full,
+                );
+                if switch.sw_consts_full {
+                    block_branch
+                } else {
+                    let cond = self.variant_object_test(scrut_expr);
+                    let else_block = const_default
+                        .map(|fallback| self.compile_effect_block(fallback))
+                        .unwrap_or_default();
+                    self.compile_effect_if(cond, block_branch, else_block)
+                }
+            }
             (true, true) => const_default
                 .map(|fallback| self.compile_effect_block(fallback))
                 .unwrap_or_default(),
@@ -1238,6 +1460,21 @@ impl LambdaCompiler {
     ) -> Block {
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
+        let borrowed_cases: Vec<_> = cases
+            .iter()
+            .map(|(tag, body)| (tag.clone(), body))
+            .collect();
+
+        if let Some(small) = self.compile_small_string_switch_assignment(
+            result,
+            scrut_compiled.expr.clone(),
+            &borrowed_cases,
+            default,
+            false,
+        ) {
+            block.extend(small);
+            return block;
+        }
 
         let mut clauses = Vec::new();
         for (tag, body) in cases {
@@ -1307,6 +1544,20 @@ impl LambdaCompiler {
     ) -> Block {
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
+        let borrowed_cases: Vec<_> = cases
+            .iter()
+            .map(|(tag, body)| (tag.clone(), body))
+            .collect();
+
+        if let Some(small) = self.compile_small_string_switch_return(
+            scrut_compiled.expr.clone(),
+            &borrowed_cases,
+            default,
+            false,
+        ) {
+            block.extend(small);
+            return block;
+        }
 
         let mut clauses = Vec::new();
         for (tag, body) in cases {
@@ -1390,6 +1641,24 @@ impl LambdaCompiler {
     ) -> Block {
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
+        let borrowed_cases: Vec<_> = cases
+            .iter()
+            .map(|(tag, body)| (tag.clone(), body))
+            .collect();
+
+        if let Some(small) = self.compile_small_string_switch_effect(
+            scrut_compiled.expr.clone(),
+            &borrowed_cases,
+            default,
+            false,
+        ) {
+            if small.is_empty() {
+                push_effect_expression(&mut block, scrut_compiled.expr);
+            } else {
+                block.extend(small);
+            }
+            return block;
+        }
 
         let mut clauses = Vec::new();
         for (tag, body) in cases {
@@ -6771,6 +7040,31 @@ mod tests {
     }
 
     #[test]
+    fn single_case_string_switches_with_default_lower_to_if_else() {
+        let mut compiler = LambdaCompiler::new();
+        let scrutinee = Ident::create_local("platform");
+        let compiled = compiler.compile_expr(&Lambda::LstringSwitch(
+            Box::new(Lambda::var(scrutinee.clone())),
+            vec![("linux".to_string(), Lambda::const_(Constant::int(1)))],
+            Some(Box::new(Lambda::const_(Constant::int(2)))),
+        ));
+
+        let [declare, if_stmt] = compiled.prelude.as_slice() else {
+            panic!("expected a declaration followed by an if statement");
+        };
+        let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc
+        else {
+            panic!("expected the string switch temporary declaration");
+        };
+        let StatementDesc::If(cond, then_block, else_block) = &if_stmt.desc else {
+            panic!("expected single-case string switches to lower to if/else");
+        };
+        assert_string_equality_check(cond, Some(&scrutinee), None, "linux");
+        assert_switch_default_assigns_int_result(then_block, result, 1);
+        assert_switch_default_assigns_int_result(else_block, result, 2);
+    }
+
+    #[test]
     fn staticcatch_wrapped_string_switches_use_the_handler_as_the_default_value() {
         let mut compiler = LambdaCompiler::new();
         let version = Ident::create_local("version");
@@ -6980,10 +7274,11 @@ mod tests {
         };
         let StatementDesc::Variable(VariableDeclaration {
             ident,
-            value: Some(Expression {
-                desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
-                ..
-            }),
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                    ..
+                }),
             ..
         }) = &branch_decl.desc
         else {
@@ -7065,10 +7360,11 @@ mod tests {
         };
         let StatementDesc::Variable(VariableDeclaration {
             ident,
-            value: Some(Expression {
-                desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
-                ..
-            }),
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                    ..
+                }),
             ..
         }) = &branch_decl.desc
         else {
@@ -7378,6 +7674,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn named_variant_return_switches_with_only_payload_cases_skip_object_split() {
+        let mut compiler = LambdaCompiler::new();
+        let action = Ident::create_local("action");
+        let block = compiler.compile_return_block(&Lambda::Lswitch(
+            Box::new(Lambda::var(action.clone())),
+            LambdaSwitch {
+                sw_consts_full: true,
+                sw_consts: vec![],
+                sw_blocks_full: true,
+                sw_blocks: vec![
+                    (0, Lambda::const_(Constant::int(1))),
+                    (1, Lambda::const_(Constant::int(2))),
+                ],
+                sw_failaction: None,
+                sw_names: Some(SwitchNames {
+                    consts: vec![],
+                    blocks: vec!["Ok".to_string(), "Error".to_string()],
+                }),
+            },
+        ));
+
+        let [dispatch] = block.as_slice() else {
+            panic!("expected a single direct payload dispatch");
+        };
+        let StatementDesc::If(cond, then_block, else_block) = &dispatch.desc else {
+            panic!("expected a direct if/else over the TAG field");
+        };
+        assert_string_equality_check(cond, None, Some(&action), "Ok");
+        assert_switch_case_returns_int_result(then_block, 1);
+        assert_switch_case_returns_int_result(else_block, 2);
+    }
+
     fn assert_switch_case_assigns_int_result(block: &Block, result: &Ident, expected: i32) {
         let [assign, break_stmt] = block.as_slice() else {
             panic!("expected an assignment followed by break");
@@ -7482,6 +7811,39 @@ mod tests {
                 ));
             }
             other => panic!("expected a typeof-object check, got {other:?}"),
+        }
+    }
+
+    fn assert_string_equality_check(
+        expr: &Expression,
+        ident: Option<&Ident>,
+        tag_ident: Option<&Ident>,
+        expected_tag: &str,
+    ) {
+        match &expr.desc {
+            ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => {
+                match (ident, tag_ident) {
+                    (Some(ident), None) => {
+                        assert!(matches!(
+                            left.as_ref(),
+                            Expression {
+                                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                                ..
+                            } if id.same(ident)
+                        ));
+                    }
+                    (None, Some(tag_ident)) => assert_tag_field_access(left, tag_ident),
+                    _ => panic!("expected exactly one string-equality input shape"),
+                }
+                assert!(matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    } if txt == expected_tag
+                ));
+            }
+            other => panic!("expected a string equality check, got {other:?}"),
         }
     }
 
