@@ -127,6 +127,28 @@ impl JsPrinter {
         self.indent = self.indent.saturating_sub(1);
     }
 
+    fn with_indent<F>(&mut self, extra: usize, action: F)
+    where
+        F: FnOnce(&mut Self),
+    {
+        self.indent += extra;
+        action(self);
+        self.indent = self.indent.saturating_sub(extra);
+    }
+
+    fn print_paren_vgroup<F>(&mut self, extra: usize, action: F)
+    where
+        F: FnOnce(&mut Self),
+    {
+        self.write_char('(');
+        self.with_indent(extra, |this| {
+            this.newline();
+            action(this);
+        });
+        self.newline();
+        self.write_char(')');
+    }
+
     fn current_name_scope_mut(&mut self) -> &mut NameScope {
         self.name_scopes
             .last_mut()
@@ -863,17 +885,17 @@ impl JsPrinter {
             }
 
             ExpressionDesc::Cond(cond, then_, else_) => {
-                let needs_paren = level > 2;
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.print_expression(cond, 3);
-                self.write(" ? ");
-                self.print_expression(then_, 3);
-                self.write(" : ");
-                self.print_expression(else_, 3);
-                if needs_paren {
-                    self.write_char(')');
+                let print_cond = |this: &mut Self| {
+                    this.print_expression(cond, 3);
+                    this.write(" ? ");
+                    this.with_indent(1, |this| this.print_expression(then_, 3));
+                    this.write(" : ");
+                    this.with_indent(1, |this| this.print_expression(else_, 3));
+                };
+                if level > 2 {
+                    self.print_paren_vgroup(1, print_cond);
+                } else {
+                    print_cond(self);
                 }
             }
 
@@ -2344,6 +2366,12 @@ pub fn print_expression(expr: &Expression) -> String {
     printer.into_output()
 }
 
+fn print_expression_with_level(expr: &Expression, level: u8) -> String {
+    let mut printer = JsPrinter::new();
+    printer.print_expression(expr, level);
+    printer.into_output()
+}
+
 /// Print a block to a string
 pub fn print_block(block: &Block) -> String {
     let mut printer = JsPrinter::new();
@@ -2441,6 +2469,32 @@ mod tests {
         let else_ = Expression::number(Number::int(2));
         let expr = Expression::cond(cond, then_, else_);
         assert_eq!(print_expression(&expr), "true ? 1 : 2");
+    }
+
+    #[test]
+    fn test_print_parenthesized_conditional_uses_vertical_group() {
+        let cond = Expression::var(Ident::create_local("x"));
+        let then_ = Expression::number(Number::int(1));
+        let else_ = Expression::number(Number::int(2));
+        let expr = Expression::cond(cond, then_, else_);
+        assert_eq!(print_expression_with_level(&expr, 3), "(\n  x ? 1 : 2\n)");
+    }
+
+    #[test]
+    fn test_print_nested_conditional_else_branch_matches_ocaml_grouping() {
+        let outer = Expression::cond(
+            Expression::var(Ident::create_local("x")),
+            Expression::number(Number::int(0)),
+            Expression::cond(
+                Expression::var(Ident::create_local("y")),
+                Expression::number(Number::int(1)),
+                Expression::number(Number::int(2)),
+            ),
+        );
+        assert_eq!(
+            print_expression(&outer),
+            "x ? 0 : (\n    y ? 1 : 2\n  )"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 261 / 657 JS snapshots passing, 0 compile errors, 396 output diffs
+**Status:** 262 / 657 JS snapshots passing, 0 compile errors, 395 output diffs
 
 ## Goal
 
@@ -35,13 +35,43 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **261 / 657**
+- JS snapshot parity: **262 / 657**
 - Compile errors: **0**
-- Output diffs: **396**
+- Output diffs: **395**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed printer-only conditional-layout
+  slice in `compiler/core/js_dump.ml`
+- After reading OCaml's `Cond` printer there, which prints branch expressions
+  under `P.group f 1` and emits any conditional at precedence level `> 2`
+  through `P.paren_vgroup f 1`, the Rust JS printer in
+  `compiler-rust/src/js_ir/printer.rs` now follows the same layout rule
+  instead of always flattening nested ternaries onto one line
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_parenthesized_conditional_uses_vertical_group`
+  and
+  `js_ir::printer::tests::test_print_nested_conditional_else_branch_matches_ocaml_grouping`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_conditional' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_parenthesized_conditional_uses_vertical_group' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_nested_conditional_else_branch_matches_ocaml_grouping' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/LetUnwrap.res -o /tmp/LetUnwrap.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/LetUnwrap.res` now matches its checked-in snapshot exactly,
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match, and
+  `js_src_LetUnwrap.res.diff` no longer appears under `temp/rust-parity/diffs`
+- The authoritative JS snapshot baseline now reports **262 / 657** passing,
+  **0** compile errors, and **395** output diffs; this is a net **+1**
+  passing snapshot and **-1** output diff from the previously recorded
+  **261 / 657**, **0** compile errors, **396** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed nested-application reduction
