@@ -2,21 +2,36 @@
 
 ## Goal
 
-Make the Rust typechecker at least as fast as the OCaml reference compiler on
-module-signature-heavy files, starting with `tests/tests/src/Import.res`.
+Make the Rust parser-free compiler pipeline at least as fast as the OCaml
+reference compiler on the canonical recursive `tests/tests/src/**/*.res`
+corpus, starting with the extreme module-signature cliff in
+`tests/tests/src/Import.res`.
 
 This project is not about parser speed or JS backend speed. The current hotspot
 is in Rust typechecking and module signature resolution.
 
 ## Baseline
 
-Authoritative `Import.res` repro on 2026-04-13:
+Authoritative single-file `Import.res` repro on 2026-04-13:
 
 - OCaml: about `0.07s`
 - Rust: about `8.69s`
 - Rust peak memory: about `5.7GB`
 
 The output JS is close. The gap is compile-time and allocation behavior.
+
+Authoritative canonical-corpus benchmark on 2026-04-13:
+
+- Canonical source universe: `657` files
+- Comparable files: `626`
+- Rust faster or equal: `1`
+- Rust slower: `625`
+- Materially slower: `246`
+- Aggregate Rust / OCaml ratio: `4.80x`
+
+Detailed corpus baseline and root-cause buckets:
+
+- [CORPUS_BASELINE.md](./CORPUS_BASELINE.md)
 
 ## Root Cause Summary
 
@@ -62,6 +77,8 @@ This project prefers the proper OCaml-shaped solution over bandaids:
   `components_of_module_maker` model
 - local fixes are acceptable only if they are stepping stones toward that model
 - "good enough but still slower than OCaml" is not an acceptable endpoint
+- a fix is not done while any comparable canonical file is still slower than
+  OCaml without an understood root cause and a concrete follow-up
 
 ## Phases
 
@@ -70,12 +87,15 @@ This project prefers the proper OCaml-shaped solution over bandaids:
 Objective:
 
 - keep a stable exact `Import.res` repro
-- use `time` and `sample` as the authoritative measurement tools
+- keep the canonical 657-file benchmark authoritative for broader regressions
+- use `time`, `sample`, and the benchmark script as the measurement tools
 
 Acceptance:
 
 - repeated timing repro is documented
 - profiler consistently points to the same hot path before optimization
+- `scripts/benchmark_typechecker_performance.py` reproduces the canonical
+  slower-than-OCaml set and writes stable machine-readable results
 
 ### Phase 1: Collapse Duplicate Module-Signature Resolution Paths
 
@@ -130,6 +150,8 @@ Acceptance:
 
 - `Import.res` matches or beats OCaml on the same machine, allowing only normal
   timing noise
+- every comparable file in the canonical 657-file corpus matches or beats OCaml
+  on the same machine, allowing only normal timing noise
 - Rust does not allocate multi-GB for `Import.res`
 - typedtree behavior remains correct
 - no parity regressions are introduced in core test coverage

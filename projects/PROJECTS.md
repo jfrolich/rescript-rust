@@ -65,6 +65,7 @@ more like OCaml's lazy cached module-components model.
 | [RALPH_PROMPT.md](./typechecker-performance/RALPH_PROMPT.md) | Agent loop instructions for typechecker performance work |
 | [RALPH_TODO.md](./typechecker-performance/RALPH_TODO.md) | Baseline, task list, and acceptance gates |
 | [RALPH_SETUP.md](./typechecker-performance/RALPH_SETUP.md) | Exact repro, timing, and profiling workflow |
+| [CORPUS_BASELINE.md](./typechecker-performance/CORPUS_BASELINE.md) | Canonical 657-file benchmark baseline, slower-file clusters, and fix directions |
 | [IMPORT_RES_PERFORMANCE_HANDOFF.md](./typechecker-performance/IMPORT_RES_PERFORMANCE_HANDOFF.md) | Link to the detailed investigation and fix guidance |
 
 ### [raw-lambda-parity](./raw-lambda-parity/)
