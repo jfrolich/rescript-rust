@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 326 / 657 JS snapshots passing, 0 compile errors, 331 output diffs
+**Status:** 328 / 657 JS snapshots passing, 0 compile errors, 329 output diffs
 
 ## Goal
 
@@ -35,13 +35,59 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **326 / 657**
+- JS snapshot parity: **328 / 657**
 - Compile errors: **0**
-- Output diffs: **331**
+- Output diffs: **329**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed JS printer rule in
+  `compiler/core/js_dump.ml`, specifically the `Bin (op, e1, e2)` branch that
+  always parenthesizes shift operators (`Lsl`, `Lsr`, `Asr`) even in
+  low-precedence contexts
+- After rereading that OCaml printer path, the Rust JS printer in
+  `compiler-rust/src/js_ir/printer.rs` now matches it more closely:
+  - `<<`, `>>`, and `>>>` expressions stay parenthesized in emitted JS instead
+    of being flattened by precedence-only printing
+  - concise arrow bodies now preserve the same parenthesized shift form that
+    OCaml prints, such as `value => (value << 1)`
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_shift_binary_is_parenthesized_like_ocaml`
+  and
+  `js_ir::printer::tests::test_print_arrow_function_preserves_parenthesized_shift_body`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_shift_binary_is_parenthesized_like_ocaml -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_arrow_function_preserves_parenthesized_shift_body -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - harness-mode snapshot repros from `tests/tests/lib/bs` for
+    `src/js_undefined_test.ast` and
+    `src/belt_sortarray_test.ast`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/js_undefined_test.res` and
+  `tests/tests/src/belt_sortarray_test.res` now match their checked-in `.mjs`
+  snapshots exactly again, while `tests/tests/src/ExternalShadow.res` remains
+  an exact guard-file match
+- The remaining nearby drift is narrower now:
+  - the shift-parentheses hunk is gone from the broader callback corpus
+    (`js_null_test`, `js_null_undefined_test`, `js_array_test`,
+    `bs_mutable_set_test`, `bs_poly_set_test`, `for_loop_test`,
+    `test_for_loop`, `test_tuple`, `record_name_test`,
+    `alias_default_value_test`, `belt_list_test`, and
+    `stdlib/Stdlib_TempTests`), but those files still fail on separate backend
+    or printer differences
+  - only five current diff files still carry shift-parentheses drift after this
+    port:
+    `gray_code_test`, `bigint_test`, `unified_ops_test`, `test_list`, and
+    `mario_game`
+- The authoritative JS snapshot baseline now reports **328 / 657** passing,
+  **0** compile errors, and **329** output diffs; this is a net **+2**
+  passing snapshots and **-2** output diffs from the previously recorded
+  **326 / 657**, **0** compile errors, **331** output diffs
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed constant-option lowering slice

@@ -934,7 +934,10 @@ impl JsPrinter {
                 }
 
                 let (out, lft, rght) = op_precedence(*op);
-                let needs_paren = level > out;
+                // OCaml keeps shift operators parenthesized even in low-precedence
+                // contexts to preserve the backend's conservative JS byte shape.
+                let needs_paren =
+                    level > out || matches!(op, BinOp::Lsl | BinOp::Lsr | BinOp::Asr);
                 if needs_paren {
                     self.write_char('(');
                 }
@@ -2521,6 +2524,16 @@ mod tests {
     }
 
     #[test]
+    fn test_print_shift_binary_is_parenthesized_like_ocaml() {
+        let expr = Expression::bin(
+            BinOp::Lsl,
+            Expression::var(Ident::create_local("x")),
+            Expression::number(Number::int(1)),
+        );
+        assert_eq!(print_expression(&expr), "(x << 1)");
+    }
+
+    #[test]
     fn test_print_zero_minus_expr_as_unary_minus() {
         let expr = Expression::bin(
             BinOp::Bor,
@@ -2927,6 +2940,26 @@ mod tests {
         }));
 
         assert_eq!(rendered, "() => ({\n  TAG: \"Some\",\n  _0: 1\n})");
+    }
+
+    #[test]
+    fn test_print_arrow_function_preserves_parenthesized_shift_body() {
+        let value = Ident::create_local("value");
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
+            is_method: false,
+            params: vec![value.clone()],
+            body: vec![Statement::return_(Expression::bin(
+                BinOp::Lsl,
+                Expression::var(value),
+                Expression::number(Number::int(1)),
+            ))],
+            env: Default::default(),
+            return_unit: false,
+            async_: false,
+            directive: None,
+        }));
+
+        assert_eq!(rendered, "value => (value << 1)");
     }
 
     #[test]
