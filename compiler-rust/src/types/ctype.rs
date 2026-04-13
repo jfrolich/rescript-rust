@@ -1387,7 +1387,6 @@ fn resolve_type_item_through_env<'a>(
     let module_mty = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)?;
     let module_sig =
         resolve_signature_through_env_module_type(ctx, env, &module_mty, &mut visiting)?;
-    let module_sig = crate::types::typecore::copy_lookup_signature_for_subst(&module_sig, ctx);
     let module_access_origin_is_persistent = module_path.head().is_persistent()
         || matches!(module_path, Path::Pident(_))
             && env
@@ -7195,6 +7194,10 @@ mod tests {
     use super::*;
     use crate::context::IdGenerator;
     use crate::ident::Ident;
+    use crate::types::asttypes::PrivateFlag;
+    use crate::types::decl::{
+        ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind,
+    };
 
     #[test]
     fn test_unify_same_type() {
@@ -7312,5 +7315,94 @@ mod tests {
         // a -> b -> c
         let f2 = ctx.new_arrow_simple(a, ctx.new_arrow_simple(b, c));
         assert_eq!(function_arity(&ctx, f2), 2);
+    }
+
+    #[test]
+    fn resolve_type_item_through_env_keeps_original_module_signature_unmodified() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let mut env = crate::types::Env::empty();
+
+        let module_id = Ident::create_local("M");
+        let sibling_id = Ident::create_local("u");
+        let type_id = Ident::create_local("t");
+
+        let int_ty = ctx.new_constr(crate::types::predef::path_int(), vec![]);
+        let sibling_decl = TypeDeclaration {
+            type_params: vec![],
+            type_arity: 0,
+            type_kind: TypeKind::TypeAbstract,
+            type_private: PrivateFlag::Public,
+            type_manifest: Some(int_ty),
+            type_variance: vec![],
+            type_newtype_level: None,
+            type_loc: crate::location::Location::none(),
+            type_attributes: vec![],
+            type_immediate: false,
+            type_unboxed: crate::types::decl::UnboxedStatus::default(),
+            type_inlined_types: vec![],
+            type_path: None,
+        };
+        let type_decl = TypeDeclaration {
+            type_params: vec![],
+            type_arity: 0,
+            type_kind: TypeKind::TypeAbstract,
+            type_private: PrivateFlag::Public,
+            type_manifest: Some(ctx.new_constr(crate::types::Path::pident(sibling_id.clone()), vec![])),
+            type_variance: vec![],
+            type_newtype_level: None,
+            type_loc: crate::location::Location::none(),
+            type_attributes: vec![],
+            type_immediate: false,
+            type_unboxed: crate::types::decl::UnboxedStatus::default(),
+            type_inlined_types: vec![],
+            type_path: None,
+        };
+
+        env.add_module(
+            module_id.clone(),
+            ModuleDeclaration {
+                md_type: ModuleType::MtySignature(vec![
+                    SignatureItem::SigType(sibling_id.clone(), sibling_decl, RecStatus::TrecNot),
+                    SignatureItem::SigType(type_id, type_decl, RecStatus::TrecNot),
+                ]),
+                md_attributes: vec![],
+                md_loc: crate::location::Location::none(),
+                md_path: None,
+            },
+        );
+
+        let queried_path = crate::types::Path::pdot(
+            crate::types::Path::pident(module_id),
+            "t".to_string(),
+        );
+        let (_, resolved_decl) =
+            resolve_type_item_through_env(&ctx, &env, &queried_path, true).expect("resolve M.t");
+
+        let resolved_manifest = resolved_decl.type_manifest.expect("resolved manifest");
+        let resolved_manifest = ctx.repr(resolved_manifest);
+        assert!(matches!(
+            &*ctx.get_desc(resolved_manifest),
+            TypeDesc::Tconstr { path, .. } if path.name() == "M.u"
+        ));
+
+        let module_decl = env.find_module("M").expect("module M");
+        let ModuleType::MtySignature(sig_items) = &module_decl.md_type else {
+            panic!("expected M to keep its original signature");
+        };
+        let Some((_, original_decl, _)) = sig_items.iter().find_map(|item| match item {
+            SignatureItem::SigType(id, decl, rec_status) if id.name() == "t" => {
+                Some((id, decl, rec_status))
+            }
+            _ => None,
+        }) else {
+            panic!("expected original type declaration for M.t");
+        };
+        let original_manifest = original_decl.type_manifest.expect("original manifest");
+        let original_manifest = ctx.repr(original_manifest);
+        assert!(matches!(
+            &*ctx.get_desc(original_manifest),
+            TypeDesc::Tconstr { path, .. } if matches!(path, crate::types::Path::Pident(id) if id.name() == "u")
+        ));
     }
 }

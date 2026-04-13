@@ -44,6 +44,44 @@ reported:
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  but this iteration first eliminated a local worktree regression that had
+  pushed `tests/tests/src/Import.res` back into the compile-error bucket under
+  the authoritative harness
+- After reading OCaml's `Env.components_of_module` / `prefix_idents` flow in
+  `compiler/ml/env.ml`, where module-component lookup materializes one
+  substituted signature rather than copying an already-copied signature again,
+  the Rust type-expansion path in `compiler-rust/src/types/ctype.rs` now
+  matches that behavior more closely: `resolve_type_item_through_env` no
+  longer deep-copies the fresh module signature returned from
+  `resolve_signature_through_env_module_type` a second time before applying the
+  access-path substitution for `M.t` lookups
+- Added focused regression coverage in
+  `types::ctype::tests::resolve_type_item_through_env_keeps_original_module_signature_unmodified`
+  so the env-stored module signature still remains untouched while the
+  resolved lookup result is path-qualified through `M.u`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release resolve_type_item_through_env_keeps_original_module_signature_unmodified -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact harness-mode AST repro for `tests/tests/src/Import.res` from
+    `tests/tests/lib/bs` using the checked-in `compiler-args` together with
+    `/usr/bin/time -l`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Import.res -o /tmp/Import.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  the exact harness-mode `Import.ast` compile dropped from about **9.35s** real
+  time to **4.68s**, `tests/tests/src/Import.res` no longer times out under the
+  10-second wrapper budget and is back to being a normal output-diff case,
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match, and
+  the authoritative wrapper result returned to the recorded baseline of
+  **262 / 657** passing, **0** compile errors, and **395** output diffs
+- Relative to the local pre-fix worktree measurement from the start of this
+  iteration, this is a net **0** passing snapshots, **-1** compile error, and
+  **+1** output diff because `Import.res` moved from the timeout bucket back
+  into the ordinary JS-diff bucket
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed printer-only conditional-layout
   slice in `compiler/core/js_dump.ml`
 - After reading OCaml's `Cond` printer there, which prints branch expressions
