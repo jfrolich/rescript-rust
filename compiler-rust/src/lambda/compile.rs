@@ -10568,6 +10568,44 @@ mod tests {
     }
 
     #[test]
+    fn top_level_if_effects_drop_trailing_pure_undefined_branch_suffixes() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let then_callback = Ident::create_local("thenCallback");
+        let else_callback = Ident::create_local("elseCallback");
+        let call = |id: &Ident| {
+            Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::var(id.clone())),
+                ap_args: vec![],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            })
+        };
+        let lam = Lambda::LifThenElse(
+            Box::new(Lambda::var(cond)),
+            Box::new(Lambda::Lsequence(
+                Box::new(call(&then_callback)),
+                Box::new(Lambda::const_(Constant::none())),
+            )),
+            Box::new(Lambda::Lsequence(
+                Box::new(call(&else_callback)),
+                Box::new(Lambda::const_(Constant::none())),
+            )),
+        );
+
+        let program = compiler.compile_program(&lam);
+        let rendered = print_block(&program.block);
+        assert!(
+            !rendered.contains("undefined;"),
+            "top-level if effect branch kept a pure undefined suffix:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn js_flatten_pass_splits_function_return_sequences_into_statements() {
         let function_ident = Ident::create_local("run");
         let callback = Ident::create_local("callback");

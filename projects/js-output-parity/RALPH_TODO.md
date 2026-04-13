@@ -44,6 +44,34 @@ reported:
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed conditional-expression cleanup
+  slice in `compiler/core/js_exp_make.ml` via `econd`
+- After reading OCaml's special-case there for
+  `Seq(effect, undefined)` on both conditional arms, the Rust JS IR builder in
+  `compiler-rust/src/js_ir/mod.rs` now folds that same shape before statement
+  lowering, instead of preserving branch-local trailing `undefined` effects
+- Added focused regression coverage in
+  `lambda::compile::tests::top_level_if_effects_drop_trailing_pure_undefined_branch_suffixes`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release top_level_if_effects_drop_trailing_pure_undefined_branch_suffixes -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalExtension.res -o /tmp/ExternalExtension.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/ExternalExtension.res` and
+  `tests/tests/src/array_subtle_test.res` no longer differ on the
+  branch-local `undefined;` tails that previously followed effect-only
+  conditional arms; `ExternalExtension.res` now differs only on the older
+  `typeof (__DEV__)` parenthesization plus pure-module comment text/spacing,
+  and `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
+- The authoritative JS snapshot baseline remains **241 / 657** passing,
+  **0** compile errors, and **416** output diffs after this OCaml-aligned
+  `econd` cleanup; the headline total is flat, but the targeted conditional
+  `undefined`-tail cluster is smaller
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed recursive-function lowering
   slice in `compiler/core/lam_compile.ml` via `compile_recursive_let`
 - After reading OCaml's recursive-let function path there, the Rust backend in

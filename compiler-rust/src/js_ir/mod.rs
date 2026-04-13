@@ -573,6 +573,25 @@ impl Expression {
 
     /// Create a conditional expression
     pub fn cond(test: Expression, consequent: Expression, alternate: Expression) -> Self {
+        if let (
+            ExpressionDesc::Seq(consequent_effect, consequent_suffix),
+            ExpressionDesc::Seq(alternate_effect, alternate_suffix),
+        ) = (&consequent.desc, &alternate.desc)
+        {
+            if matches!(consequent_suffix.as_ref().desc, ExpressionDesc::Undefined { .. })
+                && matches!(alternate_suffix.as_ref().desc, ExpressionDesc::Undefined { .. })
+            {
+                return Self::new(ExpressionDesc::Seq(
+                    Box::new(Expression::cond(
+                        test,
+                        consequent_effect.as_ref().clone(),
+                        alternate_effect.as_ref().clone(),
+                    )),
+                    Box::new(Expression::undefined(false)),
+                ));
+            }
+        }
+
         Self::new(ExpressionDesc::Cond(
             Box::new(test),
             Box::new(consequent),
