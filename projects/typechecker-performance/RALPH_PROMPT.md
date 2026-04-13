@@ -64,8 +64,10 @@ broader corpus instead of only the single-file `Import.res` repro.
 
 The project is complete when:
 
-- `Import.res` matches or beats OCaml on the same machine
-- Rust is no slower than OCaml on every comparable canonical file
+- all planned optimization work for this project is complete
+- `Import.res` is at least `2x` faster than OCaml on the same machine
+- the canonical 657-file benchmark shows aggregate Rust time at or below
+  `0.50x` aggregate OCaml time
 - Rust no longer uses multi-GB memory for the file
 - the profiler is no longer dominated by repeated
   `copy_lookup_signature_for_subst` / `copy_lookup_type_expr`

@@ -177,10 +177,11 @@ Acceptance:
 
 ## Success Criteria
 
-- `Import.res` matches or beats OCaml on the same machine, allowing only normal
-  timing noise
-- every comparable file in the canonical 657-file corpus matches or beats OCaml
-  on the same machine, allowing only normal timing noise
+- all planned optimization phases in this project are complete
+- `Import.res` is at least `2x` faster than OCaml on the same machine,
+  allowing only normal timing noise
+- the canonical 657-file benchmark shows aggregate Rust time at or below
+  `0.50x` aggregate OCaml time on the same machine
 - Rust does not allocate multi-GB for `Import.res`
 - typedtree behavior remains correct
 - no parity regressions are introduced in core test coverage

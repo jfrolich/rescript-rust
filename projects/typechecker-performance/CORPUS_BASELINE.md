@@ -228,7 +228,10 @@ Fix direction:
 
 This project is done only when:
 
-- Rust is no slower than OCaml on every comparable file in the canonical corpus
-- `Import.res` matches or beats OCaml and no longer allocates multi-GB
+- all planned optimization work is implemented
+- `Import.res` is at least `2x` faster than OCaml and no longer allocates
+  multi-GB
+- the canonical 657-file benchmark shows aggregate Rust time at or below
+  `0.50x` aggregate OCaml time
 - the remaining slower-than-OCaml clusters, if any, are explained and fixed by
   OCaml-shaped changes rather than file-specific bandaids

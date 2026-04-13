@@ -110,7 +110,9 @@ Detailed investigation:
 
 The project is done when:
 
-- `Import.res` matches or beats OCaml on the same machine
-- Rust is no slower than OCaml on every comparable file in the canonical corpus
+- every planned optimization task in this project is complete
+- `Import.res` is at least `2x` faster than OCaml on the same machine
+- the canonical 657-file benchmark shows aggregate Rust time at or below
+  `0.50x` aggregate OCaml time
 - Rust no longer allocates multi-GB on this file
 - the dominant hotspot is no longer repeated whole-signature deep-copy
