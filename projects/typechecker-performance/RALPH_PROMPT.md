@@ -17,6 +17,7 @@ Before doing anything else, read:
 
 Make Rust behave more like OCaml in module-signature-heavy typing paths:
 
+- make the lazy qualified module-components path the architectural backbone
 - reuse cached qualified module views
 - stop rebuilding fresh whole-signature copies for repeated lookups
 - preserve sharing during substitution work
@@ -53,10 +54,11 @@ broader corpus instead of only the single-file `Import.res` repro.
 
 ## Priority Order
 
-1. unify the qualified module-signature resolution path
-2. make `ctype` reuse cached qualified signatures/components
-3. move the design toward OCaml's lazy `components_of_module_maker` structure
-4. only then clean up secondary costs
+1. make the lazy qualified module-components path the source of truth
+2. make `ctype` and `typecore` both use that path
+3. cache fully qualified access-path views, not just raw signatures
+4. preserve sharing inside substituted type graphs
+5. only then clean up secondary costs
 
 ## Success Condition
 

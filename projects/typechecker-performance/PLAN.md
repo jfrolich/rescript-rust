@@ -40,6 +40,16 @@ resolving module members and expanding types. OCaml instead uses lazy,
 path-qualified module views with cached substitution work and much better
 sharing.
 
+The central architectural fix is to make Rust follow OCaml's lazy
+`EnvLazy` / `components_of_module_maker` model. That means:
+
+1. build the access-path-qualified module view lazily once
+2. make that qualified view the source of truth for repeated lookups
+3. stop letting `ctype` and other callers build throwaway whole-signature copies
+4. preserve sharing while applying substitutions inside that view
+
+It is not enough to add ad hoc memoization around the existing eager-copy path.
+
 Detailed investigation and fix guidance:
 
 - [IMPORT_RES_PERFORMANCE_HANDOFF.md](./IMPORT_RES_PERFORMANCE_HANDOFF.md)
@@ -75,10 +85,27 @@ This project prefers the proper OCaml-shaped solution over bandaids:
 
 - Rust should move toward OCaml's lazy `ps_sig` / `prefix_idents` /
   `components_of_module_maker` model
+- `env_lazy.rs` should become the real architectural backbone here, not a side
+  mechanism that the hot `ctype` path bypasses
 - local fixes are acceptable only if they are stepping stones toward that model
 - "good enough but still slower than OCaml" is not an acceptable endpoint
 - a fix is not done while any comparable canonical file is still slower than
   OCaml without an understood root cause and a concrete follow-up
+
+## Main Required Changes
+
+In priority order:
+
+1. Make the lazy qualified module-components path the single source of truth.
+   Rust already has partial scaffolding (`env_lazy.rs`, renamed persistent
+   signatures, qualified-signature caches), but the hot path still bypasses it.
+2. Route `resolve_type_item_through_env` and other `ctype` lookups through that
+   lazy qualified view instead of constructing fresh copied signatures.
+3. Cache the fully qualified access-path view, not just the raw signature.
+4. Preserve sharing while substituting and rebasing nested type expressions so
+   the lazy path does not still allocate like the eager one.
+5. Only after the above, clean up secondary work such as unpack payload
+   retyping/recovery.
 
 ## Phases
 
@@ -97,25 +124,26 @@ Acceptance:
 - `scripts/benchmark_typechecker_performance.py` reproduces the canonical
   slower-than-OCaml set and writes stable machine-readable results
 
-### Phase 1: Collapse Duplicate Module-Signature Resolution Paths
+### Phase 1: Make The Lazy Components Path The Source Of Truth
+
+Objective:
+
+- make Rust's lazy qualified module-components path match OCaml's architecture
+- stop `ctype` and `typecore` from bypassing that path with eager copies
+
+Acceptance:
+
+- the hot path for module-member lookup goes through the lazy qualified view
+- `resolve_type_item_through_env` no longer constructs throwaway whole-signature
+  copies for repeated queries through the same access path
+
+### Phase 2: Unify Resolution Around The Lazy Qualified View
 
 Objective:
 
 - unify the overlapping resolution paths in `typecore.rs` and `ctype.rs`
-- stop `ctype` from bypassing the more useful path-qualified caching logic
-
-Acceptance:
-
-- `resolve_type_item_through_env` no longer constructs throwaway whole-signature
-  copies for repeated queries through the same access path
-
-### Phase 2: Cache Qualified Module Views The OCaml Way
-
-Objective:
-
 - cache the final path-qualified signature or components view per access path
 - reuse it across type expansion, inclusion setup, and member lookups
-- move toward OCaml-style lazy qualified components instead of ad hoc memoization
 
 Acceptance:
 
@@ -123,17 +151,18 @@ Acceptance:
   dominant `Import.res` hot path
 - memory drops by orders of magnitude
 
-### Phase 3: Implement The OCaml Lazy Components Model
+### Phase 3: Preserve Sharing Through The Qualified View
 
 Objective:
 
-- model Rust more closely on OCaml's lazy module-components construction
-- answer lookups from cached component tables rather than repeated signature scans
+- preserve sharing while rebasing/substituting nested type graphs
+- avoid keeping the lazy path logically correct but allocation-heavy
 
 Acceptance:
 
 - repeated member lookups are effectively O(1) over the cached view
 - nested module-path access no longer rebuilds child signatures repeatedly
+- substitution/copy traffic is no longer dominating allocation
 
 ### Phase 4: Clean Up Secondary Costs
 

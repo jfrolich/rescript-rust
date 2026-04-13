@@ -113,7 +113,8 @@ Evidence:
 
 Fix direction:
 
-1. Port OCaml's lazy module-components model into Rust.
+1. Make OCaml's lazy `EnvLazy` / `components_of_module_maker` path the real
+   source of truth in Rust.
 2. Stop doing eager whole-signature deep-copy for repeated member lookups.
 3. Cache the fully path-qualified view per access path, not just raw signatures.
 4. Make `ctype.rs` and `typecore.rs` share one qualified-resolution path.
@@ -154,6 +155,19 @@ Fix direction:
 
 Do not optimize this cluster before the module-view fix, because the sample
 already shows the same root path.
+
+## Architectural Priority
+
+The main required change is not "add a cache somewhere". It is:
+
+1. make the lazy qualified module-components path the single source of truth
+2. route `ctype` and `typecore` through that path
+3. cache fully qualified access-path views
+4. preserve sharing while substituting nested type graphs
+5. only then optimize secondary costs
+
+If Rust keeps the current eager-copy architecture and only adds memoization
+around it, it may improve, but it is unlikely to reach OCaml.
 
 ### Cluster 3: Deep Pattern-Matching / Branch Typing
 

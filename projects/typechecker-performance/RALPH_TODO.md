@@ -38,6 +38,10 @@ Detailed corpus baseline:
 - The main cost is not JS emission.
 - The dominant root cause is repeated deep-copy and path-rewrite of module
   signatures and nested type graphs.
+- The main architectural fix is OCaml's lazy `EnvLazy` /
+  `components_of_module_maker` path. Rust already has partial pieces of this,
+  but the hot `ctype` path still bypasses them and falls back to eager whole-
+  signature copying.
 - The previous `31` "OCaml failures" were a benchmark bug, not real OCaml
   failures: the harness flattened temp output basenames in a way that broke
   interface `.cmi` lookup for every `.resi`-backed module.
@@ -62,13 +66,17 @@ Detailed investigation:
 
 - [ ] Keep `scripts/benchmark_typechecker_performance.py` authoritative for the
   canonical recursive 657-file corpus
-- [ ] Add a shared path-qualified module-signature resolution helper that both
-  `typecore.rs` and `ctype.rs` can use
-- [ ] Move `ctype::resolve_type_item_through_env` onto the shared qualified
-  signature path instead of building throwaway copies
+- [ ] Make the lazy qualified module-components path the real source of truth,
+  not a side path that `ctype` bypasses
+- [ ] Add a shared path-qualified module-signature/components helper that both
+  `typecore.rs` and `ctype.rs` use
+- [ ] Move `ctype::resolve_type_item_through_env` onto that lazy qualified path
+  instead of building throwaway copied signatures
 - [ ] Ensure the qualified view is cached by access path, not only module name
 - [ ] Cache the fully rewritten/qualified signature or components view, not just
   the raw signature
+- [ ] Preserve sharing while substituting/rebasing nested type expressions so
+  the lazy path is also allocation-efficient
 - [ ] Replace bandaid-style eager copies with a design that is structurally
   closer to OCaml's lazy `components_of_module_maker` path
 - [ ] Re-measure `Import.res` and capture new timing/memory numbers
@@ -82,6 +90,14 @@ Detailed investigation:
   with `gpr_1150.res`, JSX-heavy files, and polyvariant/Intl files
 - [ ] Clean up secondary costs such as repeated unpack semantic-module-type
   recovery only after the main signature-copy issue is fixed
+
+## Priority Order
+
+1. Make the lazy components path the architectural backbone.
+2. Route `ctype` / `typecore` lookup through it.
+3. Cache fully qualified access-path views.
+4. Preserve sharing inside substituted type graphs.
+5. Only then optimize secondary paths like unpack recovery.
 
 ## Validation Gates
 
