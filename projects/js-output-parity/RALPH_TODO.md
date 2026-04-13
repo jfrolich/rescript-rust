@@ -43,6 +43,38 @@ reported:
 
 Interpretation:
 
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed on the OCaml float-exponentiation
+  lowering path instead of treating the surviving `Math.pow(...)` drift as a
+  printer quirk
+- `compiler-rust/src/lambda/compile.rs` now matches
+  `compiler/core/lam_compile_primitive.ml` and
+  `compiler/core/js_exp_make.ml` more closely for `Ppowfloat`:
+  Rust now lowers float exponentiation to `BinOp::Pow` / JS `**`, matching
+  OCaml `E.float_pow`, instead of routing it through `Math.pow(...)`
+- Added focused regression coverage in
+  `lambda::compile::tests::compile_float_pow_uses_js_exponentiation_operator`
+  so this stays pinned to the OCaml backend operator choice rather than a
+  single snapshot file
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_float_pow_uses_js_exponentiation_operator -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/b.res -o /tmp/b.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/unified_ops_test.res -o /tmp/unified_ops_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change, and the focused float-power files now show the OCaml
+  operator shape:
+  `b.res`, `unified_ops_test.res`, `exponentiation_test.res`, and
+  `variantsMatching.res` now emit `**` on the Rust side where this slice used
+  to emit `Math.pow(...)`
+- The authoritative JS snapshot baseline remains **184 / 657** passing,
+  **0** compile errors, and **473** output diffs after this OCaml-aligned
+  `Ppowfloat` lowering port; there is no top-line parity delta yet because the
+  remaining drift in these files is still later byte shape such as float-literal
+  formatting (`2.` vs `2`), not the backend operator choice anymore
+
 - This iteration stayed on another small OCaml printer cluster instead of
   treating the surviving char-literal comment diffs as arbitrary formatting:
   `compiler-rust/src/js_ir/printer.rs` now matches the

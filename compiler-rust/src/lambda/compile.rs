@@ -2154,16 +2154,11 @@ impl LambdaCompiler {
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             )),
-            Ppowfloat => {
-                // Math.pow(base, exponent)
-                let math = Expression::var(Ident::create_persistent("Math"));
-                let pow = Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(math),
-                    "pow".to_string(),
-                    None,
-                ));
-                Expression::call(pow, compiled_args, CallInfo::default())
-            }
+            Ppowfloat => Expression::bin(
+                BinOp::Pow,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
             Pboolcomp(cmp) | Pintcomp(cmp) | Pfloatcomp(cmp) | Pbigintcomp(cmp)
             | Pstringcomp(cmp) | Pjscomp(cmp) => {
                 let op = comparison_to_binop(*cmp);
@@ -7418,6 +7413,46 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn compile_float_pow_uses_js_exponentiation_operator() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Ppowfloat,
+            vec![
+                Lambda::const_(Constant::float("2.")),
+                Lambda::const_(Constant::float("3.")),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert!(matches!(
+            &compiled.expr,
+            Expression {
+                desc: ExpressionDesc::Bin(BinOp::Pow, left, right),
+                ..
+            } if matches!(
+                left.as_ref(),
+                Expression {
+                    desc: ExpressionDesc::Number(Number::Float(_)),
+                    ..
+                }
+            ) && matches!(
+                right.as_ref(),
+                Expression {
+                    desc: ExpressionDesc::Number(Number::Float(_)),
+                    ..
+                }
+            )
+        ));
+        let printed = print_expression(&compiled.expr);
+        assert!(printed.contains("**"), "expected exponentiation operator, got {printed}");
+        assert!(
+            !printed.contains("Math.pow"),
+            "expected float pow lowering to avoid Math.pow, got {printed}"
+        );
     }
 
     #[test]
