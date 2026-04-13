@@ -1554,6 +1554,7 @@ pub struct InProcessInterfaceResult {
 pub fn compile_source_in_process(
     source: &str,
     filename: &str,
+    module_name: &str,
     options: &CompilerOptions,
     persistent_env: PersistentEnv,
     has_interface: bool,
@@ -1694,11 +1695,24 @@ pub fn compile_source_in_process(
     let js =
         print_deps_program_with_directives(&program, Some(&module_path_resolver), &file_directives);
 
-    // Return the PersistentEnv back to the caller.
-    let returned_env = tctx
+    // Self-register the module's published interface into the PersistentEnv
+    // so downstream modules can resolve it without disk I/O.
+    // When .resi exists, the .resi signature was already registered by
+    // typecheck_interface_in_process, so we only register here when there's
+    // no .resi (the inferred signature is the published interface).
+    let mut returned_env = tctx
         .persistent_env
         .take()
         .unwrap_or_else(PersistentEnv::new);
+
+    if !has_interface {
+        returned_env.register_in_memory_signature(
+            module_name,
+            published_signature.clone(),
+            filename,
+            &type_ctx,
+        );
+    }
 
     Ok(InProcessCompileResult {
         js_output: js,
@@ -1718,6 +1732,7 @@ pub fn compile_source_in_process(
 pub fn typecheck_interface_in_process(
     source: &str,
     filename: &str,
+    module_name: &str,
     options: &CompilerOptions,
     persistent_env: PersistentEnv,
 ) -> Result<InProcessInterfaceResult> {
@@ -1773,11 +1788,19 @@ pub fn typecheck_interface_in_process(
             }
         };
 
-    // Return the PersistentEnv back to the caller.
-    let returned_env = tctx
+    // Self-register the interface signature into the PersistentEnv so
+    // downstream modules (and the matching .res implementation) can resolve it.
+    let mut returned_env = tctx
         .persistent_env
         .take()
         .unwrap_or_else(PersistentEnv::new);
+
+    returned_env.register_in_memory_signature(
+        module_name,
+        published_signature.clone(),
+        filename,
+        &type_ctx,
+    );
 
     Ok(InProcessInterfaceResult {
         signature: published_signature,

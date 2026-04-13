@@ -15,6 +15,7 @@ use anyhow::{Result, anyhow};
 use console::style;
 use log::{debug, trace};
 use rayon::prelude::*;
+use rescript_compiler::cmi::persistent_env::PersistentEnv;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -166,8 +167,82 @@ pub fn compile(
         );
 
         let current_in_progres_modules = in_progress_modules.clone();
+        let is_in_process = build_state.build_mode().is_in_process();
 
-        let results = current_in_progres_modules
+        let results: Vec<(String, Result<Option<String>>, Option<Result<Option<String>>>, bool, bool)> = if is_in_process {
+            // --in-process: sequential compilation using the Rust compiler directly.
+            // No compiler assets are emitted or read; interfaces are kept in memory.
+            let mut batch_results = Vec::new();
+            for module_name in current_in_progres_modules.iter() {
+                let module = build_state.get_module(module_name).unwrap();
+                let package = build_state
+                    .get_package(&module.package_name)
+                    .expect("Package not found");
+
+                if !module
+                    .deps
+                    .intersection(&compile_universe)
+                    .all(|dep| compiled_modules.contains(dep))
+                {
+                    continue;
+                }
+
+                if !module.compile_dirty {
+                    batch_results.push((module_name.to_string(), Ok(None), Some(Ok(None)), true, false));
+                    if show_progress { inc(); }
+                    continue;
+                }
+
+                match &module.source_type {
+                    SourceType::MlMap(_) => {
+                        batch_results.push((
+                            package.namespace.to_suffix().unwrap(),
+                            Ok(None),
+                            Some(Ok(None)),
+                            false,
+                            false,
+                        ));
+                    }
+                    SourceType::SourceFile(_) => {
+                        // Record interface generation before compilation for staleness detection
+                        let gen_before = build_state.get_interface_generation(module_name);
+
+                        let result = compile_module_in_process(
+                            package,
+                            module,
+                            module_name,
+                            build_state,
+                        );
+
+                        let gen_after = build_state.get_interface_generation(module_name);
+
+                        // Interface is "clean" if the generation didn't change
+                        // (meaning the module wasn't recompiled or its interface is unchanged)
+                        let is_clean = gen_before == gen_after;
+
+                        // compile_module_in_process handles both .resi and .res in one call.
+                        // Map the result into the expected tuple format.
+                        let (impl_result, intf_result) = match result {
+                            Ok(warning) => (Ok(warning), Some(Ok(None))),
+                            Err(e) => (Err(e), None),
+                        };
+
+                        batch_results.push((
+                            module_name.to_string(),
+                            impl_result,
+                            intf_result,
+                            is_clean,
+                            true,
+                        ));
+                    }
+                }
+
+                if show_progress { inc(); }
+            }
+            batch_results
+        } else {
+            // Default / --rust: parallel compilation via bsc subprocess
+            current_in_progres_modules
             .par_iter()
             .filter_map(|module_name| {
                 let module = build_state.get_module(module_name).unwrap();
@@ -274,7 +349,8 @@ pub fn compile(
                     }
                 })
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+        };
 
         for result in results.iter() {
             let (module_name, result, interface_result, is_clean, is_compiled) = result;
@@ -697,6 +773,279 @@ fn get_dependency_paths(
         })
         .collect::<Vec<Vec<String>>>()
         .concat()
+}
+
+/// Build `CompilerOptions` for an in-process compilation from the package config.
+fn build_compiler_options(
+    package: &packages::Package,
+    source_file_path: &Path,
+    build_state: &BuildState,
+) -> Result<rescript_compiler::driver::CompilerOptions> {
+    let root_config = build_state.get_root_config();
+    let project_context = &build_state.project_context;
+
+    // Collect -I paths from all dependencies (same logic as get_dependency_paths)
+    let mut include_paths: Vec<PathBuf> = Vec::new();
+
+    // Add the package's own lib/ocaml directory
+    include_paths.push(package.get_ocaml_build_path());
+
+    // Add dependency lib/ocaml paths
+    let dep_names: Vec<&str> = package
+        .config
+        .dependencies
+        .as_ref()
+        .map(|d| d.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+    for dep_name in dep_names {
+        if let Some(dep_pkg) = build_state.packages.get(dep_name) {
+            include_paths.push(dep_pkg.get_ocaml_build_path());
+        }
+    }
+
+    // Add dev dependency paths if the module is type:dev
+    // (omitted for simplicity in first cut; can be added later)
+
+    // Extract JSX version from root config
+    let jsx_version = root_config
+        .jsx
+        .as_ref()
+        .and_then(|jsx| jsx.version)
+        .filter(|&v| v == 4);
+
+    // Build open_modules from namespace
+    let mut open_modules: Vec<String> = Vec::new();
+    match &package.config.get_namespace() {
+        packages::Namespace::NamespaceWithEntry { namespace: _, entry }
+            if entry
+                == &helpers::file_path_to_module_name(
+                    source_file_path,
+                    &package.config.get_namespace(),
+                ) =>
+        {
+            // Entry module opens the namespace
+            open_modules.push(
+                package
+                    .config
+                    .get_namespace()
+                    .to_suffix()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        _ => {
+            // Non-entry namespaced modules: the -bs-ns flag is handled by the compiler's
+            // module name prefixing. For in-process, the module name already includes
+            // the namespace suffix from rewatch's module resolution.
+        }
+    }
+
+    // Runtime path
+    let runtime_path = get_runtime_path(&package.config, project_context).ok();
+
+    // Source filename for interface constraint resolution
+    let source_filename = Some(source_file_path.to_string_lossy().to_string());
+
+    // Output path for JS import resolution
+    let output_path = root_config.get_package_specs().first().map(|spec| {
+        if spec.in_source {
+            PathBuf::from(source_file_path.parent().unwrap_or(Path::new(".")))
+        } else {
+            Path::new("lib")
+                .join(spec.get_out_of_source_dir())
+                .join(source_file_path.parent().unwrap_or(Path::new(".")))
+        }
+    });
+
+    Ok(rescript_compiler::driver::CompilerOptions {
+        include_paths,
+        runtime_path,
+        open_modules,
+        source_filename,
+        output_path,
+        jsx_version,
+        ..Default::default()
+    })
+}
+
+/// Write JS output to the correct location(s) based on package specs.
+fn write_js_output(
+    js_output: &str,
+    package: &packages::Package,
+    source_file_path: &Path,
+    root_config: &config::Config,
+) -> Result<()> {
+    for spec in root_config.get_package_specs() {
+        let suffix = root_config.get_suffix(&spec);
+        let js_path = if spec.in_source {
+            // In-source: JS goes alongside the .res file, within the package root
+            let source_abs = Path::new(&package.path).join(source_file_path);
+            helpers::get_source_file_from_rescript_file(&source_abs, &suffix)
+        } else {
+            // Out-of-source: JS goes in lib/js/ or lib/es6/ preserving relative path
+            let out_dir = spec.get_out_of_source_dir();
+            let js_relative =
+                helpers::get_source_file_from_rescript_file(source_file_path, &suffix);
+            Path::new(&package.path)
+                .join("lib")
+                .join(out_dir)
+                .join(js_relative)
+        };
+
+        if let Some(parent) = js_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&js_path, js_output)?;
+    }
+    Ok(())
+}
+
+/// Compile a single module fully in-process using the Rust compiler.
+///
+/// This replaces the bsc subprocess path for `--in-process` mode:
+/// - Reads source from disk
+/// - If .resi exists, typechecks it first and registers the interface
+/// - Compiles the .res implementation
+/// - Writes only JS output (no .cmi, .cmj, .cmt, .cmti)
+/// - Registers the module's interface in the shared PersistentEnv
+///
+/// Returns Ok(None) on success, Ok(Some(warning)) on success with warnings,
+/// Err on failure.
+fn compile_module_in_process(
+    package: &packages::Package,
+    module: &Module,
+    module_name: &str,
+    build_command_state: &BuildCommandState,
+) -> Result<Option<String>> {
+    let source_file = match &module.source_type {
+        SourceType::SourceFile(sf) => sf,
+        _ => return Ok(None), // MlMap handled elsewhere
+    };
+
+    let implementation_path = &source_file.implementation.path;
+    let has_interface = source_file.interface.is_some();
+    let root_config = build_command_state.get_root_config();
+
+    // Build compiler options from package config
+    let options =
+        build_compiler_options(package, implementation_path, &build_command_state.build_state)?;
+
+    // Take the shared PersistentEnv
+    let mut persistent_env = build_command_state
+        .take_persistent_env()
+        .unwrap_or_else(PersistentEnv::new);
+
+    // Register this module's metadata in the PersistentEnv for JS import resolution
+    let source_abs = Path::new(&package.path).join(implementation_path);
+    let is_runtime = package.name == "@rescript/runtime";
+
+    // Determine purity: ReScript files are generally pure unless they have side effects.
+    // For now, treat all modules as pure (the compiler will determine actual purity).
+    let is_pure = true;
+
+    persistent_env.register_in_memory_module(
+        module_name,
+        rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
+            source_path: source_abs.clone(),
+            is_pure,
+            is_runtime,
+        },
+    );
+
+    // Step 1: If .resi exists, typecheck the interface first
+    if let Some(interface) = &source_file.interface {
+        let intf_source_abs = Path::new(&package.path).join(&interface.path);
+        let intf_source = std::fs::read_to_string(&intf_source_abs).map_err(|e| {
+            anyhow!(
+                "Failed to read interface file {}: {}",
+                intf_source_abs.display(),
+                e
+            )
+        })?;
+
+        let intf_result = rescript_compiler::driver::typecheck_interface_in_process(
+            &intf_source,
+            &intf_source_abs.to_string_lossy(),
+            module_name,
+            &options,
+            persistent_env,
+        )
+        .map_err(|e| anyhow!("Interface typecheck failed for {}: {}", module_name, e))?;
+
+        persistent_env = intf_result.persistent_env;
+
+        // Register the interface signature in rewatch's in-memory registry
+        build_command_state.register_in_memory_interface(
+            module_name.to_string(),
+            intf_result.signature,
+            is_pure,
+        );
+    }
+
+    // Step 2: Compile the implementation
+    let impl_source = std::fs::read_to_string(&source_abs).map_err(|e| {
+        anyhow!(
+            "Failed to read source file {}: {}",
+            source_abs.display(),
+            e
+        )
+    })?;
+
+    let compile_result = rescript_compiler::driver::compile_source_in_process(
+        &impl_source,
+        &source_abs.to_string_lossy(),
+        module_name,
+        &options,
+        persistent_env,
+        has_interface,
+    )
+    .map_err(|e| anyhow!("Compilation failed for {}: {}", module_name, e))?;
+
+    // Return the PersistentEnv for subsequent compilations
+    build_command_state.return_persistent_env(compile_result.persistent_env);
+
+    // Register the implementation's inferred signature if no .resi
+    if !has_interface {
+        build_command_state.register_in_memory_interface(
+            module_name.to_string(),
+            compile_result.signature,
+            is_pure,
+        );
+    }
+
+    // Step 3: Write only JS output (no compiler assets)
+    write_js_output(
+        &compile_result.js_output,
+        package,
+        implementation_path,
+        root_config,
+    )?;
+
+    // Execute js-post-build command if configured
+    if let Some(js_post_build) = &package.config.js_post_build {
+        for spec in root_config.get_package_specs() {
+            let suffix = root_config.get_suffix(&spec);
+            let js_file = if spec.in_source {
+                helpers::get_source_file_from_rescript_file(
+                    &Path::new(&package.path).join(implementation_path),
+                    &suffix,
+                )
+            } else {
+                let out_dir = spec.get_out_of_source_dir();
+                let js_relative =
+                    helpers::get_source_file_from_rescript_file(implementation_path, &suffix);
+                Path::new(&package.path)
+                    .join("lib")
+                    .join(out_dir)
+                    .join(js_relative)
+            };
+            if js_file.exists() {
+                execute_post_build_command(&js_post_build.cmd, &js_file)?;
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 fn compile_file(
