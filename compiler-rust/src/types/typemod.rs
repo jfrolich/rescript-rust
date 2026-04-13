@@ -6104,23 +6104,26 @@ fn localize_exported_structure_module_type(
     };
 
     let mut no_persistent_env = None;
-    let resolved_sig = crate::types::ctype::resolve_module_type_through_env(type_ctx, env, &path)
-        .and_then(|resolved_mty| {
-            resolve_mod_type_to_sig(&resolved_mty, Some(env), &mut no_persistent_env, type_ctx)
-        })
-        .or_else(|| {
-            resolve_mod_type_to_sig(
-                &DeclMty::MtyIdent(path.clone()),
-                Some(env),
-                &mut no_persistent_env,
-                type_ctx,
-            )
-        });
+    let resolved_sig = crate::types::typecore::resolve_module_signature_for_path(
+        &path,
+        env,
+        &mut no_persistent_env,
+        type_ctx,
+    )
+    .map(|(_, sig)| sig)
+    .or_else(|| {
+        resolve_mod_type_to_sig(
+            &DeclMty::MtyIdent(path.clone()),
+            Some(env),
+            &mut no_persistent_env,
+            type_ctx,
+        )
+    });
     let Some(sig) = resolved_sig else {
         return mty;
     };
 
-    let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(&sig, type_ctx);
+    let mut sig = sig;
     crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
         &sig,
         &path,

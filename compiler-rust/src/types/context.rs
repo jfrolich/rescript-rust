@@ -185,6 +185,11 @@ pub struct TypeContext<'a> {
     /// creating fresh type copies via copy_lookup_signature_for_subst.
     resolved_module_sig_cache: RefCell<ahash::AHashMap<String, (Path, super::decl::Signature)>>,
 
+    /// Cached qualified module-component views keyed by access-path semantics.
+    /// This is the Rust analogue of OCaml's lazy `components_of_module_maker`.
+    qualified_module_components_cache:
+        RefCell<ahash::AHashMap<String, super::env_lazy::QualifiedModuleComponents>>,
+
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
 
@@ -294,6 +299,7 @@ impl<'a> TypeContext<'a> {
             type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
             resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
+            qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Vec::new()),
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
@@ -435,6 +441,28 @@ impl<'a> TypeContext<'a> {
     /// Look up a cached resolved module signature.
     pub fn find_resolved_module_sig(&self, path: &str) -> Option<(Path, super::decl::Signature)> {
         self.resolved_module_sig_cache.borrow().get(path).cloned()
+    }
+
+    /// Cache a lazily-built qualified module-components view.
+    pub(crate) fn register_qualified_module_components(
+        &self,
+        path: &str,
+        components: super::env_lazy::QualifiedModuleComponents,
+    ) {
+        self.qualified_module_components_cache
+            .borrow_mut()
+            .insert(path.to_string(), components);
+    }
+
+    /// Borrow a cached qualified module-components view.
+    pub(crate) fn with_qualified_module_components<R>(
+        &self,
+        path: &str,
+        f: impl FnOnce(&super::env_lazy::QualifiedModuleComponents) -> R,
+    ) -> Option<R> {
+        let cache = self.qualified_module_components_cache.borrow();
+        let components = cache.get(path)?;
+        Some(f(components))
     }
 
     /// Set load paths for resolving CMI files.

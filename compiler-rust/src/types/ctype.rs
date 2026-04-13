@@ -1156,6 +1156,15 @@ fn resolve_signature_through_env_module_type<'a>(
             crate::types::typecore::copy_lookup_signature_for_subst(sig, ctx),
         ),
         ModuleType::MtyAlias(_, path) | ModuleType::MtyIdent(path) => {
+            let mut no_persistent_env = None;
+            if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
+                path,
+                env,
+                &mut no_persistent_env,
+                ctx,
+            ) {
+                return Some(sig);
+            }
             let resolved = resolve_module_type_through_env_path(ctx, env, path, visiting)?;
             resolve_signature_through_env_module_type(ctx, env, &resolved, visiting)
         }
