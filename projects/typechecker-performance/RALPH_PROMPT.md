@@ -114,7 +114,10 @@ The project is complete when:
 - `Import.res` is at least `2x` faster than OCaml on the same machine
 - the canonical 657-file benchmark shows aggregate Rust time at or below
   `0.50x` aggregate OCaml time
-- Rust no longer uses multi-GB memory for the file
+- Rust peak memory usage for the authoritative `Import.res` repro is at or
+  below OCaml on the same machine
+- Rust is not carrying larger equivalent data structures than OCaml through this
+  path
 - the profiler is no longer dominated by repeated
   `copy_lookup_signature_for_subst` / `copy_lookup_type_expr`
 

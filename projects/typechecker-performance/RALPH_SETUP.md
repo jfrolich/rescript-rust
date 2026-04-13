@@ -127,7 +127,8 @@ You are done when:
 
 - `Import.res` matches or beats OCaml on the same machine
 - Rust is no slower than OCaml on every comparable file in the canonical corpus
-- Rust is no longer a multi-GB compile for this file
+- Rust peak memory usage for the authoritative `Import.res` repro is at or
+  below OCaml on the same machine
 - the profiler no longer shows repeated whole-signature deep-copy as the top cost
 - the implementation shape is recognizably closer to OCaml's lazy module view
   construction, not just a local bandaid

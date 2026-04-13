@@ -140,7 +140,7 @@ Detailed investigation:
 
 ## Validation Gates
 
-- exact `Import.res` timing repro before/after every optimization
+- exact `Import.res` timing and memory repro before/after every optimization
 - full canonical-corpus benchmark before claiming broad progress
 - full canonical typedtree parity before accepting the change
 - focused correctness checks on `Import.res` only as a diagnostic supplement
@@ -153,5 +153,8 @@ The project is done when:
 - `Import.res` is at least `2x` faster than OCaml on the same machine
 - the canonical 657-file benchmark shows aggregate Rust time at or below
   `0.50x` aggregate OCaml time
-- Rust no longer allocates multi-GB on this file
+- Rust peak memory usage for the authoritative `Import.res` repro is at or
+  below OCaml on the same machine
+- Rust is not using larger equivalent data structures than OCaml through this
+  path
 - the dominant hotspot is no longer repeated whole-signature deep-copy
