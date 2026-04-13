@@ -59,6 +59,9 @@ Detailed corpus baseline:
 - There is at least one additional nontrivial cluster in deep pattern matching
   (`gpr_1150.res`), but it should be investigated after the main module-view
   cliff is fixed so the residual signal is cleaner.
+- The next agent should not spend time on profiling detours or random local
+  fixes before completing the `env_lazy` infrastructure rollout through the hot
+  lookup paths. That rollout is the highest-impact task.
 
 ## Rejected Prototype
 
@@ -86,12 +89,16 @@ Detailed investigation:
 
 - [ ] Keep `scripts/benchmark_typechecker_performance.py` authoritative for the
   canonical recursive 657-file corpus
+- [ ] Implement `env_lazy` properly everywhere it matters before doing more
+  profiling or secondary optimizations
 - [ ] Make the lazy qualified module-components path the real source of truth,
   not a side path that `ctype` bypasses
 - [ ] Add a shared path-qualified module-signature/components helper that both
   `typecore.rs` and `ctype.rs` use
 - [ ] Move `ctype::resolve_type_item_through_env` onto that lazy qualified path
   instead of building throwaway copied signatures
+- [ ] Move the matching `typecore.rs` and shared module-resolution lookups onto
+  the same lazy qualified path so `env_lazy` is not partial
 - [ ] When retrying the `ctype` cache, preserve typedtree stamp parity for
   `Import*` files and `DynamicImportModuleWithAlias` before keeping any speedup
 - [ ] Ensure the qualified view is cached by access path, not only module name
@@ -115,18 +122,20 @@ Detailed investigation:
 
 ## Priority Order
 
-1. Make the lazy components path the architectural backbone.
+1. Implement `env_lazy` properly everywhere it matters and make the lazy
+   components path the architectural backbone.
 2. Route `ctype` / `typecore` lookup through it.
 3. Cache fully qualified access-path views.
 4. Preserve sharing inside substituted type graphs.
-5. Only then optimize secondary paths like unpack recovery.
+5. Only then optimize secondary paths like unpack recovery or revisit profiler
+   outliers.
 
 ## Validation Gates
 
 - exact `Import.res` timing repro before/after every optimization
 - full canonical-corpus benchmark before claiming broad progress
-- focused correctness checks on `Import.res`
-- broader parity guard before accepting the change
+- full canonical typedtree parity before accepting the change
+- focused correctness checks on `Import.res` only as a diagnostic supplement
 
 ## Exit Condition
 

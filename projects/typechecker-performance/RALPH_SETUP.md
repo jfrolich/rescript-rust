@@ -91,16 +91,17 @@ Read this first before changing code:
 This project changes typing/module-resolution code. Do not accept a
 performance-only patch without correctness checks.
 
-Recommended minimum:
-
-```bash
-./scripts/test_typedtree_parity.sh Import
-```
-
-Recommended broader gate before finalizing a change:
+Required canonical parity gate for every accepted change:
 
 ```bash
 ./scripts/test_typedtree_parity.sh
+```
+
+Focused parity slices such as the `Import` subset are useful for diagnosis, but
+they do not replace the canonical full typedtree parity run:
+
+```bash
+./scripts/test_typedtree_parity.sh Import
 ```
 
 Recommended performance gate before finalizing a change:

@@ -26,6 +26,24 @@ Make Rust behave more like OCaml in module-signature-heavy typing paths:
 Then use the canonical 657-file benchmark to confirm the change improves the
 broader corpus instead of only the single-file `Import.res` repro.
 
+## First Task
+
+Before doing more profiling passes or local optimizations, implement
+`env_lazy` properly across the hot typechecker/module-resolution paths. Treat
+that infrastructure change as the first required task for this project.
+
+Specifically:
+
+- route the real hot lookup paths through `env_lazy` instead of bypassing it
+- make `env_lazy` the default/source-of-truth path in `ctype.rs`,
+  `typecore.rs`, and the shared module-resolution helpers they depend on
+- only profile to confirm the impact of that work or to debug what still
+  bypasses it
+
+Do not spend cycles on random small fixes before this lands. The expected
+largest impact is making the OCaml-shaped lazy environment machinery real
+everywhere it matters.
+
 ## Rules
 
 1. Do not add `Import.res`-specific hacks.
@@ -33,10 +51,14 @@ broader corpus instead of only the single-file `Import.res` repro.
 3. Do not optimize the small unpack-retyping path first; fix the main
    signature-copy problem first.
 4. Before changing Rust behavior, read the relevant OCaml code and align with it.
-5. Measure before and after every change.
-6. Do not accept a speedup that regresses typedtree parity.
-7. Do not accept an endpoint that is still slower than OCaml.
-8. Prefer the OCaml lazy-components design over local memoization bandaids.
+5. Do not treat profiling as the first task. Use it to validate or focus the
+   `env_lazy` rollout, not to justify unrelated tweaks.
+6. Measure before and after every change.
+7. Always measure canonical typedtree parity for this project. Do not rely only
+   on a focused `Import` parity slice before keeping a change.
+8. Do not accept a speedup that regresses typedtree parity.
+9. Do not accept an endpoint that is still slower than OCaml.
+10. Prefer the OCaml lazy-components design over local memoization bandaids.
 
 ## Workflow
 
@@ -44,21 +66,25 @@ broader corpus instead of only the single-file `Import.res` repro.
 2. If there is unfinished local work on this project, finish it first.
 3. Reproduce the exact `Import.res` timing baseline.
 4. Reproduce the canonical corpus baseline if it is missing or stale.
-5. Read the OCaml and Rust files named in the handoff documents.
-6. Implement one focused change.
+5. Read the OCaml and Rust files named in the handoff documents, with special
+   focus on the `EnvLazy`/`components_of_module_maker` path.
+6. Implement the `env_lazy` infrastructure change first across the real hot
+   paths before attempting smaller optimizations.
 7. Re-run the exact timing repro.
 8. Re-run the canonical corpus benchmark or a justified focused slice.
-9. Run correctness checks.
+9. Run the canonical typedtree parity suite and any focused correctness checks
+   needed for diagnosis.
 10. Update `RALPH_TODO.md` with concrete new timing data.
 11. Commit the result.
 
 ## Priority Order
 
-1. make the lazy qualified module-components path the source of truth
-2. make `ctype` and `typecore` both use that path
+1. implement `env_lazy` properly everywhere it matters and make the lazy
+   qualified module-components path the source of truth
+2. make `ctype` and `typecore` both use that path end-to-end
 3. cache fully qualified access-path views, not just raw signatures
 4. preserve sharing inside substituted type graphs
-5. only then clean up secondary costs
+5. only then clean up secondary costs or revisit profiler-guided residuals
 
 ## Success Condition
 
