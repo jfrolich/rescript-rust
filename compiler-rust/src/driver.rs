@@ -1105,6 +1105,13 @@ pub struct CompilerOptions {
     pub output_path: Option<PathBuf>,
     /// JSX version from CLI `-bs-jsx` (e.g. 4). When set, enables JSX PPX rewrite.
     pub jsx_version: Option<i32>,
+    /// When true, do not implicitly open Pervasives and Stdlib (like OCaml's -nopervasives).
+    /// Used by `@rescript/runtime` modules which bootstrap Pervasives themselves.
+    pub nopervasives: bool,
+    /// The module name being compiled (e.g. "Pervasives"). Used for self-open filtering:
+    /// if `-open Pervasives` is in open_modules and we're compiling Pervasives itself,
+    /// the self-open is skipped to avoid circular loading.
+    pub module_name: Option<String>,
 }
 
 pub(crate) fn jsx_version_for_structure(
@@ -1172,7 +1179,7 @@ pub fn compile_source_to_js_with_options(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
 
     // Store persistent env in the type check context for module resolution
     tctx.set_persistent_env(pers_env);
@@ -1447,7 +1454,7 @@ pub fn typecheck_interface_source(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
 
     tctx.set_persistent_env(pers_env);
 
@@ -1596,7 +1603,7 @@ pub fn compile_source_in_process(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
 
     tctx.set_persistent_env(pers_env);
 
@@ -1763,7 +1770,7 @@ pub fn typecheck_interface_in_process(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
 
     tctx.set_persistent_env(pers_env);
 
@@ -1899,36 +1906,55 @@ fn normalize_lexical_path(path: PathBuf) -> PathBuf {
 ///
 /// This is equivalent to OCaml's `res_compmisc.ml:initial_env()` which loads
 /// Pervasives.cmi and Stdlib.cmi and opens them into the environment.
+///
+/// When `nopervasives` is true (matching OCaml's `-nopervasives` flag), the
+/// implicit Pervasives and Stdlib opens are skipped. This is used by
+/// `@rescript/runtime` modules which bootstrap Pervasives themselves.
+///
+/// When `compiling_module` is `Some(name)`, any explicit `-open` that matches
+/// that module name is skipped to prevent circular self-loading (matching
+/// OCaml's `res_compmisc.ml:initial_env` which filters `modulename` from
+/// `open_modules`).
 pub(crate) fn load_pervasives<'a>(
     pers_env: &mut PersistentEnv,
     env: &mut Env,
     ctx: &'a TypeContext<'a>,
     open_modules: &[String],
+    nopervasives: bool,
+    compiling_module: Option<&str>,
 ) {
     use crate::ident::Ident;
 
-    // Try to load and open Pervasives (matches OCaml: open_implicit_module "Pervasives")
-    if pers_env.open_module("Pervasives", env, ctx) {
-        if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
-            if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                ctx.register_raw_module_sig("Pervasives", sig.clone());
+    if !nopervasives {
+        // Try to load and open Pervasives (matches OCaml: open_implicit_module "Pervasives")
+        if pers_env.open_module("Pervasives", env, ctx) {
+            if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
+                if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+                    ctx.register_raw_module_sig("Pervasives", sig.clone());
+                }
+                env.add_module(Ident::create_persistent("Pervasives"), md);
             }
-            env.add_module(Ident::create_persistent("Pervasives"), md);
         }
-    }
 
-    // Try to load and open Stdlib (matches OCaml: open_implicit_module "Stdlib")
-    if pers_env.open_module("Stdlib", env, ctx) {
-        if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
-            if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                ctx.register_raw_module_sig("Stdlib", sig.clone());
+        // Try to load and open Stdlib (matches OCaml: open_implicit_module "Stdlib")
+        if pers_env.open_module("Stdlib", env, ctx) {
+            if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
+                if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+                    ctx.register_raw_module_sig("Stdlib", sig.clone());
+                }
+                env.add_module(Ident::create_persistent("Stdlib"), md);
             }
-            env.add_module(Ident::create_persistent("Stdlib"), md);
         }
     }
 
     // Apply explicit `-open` modules in argument order.
+    // Filter out self-opens: if compiling module M, skip `-open M`.
     for module_name in open_modules {
+        if let Some(compiling) = compiling_module {
+            if module_name == compiling {
+                continue;
+            }
+        }
         if pers_env.open_module(module_name, env, ctx) {
             if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
                 env.add_module(Ident::create_persistent(module_name), md);
@@ -1975,7 +2001,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path(load_path);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
-        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
+        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
         tctx.set_persistent_env(pers_env);
 
         let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
@@ -2018,7 +2044,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path(load_path);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
-        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
+        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
         tctx.set_persistent_env(pers_env);
 
         let (typed_structure, _final_env) =
@@ -2766,7 +2792,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
     tctx.set_persistent_env(pers_env);
 
     let (typed_structure, _final_env) = type_structure(&mut tctx, &env, &arena, &structure)
@@ -2800,7 +2826,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
     tctx.set_persistent_env(pers_env);
 
     let typed_signature = transl_signature(&mut tctx, &env, &arena, &signature)

@@ -318,7 +318,7 @@ impl PersistentEnv {
         let mut fallback_pers = self.clone();
         let mut env = initial_env(ctx);
         let open_modules = fallback_pers.open_modules.clone();
-        load_pervasives(&mut fallback_pers, &mut env, ctx, &open_modules);
+        load_pervasives(&mut fallback_pers, &mut env, ctx, &open_modules, false, None);
 
         if source_path
             .extension()

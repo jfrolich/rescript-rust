@@ -237,6 +237,7 @@ fn run() -> Result<()> {
         source_filename: Some(source_path.to_string_lossy().into_owned()),
         output_path: opts.output.clone(),
         jsx_version: opts.jsx_version,
+        ..Default::default()
     };
 
     if is_interface {

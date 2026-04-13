@@ -785,11 +785,32 @@ fn get_dependency_paths(
 /// Build `CompilerOptions` for an in-process compilation from the package config.
 fn build_compiler_options(
     package: &packages::Package,
+    module_name: &str,
     source_file_path: &Path,
     build_state: &BuildState,
 ) -> Result<rescript_compiler::driver::CompilerOptions> {
     let root_config = build_state.get_root_config();
     let project_context = &build_state.project_context;
+
+    // Parse package compiler-flags for flags the in-process compiler needs to honor.
+    // In the subprocess path, these are passed as raw CLI args to bsc.
+    let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
+    let mut nopervasives = false;
+    let mut flag_open_modules: Vec<String> = Vec::new();
+    {
+        let mut iter = bsc_flags.iter();
+        while let Some(flag) = iter.next() {
+            match flag.as_str() {
+                "-nopervasives" => nopervasives = true,
+                "-open" => {
+                    if let Some(mod_name) = iter.next() {
+                        flag_open_modules.push(mod_name.clone());
+                    }
+                }
+                _ => {} // Other flags (-nostdlib, -make-runtime, etc.) are not needed in-process
+            }
+        }
+    }
 
     // Collect -I paths from all dependencies (same logic as get_dependency_paths)
     let mut include_paths: Vec<PathBuf> = Vec::new();
@@ -820,7 +841,7 @@ fn build_compiler_options(
         .and_then(|jsx| jsx.version)
         .filter(|&v| v == 4);
 
-    // Build open_modules from namespace
+    // Build open_modules: namespace opens first, then explicit -open flags from compiler-flags.
     let mut open_modules: Vec<String> = Vec::new();
     match &package.config.get_namespace() {
         packages::Namespace::NamespaceWithEntry { namespace: _, entry }
@@ -847,6 +868,11 @@ fn build_compiler_options(
         }
     }
 
+    // Append explicit -open flags from package compiler-flags.
+    // Self-open filtering (e.g., skip `-open Pervasives` when compiling Pervasives.res)
+    // is handled inside load_pervasives via the module_name field.
+    open_modules.extend(flag_open_modules);
+
     // Runtime path
     let runtime_path = get_runtime_path(&package.config, project_context).ok();
 
@@ -871,6 +897,8 @@ fn build_compiler_options(
         source_filename,
         output_path,
         jsx_version,
+        nopervasives,
+        module_name: Some(module_name.to_string()),
         ..Default::default()
     })
 }
@@ -997,7 +1025,7 @@ fn compile_module_in_process(
 
     // Build compiler options from package config
     let options =
-        build_compiler_options(package, implementation_path, &build_command_state.build_state)?;
+        build_compiler_options(package, module_name, implementation_path, &build_command_state.build_state)?;
 
     // Take the shared PersistentEnv
     let mut persistent_env = build_command_state

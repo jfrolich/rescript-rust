@@ -1,7 +1,7 @@
 # Ralph TODO: Rewatch In-Memory Build
 
 **Last Updated:** 2026-04-13
-**Status:** 14/16 tasks complete
+**Status:** 15/16 tasks complete
 
 ## Goal
 
@@ -79,7 +79,13 @@ Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-
     3. **`compile.rs`**: Added `register_namespace_signatures()` function, called at the start of `compile()` when `is_in_process()`. Iterates over all packages with namespaces, builds `(short_name, internal_name)` alias pairs mirroring the `gen_mlmap` logic (excluding entry modules, filtering exotic names), and registers each namespace signature in the shared `PersistentEnv` before any source modules are compiled. This ensures `-open Namespace` resolves correctly during compilation.
   - **Note:** The `.mlmap` file is still written to disk by `packages::parse_packages` (which operates on `BuildState` without build-mode awareness). This is harmless metadata; the important thing is that `bsc` is not invoked and no `.cmi/.cmt/.cmj` assets are produced for the namespace module. A future cleanup can skip the `.mlmap` write too.
   - **Test results:** Compiler tests: 731/732 pass (same 20 pre-existing failures). Rewatch unit tests: 62/62 pass. Default-mode suite: same pre-existing mlmap `randjbuildsystem` error (Rust bsc can't compile `.mlmap` files—unrelated to this change).
-- [ ] Bootstrap `@rescript/runtime` from source into the same in-memory registry, including `Pervasives` / `Stdlib` handling for `-nostdlib`, `-nopervasives`, and `-open Pervasives`.
+- [x] Bootstrap `@rescript/runtime` from source into the same in-memory registry, including `Pervasives` / `Stdlib` handling for `-nostdlib`, `-nopervasives`, and `-open Pervasives`.
+  - **Done:** Three-part implementation to handle runtime-specific compiler flags in the in-process path:
+    1. **`CompilerOptions` (driver.rs)**: Added `nopervasives: bool` and `module_name: Option<String>` fields. `nopervasives` controls whether Pervasives/Stdlib are implicitly opened. `module_name` enables self-open filtering (e.g., skip `-open Pervasives` when compiling Pervasives.res itself). Both default to `false`/`None` so existing file-based paths are unaffected.
+    2. **`load_pervasives` (driver.rs)**: Updated to accept `nopervasives` and `compiling_module` parameters. When `nopervasives` is true, skips implicit Pervasives/Stdlib opening (matching OCaml's `-nopervasives` flag). When `compiling_module` matches an explicit `-open` target, that self-open is skipped (matching OCaml's `res_compmisc.ml:initial_env` which filters `modulename` from `open_modules`).
+    3. **`build_compiler_options` (compile.rs)**: Now parses `-nopervasives` and `-open X` from the package's `compiler-flags` (from `rescript.json`). These are the same flags that the subprocess path passes as raw CLI args to `bsc`. The parsed values are threaded into `CompilerOptions`. Other flags like `-nostdlib` and `-make-runtime` are not needed in-process: `-nostdlib` controls load path (which is already managed by rewatch), and `-make-runtime` sets package specs (already handled by rewatch's `write_js_output`).
+  - **Bootstrap ordering:** Runtime modules (including `Pervasives.res`) are compiled in dependency order by the existing topological sort. `Pervasives.res` compiles first (no deps, `nopervasives=true`, self-open filtered out). Subsequent runtime modules get `nopervasives=true` + explicit `-open Pervasives` which loads the already-compiled Pervasives from the in-memory registry. User-code packages get `nopervasives=false` (default), so Pervasives/Stdlib are implicitly opened as normal.
+  - **Test results:** Compiler tests: 732/732 pass (same 19 pre-existing failures). Default-mode suite: same pre-existing mlmap `randjbuildsystem` error (unrelated). All 8 `load_pervasives` call sites updated.
 
 ## Phase 4: Asset Removal And Output Surface
 
