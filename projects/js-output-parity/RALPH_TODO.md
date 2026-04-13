@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 234 / 657 JS snapshots passing, 0 compile errors, 423 output diffs
+**Status:** 235 / 657 JS snapshots passing, 0 compile errors, 422 output diffs
 
 ## Goal
 
@@ -35,13 +35,47 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **234 / 657**
+- JS snapshot parity: **235 / 657**
 - Compile errors: **0**
-- Output diffs: **423**
+- Output diffs: **422**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed effect-continuation slice in
+  `compiler/core/lam_compile.ml`
+- After reading OCaml's `Lsequence` lowering there, the Rust backend in
+  `compiler-rust/src/lambda/compile.rs` now compiles the first operand of
+  `Lambda::Lsequence` through the same effect-position path instead of the
+  generic value-expression path
+- The new `compile_effect_output` helper preserves OCaml's
+  `EffectCall Not_tail` behavior for sequence prefixes, nested effect-position
+  `if` lowering, switches, static catches, and lets, which removes synthetic
+  result temporaries from effect-only control-flow
+- Added focused regression coverage in
+  `lambda::compile::tests::sequence_prefix_ifs_use_effect_lowering_without_result_temps`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib sequence_prefix_ifs_use_effect_lowering_without_result_temps -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_2682_test.res -o /tmp/gpr_2682_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/gpr_2682_test.res` no longer differs on the old
+  `let ifres; if (...) { ... } else { throw ...; ifres = undefined; }`
+  assert scaffold; the remaining drift in that file is down to separate raw-JS
+  formatting details
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same backend change
+- Across cached diff artifacts, files whose diffs still contain `let ifres`
+  dropped from **37** to **27** in this iteration
+- The authoritative JS snapshot baseline now reports **235 / 657** passing,
+  **0** compile errors, and **422** output diffs; this is a net **+1**
+  passing snapshot and **-1** output diff from the previously recorded
+  **234 / 657**, **0** compile errors, **423** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed printer slice in

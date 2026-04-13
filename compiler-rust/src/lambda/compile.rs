@@ -376,7 +376,7 @@ impl LambdaCompiler {
                 }
             }
             Lambda::Lsequence(a, b) => {
-                let first = self.compile_expr(a);
+                let first = self.compile_effect_output(a);
                 let second = self.compile_expr(b);
                 self.append_effect_output(first, second)
             }
@@ -548,6 +548,46 @@ impl LambdaCompiler {
                 }
                 block
             }
+        }
+    }
+
+    fn compile_effect_output(&mut self, lam: &Lambda) -> Compiled {
+        match lam {
+            Lambda::Llet(kind, id, value, body) => {
+                let mut prelude = self.compile_let_binding(*kind, id, value);
+                if block_terminates(&prelude) {
+                    return Compiled {
+                        prelude,
+                        expr: Expression::undefined(false),
+                    };
+                }
+                let body_compiled = self.compile_effect_output(body);
+                prelude.extend(body_compiled.prelude);
+                Compiled {
+                    prelude,
+                    expr: body_compiled.expr,
+                }
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                compiled_from_effect_block(self.compile_if_effect_block(cond, then_, else_))
+            }
+            Lambda::Lsequence(first, second) => {
+                let first = self.compile_effect_output(first);
+                let second = self.compile_effect_output(second);
+                self.append_effect_output(first, second)
+            }
+            Lambda::LstaticCatch(body, (label, bindings), handler) => {
+                self.with_static_handler(*label, bindings, handler, |this| {
+                    this.compile_effect_output(body)
+                })
+            }
+            Lambda::Lswitch(scrut, switch) => {
+                compiled_from_effect_block(self.compile_switch_effect_block(scrut, switch))
+            }
+            Lambda::LstringSwitch(scrut, cases, default) => compiled_from_effect_block(
+                self.compile_string_switch_effect_block(scrut, cases, default.as_deref()),
+            ),
+            _ => self.compile_expr(lam),
         }
     }
 
@@ -4081,6 +4121,34 @@ fn push_effect_expression(block: &mut Block, expr: Expression) {
         }
         _ if js_expr_no_side_effects(&expr) => {}
         _ => block.push(Statement::exp(expr)),
+    }
+}
+
+fn compiled_from_effect_block(mut block: Block) -> Compiled {
+    if block.len() == 1 {
+        let stmt = block.pop().expect("single-item block");
+        let Statement { desc, comment } = stmt;
+        return match desc {
+            StatementDesc::Exp(mut expr) => {
+                if expr.comment.is_none() {
+                    expr.comment = comment;
+                }
+                Compiled {
+                    prelude: vec![],
+                    expr,
+                }
+            }
+            StatementDesc::Block(inner) if comment.is_none() => compiled_from_effect_block(inner),
+            desc => Compiled {
+                prelude: vec![Statement { desc, comment }],
+                expr: Expression::undefined(false),
+            },
+        };
+    }
+
+    Compiled {
+        prelude: block,
+        expr: Expression::undefined(false),
     }
 }
 
@@ -9058,6 +9126,62 @@ mod tests {
                     ExpressionDesc::Number(Number::Int { i: 2, .. })
                 ) if rhs_id.same(&rhs)
             )
+        ));
+    }
+
+    #[test]
+    fn sequence_prefix_ifs_use_effect_lowering_without_result_temps() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let value = Ident::create_local("value");
+        let compiled = compiler.compile_expr(&Lambda::Lsequence(
+            Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::var(cond.clone())),
+                Box::new(Lambda::const_(Constant::int(0))),
+                Box::new(Lambda::LstaticRaise(
+                    1,
+                    vec![Lambda::const_(Constant::string("boom"))],
+                )),
+            )),
+            Box::new(Lambda::var(value.clone())),
+        ));
+
+        assert!(
+            compiled
+                .prelude
+                .iter()
+                .all(|stmt| !matches!(stmt.desc, StatementDesc::Variable(_))),
+            "effect-lowered sequence prefixes should not allocate result temps"
+        );
+
+        let [if_stmt] = compiled.prelude.as_slice() else {
+            panic!("expected a single effect-position if prelude");
+        };
+        let StatementDesc::If(_, then_block, else_block) = &if_stmt.desc else {
+            panic!("expected an effect-lowered if statement");
+        };
+        assert!(
+            matches!(
+                then_block.as_slice(),
+                [Statement {
+                    desc: StatementDesc::Throw(_),
+                    ..
+                }]
+            ) || matches!(
+                else_block.as_slice(),
+                [Statement {
+                    desc: StatementDesc::Throw(_),
+                    ..
+                }]
+            ),
+            "expected the lowered branch to throw directly"
+        );
+        assert!(matches!(
+            compiled.expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&value)
         ));
     }
 
