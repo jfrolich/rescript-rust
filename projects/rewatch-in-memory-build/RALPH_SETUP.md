@@ -58,6 +58,31 @@ When working in `rewatch/src/build/compile.rs`:
 
 If the implementation needs interface publication for downstream compilations, solve that without giving up parallelism.
 
+## Per-File `PersistentEnv`
+
+One `PersistentEnv` per file is acceptable and may be the simplest correct design.
+
+What is not acceptable:
+
+- one shared mutable `PersistentEnv` for the entire ready batch
+- `take_persistent_env()` -> compile one file -> `return_persistent_env()` if that makes the batch effectively single-threaded
+
+What is acceptable:
+
+- build or clone a `PersistentEnv` per worker/file
+- seed it from the published interfaces and module metadata already visible at the start of that wave
+- use it as compilation-local resolver/cache state
+- publish the finished module interface back to build state when the worker completes
+
+Why this is sound:
+
+- modules in the same ready batch do not depend on each other
+- they only depend on modules from earlier waves, whose published interfaces are already fixed
+- the authoritative cross-file state is `BuildCommandState` interface publication plus module metadata
+- `PersistentEnv` cache reuse is an optimization, not the semantic source of truth
+
+If rebuilding some `PersistentEnv` caches per file costs CPU, that is still a better trade than collapsing the whole frontier to one thread.
+
 Target smoke commands once the new mode exists:
 
 ```bash
@@ -109,6 +134,7 @@ The in-process build should still succeed or fail exactly the same way after tho
 ```bash
 rg -n "compile_file|bs-read-cmi|lib/ocaml|bsc" rewatch/src/build/compile.rs
 rg -n "par_iter|take_persistent_env|return_persistent_env|compile_module_in_process" rewatch/src/build/compile.rs
+rg -n "register_in_memory_interface|in_memory_interfaces|stored_asts" rewatch/src/build/build_types.rs rewatch/src/build/compile.rs
 rg -n "read_ast|deps" rewatch/src/build/deps.rs rewatch/src/build/parse.rs
 rg -n "compile_mlmap|mlmap" rewatch/src/build/namespaces.rs rewatch/src/build/packages.rs
 rg -n "read_compile_state|compiler-info|sourcedirs" rewatch/src/build

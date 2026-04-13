@@ -57,6 +57,12 @@ The in-memory state boundary is also part of the design:
 
 Do not turn `BuildCommandState` into a store of typedtrees or live type arenas.
 
+Apply the same boundary to `PersistentEnv`:
+
+- acceptable: one fresh or cloned `PersistentEnv` per file/worker
+- acceptable: seeding that env from the already-published dependency interface snapshot for the current wave
+- not acceptable: one globally shared mutable env token that serializes the whole ready batch
+
 Do not keep any fallback compiler-asset protocol alive inside `--in-process` for runtime bootstrap, `node_modules`, namespace handling, startup reconstruction, or stale-build detection.
 
 ## Important Constraints
@@ -71,6 +77,7 @@ Do not keep any fallback compiler-asset protocol alive inside `--in-process` for
 8. Preserve parallel compilation. The same dependency-ready module batch that compiles in parallel in the file-backed modes must still compile in parallel in `--in-process`.
 9. A sequential `for module in current_in_progress_modules` implementation in the `--in-process` path is not acceptable as the finished design.
 10. Do not serialize the entire ready batch behind one shared mutable `PersistentEnv` token. If interface publication needs synchronization, keep the critical section narrow and preserve worker parallelism.
+11. A single `PersistentEnv` per file is acceptable. `PersistentEnv` is compilation-local context plus caches; `BuildCommandState` is the authoritative cross-file registry of published interfaces and metadata.
 
 ## Your Task Each Iteration
 
