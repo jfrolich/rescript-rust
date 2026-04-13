@@ -355,6 +355,16 @@ impl LambdaCompiler {
                     this.compile_let_binding(kind, id, body)
                 })
             }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                let mut block = vec![Statement::variable(VariableDeclaration {
+                    ident: id.clone(),
+                    value: None,
+                    property: kind,
+                    ident_info: IdentInfo::default(),
+                })];
+                block.extend(self.compile_if_assignment_block(id, cond, then_, else_));
+                block
+            }
             Lambda::Lswitch(scrut, switch) => {
                 let mut block = vec![Statement::variable(VariableDeclaration {
                     ident: id.clone(),
@@ -430,6 +440,9 @@ impl LambdaCompiler {
                 let mut block = self.compile_let_binding(*kind, id, value);
                 block.extend(self.compile_return_block(body));
                 block
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                self.compile_if_return_block(cond, then_, else_)
             }
             Lambda::Lsequence(first, second) => {
                 let mut block = self.compile_effect_block(first);
@@ -1002,6 +1015,60 @@ impl LambdaCompiler {
         }
     }
 
+    fn compile_if_assignment_block(
+        &mut self,
+        result: &Ident,
+        cond: &Lambda,
+        then_: &Lambda,
+        else_: &Lambda,
+    ) -> Block {
+        let cond_compiled = self.compile_expr(cond);
+        let then_compiled = self.compile_expr(then_);
+        let else_compiled = self.compile_expr(else_);
+
+        if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
+            let mut block = cond_compiled.prelude;
+            block.push(Statement::exp(Expression::bin(
+                BinOp::Eq,
+                Expression::var(result.clone()),
+                Expression::cond(cond_compiled.expr, then_compiled.expr, else_compiled.expr),
+            )));
+            return block;
+        }
+
+        let mut block = cond_compiled.prelude;
+        block.push(Statement::if_(
+            cond_compiled.expr,
+            self.compile_assign_to_target_block(result, then_),
+            self.compile_assign_to_target_block(result, else_),
+        ));
+        block
+    }
+
+    fn compile_if_return_block(&mut self, cond: &Lambda, then_: &Lambda, else_: &Lambda) -> Block {
+        let cond_compiled = self.compile_expr(cond);
+        let then_compiled = self.compile_expr(then_);
+        let else_compiled = self.compile_expr(else_);
+
+        if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
+            let mut block = cond_compiled.prelude;
+            block.push(Statement::return_(Expression::cond(
+                cond_compiled.expr,
+                then_compiled.expr,
+                else_compiled.expr,
+            )));
+            return block;
+        }
+
+        let mut block = cond_compiled.prelude;
+        block.push(Statement::if_(
+            cond_compiled.expr,
+            self.compile_return_block(then_),
+            self.compile_return_block(else_),
+        ));
+        block
+    }
+
     fn compile_switch_value_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
         let mut block = self.compile_assign_to_target_block(result, lam);
         if !block_terminates(&block) {
@@ -1016,6 +1083,9 @@ impl LambdaCompiler {
                 self.with_static_handler(*label, bindings, handler, |this| {
                     this.compile_assign_to_target_block(result, body)
                 })
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                self.compile_if_assignment_block(result, cond, then_, else_)
             }
             Lambda::Lswitch(scrut, switch) => {
                 self.compile_switch_assignment_block(result, scrut, switch)
@@ -6767,6 +6837,195 @@ mod tests {
             assert_switch_case_returns_int_result(&clause.body, expected_value);
         }
         assert_switch_default_returns_int_result(default_block, 3);
+    }
+
+    #[test]
+    fn function_return_blocks_lower_ifs_without_a_result_temp() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let branch = Ident::create_local("branch");
+        let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+            arity: 1,
+            params: vec![cond.clone()],
+            body: Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::var(cond.clone())),
+                Box::new(Lambda::let_(
+                    LetKind::Strict,
+                    branch.clone(),
+                    Lambda::const_(Constant::int(1)),
+                    Lambda::var(branch.clone()),
+                )),
+                Box::new(Lambda::const_(Constant::int(0))),
+            )),
+            attr: crate::lambda::FunctionAttribute::default(),
+        }));
+
+        let Expression {
+            desc: ExpressionDesc::Fun { body, .. },
+            ..
+        } = compiled.expr
+        else {
+            panic!("expected a function expression");
+        };
+
+        let [if_stmt] = body.as_slice() else {
+            panic!("expected a single if statement in the function body");
+        };
+        let StatementDesc::If(test, then_block, else_block) = &if_stmt.desc else {
+            panic!("expected direct return-position if lowering");
+        };
+        assert!(matches!(
+            test,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&cond)
+        ));
+
+        let [branch_decl, branch_return] = then_block.as_slice() else {
+            panic!("expected the let-binding branch to stay inline in the then block");
+        };
+        let StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value: Some(Expression {
+                desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                ..
+            }),
+            ..
+        }) = &branch_decl.desc
+        else {
+            panic!("expected the then branch local declaration");
+        };
+        assert!(ident.same(&branch));
+        assert!(matches!(
+            branch_return,
+            Statement {
+                desc: StatementDesc::Return(Expression {
+                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                    ..
+                }),
+                ..
+            } if id.same(&branch)
+        ));
+
+        let [else_return] = else_block.as_slice() else {
+            panic!("expected a single return in the else branch");
+        };
+        assert!(matches!(
+            else_return,
+            Statement {
+                desc: StatementDesc::Return(Expression {
+                    desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
+                    ..
+                }),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn let_bindings_lower_ifs_without_a_result_temp() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let result = Ident::create_local("result");
+        let branch = Ident::create_local("branch");
+        let compiled = compiler.compile_expr(&Lambda::Llet(
+            LetKind::Strict,
+            result.clone(),
+            Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::var(cond.clone())),
+                Box::new(Lambda::let_(
+                    LetKind::Strict,
+                    branch.clone(),
+                    Lambda::const_(Constant::int(1)),
+                    Lambda::var(branch.clone()),
+                )),
+                Box::new(Lambda::const_(Constant::int(0))),
+            )),
+            Box::new(Lambda::var(result.clone())),
+        ));
+
+        let [result_decl, if_stmt] = compiled.prelude.as_slice() else {
+            panic!("expected a declaration followed by direct if assignment");
+        };
+        let StatementDesc::Variable(VariableDeclaration {
+            ident, value: None, ..
+        }) = &result_decl.desc
+        else {
+            panic!("expected an uninitialized declaration for the let-bound result");
+        };
+        assert!(ident.same(&result));
+
+        let StatementDesc::If(test, then_block, else_block) = &if_stmt.desc else {
+            panic!("expected the let-bound if to lower directly into branch assignments");
+        };
+        assert!(matches!(
+            test,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&cond)
+        ));
+
+        let [branch_decl, branch_assign] = then_block.as_slice() else {
+            panic!("expected the then branch declaration and assignment");
+        };
+        let StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value: Some(Expression {
+                desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                ..
+            }),
+            ..
+        }) = &branch_decl.desc
+        else {
+            panic!("expected the then branch local declaration");
+        };
+        assert!(ident.same(&branch));
+        assert!(matches!(
+            branch_assign,
+            Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Bin(
+                        BinOp::Eq,
+                        lhs,
+                        rhs
+                    ),
+                    ..
+                }),
+                ..
+            } if matches!(
+                (&lhs.desc, &rhs.desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(rhs_id))
+                ) if lhs_id.same(&result) && rhs_id.same(&branch)
+            )
+        ));
+
+        let [else_assign] = else_block.as_slice() else {
+            panic!("expected a single assignment in the else branch");
+        };
+        assert!(matches!(
+            else_assign,
+            Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Bin(
+                        BinOp::Eq,
+                        lhs,
+                        rhs
+                    ),
+                    ..
+                }),
+                ..
+            } if matches!(
+                (&lhs.desc, &rhs.desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                    ExpressionDesc::Number(Number::Int { i: 0, .. })
+                ) if lhs_id.same(&result)
+            )
+        ));
     }
 
     #[test]

@@ -44,6 +44,38 @@ reported:
 Interpretation:
 
 - `compiler-rust/src/lambda/compile.rs` now matches one more slice of
+  OCaml `core/lam_compile.ml` on the Rust JS path:
+  return-position and declaration-position `if` lowering no longer round-trip
+  through the generic expression compiler when a branch needs statements;
+  instead, the backend now emits direct branch returns / assignments in those
+  contexts, which matches OCaml's continuation-aware `compile_if` split more
+  closely and avoids manufacturing synthetic `ifres` result temporaries
+- Added focused coverage for this slice in
+  `function_return_blocks_lower_ifs_without_a_result_temp` and
+  `let_bindings_lower_ifs_without_a_result_temp`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lower_ifs_without_a_result_temp -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/return_check.res -o /tmp/return_check.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/return_check.res` narrowed materially:
+  the synthetic `let ifres` / trailing `return ifres` scaffolding is gone from
+  the option/assert branches, and the file now differs on later nullable-test
+  byte shape, retained `Some(k)` aliases, and the still-missing OCaml assert
+  exception object shape instead of return-context control-flow lowering
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the continuation-aware `if` change
+- the cached `let ifres` diff motif collapsed from **119** files to **59**
+  files after the authoritative rerun, which confirms this was a broad backend
+  continuation gap rather than a local snapshot accident
+- The authoritative JS snapshot baseline remains **130 / 657** passing,
+  **0** compile errors, and **527** output diffs after this OCaml-aligned
+  return/assignment `if` lowering fix; the change is kept because it moves the
+  Rust backend closer to OCaml even though the checked-in corpus total stays
+  flat
+
+- `compiler-rust/src/lambda/compile.rs` now matches one more slice of
   OCaml `core/js_pass_get_used.ml` and `core/js_pass_tailcall_inline.ml`
   on the Rust JS path:
   the missing JS pass is now threaded between `external_shadow` and
