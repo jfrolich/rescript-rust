@@ -856,7 +856,7 @@ fn find_cmi_file(load_paths: &[std::path::PathBuf], module_name: &str) -> Option
     None
 }
 
-fn resolve_module_signature_through_cmi<'a>(
+pub(crate) fn resolve_module_signature_through_cmi<'a>(
     ctx: &'a TypeContext<'a>,
     load_paths: &[std::path::PathBuf],
     module_path: &Path,
@@ -1383,48 +1383,39 @@ fn resolve_type_item_through_env<'a>(
         _ => return None,
     };
 
-    let mut visiting = HashSet::new();
-    let module_mty = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)?;
-    let module_sig =
-        resolve_signature_through_env_module_type(ctx, env, &module_mty, &mut visiting)?;
-    let module_sig = crate::types::typecore::copy_lookup_signature_for_subst(&module_sig, ctx);
-    let module_access_origin_is_persistent = module_path.head().is_persistent()
-        || matches!(module_path, Path::Pident(_))
-            && env
-                .lookup_module(module_path)
-                .or_else(|_| match module_path {
-                    Path::Pident(id) => env.find_module(id.name()),
-                    _ => unreachable!(),
-                })
-                .ok()
-                .and_then(|md| md.md_path.as_ref())
-                .is_some_and(|path| path.head().is_persistent());
+    let mut no_persistent_env = None;
+    let (qualified_module_path, module_sig) = crate::types::typecore::resolve_module_signature_for_path(
+        module_path,
+        env,
+        &mut no_persistent_env,
+        ctx,
+    )?;
+    let module_access_origin_is_persistent = qualified_module_path.head().is_persistent();
     // For alias modules, expansion should expose the alias target path
     // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
     let alias_target_for_strengthening = if strengthen_alias_types {
-        match &module_mty {
-            // Preserve local access paths like `L.t` / `V.t` instead of
-            // collapsing them back to the alias target during expansion.
-            super::decl::ModuleType::MtyAlias(_, target_path)
-                if module_access_origin_is_persistent =>
-            {
-                Some(target_path.clone())
-            }
-            _ => None,
-        }
+        // Preserve local access paths like `L.t` / `V.t` instead of
+        // collapsing them back to the alias target during expansion.
+        let mut no_persistent_env = None;
+        crate::types::typecore::module_alias_target_for_path(
+            module_path,
+            env,
+            &mut no_persistent_env,
+            ctx,
+        )
+        .filter(|_| module_access_origin_is_persistent)
     } else {
         None
     };
-    // Match OCaml Env.components_of_module path lookup behavior: when resolving
-    // `M.t`, operate on a path-qualified copy of `M`'s signature so sibling
-    // references inside manifests are rewritten through the access path.
-    crate::cmi::persistent_env::substitute_type_paths_in_sig(&module_sig, module_path, ctx);
 
     for item in &module_sig {
         if let SignatureItem::SigType(id, decl, _) = item {
             if id.name() == type_name {
-                let queried_type_path = Path::pdot(module_path.clone(), type_name.to_string());
-                let self_manifest = decl.type_manifest.is_some_and(|manifest| {
+                let copied_decl =
+                    crate::types::typecore::copy_lookup_type_decl_for_subst(decl, ctx);
+                let queried_type_path =
+                    Path::pdot(qualified_module_path.clone(), type_name.to_string());
+                let self_manifest = copied_decl.type_manifest.is_some_and(|manifest| {
                     let manifest = ctx.repr(manifest);
                     let manifest_desc = ctx.get_desc(manifest);
                     matches!(
@@ -1447,10 +1438,15 @@ fn resolve_type_item_through_env<'a>(
                 if let Some(target_path) = alias_target_for_strengthening.as_ref() {
                     return Some((
                         id.clone(),
-                        strengthen_type_decl_for_module_access_path(ctx, target_path, id, decl),
+                        strengthen_type_decl_for_module_access_path(
+                            ctx,
+                            target_path,
+                            id,
+                            &copied_decl,
+                        ),
                     ));
                 }
-                return Some((id.clone(), decl.clone()));
+                return Some((id.clone(), copied_decl));
             }
         }
     }
@@ -1502,6 +1498,49 @@ fn normalize_path_full<'a>(ctx: &'a TypeContext<'a>, env: &Env, path: &Path) -> 
     normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new())
 }
 
+fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
+    if path.same(old_prefix) {
+        return Some(new_prefix.clone());
+    }
+
+    match path {
+        Path::Pdot(parent, name, pos) => {
+            let rewritten_parent = rewrite_path_prefix(parent, old_prefix, new_prefix)?;
+            Some(Path::Pdot(Box::new(rewritten_parent), name.clone(), *pos))
+        }
+        Path::Pident(_) | Path::Papply(_, _) => None,
+    }
+}
+
+fn normalize_path_through_local_aliases(env: &Env, path: &Path) -> Option<Path> {
+    let mut aliases = env.current_local_module_aliases();
+    aliases.sort_by(|(left_id, left_target), (right_id, right_target)| {
+        right_target
+            .name()
+            .len()
+            .cmp(&left_target.name().len())
+            .then_with(|| right_target.name().cmp(&left_target.name()))
+            .then_with(|| right_id.stamp().cmp(&left_id.stamp()))
+    });
+
+    aliases.into_iter().find_map(|(alias_id, target_path)| {
+        let target_head = target_path.head();
+        let target_is_local = env
+            .find_module_with_origin(target_head.name())
+            .ok()
+            .is_some_and(|(origin_id, _, is_local)| is_local && origin_id.same(target_head));
+        if !target_is_local {
+            return None;
+        }
+        let alias_path = Path::pident(alias_id);
+        if alias_path.same(path) {
+            return None;
+        }
+        rewrite_path_prefix(path, &target_path, &alias_path)
+            .filter(|rewritten| !rewritten.same(path))
+    })
+}
+
 fn normalize_path_full_inner<'a>(
     ctx: &'a TypeContext<'a>,
     env: &Env,
@@ -1533,6 +1572,32 @@ fn normalize_path_full_inner<'a>(
         if id.is_persistent() {
             ctx.trigger_module_sig_rename(id.name());
         }
+        if env.find_module_with_origin(id.name()).ok().is_some_and(
+            |(origin_id, md, is_local)| {
+                let target_is_local = match &md.md_type {
+                    super::decl::ModuleType::MtyAlias(_, target)
+                    | super::decl::ModuleType::MtyIdent(target) => {
+                        let head = target.head();
+                        env.find_module_with_origin(head.name())
+                            .ok()
+                            .is_some_and(|(target_id, _, target_local)| {
+                                target_local && target_id.same(head)
+                            })
+                    }
+                    _ => false,
+                };
+                is_local
+                    && origin_id.same(id)
+                    && target_is_local
+                    && matches!(
+                        md.md_type,
+                        super::decl::ModuleType::MtyAlias(..)
+                            | super::decl::ModuleType::MtyIdent(..)
+                    )
+            },
+        ) {
+            return path;
+        }
     }
 
     // Then check if the path itself is a module alias.
@@ -1557,6 +1622,10 @@ fn normalize_path_full_inner<'a>(
                 return normalize_path_full_inner(ctx, env, alias_path, depth + 1, visiting);
             }
         }
+    }
+
+    if let Some(rewritten) = normalize_path_through_local_aliases(env, &path) {
+        return normalize_path_full_inner(ctx, env, &rewritten, depth + 1, visiting);
     }
 
     path

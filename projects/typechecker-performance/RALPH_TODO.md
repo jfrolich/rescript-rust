@@ -1,7 +1,7 @@
 # Ralph TODO: Typechecker Performance
 
 **Last Updated:** 2026-04-13
-**Status:** Baseline refreshed; first cache prototype rejected on parity
+**Status:** env_lazy hot-path rollout checkpoint landed; broader perf gap still open
 
 ## Goal
 
@@ -89,6 +89,64 @@ Detailed investigation:
 - [IMPORT_RES_PERFORMANCE_HANDOFF.md](./IMPORT_RES_PERFORMANCE_HANDOFF.md)
 - [CORPUS_BASELINE.md](./CORPUS_BASELINE.md)
 
+## Current Checkpoint
+
+Checkpoint measurements from this worktree after the first `env_lazy` /
+shared-module-view rollout on `2026-04-13`:
+
+- Full typedtree parity: Rust `657 passed`, OCaml `657 passed`, parity
+  `226/657`, `43199` hunk mismatches
+- Clean-head comparison with explicit runtime path: parity `226/656`,
+  `42930` hunk mismatches, with clean head still timing out on `Import.res`
+- Authoritative `Import.res` repro:
+  - OCaml: `0.05s` (`/usr/bin/time -lp`)
+  - Rust: `0.73s` (`/usr/bin/time -lp`)
+  - Rust max RSS: about `537MB`
+  - Rust peak footprint: about `510MB`
+- Authoritative canonical corpus benchmark:
+  - Files tested: `657`
+  - Comparable files: `656`
+  - Rust faster or equal: `1`
+  - Rust slower: `655`
+  - Materially slower: `233`
+  - Rust failures: `1` (`src/ticker.res`: stack overflow)
+  - Aggregate OCaml total: `4954.9ms`
+  - Aggregate Rust total: `12669.3ms`
+  - Aggregate Rust / OCaml ratio: `2.56x`
+
+What landed in this checkpoint:
+
+- `ctype::resolve_type_item_through_env` now resolves through the shared
+  access-path-qualified module-signature helper instead of rebuilding an eager
+  throwaway signature copy locally
+- `typecore` longident/module lookup now routes the real hot path through the
+  same `resolve_module_signature_for_path` helper
+- flattened qualified alias-head rewriting is part of the shared helper path,
+  which restores the clean-head `Import.res` / `js_json_test.res` shapes
+- cache scope for resolved module views is now restricted to env-sensitive
+  local-to-local alias cases instead of all local module paths
+- local-to-local alias family rebasing was added for copied value descriptions
+  plus path normalization, which fixes the `ffi_test.res` / `mario_game.res`
+  type clashes introduced by the helper rollout
+
+Focused correctness checks from this checkpoint:
+
+- `Import.res` typedtree matches the stored clean-head reference exactly
+- `ffi_test.res`, `mario_game.res`, `js_json_test.res`, `bs_set_int_test.res`,
+  `bs_mutable_set_test.res`, and `topsort_test.res` all typecheck again
+
+What this means:
+
+- The first required infrastructure change is mostly in place: the hot lookup
+  path is no longer split between a shared helper and a separate eager `ctype`
+  path
+- The architectural change alone did not collapse the performance gap yet
+- Typedtree parity is back to the branch's broad `226`-file plateau, but the
+  global hunk total is still slightly worse than the clean-head comparison, so
+  parity work is not done
+- The next session should continue from this code state instead of reverting the
+  shared helper rollout
+
 ## Task List
 
 - [ ] Keep `scripts/benchmark_typechecker_performance.py` authoritative for the
@@ -99,11 +157,11 @@ Detailed investigation:
   order, and sharing model before attempting alternative optimizations
 - [ ] Make the lazy qualified module-components path the real source of truth,
   not a side path that `ctype` bypasses
-- [ ] Add a shared path-qualified module-signature/components helper that both
+- [x] Add a shared path-qualified module-signature/components helper that both
   `typecore.rs` and `ctype.rs` use
-- [ ] Move `ctype::resolve_type_item_through_env` onto that lazy qualified path
+- [x] Move `ctype::resolve_type_item_through_env` onto that lazy qualified path
   instead of building throwaway copied signatures
-- [ ] Move the matching `typecore.rs` and shared module-resolution lookups onto
+- [x] Move the matching `typecore.rs` and shared module-resolution lookups onto
   the same lazy qualified path so `env_lazy` is not partial
 - [ ] When retrying the `ctype` cache, preserve typedtree stamp parity for
   `Import*` files and `DynamicImportModuleWithAlias` before keeping any speedup

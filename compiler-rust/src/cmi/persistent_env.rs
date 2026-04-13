@@ -2295,6 +2295,16 @@ fn rewrite_type_expr_by_path_prefix(
     }
 }
 
+pub fn rewrite_type_expr_by_path_prefix_pub(
+    ty_ref: TypeExprRef,
+    old_prefix: &Path,
+    new_prefix: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    let mut visited = HashSet::new();
+    rewrite_type_expr_by_path_prefix(ty_ref, old_prefix, new_prefix, ctx, &mut visited);
+}
+
 /// Rewrite all type paths in a signature by replacing path prefix `old_prefix`
 /// with `new_prefix`. Used when resolving module aliases like `module J = Js.Json`:
 /// rewrites `Pdot(Pdot(Pident("Js"), "Json"), "Kind")` → `Pdot(Pident("J"), "Kind")`.
