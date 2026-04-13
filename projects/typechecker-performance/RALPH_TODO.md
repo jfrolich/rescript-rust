@@ -1,7 +1,7 @@
 # Ralph TODO: Typechecker Performance
 
 **Last Updated:** 2026-04-13
-**Status:** Baseline complete, implementation not started
+**Status:** Baseline refreshed; first cache prototype rejected on parity
 
 ## Goal
 
@@ -12,22 +12,25 @@ closer to OCaml's lazy module-components model.
 
 ## Baseline
 
-Authoritative `Import.res` timing repro:
+Authoritative `Import.res` timing repro from this worktree on `2026-04-13`:
 
-- OCaml: about `0.07s`
-- Rust: about `8.69s`
-- Rust peak memory: about `5.7GB`
+- OCaml: `0.04s` (`/usr/bin/time -lp`)
+- Rust: `8.93s` (`/usr/bin/time -lp`)
+- Rust max RSS: about `3.30GB`
+- Rust peak footprint: about `9.40GB`
 
-Authoritative canonical-corpus benchmark:
+Authoritative canonical-corpus benchmark from this worktree on `2026-04-13`:
 
 - Files tested: `657`
 - Comparable files: `657`
 - Rust faster or equal: `2`
 - Rust slower: `655`
-- Materially slower: `252`
+- Materially slower: `253`
 - OCaml failures: `0`
 - Rust failures: `0`
-- Aggregate Rust / OCaml ratio: `4.29x`
+- Aggregate OCaml total: `5491.7ms`
+- Aggregate Rust total: `25029.1ms`
+- Aggregate Rust / OCaml ratio: `4.56x`
 
 Detailed corpus baseline:
 
@@ -57,6 +60,23 @@ Detailed corpus baseline:
   (`gpr_1150.res`), but it should be investigated after the main module-view
   cliff is fixed so the residual signal is cleaner.
 
+## Rejected Prototype
+
+- Attempted change: cache the path-qualified module signature produced for
+  `ctype::resolve_type_item_through_env` instead of rebuilding it on every
+  lookup.
+- Best observed `Import.res` timing during the prototype: Rust `1.56s`
+  (`/usr/bin/time -lp`) with about `575MB` max RSS and about `548MB` peak
+  footprint. A slightly earlier version measured Rust `2.38s` to `4.07s`
+  depending on the cache variant.
+- Why it was rejected: typedtree parity regressed on exactly these files:
+  `Import.res`, `ImportAttributes.res`, `DynamicImportModuleWithAlias.res`,
+  `stdlib/Stdlib_ImportTests.res`.
+- Parity symptom: the diffs were dominated by identifier/stamp drift in the
+  import-heavy path, which means the cache shape still does not match OCaml's
+  lazy forcing behavior closely enough.
+- Outcome: prototype reverted. Keep the measurements, but do not keep the code.
+
 Detailed investigation:
 
 - [IMPORT_RES_PERFORMANCE_HANDOFF.md](./IMPORT_RES_PERFORMANCE_HANDOFF.md)
@@ -72,6 +92,8 @@ Detailed investigation:
   `typecore.rs` and `ctype.rs` use
 - [ ] Move `ctype::resolve_type_item_through_env` onto that lazy qualified path
   instead of building throwaway copied signatures
+- [ ] When retrying the `ctype` cache, preserve typedtree stamp parity for
+  `Import*` files and `DynamicImportModuleWithAlias` before keeping any speedup
 - [ ] Ensure the qualified view is cached by access path, not only module name
 - [ ] Cache the fully rewritten/qualified signature or components view, not just
   the raw signature
