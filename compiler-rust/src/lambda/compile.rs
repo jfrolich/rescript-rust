@@ -2397,6 +2397,39 @@ impl LambdaCompiler {
                 ))
             }
             Pmakearray => Expression::array(compiled_args, MutableFlag::Mutable),
+            Pmakedict => match compiled_args.as_slice() {
+                [Expression {
+                    desc: ExpressionDesc::Array(items, _),
+                    ..
+                }] => {
+                    let props = items
+                        .iter()
+                        .filter_map(|item| match &item.desc {
+                            ExpressionDesc::CamlBlock(fields, _, _, _)
+                                if matches!(
+                                    fields.as_slice(),
+                                    [Expression {
+                                        desc: ExpressionDesc::Str { .. },
+                                        ..
+                                    }, _]
+                                ) =>
+                            {
+                                let [Expression {
+                                    desc: ExpressionDesc::Str { txt, .. },
+                                    ..
+                                }, value] = fields.as_slice()
+                                else {
+                                    unreachable!("checked by matches! above");
+                                };
+                                Some((PropertyName::lit(txt.clone()), value.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    Expression::new(ExpressionDesc::Object(None, props))
+                }
+                _ => Expression::undefined(false),
+            },
             Pstringadd => Expression::new(ExpressionDesc::StringAppend(
                 Box::new(compiled_args[0].clone()),
                 Box::new(compiled_args[1].clone()),
@@ -11361,6 +11394,73 @@ mod tests {
                 ));
             }
             other => panic!("expected an object literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
+        let mut compiler = LambdaCompiler::new();
+        let dict_ident = Ident::create_local("stringDict");
+        let dict_value = Lambda::prim(
+            Primitive::Pmakedict,
+            vec![Lambda::prim(
+                Primitive::Pmakearray,
+                vec![Lambda::prim(
+                    Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+                    vec![
+                        Lambda::const_(Constant::string("first")),
+                        Lambda::const_(Constant::string("hello")),
+                    ],
+                    Location::none(),
+                )],
+                Location::none(),
+            )],
+            Location::none(),
+        );
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            dict_ident.clone(),
+            dict_value,
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::ModuleExport(vec![dict_ident.clone()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::var(dict_ident.clone())],
+                Location::none(),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!("expected one exported dict binding");
+        };
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Object(_, props),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&dict_ident));
+                assert_eq!(props.len(), 1);
+                assert!(matches!(
+                    &props[0],
+                    (
+                        PropertyName::Lit(name),
+                        Expression {
+                            desc: ExpressionDesc::Str { txt, .. },
+                            ..
+                        },
+                    ) if name == "first" && txt == "hello"
+                ));
+            }
+            other => panic!("expected exported dict object literal, got {other:?}"),
         }
     }
 

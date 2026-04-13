@@ -44,6 +44,36 @@ reported:
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed primitive-lowering slice in
+  `compiler/core/lam_compile_primitive.ml`
+- After reading OCaml's `Pmakedict` branch there, the Rust backend in
+  `compiler-rust/src/lambda/compile.rs` now lowers `Primitive::Pmakedict`
+  to a JS object literal by unpacking the array-of-pairs payload, instead of
+  falling through to `undefined`
+- Added focused regression coverage in
+  `lambda::compile::tests::compile_deps_program_keeps_exported_dict_initializer_object_literals`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_deps_program_keeps_exported_dict_initializer_object_literals -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DictInternalRepresentation.res -o /tmp/DictInternalRepresentation.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/DictInternalRepresentation.res` no longer differs on the
+  missing top-level dict initializers (`let stringDict;` / `let intDict;`);
+  the remaining drift in that file is now only the separate let-continuation
+  split on `first$1`, `second`, and `third`
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same primitive fix
+- Across cached diff artifacts, `let stringDict;` and `let intDict;` no longer
+  appear in the JS diffs
+- The authoritative JS snapshot baseline remains **235 / 657** passing,
+  **0** compile errors, and **422** output diffs after this OCaml-aligned
+  `Pmakedict` fix; the headline total is flat, but the missing-dict-literal
+  cluster is smaller
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed continuation slice in
   `compiler/core/lam_compile.ml` together with
   `compiler/core/js_output.ml`
