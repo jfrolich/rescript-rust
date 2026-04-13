@@ -16,9 +16,9 @@ use crate::js_ir::op::{
 };
 use crate::js_ir::printer::{convert_ident_name, is_js_keyword_or_global};
 use crate::js_ir::{
-    BinOp, Block, CallInfo, CaseClause, Delim, DepsProgram, Expression, ExpressionDesc,
-    ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc, StringClause,
-    VIdent, VariableDeclaration, expression_has_no_side_effects,
+    expression_has_no_side_effects, BinOp, Block, CallInfo, CaseClause, Delim, DepsProgram,
+    Expression, ExpressionDesc, ForDirection, ModuleId, ModulePathResolver, Program, Statement,
+    StatementDesc, StringClause, VIdent, VariableDeclaration,
 };
 use crate::lambda::analysis;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
@@ -43,6 +43,25 @@ struct StaticHandler {
     label: i32,
     bindings: Vec<Ident>,
     handler: Lambda,
+}
+
+#[derive(Debug, Clone)]
+struct TailLoopState {
+    function: Ident,
+    params: Vec<Ident>,
+    new_params: HashMap<Ident, Ident>,
+    triggered: bool,
+}
+
+impl TailLoopState {
+    fn new(function: Ident, params: Vec<Ident>) -> Self {
+        Self {
+            function,
+            params,
+            new_params: HashMap::new(),
+            triggered: false,
+        }
+    }
 }
 
 /// Lambda compiler to JS IR.
@@ -315,8 +334,13 @@ impl LambdaCompiler {
                         // OCaml's recursive-let path emits function bindings through the same
                         // declared-binding route used by non-rec lets, which lets the printer
                         // recover `function name(...)` at the top level.
-                        Lambda::Lfunction(_) => {
-                            prelude.extend(self.compile_let_binding(LetKind::Alias, id, expr));
+                        Lambda::Lfunction(func) => {
+                            prelude.push(Statement::variable(VariableDeclaration {
+                                ident: id.clone(),
+                                value: Some(self.compile_recursive_function_expr(id, func)),
+                                property: LetKind::Alias,
+                                ident_info: IdentInfo::default(),
+                            }));
                         }
                         _ => {
                             prelude.push(Statement::variable(VariableDeclaration {
@@ -613,6 +637,260 @@ impl LambdaCompiler {
                 block
             }
         }
+    }
+
+    fn compile_recursive_function_expr(
+        &mut self,
+        function: &Ident,
+        func: &crate::lambda::LFunction,
+    ) -> Expression {
+        if !function_has_self_tailcall(function, &func.body) {
+            return self.compile_expr(&Lambda::Lfunction(func.clone())).expr;
+        }
+
+        let params = if func.attr.one_unit_arg {
+            vec![]
+        } else {
+            func.params.clone()
+        };
+        let mut tail_loop = TailLoopState::new(function.clone(), params.clone());
+        let body = self.compile_tail_loop_return_block(&func.body, &mut tail_loop);
+
+        if !tail_loop.triggered {
+            return self.compile_expr(&Lambda::Lfunction(func.clone())).expr;
+        }
+
+        let lowered_params = params
+            .iter()
+            .map(|param| {
+                tail_loop
+                    .new_params
+                    .get(param)
+                    .cloned()
+                    .unwrap_or_else(|| param.clone())
+            })
+            .collect();
+
+        let mut loop_body = Vec::new();
+        for param in params.iter().rev() {
+            let Some(new_param) = tail_loop.new_params.get(param) else {
+                continue;
+            };
+            loop_body.push(Statement::variable(VariableDeclaration {
+                ident: param.clone(),
+                value: Some(Expression::var(new_param.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }));
+        }
+        loop_body.extend(body);
+
+        Expression::new(ExpressionDesc::Fun {
+            is_method: false,
+            params: lowered_params,
+            body: vec![Statement::while_(Expression::bool(true), loop_body)],
+            env: Default::default(),
+            return_unit: func.attr.return_unit,
+            async_: func.attr.async_,
+            directive: func.attr.directive.clone(),
+        })
+    }
+
+    fn compile_tail_loop_return_block(
+        &mut self,
+        lam: &Lambda,
+        tail_loop: &mut TailLoopState,
+    ) -> Block {
+        match lam {
+            Lambda::Llet(kind, id, value, body) => {
+                let mut block = self.compile_let_binding(*kind, id, value);
+                block.extend(self.compile_tail_loop_return_block(body, tail_loop));
+                block
+            }
+            Lambda::Lapply(apply) => {
+                if let Some(block) = self.try_compile_self_tailcall_block(apply, tail_loop) {
+                    return block;
+                }
+                let compiled = self.compile_apply_call(apply);
+                let mut block = compiled.prelude;
+                block.push(Statement::return_(compiled.expr));
+                block
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                self.compile_tail_loop_if_return_block(cond, then_, else_, tail_loop)
+            }
+            Lambda::Lsequence(first, second) => {
+                let mut block = self.compile_effect_block(first);
+                block.extend(self.compile_tail_loop_return_block(second, tail_loop));
+                block
+            }
+            Lambda::LstaticCatch(body, (label, bindings), handler) => {
+                self.with_static_handler(*label, bindings, handler, |this| {
+                    this.compile_tail_loop_return_block(body, tail_loop)
+                })
+            }
+            Lambda::Lswitch(scrut, switch) => {
+                self.compile_tail_loop_switch_return_block(scrut, switch, tail_loop)
+            }
+            Lambda::LstringSwitch(scrut, cases, default) => self
+                .compile_tail_loop_string_switch_return_block(
+                    scrut,
+                    cases,
+                    default.as_deref(),
+                    tail_loop,
+                ),
+            _ => {
+                let compiled = self.compile_expr(lam);
+                let mut block = compiled.prelude;
+                if !block_terminates(&block) {
+                    block.push(Statement::return_(compiled.expr));
+                }
+                block
+            }
+        }
+    }
+
+    fn compile_tail_loop_if_return_block(
+        &mut self,
+        cond: &Lambda,
+        then_: &Lambda,
+        else_: &Lambda,
+        tail_loop: &mut TailLoopState,
+    ) -> Block {
+        let cond_compiled = self.compile_expr(cond);
+        let then_block = self.compile_tail_loop_return_block(then_, tail_loop);
+        let else_block = self.compile_tail_loop_return_block(else_, tail_loop);
+
+        let mut block = cond_compiled.prelude;
+        if let (Some(then_expr), Some(else_expr)) = (
+            single_return_expression(&then_block),
+            single_return_expression(&else_block),
+        ) {
+            block.push(Statement::return_(Expression::cond(
+                cond_compiled.expr,
+                then_expr,
+                else_expr,
+            )));
+            return block;
+        }
+
+        block.push(Statement::if_(cond_compiled.expr, then_block, else_block));
+        block
+    }
+
+    fn compile_tail_loop_switch_return_block(
+        &mut self,
+        scrut: &Lambda,
+        switch: &LambdaSwitch,
+        tail_loop: &mut TailLoopState,
+    ) -> Block {
+        let scrut_compiled = self.compile_expr(scrut);
+        let mut block = scrut_compiled.prelude;
+        let mut cases = Vec::new();
+
+        for (tag, body) in &switch.sw_consts {
+            cases.push((
+                *tag,
+                CaseClause {
+                    body: self.compile_tail_loop_return_block(body, tail_loop),
+                    should_break: false,
+                    comment: None,
+                },
+            ));
+        }
+
+        let default_block = switch
+            .sw_failaction
+            .as_ref()
+            .map(|fallback| self.compile_tail_loop_return_block(fallback, tail_loop));
+
+        block.push(Statement::new(StatementDesc::IntSwitch(
+            scrut_compiled.expr,
+            cases,
+            default_block,
+        )));
+        block
+    }
+
+    fn compile_tail_loop_string_switch_return_block(
+        &mut self,
+        scrut: &Lambda,
+        cases: &[(String, Lambda)],
+        default: Option<&Lambda>,
+        tail_loop: &mut TailLoopState,
+    ) -> Block {
+        let scrut_compiled = self.compile_expr(scrut);
+        let mut block = scrut_compiled.prelude;
+        let mut clauses = Vec::new();
+
+        for (tag, body) in cases {
+            clauses.push(StringClause {
+                tag_type: tag.clone(),
+                clause: CaseClause {
+                    body: self.compile_tail_loop_return_block(body, tail_loop),
+                    should_break: false,
+                    comment: None,
+                },
+            });
+        }
+
+        let default_block =
+            default.map(|fallback| self.compile_tail_loop_return_block(fallback, tail_loop));
+
+        block.push(Statement::new(StatementDesc::StringSwitch(
+            scrut_compiled.expr,
+            clauses,
+            default_block,
+        )));
+        block
+    }
+
+    fn try_compile_self_tailcall_block(
+        &mut self,
+        apply: &Apply,
+        tail_loop: &mut TailLoopState,
+    ) -> Option<Block> {
+        let Lambda::Lvar(function) = apply.ap_func.as_ref() else {
+            return None;
+        };
+        if !function.same(&tail_loop.function) {
+            return None;
+        }
+
+        let mut block = Vec::new();
+        let mut args = Vec::new();
+        for arg in &apply.ap_args {
+            let compiled = self.compile_expr(arg);
+            block.extend(compiled.prelude);
+            args.push(compiled.expr);
+        }
+
+        tail_loop.triggered = true;
+        let args = if tail_loop.params.is_empty() {
+            Vec::new()
+        } else {
+            args
+        };
+        let mut assignments = Vec::new();
+        for (param, arg) in tail_loop.params.iter().zip(args) {
+            if matches!(&arg.desc, ExpressionDesc::Var(VIdent::Id(id)) if id.same(param)) {
+                continue;
+            }
+
+            let target = tail_loop
+                .new_params
+                .entry(param.clone())
+                .or_insert_with(|| self.fresh_ident(&format!("_{}", param.name())))
+                .clone();
+            assignments.push(Statement::exp(Expression::bin(
+                BinOp::Eq,
+                Expression::var(target),
+                arg,
+            )));
+        }
+        block.extend(assignments.into_iter().rev());
+        block.push(Statement::continue_());
+        Some(block)
     }
 
     fn compile_effect_output(&mut self, lam: &Lambda) -> Compiled {
@@ -2509,10 +2787,13 @@ impl LambdaCompiler {
                             ExpressionDesc::CamlBlock(fields, _, _, _)
                                 if matches!(
                                     fields.as_slice(),
-                                    [Expression {
-                                        desc: ExpressionDesc::Str { .. },
-                                        ..
-                                    }, _]
+                                    [
+                                        Expression {
+                                            desc: ExpressionDesc::Str { .. },
+                                            ..
+                                        },
+                                        _
+                                    ]
                                 ) =>
                             {
                                 let [Expression {
@@ -3400,16 +3681,13 @@ impl LambdaCompiler {
 
                 if *tagged_template {
                     match args.as_slice() {
-                        [
-                            Expression {
-                                desc: ExpressionDesc::Array(strings, _),
-                                ..
-                            },
-                            Expression {
-                                desc: ExpressionDesc::Array(values, _),
-                                ..
-                            },
-                        ] => {
+                        [Expression {
+                            desc: ExpressionDesc::Array(strings, _),
+                            ..
+                        }, Expression {
+                            desc: ExpressionDesc::Array(values, _),
+                            ..
+                        }] => {
                             return Expression::new(ExpressionDesc::TaggedTemplate(
                                 Box::new(target),
                                 strings.clone(),
@@ -3562,13 +3840,10 @@ impl LambdaCompiler {
     fn compile_import(&self, args: Vec<Expression>) -> Expression {
         let arg = match args.as_slice() {
             [arg] => arg,
-            [
-                arg,
-                Expression {
-                    desc: ExpressionDesc::Undefined { is_unit: true },
-                    ..
-                },
-            ] => arg,
+            [arg, Expression {
+                desc: ExpressionDesc::Undefined { is_unit: true },
+                ..
+            }] => arg,
             _ => {
                 return Expression::call(
                     Expression::var(Ident::create_persistent("import")),
@@ -3735,6 +4010,67 @@ impl LambdaCompiler {
         let mut modules = seen.into_iter().collect::<Vec<_>>();
         modules.sort_by(module_sort_cmp);
         modules
+    }
+}
+
+fn single_return_expression(block: &Block) -> Option<Expression> {
+    let [stmt] = block.as_slice() else {
+        return None;
+    };
+    let StatementDesc::Return(expr) = &stmt.desc else {
+        return None;
+    };
+    Some(expr.clone())
+}
+
+fn function_has_self_tailcall(function: &Ident, lam: &Lambda) -> bool {
+    match lam {
+        Lambda::Lapply(Apply { ap_func, .. }) => {
+            matches!(ap_func.as_ref(), Lambda::Lvar(id) if id.same(function))
+        }
+        Lambda::Llet(_, _, _, body) => function_has_self_tailcall(function, body),
+        Lambda::LifThenElse(_, then_, else_) => {
+            function_has_self_tailcall(function, then_)
+                || function_has_self_tailcall(function, else_)
+        }
+        Lambda::Lsequence(_, second) => function_has_self_tailcall(function, second),
+        Lambda::Lswitch(_, switch) => {
+            switch
+                .sw_consts
+                .iter()
+                .any(|(_, body)| function_has_self_tailcall(function, body))
+                || switch
+                    .sw_blocks
+                    .iter()
+                    .any(|(_, body)| function_has_self_tailcall(function, body))
+                || switch
+                    .sw_failaction
+                    .as_ref()
+                    .is_some_and(|fallback| function_has_self_tailcall(function, fallback))
+        }
+        Lambda::LstringSwitch(_, cases, default) => {
+            cases
+                .iter()
+                .any(|(_, body)| function_has_self_tailcall(function, body))
+                || default
+                    .as_ref()
+                    .is_some_and(|fallback| function_has_self_tailcall(function, fallback))
+        }
+        Lambda::LstaticCatch(body, _, handler) => {
+            function_has_self_tailcall(function, body)
+                || function_has_self_tailcall(function, handler)
+        }
+        Lambda::Lvar(_)
+        | Lambda::LglobalModule(_, _)
+        | Lambda::Lconst(_)
+        | Lambda::Lfunction(_)
+        | Lambda::Lletrec(_, _)
+        | Lambda::Lprim(_)
+        | Lambda::LstaticRaise(_, _)
+        | Lambda::LtryWith(_, _, _)
+        | Lambda::Lwhile(_, _)
+        | Lambda::Lfor(_, _, _, _, _)
+        | Lambda::Lassign(_, _) => false,
     }
 }
 
@@ -4357,11 +4693,11 @@ fn push_effect_expression(block: &mut Block, expr: Expression) {
 
 fn statement_allows_undefined_export_reuse(stmt: &Statement) -> bool {
     match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration { value, .. }) => value.as_ref().is_none_or(
-            |expr| {
+        StatementDesc::Variable(VariableDeclaration { value, .. }) => {
+            value.as_ref().is_none_or(|expr| {
                 !matches!(expr.desc, ExpressionDesc::Fun { .. }) && js_expr_no_side_effects(expr)
-            },
-        ),
+            })
+        }
         _ => false,
     }
 }
@@ -4659,40 +4995,21 @@ fn int32_bor(left: Expression, right: Expression) -> Expression {
             ExpressionDesc::Number(Number::Int { i: lhs, .. }),
             ExpressionDesc::Number(Number::Int { i: rhs, .. }),
         ) => int_expr(*lhs | *rhs),
-        (
-            _,
-            ExpressionDesc::Bin(
-                BinOp::Lsr,
-                inner,
-                shift,
-            ),
-        ) if is_zero_int(shift.as_ref()) => int32_bor(left, inner.as_ref().clone()),
-        (
-            ExpressionDesc::Bin(
-                BinOp::Lsr,
-                inner,
-                shift,
-            ),
-            _,
-        ) if is_zero_int(shift.as_ref()) => int32_bor(inner.as_ref().clone(), right),
-        (
-            ExpressionDesc::Bin(
-                BinOp::Lsr,
-                _,
-                shift,
-            ),
-            _,
-        ) if is_zero_int(&right) && int_literal(shift.as_ref()).is_some_and(|value| value > 0) => {
+        (_, ExpressionDesc::Bin(BinOp::Lsr, inner, shift)) if is_zero_int(shift.as_ref()) => {
+            int32_bor(left, inner.as_ref().clone())
+        }
+        (ExpressionDesc::Bin(BinOp::Lsr, inner, shift), _) if is_zero_int(shift.as_ref()) => {
+            int32_bor(inner.as_ref().clone(), right)
+        }
+        (ExpressionDesc::Bin(BinOp::Lsr, _, shift), _)
+            if is_zero_int(&right)
+                && int_literal(shift.as_ref()).is_some_and(|value| value > 0) =>
+        {
             left
         }
-        (
-            ExpressionDesc::Bin(
-                BinOp::Bor,
-                inner,
-                truncation,
-            ),
-            _,
-        ) if is_zero_int(&right) && is_zero_int(truncation.as_ref()) => {
+        (ExpressionDesc::Bin(BinOp::Bor, inner, truncation), _)
+            if is_zero_int(&right) && is_zero_int(truncation.as_ref()) =>
+        {
             int32_bor(inner.as_ref().clone(), right)
         }
         _ => Expression::bin(BinOp::Bor, left, right),
@@ -4706,14 +5023,9 @@ fn int32_lsr(left: Expression, right: Expression) -> Expression {
             ExpressionDesc::Number(Number::Int { i: rhs, .. }),
         ) => int_expr(((*lhs as u32) >> (*rhs as u32)) as i32),
         (ExpressionDesc::Bin(BinOp::Lsr, _, _), _) if is_zero_int(&right) => left,
-        (
-            ExpressionDesc::Bin(
-                BinOp::Bor,
-                inner,
-                truncation,
-            ),
-            _,
-        ) if is_zero_int(&right) && is_zero_int(truncation.as_ref()) => {
+        (ExpressionDesc::Bin(BinOp::Bor, inner, truncation), _)
+            if is_zero_int(&right) && is_zero_int(truncation.as_ref()) =>
+        {
             int32_lsr(inner.as_ref().clone(), right)
         }
         _ => to_int32(Expression::bin(BinOp::Lsr, left, right)),
@@ -4726,22 +5038,12 @@ fn int32_bxor(left: Expression, right: Expression) -> Expression {
             ExpressionDesc::Number(Number::Int { i: lhs, .. }),
             ExpressionDesc::Number(Number::Int { i: rhs, .. }),
         ) => int_expr(*lhs ^ *rhs),
-        (
-            _,
-            ExpressionDesc::Bin(
-                BinOp::Lsr,
-                inner,
-                shift,
-            ),
-        ) if is_zero_int(shift.as_ref()) => int32_bxor(left, inner.as_ref().clone()),
-        (
-            ExpressionDesc::Bin(
-                BinOp::Lsr,
-                inner,
-                shift,
-            ),
-            _,
-        ) if is_zero_int(shift.as_ref()) => int32_bxor(inner.as_ref().clone(), right),
+        (_, ExpressionDesc::Bin(BinOp::Lsr, inner, shift)) if is_zero_int(shift.as_ref()) => {
+            int32_bxor(left, inner.as_ref().clone())
+        }
+        (ExpressionDesc::Bin(BinOp::Lsr, inner, shift), _) if is_zero_int(shift.as_ref()) => {
+            int32_bxor(inner.as_ref().clone(), right)
+        }
         _ => Expression::bin(BinOp::Bxor, left, right),
     }
 }
@@ -8228,7 +8530,7 @@ fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option<String> {
 mod tests {
     use super::*;
     use crate::cmi::persistent_env::PersistentEnv;
-    use crate::js_ir::{ModulePathResolver, print_block, print_deps_program, print_expression};
+    use crate::js_ir::{print_block, print_deps_program, print_expression, ModulePathResolver};
     use crate::lambda::constant::{Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo};
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
@@ -8766,11 +9068,15 @@ mod tests {
             panic!("expected the existing bindings to be reused without rebound placeholders");
         };
         match &first.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, .. }) => assert!(ident.same(&alias)),
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&alias))
+            }
             other => panic!("expected the original alias binding first, got {other:?}"),
         }
         match &second.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, .. }) => assert!(ident.same(&other)),
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&other))
+            }
             other => panic!("expected the later binding second, got {other:?}"),
         }
     }
@@ -8806,13 +9112,18 @@ mod tests {
             panic!("expected the later effect to force a trailing rebound placeholder");
         };
         match &decl.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, .. }) => assert!(ident.same(&alias)),
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&alias))
+            }
             other => panic!("expected the original alias binding first, got {other:?}"),
         }
         assert!(matches!(effect.desc, StatementDesc::Exp(_)));
         match &rebound.desc {
             StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
-                assert!(!ident.same(&alias), "expected a rebound export placeholder at the tail");
+                assert!(
+                    !ident.same(&alias),
+                    "expected a rebound export placeholder at the tail"
+                );
                 assert_eq!(ident.name(), alias.name());
                 assert_eq!(exports, vec![ident.clone()]);
             }
@@ -9156,16 +9467,20 @@ mod tests {
                 deps.program.block
             );
         };
-        assert!(matches!(
-            stmt,
-            Statement {
-                desc: StatementDesc::Throw(Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+        assert!(
+            matches!(
+                stmt,
+                Statement {
+                    desc: StatementDesc::Throw(Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    }),
                     ..
-                }),
-                ..
-            } if txt == "boom"
-        ), "expected a terminating throw, got {:?}", stmt);
+                } if txt == "boom"
+            ),
+            "expected a terminating throw, got {:?}",
+            stmt
+        );
     }
 
     #[test]
@@ -12838,8 +13153,12 @@ mod tests {
             module.kind == Kind::Runtime && module.id.name() == "Primitive_option"
         }));
 
-        let resolver =
-            ModulePathResolver::from_compile_options(None, Some(std::path::Path::new("/tmp/wrapped.mjs")), None, None);
+        let resolver = ModulePathResolver::from_compile_options(
+            None,
+            Some(std::path::Path::new("/tmp/wrapped.mjs")),
+            None,
+            None,
+        );
         let rendered = print_deps_program(&deps, Some(&resolver));
         assert!(rendered.contains(
             "import * as Primitive_option from \"@rescript/runtime/lib/es6/Primitive_option.js\";"
@@ -13391,6 +13710,112 @@ mod tests {
         assert!(
             !rendered.contains("let even;") && !rendered.contains("let odd;"),
             "unexpected recursive placeholders remained:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn recursive_self_tailcalls_lower_to_looping_while_bodies() {
+        let mut compiler = LambdaCompiler::new();
+        let loop_ = Ident::create_local("loop");
+        let flag = Ident::create_local("flag");
+        let acc = Ident::create_local("acc");
+        let next = Ident::create_local("next");
+        let tailcall = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::var(loop_.clone())),
+            ap_args: vec![
+                Lambda::const_(Constant::JsFalse),
+                Lambda::var(next.clone()),
+                Lambda::var(next.clone()),
+            ],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+        let lam = Lambda::letrec(
+            vec![(
+                loop_.clone(),
+                Lambda::function_(
+                    3,
+                    vec![flag.clone(), acc.clone(), next],
+                    Lambda::if_(Lambda::var(flag), tailcall, Lambda::var(acc)),
+                    FunctionAttribute::default(),
+                ),
+            )],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert!(
+            rendered.contains("while (true)"),
+            "expected recursive self-tailcall lowering to emit a loop:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("continue;"),
+            "expected recursive self-tailcall lowering to continue the loop:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("return loop("),
+            "unexpected recursive return call remained:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn recursive_self_tailcalls_rename_params_before_loop_assignments() {
+        let mut compiler = LambdaCompiler::new();
+        let loop_ = Ident::create_local("loop");
+        let a = Ident::create_local("a");
+        let b = Ident::create_local("b");
+        let flag = Ident::create_local("flag");
+        let tailcall = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::var(loop_.clone())),
+            ap_args: vec![
+                Lambda::var(b.clone()),
+                Lambda::var(a.clone()),
+                Lambda::const_(Constant::JsFalse),
+            ],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+        let lam = Lambda::letrec(
+            vec![(
+                loop_.clone(),
+                Lambda::function_(
+                    3,
+                    vec![a.clone(), b.clone(), flag.clone()],
+                    Lambda::if_(Lambda::var(flag), tailcall, Lambda::var(a)),
+                    FunctionAttribute::default(),
+                ),
+            )],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert!(
+            rendered.contains("function loop(_a, _b, _flag)"),
+            "expected loop parameters to be renamed before tailcall assignments:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("let a = _a;")
+                && rendered.contains("let b = _b;")
+                && rendered.contains("let flag = _flag;"),
+            "expected original parameter aliases inside the loop body:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("_a = b;")
+                && rendered.contains("_b = a;")
+                && rendered.contains("_flag = false;"),
+            "expected assignments to target renamed loop params:\n{rendered}"
         );
     }
 }

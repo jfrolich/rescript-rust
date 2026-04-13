@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 270 / 657 JS snapshots passing, 0 compile errors, 387 output diffs
+**Status:** 275 / 657 JS snapshots passing, 0 compile errors, 382 output diffs
 
 ## Goal
 
@@ -35,13 +35,57 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **270 / 657**
+- JS snapshot parity: **275 / 657**
 - Compile errors: **0**
-- Output diffs: **387**
+- Output diffs: **382**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated the OCaml `compile_recursive_let` /
+  `compile_apply` self-tailcall slice in `compiler/core/lam_compile.ml`
+- After reading OCaml's recursive-function lowering there, the Rust backend in
+  `compiler-rust/src/lambda/compile.rs` now mirrors the same core behavior for
+  self-tail-recursive bindings: recursive `Lletrec` function bindings compile
+  through a loop-aware path, recognized self-tail calls lower to parameter
+  assignments plus `continue`, and renamed loop parameters get aliased back to
+  the original parameter ids inside the `while (true)` body
+- Added focused regression coverage in
+  `lambda::compile::tests::recursive_self_tailcalls_lower_to_looping_while_bodies`
+  and
+  `lambda::compile::tests::recursive_self_tailcalls_rename_params_before_loop_assignments`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release recursive_self_tailcalls -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release recursive_function_bindings_lower_directly_without_placeholder_assignments -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `cd tests/tests && timeout 10 ../../compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/test_cps.res -o /tmp/test_cps.mjs`
+  - `cd tests/tests && timeout 10 ../../compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match, the
+  tailcall cluster now lowers through OCaml-style loops instead of direct
+  recursive calls on focused repros like `tests/tests/src/test_cps.res`, and
+  the cached `while (true)` motif shrank from **44** failing diff files to
+  **37**
+- Resolved checked-in snapshot files for this cluster:
+  `tests/tests/src/inline_regression_test.res`,
+  `tests/tests/src/inline_edge_cases.res`,
+  `tests/tests/src/gpr_3697_test.res`, and
+  `tests/tests/src/unsafe_full_apply_primitive.res` no longer appear under
+  `temp/rust-parity/diffs`
+- The authoritative JS snapshot baseline now reports **275 / 657** passing,
+  **0** compile errors, and **382** output diffs; this is a net **+5**
+  passing snapshots and **-5** output diffs from the previously recorded
+  **270 / 657**, **0** compile errors, **387** output diffs
+- The remaining drift inside focused files such as
+  `tests/tests/src/test_cps.res`,
+  `tests/tests/src/cps_test.res`, and
+  `tests/tests/src/tailcall_inline_test.res` has moved on from missing
+  recursive-loop lowering to later byte ordering and surrounding backend
+  shaping
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed `Js_exp_make` expression
