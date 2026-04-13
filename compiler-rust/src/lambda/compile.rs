@@ -184,6 +184,42 @@ impl LambdaCompiler {
         exports
     }
 
+    fn compile_apply_call(&mut self, apply: &Apply) -> Compiled {
+        let mut prelude = vec![];
+        let func = self.compile_expr(&apply.ap_func);
+        prelude.extend(func.prelude);
+        let mut args = Vec::new();
+        for arg in &apply.ap_args {
+            let compiled = self.compile_expr(arg);
+            prelude.extend(compiled.prelude);
+            args.push(compiled.expr);
+        }
+
+        Compiled {
+            prelude,
+            expr: Expression::call(func.expr, args, CallInfo::default()),
+        }
+    }
+
+    fn materialize_compiled_value(&mut self, hint: &str, compiled: Compiled) -> Compiled {
+        if compiled.prelude.is_empty() {
+            return compiled;
+        }
+
+        let mut prelude = compiled.prelude;
+        let tmp = self.fresh_ident(hint);
+        prelude.push(Statement::variable(VariableDeclaration {
+            ident: tmp.clone(),
+            value: Some(compiled.expr),
+            property: LetKind::Strict,
+            ident_info: IdentInfo::default(),
+        }));
+        Compiled {
+            prelude,
+            expr: Expression::var(tmp),
+        }
+    }
+
     fn compile_expr(&mut self, lam: &Lambda) -> Compiled {
         match lam {
             Lambda::Lvar(id) => Compiled {
@@ -205,40 +241,9 @@ impl LambdaCompiler {
                 prelude: vec![],
                 expr: Self::compile_constant(cst),
             },
-            Lambda::Lapply(Apply {
-                ap_func,
-                ap_args,
-                ap_info: _,
-                ap_transformed_jsx: _,
-            }) => {
-                let mut prelude = vec![];
-                let func = self.compile_expr(ap_func);
-                prelude.extend(func.prelude);
-                let mut args = Vec::new();
-                for arg in ap_args {
-                    let compiled = self.compile_expr(arg);
-                    prelude.extend(compiled.prelude);
-                    args.push(compiled.expr);
-                }
-                let call = Expression::call(func.expr, args, CallInfo::default());
-                if prelude.is_empty() {
-                    Compiled {
-                        prelude,
-                        expr: call,
-                    }
-                } else {
-                    let tmp = self.fresh_ident("call");
-                    prelude.push(Statement::variable(VariableDeclaration {
-                        ident: tmp.clone(),
-                        value: Some(call),
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    }));
-                    Compiled {
-                        prelude,
-                        expr: Expression::var(tmp),
-                    }
-                }
+            Lambda::Lapply(apply) => {
+                let compiled = self.compile_apply_call(apply);
+                self.materialize_compiled_value("call", compiled)
             }
             Lambda::Lfunction(func) => {
                 if let Some(expr) = self.compile_eta_wrapped_runtime_alias(func) {
@@ -515,6 +520,12 @@ impl LambdaCompiler {
                 block.extend(self.compile_return_block(body));
                 block
             }
+            Lambda::Lapply(apply) => {
+                let compiled = self.compile_apply_call(apply);
+                let mut block = compiled.prelude;
+                block.push(Statement::return_(compiled.expr));
+                block
+            }
             Lambda::LifThenElse(cond, then_, else_) => {
                 self.compile_if_return_block(cond, then_, else_)
             }
@@ -560,6 +571,7 @@ impl LambdaCompiler {
                     expr: body_compiled.expr,
                 }
             }
+            Lambda::Lapply(apply) => self.compile_apply_call(apply),
             Lambda::LifThenElse(cond, then_, else_) => {
                 compiled_from_effect_block(self.compile_if_effect_block(cond, then_, else_))
             }
@@ -1720,6 +1732,16 @@ impl LambdaCompiler {
                 block.extend(self.compile_assign_to_target_block(result, body));
                 block
             }
+            Lambda::Lapply(apply) => {
+                let compiled = self.compile_apply_call(apply);
+                let mut block = compiled.prelude;
+                block.push(Statement::exp(Expression::bin(
+                    BinOp::Eq,
+                    Expression::var(result.clone()),
+                    compiled.expr,
+                )));
+                block
+            }
             Lambda::Lsequence(first, second) => {
                 let mut block = self.compile_effect_block(first);
                 block.extend(self.compile_assign_to_target_block(result, second));
@@ -2144,11 +2166,7 @@ impl LambdaCompiler {
         Compiled { prelude, expr }
     }
 
-    fn compile_primitive(
-        &mut self,
-        prim: &Primitive,
-        args: &[Lambda],
-    ) -> Compiled {
+    fn compile_primitive(&mut self, prim: &Primitive, args: &[Lambda]) -> Compiled {
         if matches!(prim, Primitive::Pimport) {
             return self.compile_import_primitive(args);
         }
@@ -2565,14 +2583,12 @@ impl LambdaCompiler {
                     tag.name.clone(),
                 ),
             },
-            Constant::Int { i, comment } => {
-                match pointer_info_comment_text(comment.as_ref()) {
-                    Some(comment) => {
-                        Expression::with_comment(ExpressionDesc::Number(Number::int(*i)), comment)
-                    }
-                    None => Expression::number(Number::int(*i)),
+            Constant::Int { i, comment } => match pointer_info_comment_text(comment.as_ref()) {
+                Some(comment) => {
+                    Expression::with_comment(ExpressionDesc::Number(Number::int(*i)), comment)
                 }
-            }
+                None => Expression::number(Number::int(*i)),
+            },
             Constant::NativeInt { i, comment } => {
                 match pointer_info_comment_text(comment.as_ref()) {
                     Some(comment) => Expression::with_comment(
@@ -2755,7 +2771,10 @@ impl LambdaCompiler {
         )
     }
 
-    fn compile_eta_wrapped_runtime_alias(&self, func: &crate::lambda::LFunction) -> Option<Expression> {
+    fn compile_eta_wrapped_runtime_alias(
+        &self,
+        func: &crate::lambda::LFunction,
+    ) -> Option<Expression> {
         if func.attr.one_unit_arg || func.attr.async_ || func.attr.directive.is_some() {
             return None;
         }
@@ -4211,7 +4230,9 @@ fn comparison_to_runtime_member(cmp: Comparison) -> &'static str {
     }
 }
 
-fn runtime_member_for_eta_wrapped_primitive(primitive: &Primitive) -> Option<(&'static str, &'static str)> {
+fn runtime_member_for_eta_wrapped_primitive(
+    primitive: &Primitive,
+) -> Option<(&'static str, &'static str)> {
     match primitive {
         Primitive::Pobjcomp(cmp) => Some(("Primitive_object", comparison_to_runtime_member(*cmp))),
         Primitive::Pobjorder => Some(("Primitive_object", "compare")),
@@ -4479,8 +4500,11 @@ fn flatten_and_mark_dead_statement(
                             } else {
                                 let rewritten =
                                     flatten_and_mark_dead_expression(item, id_gen, substitution);
-                                let temp = id_gen
-                                    .create(&block_substitution_name(&decl.ident, &tag_info, index));
+                                let temp = id_gen.create(&block_substitution_name(
+                                    &decl.ident,
+                                    &tag_info,
+                                    index,
+                                ));
                                 rewritten_items.push(Expression::var(temp.clone()));
                                 bindings.push(Statement::variable(VariableDeclaration {
                                     ident: temp,
@@ -4564,7 +4588,11 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::Return(expr) => Statement {
-            desc: StatementDesc::Return(flatten_and_mark_dead_expression(expr, id_gen, substitution)),
+            desc: StatementDesc::Return(flatten_and_mark_dead_expression(
+                expr,
+                id_gen,
+                substitution,
+            )),
             comment,
         },
         StatementDesc::If(cond, then_block, else_block) => Statement {
@@ -4601,7 +4629,11 @@ fn flatten_and_mark_dead_statement(
                         (
                             tag,
                             CaseClause {
-                                body: flatten_and_mark_dead_block(clause.body, id_gen, substitution),
+                                body: flatten_and_mark_dead_block(
+                                    clause.body,
+                                    id_gen,
+                                    substitution,
+                                ),
                                 should_break: clause.should_break,
                                 comment: clause.comment,
                             },
@@ -4635,14 +4667,21 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::Throw(expr) => Statement {
-            desc: StatementDesc::Throw(flatten_and_mark_dead_expression(expr, id_gen, substitution)),
+            desc: StatementDesc::Throw(flatten_and_mark_dead_expression(
+                expr,
+                id_gen,
+                substitution,
+            )),
             comment,
         },
         StatementDesc::Try(body, catch, finally) => Statement {
             desc: StatementDesc::Try(
                 flatten_and_mark_dead_block(body, id_gen, substitution),
                 catch.map(|(ident, block)| {
-                    (ident, flatten_and_mark_dead_block(block, id_gen, substitution))
+                    (
+                        ident,
+                        flatten_and_mark_dead_block(block, id_gen, substitution),
+                    )
                 }),
                 finally.map(|block| flatten_and_mark_dead_block(block, id_gen, substitution)),
             ),
@@ -4675,23 +4714,43 @@ fn flatten_and_mark_dead_expression(
     let Expression { desc, comment } = expr;
     let desc = match desc {
         ExpressionDesc::Length(inner, object) => ExpressionDesc::Length(
-            Box::new(flatten_and_mark_dead_expression(*inner, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *inner,
+                id_gen,
+                substitution,
+            )),
             object,
         ),
         ExpressionDesc::IsNullOrUndefined(inner) => ExpressionDesc::IsNullOrUndefined(Box::new(
             flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
         ExpressionDesc::StringAppend(left, right) => ExpressionDesc::StringAppend(
-            Box::new(flatten_and_mark_dead_expression(*left, id_gen, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *left,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *right,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::Bool(value) => ExpressionDesc::Bool(value),
         ExpressionDesc::Typeof(inner) => ExpressionDesc::Typeof(Box::new(
             flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
         ExpressionDesc::In(left, right) => ExpressionDesc::In(
-            Box::new(flatten_and_mark_dead_expression(*left, id_gen, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *left,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *right,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::JsNot(inner) => ExpressionDesc::JsNot(Box::new(
             flatten_and_mark_dead_expression(*inner, id_gen, substitution),
@@ -4700,37 +4759,93 @@ fn flatten_and_mark_dead_expression(
             flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
         ExpressionDesc::Seq(left, right) => ExpressionDesc::Seq(
-            Box::new(flatten_and_mark_dead_expression(*left, id_gen, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *left,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *right,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::Cond(test, consequent, alternate) => ExpressionDesc::Cond(
-            Box::new(flatten_and_mark_dead_expression(*test, id_gen, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*consequent, id_gen, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*alternate, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *test,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *consequent,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *alternate,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::Bin(op, left, right) => ExpressionDesc::Bin(
             op,
-            Box::new(flatten_and_mark_dead_expression(*left, id_gen, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *left,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *right,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::FlatCall(func, args) => ExpressionDesc::FlatCall(
-            Box::new(flatten_and_mark_dead_expression(*func, id_gen, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*args, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *func,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *args,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::Call(func, args, info) => ExpressionDesc::Call(
-            Box::new(flatten_and_mark_dead_expression(*func, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *func,
+                id_gen,
+                substitution,
+            )),
             args.into_iter()
                 .map(|arg| flatten_and_mark_dead_expression(arg, id_gen, substitution))
                 .collect(),
             info,
         ),
         ExpressionDesc::StringIndex(left, right) => ExpressionDesc::StringIndex(
-            Box::new(flatten_and_mark_dead_expression(*left, id_gen, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *left,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *right,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::ArrayIndex(left, right) => ExpressionDesc::ArrayIndex(
-            Box::new(flatten_and_mark_dead_expression(*left, id_gen, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *left,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *right,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
             Box::new(flatten_and_mark_dead_expression(*tag, id_gen, substitution)),
@@ -4744,12 +4859,20 @@ fn flatten_and_mark_dead_expression(
                 .collect(),
         ),
         ExpressionDesc::StaticIndex(target, field, pos) => ExpressionDesc::StaticIndex(
-            Box::new(flatten_and_mark_dead_expression(*target, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *target,
+                id_gen,
+                substitution,
+            )),
             field,
             pos,
         ),
         ExpressionDesc::New(target, args) => ExpressionDesc::New(
-            Box::new(flatten_and_mark_dead_expression(*target, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *target,
+                id_gen,
+                substitution,
+            )),
             args.map(|items| {
                 items
                     .into_iter()
@@ -4785,7 +4908,11 @@ fn flatten_and_mark_dead_expression(
             mutable_flag,
         ),
         ExpressionDesc::OptionalBlock(inner, flag) => ExpressionDesc::OptionalBlock(
-            Box::new(flatten_and_mark_dead_expression(*inner, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *inner,
+                id_gen,
+                substitution,
+            )),
             flag,
         ),
         ExpressionDesc::CamlBlock(items, mutable_flag, tag, tag_info) => ExpressionDesc::CamlBlock(
@@ -4798,16 +4925,29 @@ fn flatten_and_mark_dead_expression(
             tag_info,
         ),
         ExpressionDesc::CamlBlockTag(inner, tag) => ExpressionDesc::CamlBlockTag(
-            Box::new(flatten_and_mark_dead_expression(*inner, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *inner,
+                id_gen,
+                substitution,
+            )),
             tag,
         ),
         ExpressionDesc::Number(number) => ExpressionDesc::Number(number),
         ExpressionDesc::Object(dup, props) => ExpressionDesc::Object(
-            dup.map(|expr| Box::new(flatten_and_mark_dead_expression(*expr, id_gen, substitution))),
+            dup.map(|expr| {
+                Box::new(flatten_and_mark_dead_expression(
+                    *expr,
+                    id_gen,
+                    substitution,
+                ))
+            }),
             props
                 .into_iter()
                 .map(|(name, value)| {
-                    (name, flatten_and_mark_dead_expression(value, id_gen, substitution))
+                    (
+                        name,
+                        flatten_and_mark_dead_expression(value, id_gen, substitution),
+                    )
                 })
                 .collect(),
         ),
@@ -4898,12 +5038,10 @@ fn block_substitution_name(ident: &Ident, tag_info: &TagInfo, index: usize) -> S
 }
 
 fn max_ident_stamp_in_program(program: &Program) -> i32 {
-    program
-        .exports
-        .iter()
-        .fold(max_ident_stamp_in_block(&program.block), |max_stamp, export| {
-            max_stamp.max(export.stamp())
-        })
+    program.exports.iter().fold(
+        max_ident_stamp_in_block(&program.block),
+        |max_stamp, export| max_stamp.max(export.stamp()),
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -7732,9 +7870,7 @@ fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option<String> {
         Some(PointerInfo::None) | None => None,
         Some(PointerInfo::Constructor(tag)) => Some(tag.name.clone()),
         Some(PointerInfo::AssertFalse) => Some("assert_false".to_string()),
-        Some(PointerInfo::Some(name)) | Some(PointerInfo::PolyVariant(name)) => {
-            Some(name.clone())
-        }
+        Some(PointerInfo::Some(name)) | Some(PointerInfo::PolyVariant(name)) => Some(name.clone()),
     }
 }
 
@@ -8027,7 +8163,10 @@ mod tests {
         let mut compiler = LambdaCompiler::new();
         let compiled = compiler.compile_expr(&Lambda::prim(
             Primitive::Pobjcomp(Comparison::Eq),
-            vec![Lambda::const_(Constant::JsNull), Lambda::const_(Constant::int(5))],
+            vec![
+                Lambda::const_(Constant::JsNull),
+                Lambda::const_(Constant::int(5)),
+            ],
             Location::none(),
         ));
 
@@ -9848,6 +9987,189 @@ mod tests {
                 panic!("expected top-level sequence to flatten to a call statement, got {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
+        let mut compiler = LambdaCompiler::new();
+        let before = Ident::create_local("before");
+        let after = Ident::create_local("after");
+        let then_fn = Ident::create_local("thenFn");
+        let else_fn = Ident::create_local("elseFn");
+        let lam = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::const_(Constant::JsTrue)),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(before.clone())),
+                        ap_args: vec![],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    Box::new(Lambda::var(then_fn.clone())),
+                )),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(after.clone())),
+                        ap_args: vec![],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    Box::new(Lambda::var(else_fn.clone())),
+                )),
+            )),
+            ap_args: vec![Lambda::const_(Constant::int(1))],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let program = compiler.compile_program(&lam);
+        let rendered = print_block(&program.block);
+        assert!(
+            !rendered.contains("let call ="),
+            "effect-context apply reintroduced a call temp:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("(1);"),
+            "effect-context apply lost the direct call:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
+        let mut compiler = LambdaCompiler::new();
+        let before = Ident::create_local("before");
+        let after = Ident::create_local("after");
+        let then_fn = Ident::create_local("thenFn");
+        let else_fn = Ident::create_local("elseFn");
+        let lam = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::const_(Constant::JsTrue)),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(before.clone())),
+                        ap_args: vec![],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    Box::new(Lambda::var(then_fn.clone())),
+                )),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(after.clone())),
+                        ap_args: vec![],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    Box::new(Lambda::var(else_fn.clone())),
+                )),
+            )),
+            ap_args: vec![Lambda::const_(Constant::int(1))],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let block = compiler.compile_return_block(&lam);
+        let rendered = print_block(&block);
+        assert!(
+            !rendered.contains("let call ="),
+            "return-context apply reintroduced a call temp:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("return call;"),
+            "return-context apply still returns the call temp:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("return ") && rendered.contains("(1);"),
+            "return-context apply lost the direct return call:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
+        let mut compiler = LambdaCompiler::new();
+        let before = Ident::create_local("before");
+        let after = Ident::create_local("after");
+        let then_fn = Ident::create_local("thenFn");
+        let else_fn = Ident::create_local("elseFn");
+        let result = Ident::create_local("result");
+        let lam = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::const_(Constant::JsTrue)),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(before.clone())),
+                        ap_args: vec![],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    Box::new(Lambda::var(then_fn.clone())),
+                )),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(after.clone())),
+                        ap_args: vec![],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    Box::new(Lambda::var(else_fn.clone())),
+                )),
+            )),
+            ap_args: vec![Lambda::const_(Constant::int(1))],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let block = compiler.compile_assign_to_target_block(&result, &lam);
+        let rendered = print_block(&block);
+        assert!(
+            !rendered.contains("let call ="),
+            "assignment-context apply reintroduced a call temp:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("= call;"),
+            "assignment-context apply still assigns from the call temp:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("result = ") && rendered.contains("(1);"),
+            "assignment-context apply lost the direct assignment call:\n{rendered}"
+        );
     }
 
     #[test]

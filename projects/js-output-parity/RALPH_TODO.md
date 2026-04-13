@@ -44,6 +44,46 @@ reported:
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed continuation slice in
+  `compiler/core/lam_compile.ml` together with
+  `compiler/core/js_output.ml`
+- After reading OCaml's `compile_apply` +
+  `output_of_block_and_expression` path, the Rust backend in
+  `compiler-rust/src/lambda/compile.rs` now keeps `Lapply` on that same
+  continuation-aware path for effect, return, and assignment contexts instead
+  of materializing a synthetic `call` binding whenever the callee lowering had
+  prelude statements
+- The new Rust helper still materializes a temp in true value contexts, but
+  effect-position `apply`, `return (apply ...)`, and `result = apply ...`
+  now append the call directly after the prelude, which matches the OCaml
+  backend contract more closely
+- Added focused regression coverage in:
+  `lambda::compile::tests::effect_context_calls_with_arg_preludes_skip_intermediate_call_temps`,
+  `return_context_calls_with_arg_preludes_skip_intermediate_call_temps`, and
+  `assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release skip_intermediate_call_temps -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/arity_infer.res -o /tmp/arity_infer.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/arity_infer.res` no longer differs on the synthetic
+  `let call = ...; return call;` pattern in `f0`, `f1`, and `f3`; the
+  remaining drift there is now limited to the older temp-name / switch-format
+  mismatch (`tmp` vs `ifres` / `$$switch`, plus `case 0 :` formatting)
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same continuation change
+- Across cached diff artifacts, files whose diffs still contain `let call =`
+  dropped from **16** to **5** in this iteration, and `return call;` no longer
+  appears in the cached JS diffs
+- The authoritative JS snapshot baseline remains **235 / 657** passing,
+  **0** compile errors, and **422** output diffs after this OCaml-aligned
+  continuation fix; the headline total is flat, but the apply-continuation
+  cluster is materially smaller
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed alias-removal slice in
   `compiler/core/lam_pass_remove_alias.ml`
 - After reading OCaml's fallback for
