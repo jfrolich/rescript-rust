@@ -70,6 +70,15 @@ That may be an acceptable transition step, but the target architecture for this 
 
 If a change makes `PersistentEnv` more central to the in-process design, it is moving in the wrong direction.
 
+## Current Review Status
+
+Do not treat the current branch as complete. Post-implementation review found four acceptance blockers:
+
+- `rewatch/tests/in-process.sh` currently accepts a non-zero exit from `rewatch build --in-process` by matching partial progress text. The suite must require a successful process exit.
+- in-memory interface invalidation currently uses generation-before vs generation-after equality, but the generation counter is bumped on every publish. That over-dirties downstream dependents even when the published interface is unchanged.
+- `ModuleRegistry` currently accumulates inserts and overwrites only. Deleted modules and stale namespace aliases are not purged from the shared registry.
+- `PersistentEnv` is no longer shared through `BuildCommandState`, but it still exists inside the in-process compiler path via `PersistentEnv::from_registry(...)`. That is a transition step, not the target architecture.
+
 ## Per-File `PersistentEnv`
 
 One `PersistentEnv` per file is acceptable and may be the simplest correct design.
@@ -103,6 +112,10 @@ Target smoke commands once the new mode exists:
 timeout 300 "$REWATCH_EXECUTABLE" build --in-process
 timeout 300 "$REWATCH_EXECUTABLE" watch --in-process
 ```
+
+Acceptance note:
+
+- `build --in-process` must exit successfully. Do not accept "Compiled N modules" text as a substitute for a zero exit code.
 
 ## No-Compiler-Assets Guard
 
@@ -147,9 +160,9 @@ The in-process build should still succeed or fail exactly the same way after tho
 
 ```bash
 rg -n "compile_file|bs-read-cmi|lib/ocaml|bsc" rewatch/src/build/compile.rs
-rg -n "par_iter|take_persistent_env|return_persistent_env|compile_module_in_process" rewatch/src/build/compile.rs
-rg -n "register_in_memory_interface|in_memory_interfaces|stored_asts" rewatch/src/build/build_types.rs rewatch/src/build/compile.rs
-rg -n "PersistentEnv|set_persistent_env|register_in_memory_signature" compiler-rust/src/driver.rs compiler-rust/src/types/typecore.rs compiler-rust/src/cmi/persistent_env.rs
+rg -n "par_iter|compile_module_in_process|is_clean" rewatch/src/build/compile.rs
+rg -n "register_in_memory_interface|in_memory_interfaces|stored_asts|module_registry|deleted_modules" rewatch/src/build/build_types.rs rewatch/src/build/compile.rs rewatch/src/build/clean.rs rewatch/src/build.rs
+rg -n "PersistentEnv|from_registry|set_persistent_env|register_in_memory_signature|ModuleRegistry" compiler-rust/src/driver.rs compiler-rust/src/types/typecore.rs compiler-rust/src/cmi/persistent_env.rs
 rg -n "read_ast|deps" rewatch/src/build/deps.rs rewatch/src/build/parse.rs
 rg -n "compile_mlmap|mlmap" rewatch/src/build/namespaces.rs rewatch/src/build/packages.rs
 rg -n "read_compile_state|compiler-info|sourcedirs" rewatch/src/build

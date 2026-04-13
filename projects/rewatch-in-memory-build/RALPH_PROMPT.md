@@ -12,6 +12,12 @@ You are working on adding a true in-process Rust build mode to `rewatch` while p
 
 This project is about the third mode.
 
+Current review status:
+
+- Do not treat the current implementation as complete.
+- The shared `PersistentEnv` token has been removed from `rewatch`, but `PersistentEnv` still exists internally in the in-process compiler path via `PersistentEnv::from_registry(...)`.
+- Post-review blockers remain in tests, interface invalidation, and registry invalidation.
+
 For `--in-process`:
 
 - `rewatch` does not shell out to `bsc` at parse time, namespace time, or compile time
@@ -69,6 +75,13 @@ Cleaner target for this project:
 - `--in-process` should move to a module-registry plus resolver-session design
 - `PersistentEnv` may remain only as a temporary compatibility adapter for file-backed mode during migration
 
+Known blockers that must be fixed before declaring completion:
+
+- `rewatch/tests/in-process.sh` must require a successful exit status from `rewatch build --in-process`; do not encode a known failure as a passing test.
+- Unchanged published interfaces must not dirty dependents. The current generation-based invalidation is not sufficient if every publish bumps the generation counter.
+- Deleted or renamed modules must be purged from the shared in-memory registry, including stale namespace alias rewrites and module metadata.
+- Final in-process cleanup still needs to remove internal `PersistentEnv::from_registry(...)` construction from the compiler path.
+
 Do not keep any fallback compiler-asset protocol alive inside `--in-process` for runtime bootstrap, `node_modules`, namespace handling, startup reconstruction, or stale-build detection.
 
 ## Important Constraints
@@ -85,6 +98,9 @@ Do not keep any fallback compiler-asset protocol alive inside `--in-process` for
 10. Do not serialize the entire ready batch behind one shared mutable `PersistentEnv` token. If interface publication needs synchronization, keep the critical section narrow and preserve worker parallelism.
 11. A single `PersistentEnv` per file is acceptable. `PersistentEnv` is compilation-local context plus caches; `BuildCommandState` is the authoritative cross-file registry of published interfaces and metadata.
 12. Final in-process acceptance requires removing `PersistentEnv` from the in-process compiler API. Do not declare victory on a design that still takes/returns `PersistentEnv` for `--in-process`.
+13. Final in-process acceptance also requires removing internal `PersistentEnv::from_registry(...)` construction from the in-process path. Public API cleanup alone is not enough.
+14. The in-process test suite must require zero exit status, not just partial progress text.
+15. Watch/incremental correctness matters: unchanged interfaces must not dirty dependents, and deleted modules must not remain resolvable from stale registry state.
 
 ## Your Task Each Iteration
 
@@ -151,8 +167,12 @@ Only when all are true:
 - `--in-process` still compiles dependency-independent modules in parallel
 - default-mode compatibility tests pass
 - in-process tests pass
+- in-process tests require zero exit status from successful builds
 - in `--in-process`, no compiler assets are emitted or read anywhere in the `rewatch/testrepo` build graph
 - in `--in-process`, only final JS outputs remain on disk
+- unchanged published interfaces do not dirty downstream dependents
+- deleted/renamed modules are purged from the in-memory registry
+- the in-process path no longer constructs `PersistentEnv::from_registry(...)`
 - `RALPH_TODO.md` has no unchecked tasks remaining
 
 Do not claim completion early.

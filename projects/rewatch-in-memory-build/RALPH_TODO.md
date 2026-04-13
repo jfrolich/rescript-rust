@@ -1,7 +1,7 @@
 # Ralph TODO: Rewatch In-Memory Build
 
 **Last Updated:** 2026-04-13
-**Status:** 20/20 tasks complete (all phases done)
+**Status:** Review blocked: follow-up required before acceptance
 
 ## Goal
 
@@ -13,6 +13,13 @@ Clean architecture target for this project:
 - shared truth lives in build-state module/interface registries
 - per-file compilation uses a local resolver session, not a shared mutable env token
 - `PersistentEnv` may survive temporarily only as a file-backed compatibility adapter during migration, but do not extend it further for `--in-process`
+
+## Post-Review Blockers
+
+- `rewatch/tests/in-process.sh` currently accepts a non-zero exit from `rewatch build --in-process` by matching partial progress text like `Compiled 52 modules`. That is not acceptable as a completion signal. The in-process suite must require a successful process exit.
+- In-memory interface invalidation is currently wrong: `register_in_memory_interface(...)` always bumps the generation counter, and `compile.rs` uses generation-before vs generation-after equality as the "interface changed" test. That makes every recompiled dirty module look interface-dirty, even when the published signature is unchanged.
+- `ModuleRegistry` is only grown/overwritten. Deleted modules, stale namespace aliases, and stale module metadata are not purged from the shared registry, so watch/incremental builds can resolve removed modules until process restart.
+- `PersistentEnv` is not removed entirely yet. The shared `BuildCommandState` token is gone, and the public in-process entrypoints no longer take or return a `PersistentEnv`, but `compiler-rust/src/driver.rs` still creates a fresh `PersistentEnv::from_registry(...)` internally for each compilation, and the typechecker / JS backend still depend on that abstraction.
 
 ## Current Findings
 
@@ -34,6 +41,7 @@ Clean architecture target for this project:
 - Current `rewatch/src/build/compile.rs` work-in-progress has an `--in-process` branch, but it compiles the ready batch sequentially and takes/returns one shared `PersistentEnv`. That is not an acceptable end state: `--in-process` must preserve parallel compilation for dependency-independent modules.
 - A `PersistentEnv` per file is acceptable. The problem is not "multiple envs"; the problem is one shared mutable env token for the whole batch. In `--in-process`, build state is the source of truth for published interfaces and module metadata. `PersistentEnv` can be compilation-local resolver/cache state seeded from that shared registry.
 - Cleaner end state: replace `PersistentEnv` in `--in-process` with a dedicated module-registry plus per-file resolver session. Do not let `PersistentEnv` become the permanent in-process architecture.
+- Current code is only partway there: the shared mutable env token is gone, but a per-compilation `PersistentEnv::from_registry(...)` still exists internally. Do not treat that as the final architecture.
 
 ## Phase 0: Mode Model And CLI
 
@@ -150,6 +158,13 @@ Clean architecture target for this project:
 - [x] Decide and document the `compiler-args` contract across the three modes, then update `rewatch/tests/compiler-args.sh` and parity consumers if needed.
   - **Decision:** `compiler-args` is a diagnostic/IDE support command that returns the CLI args `bsc` would use. In `--in-process` mode, `bsc` is never invoked, so `compiler-args` continues to return the file-backed args unchanged. This is correct because `compiler-args` consumers (editors, parity scripts) need the file-based protocol args. No changes needed to `compiler-args.sh` or parity consumers. The `--in-process` flag is orthogonal to `compiler-args` — it affects the build pipeline, not the IDE integration surface.
 
+## Phase 6: Post-Review Corrections
+
+- [ ] Make `rewatch/tests/in-process.sh` require a successful `rewatch build --in-process` exit code. Do not encode known failures as passing test expectations.
+- [ ] Replace generation-before vs generation-after invalidation with a real "published interface changed" test. That can be a stable signature fingerprint or direct equality on the stored `DeclSignature`, but it must not mark dependents dirty when the published interface is unchanged.
+- [ ] Add registry invalidation for deleted/renamed modules and stale namespace aliases. `ModuleRegistry` must reflect the live build graph in watch/incremental mode, not just accumulate inserts forever.
+- [ ] Remove internal `PersistentEnv` construction from the in-process compiler path. The public API cleanup is done; the remaining work is to replace the internal `PersistentEnv::from_registry(...)` session with a dedicated resolver-session abstraction.
+
 ## Acceptance Criteria
 
 - `timeout 600 ./rewatch/tests/suite.sh "$REWATCH_EXECUTABLE"` still passes for the existing default mode
@@ -158,6 +173,10 @@ Clean architecture target for this project:
 - `--in-process` builds use the Rust compiler fully in-process
 - `--in-process` preserves parallel compilation for dependency-independent modules; do not regress to a single-thread batch loop
 - `--in-process` compiler calls do not take or return `PersistentEnv`
+- `--in-process` does not internally construct or rely on `PersistentEnv::from_registry(...)`
 - `rewatch/tests/no-compiler-assets.sh` passes for `--in-process`
+- `rewatch/tests/in-process.sh` requires a zero exit status for `rewatch build --in-process`
 - in `--in-process`, building or watching inside `rewatch/testrepo` never creates or reads `.ast`, `.iast`, `.cmi`, `.cmj`, `.cmt`, `.cmti`, `.compiler.log`, `.sourcedirs.json`, `compiler-info.json`, `build.ninja`, `.mlmap`, `.sexp`, or copied `.res/.resi` build mirrors
 - in `--in-process`, only final JS outputs remain on disk
+- unchanged published interfaces do not dirty downstream dependents
+- deleted or renamed modules are purged from the in-memory module/interface registry
