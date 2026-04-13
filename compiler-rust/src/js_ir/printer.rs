@@ -1195,23 +1195,32 @@ impl JsPrinter {
                             );
                         }
                     }
-                    TagInfo::RecordInlined { fields, .. } if fields.len() == elements.len() => {
+                    TagInfo::RecordInlined { name, fields, .. }
+                        if fields.len() == elements.len() =>
+                    {
                         self.print_object_literal(
                             level,
                             None,
-                            elements.iter().zip(fields.iter()).filter_map(
+                            std::iter::once((None, None)).chain(elements.iter().zip(fields.iter()).filter_map(
                                 |(elem, (field_name, optional))| {
                                     if *optional && is_undefined_literal(elem) {
                                         None
                                     } else {
-                                        Some((field_name.as_str(), elem))
+                                        Some((Some(field_name.as_str()), Some(elem)))
                                     }
                                 },
-                            ),
-                            |this, (field_name, elem)| {
-                                this.print_literal_property_name(field_name);
-                                this.write(": ");
-                                this.print_expression(elem, 1);
+                            )),
+                            |this, prop| match prop {
+                                (None, None) => {
+                                    this.write("TAG: ");
+                                    this.print_string(name);
+                                }
+                                (Some(field_name), Some(elem)) => {
+                                    this.print_literal_property_name(field_name);
+                                    this.write(": ");
+                                    this.print_expression(elem, 1);
+                                }
+                                _ => unreachable!("inline record literal properties stay aligned"),
                             },
                         );
                     }
@@ -3034,6 +3043,28 @@ mod tests {
         ));
 
         assert_eq!(print_expression(&expr), "{\n  x: 10\n}");
+    }
+
+    #[test]
+    fn test_print_inline_record_variant_keeps_tag_field() {
+        let expr = Expression::new(ExpressionDesc::CamlBlock(
+            vec![Expression::string("hello")],
+            MutableFlag::Immutable,
+            Box::new(Expression::number(Number::int(0))),
+            TagInfo::RecordInlined {
+                name: "One".to_string(),
+                num_nonconst: 1,
+                tag: 0,
+                fields: vec![("name".to_string(), false)],
+                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                attrs: vec![],
+            },
+        ));
+
+        assert_eq!(
+            print_expression(&expr),
+            "{\n  TAG: \"One\",\n  name: \"hello\"\n}"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 241 / 657 JS snapshots passing, 0 compile errors, 416 output diffs
+**Status:** 243 / 657 JS snapshots passing, 0 compile errors, 414 output diffs
 
 ## Goal
 
@@ -35,13 +35,46 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **241 / 657**
+- JS snapshot parity: **243 / 657**
 - Compile errors: **0**
-- Output diffs: **416**
+- Output diffs: **414**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed inline-record constructor-object
+  printer slice in `compiler/core/js_dump.ml`
+- After reading OCaml's `Caml_block (..., Blk_record_inlined ...)` path there,
+  the Rust printer in `compiler-rust/src/js_ir/printer.rs` now emits the
+  leading `TAG` field for inline-record variants before their payload fields,
+  instead of treating `TagInfo::RecordInlined` like a plain record object and
+  dropping the constructor tag entirely
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_inline_record_variant_keeps_tag_field`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_inline_record_variant_keeps_tag_field' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_non_cons_constructor_keeps_tag_object_shape' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/VariantSpreads.res -o /tmp/VariantSpreads.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/object_type_spreads.res -o /tmp/object_type_spreads.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/VariantSpreads.res` and
+  `tests/tests/src/object_type_spreads.res` now match their checked-in
+  snapshots exactly again, which confirms the inline-record constructor-object
+  `TAG` field is back on the Rust path; `tests/tests/src/ExternalShadow.res`
+  remains an exact guard-file match after the same printer change
+- Across cached diff artifacts, the removed inline-record `TAG:` motif shrank
+  from **130** removed lines across **37** files to **107** removed lines
+  across **30** files after the authoritative rerun
+- The authoritative JS snapshot baseline now reports **243 / 657** passing,
+  **0** compile errors, and **414** output diffs; this is a net **+2**
+  passing snapshots and **-2** output diffs from the previously recorded
+  **241 / 657**, **0** compile errors, **416** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed conditional-expression cleanup
