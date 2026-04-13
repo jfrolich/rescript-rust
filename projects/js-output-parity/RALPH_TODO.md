@@ -44,6 +44,53 @@ reported:
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed constant-option lowering slice
+  in `compiler/core/lam_compile_const.ml`, specifically its `translate_some`,
+  `is_some_none_aux`, and `nested_some_none` path for `Const_some`
+- After rereading that OCaml constant backend path, the Rust JS backend in
+  `compiler-rust/src/lambda/compile.rs` now matches it more closely:
+  - `Constant::Some` only lowers as an identity optional block when the payload
+    is not part of an `undefined` / `module alias` none-chain
+  - `Some(undefined)`, `Some(unit)`, and nested `Some(None)`-style constants
+    now preserve the boxed none encoding with non-identity `OptionalBlock`
+    layers instead of collapsing to raw `undefined`
+- Added focused regression coverage in
+  `lambda::compile::tests::compile_constant_some_unit_boxes_undefined_none_encoding`
+  and
+  `lambda::compile::tests::compile_constant_nested_some_none_preserves_nested_optional_boxes`
+- Verified focused guards for this slice:
+  - `timeout 600 env RUSTFLAGS=-Awarnings cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::compile::tests::compile_constant_some_unit_boxes_undefined_none_encoding -- --exact`
+  - `timeout 600 env RUSTFLAGS=-Awarnings cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::compile::tests::compile_constant_nested_some_none_preserves_nested_optional_boxes -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - harness-mode snapshot repros from `tests/tests/lib/bs` for
+    `src/unit_undefined_test.ast`,
+    `src/js_null_test.ast`, and
+    `src/js_null_undefined_test.ast`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/unit_undefined_test.res` no longer collapses boxed option
+  constants to raw `undefined`, `tests/tests/src/js_null_test.res` now keeps
+  the correct boxed-option shape on its `toOption - 'a` assertion, and
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
+- The remaining drift in this nullable-option slice is now narrower and later:
+  - `tests/tests/src/unit_undefined_test.res` still differs on the separate
+    OCaml `Optional_block` printer path that routes through normal call
+    printing, so Rust still emits `Primitive_option.some(undefined)` where the
+    checked-in snapshot has `Primitive_option.some()`, plus the older empty
+    function-body formatting hunk in `fx`
+  - `tests/tests/src/js_null_test.res` still differs on the separate
+    arrow-parentheses printer hunk in `n => (n << 1)`
+  - `tests/tests/src/js_null_undefined_test.res` is unchanged for this slice;
+    its remaining drift is the earlier nullable-predicate / constant-fold
+    cluster rather than constant `Const_some` lowering
+- The authoritative JS snapshot baseline remains **326 / 657** passing,
+  **0** compile errors, and **331** output diffs after this OCaml-aligned
+  `Const_some` port. The topline stays flat because the affected files were
+  already failing on later printer/backend drift, but the constant option
+  representation is now aligned with OCaml and should not be reverted.
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed printer rule in
   `compiler/core/js_dump.ml`, specifically `loop_case_clauses` emitting
   `case <expr> :` for switch labels while keeping `default:` unchanged

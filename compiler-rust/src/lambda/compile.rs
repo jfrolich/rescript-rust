@@ -3114,6 +3114,41 @@ impl LambdaCompiler {
         Compiled { prelude, expr }
     }
 
+    fn some_none_depth(cst: &Constant) -> Option<usize> {
+        match cst {
+            Constant::Some(inner) => Self::some_none_depth(inner).map(|depth| depth + 1),
+            Constant::ModuleAlias | Constant::JsUndefined { .. } => Some(0),
+            _ => None,
+        }
+    }
+
+    fn nested_some_none(depth: usize, none: Expression) -> Expression {
+        if depth == 0 {
+            none
+        } else {
+            Self::nested_some_none(
+                depth - 1,
+                Expression::new(ExpressionDesc::OptionalBlock(Box::new(none), false)),
+            )
+        }
+    }
+
+    fn compile_some_constant(inner: &Constant) -> Expression {
+        match Self::some_none_depth(inner) {
+            Some(depth) => Self::nested_some_none(
+                depth,
+                Expression::new(ExpressionDesc::OptionalBlock(
+                    Box::new(Expression::undefined(false)),
+                    false,
+                )),
+            ),
+            None => Expression::new(ExpressionDesc::OptionalBlock(
+                Box::new(Self::compile_constant(inner)),
+                true,
+            )),
+        }
+    }
+
     fn compile_constant(cst: &Constant) -> Expression {
         match cst {
             Constant::JsNull => Expression::null(),
@@ -3192,10 +3227,7 @@ impl LambdaCompiler {
                     tag_info.clone(),
                 ))
             }
-            Constant::Some(inner) => {
-                let inner = Self::compile_constant(inner);
-                Expression::new(ExpressionDesc::OptionalBlock(Box::new(inner), true))
-            }
+            Constant::Some(inner) => Self::compile_some_constant(inner),
             Constant::ModuleAlias => Expression::undefined(false),
         }
     }
@@ -8841,6 +8873,40 @@ mod tests {
             if comment == "[]"
         ));
         assert_eq!(print_expression(&compiled), "/* [] */0");
+    }
+
+    #[test]
+    fn compile_constant_some_unit_boxes_undefined_none_encoding() {
+        let compiled = LambdaCompiler::compile_constant(&Constant::Some(Box::new(
+            Constant::JsUndefined { is_unit: true },
+        )));
+
+        assert!(matches!(
+            compiled,
+            Expression {
+                desc: ExpressionDesc::OptionalBlock(ref inner, false),
+                ..
+            } if matches!(
+                inner.as_ref(),
+                Expression {
+                    desc: ExpressionDesc::Undefined { is_unit: false },
+                    ..
+                }
+            )
+        ));
+        assert_eq!(print_expression(&compiled), "Primitive_option.some(undefined)");
+    }
+
+    #[test]
+    fn compile_constant_nested_some_none_preserves_nested_optional_boxes() {
+        let compiled = LambdaCompiler::compile_constant(&Constant::Some(Box::new(Constant::Some(
+            Box::new(Constant::JsUndefined { is_unit: false }),
+        ))));
+
+        assert_eq!(
+            print_expression(&compiled),
+            "Primitive_option.some(Primitive_option.some(undefined))"
+        );
     }
 
     #[test]
