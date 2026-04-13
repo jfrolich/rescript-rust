@@ -309,6 +309,7 @@ impl JsPrinter {
                                 is_method: false,
                                 params,
                                 body,
+                                return_unit,
                                 async_,
                                 directive,
                                 ..
@@ -320,6 +321,7 @@ impl JsPrinter {
                             &decl.ident,
                             params,
                             body,
+                            *return_unit,
                             *async_,
                             directive.as_deref(),
                         );
@@ -597,6 +599,7 @@ impl JsPrinter {
         ident: &Ident,
         params: &[Ident],
         body: &Block,
+        return_unit: bool,
         async_: bool,
         directive: Option<&str>,
     ) {
@@ -619,7 +622,7 @@ impl JsPrinter {
             if !body.is_empty() || directive.is_some() {
                 this.indent();
                 this.print_function_directive(directive, !body.is_empty());
-                this.print_function_body(body);
+                this.print_function_body(body, return_unit);
                 this.dedent();
                 this.newline();
             }
@@ -1001,6 +1004,7 @@ impl JsPrinter {
                 is_method,
                 params,
                 body,
+                return_unit,
                 async_,
                 directive,
                 ..
@@ -1042,27 +1046,26 @@ impl JsPrinter {
                     }
 
                     // Body
-                    if use_arrow && directive.is_none() && body.len() == 1 {
-                        if let StatementDesc::Return(expr) = &body[0].desc {
-                            if !matches!(expr.desc, ExpressionDesc::Undefined { .. }) {
-                                let needs_paren = this.expr_needs_paren(expr);
-                                if needs_paren {
-                                    this.write_char('(');
-                                }
-                                this.print_expression(expr, 0);
-                                if needs_paren {
-                                    this.write_char(')');
-                                }
-                                return;
-                            }
+                    if use_arrow
+                        && directive.is_none()
+                        && let Some(expr) = single_arrow_function_expr(body)
+                    {
+                        let needs_paren = this.expr_needs_paren(expr);
+                        if needs_paren {
+                            this.write_char('(');
                         }
+                        this.print_expression(expr, 0);
+                        if needs_paren {
+                            this.write_char(')');
+                        }
+                        return;
                     }
 
                     this.write_char('{');
                     if !body.is_empty() || directive.is_some() {
                         this.indent();
                         this.print_function_directive(directive.as_deref(), !body.is_empty());
-                        this.print_function_body(body);
+                        this.print_function_body(body, *return_unit);
                         this.dedent();
                         this.newline();
                     }
@@ -1525,30 +1528,59 @@ impl JsPrinter {
         }
     }
 
-    /// Print a function body (handles trailing return undefined)
-    fn print_function_body(&mut self, stmts: &Block) {
+    /// Print a function body using the same return-unit elision rules as OCaml.
+    fn print_function_body(&mut self, stmts: &Block, return_unit: bool) {
         if stmts.is_empty() {
             return;
         }
 
-        let body = if matches!(
-            stmts.last().map(|stmt| &stmt.desc),
-            Some(StatementDesc::Return(Expression {
-                desc: ExpressionDesc::Undefined { .. },
-                ..
-            }))
-        ) {
-            &stmts[..stmts.len() - 1]
-        } else {
-            &stmts[..]
-        };
-
-        for (i, stmt) in body.iter().enumerate() {
-            if i > 0 {
+        let mut printed_any = false;
+        for (index, stmt) in stmts.iter().enumerate() {
+            let printed = if index + 1 == stmts.len() {
+                function_tail_statement_prints(stmt)
+            } else {
+                true
+            };
+            if !printed {
+                continue;
+            }
+            if printed_any {
                 self.newline();
             }
+            if index + 1 == stmts.len() {
+                self.print_function_tail_statement(stmt, return_unit);
+            } else {
+                self.print_statement(stmt, false);
+            }
+            printed_any = true;
+        }
+    }
 
-            self.print_statement(stmt, false);
+    fn print_function_tail_statement(&mut self, stmt: &Statement, return_unit: bool) {
+        match &stmt.desc {
+            StatementDesc::If(cond, then_, else_) if else_is_single_return_undefined(else_) => {
+                self.print_statement(
+                    &Statement {
+                        desc: StatementDesc::If(cond.clone(), then_.clone(), vec![]),
+                        comment: stmt.comment.clone(),
+                    },
+                    false,
+                );
+            }
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Undefined { .. },
+                ..
+            }) => {}
+            StatementDesc::Return(expr) if return_unit => {
+                self.print_statement(
+                    &Statement {
+                        desc: StatementDesc::Exp(expr.clone()),
+                        comment: stmt.comment.clone(),
+                    },
+                    false,
+                );
+            }
+            _ => self.print_statement(stmt, false),
         }
     }
 }
@@ -1562,6 +1594,44 @@ fn deps_program_is_empty(program: &DepsProgram) -> bool {
 
 fn is_undefined_literal(expr: &Expression) -> bool {
     matches!(expr.desc, ExpressionDesc::Undefined { .. })
+}
+
+fn else_is_single_return_undefined(block: &Block) -> bool {
+    matches!(
+        block.as_slice(),
+        [Statement {
+            desc:
+                StatementDesc::Return(Expression {
+                    desc: ExpressionDesc::Undefined { .. },
+                    ..
+                }),
+            ..
+        }]
+    )
+}
+
+fn function_tail_statement_prints(stmt: &Statement) -> bool {
+    !matches!(
+        stmt.desc,
+        StatementDesc::Return(Expression {
+            desc: ExpressionDesc::Undefined { .. },
+            ..
+        })
+    )
+}
+
+fn single_arrow_function_expr(body: &Block) -> Option<&Expression> {
+    match body.as_slice() {
+        [Statement {
+            desc: StatementDesc::Return(expr),
+            ..
+        }] if !matches!(expr.desc, ExpressionDesc::Undefined { .. }) => Some(expr),
+        [Statement {
+            desc: StatementDesc::Exp(expr),
+            ..
+        }] => Some(expr),
+        _ => None,
+    }
 }
 
 fn record_uses_array_syntax(fields: &[(String, bool)]) -> bool {
@@ -2309,6 +2379,113 @@ mod tests {
 
         assert!(rendered.contains("function foo(arg) {"));
         assert!(rendered.contains("return value + arg;"));
+    }
+
+    #[test]
+    fn test_print_unit_function_elides_tail_return_statement() {
+        let foo = Ident::create_local("remove");
+        let param = Ident::create_local("id");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: foo,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![param.clone()],
+                body: vec![Statement::return_(Expression::call(
+                    Expression::qualified(
+                        ModuleId {
+                            id: Ident::create_local("Belt_MutableMapInt"),
+                            kind: Kind::Ml,
+                            dynamic_import: false,
+                        },
+                        Some("remove".to_string()),
+                    ),
+                    vec![
+                        Expression::var(Ident::create_local("mockMap")),
+                        Expression::var(param),
+                    ],
+                    CallInfo::default(),
+                ))],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("function remove(id) {"));
+        assert!(rendered.contains("Belt_MutableMapInt.remove(mockMap, id);"));
+        assert!(!rendered.contains("return Belt_MutableMapInt.remove"));
+    }
+
+    #[test]
+    fn test_print_unit_arrow_function_elides_tail_return_statement() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
+            is_method: false,
+            params: vec![],
+            body: vec![Statement::return_(Expression::call(
+                Expression::qualified(
+                    ModuleId {
+                        id: Ident::create_local("Test_utils"),
+                        kind: Kind::Ml,
+                        dynamic_import: false,
+                    },
+                    Some("eq".to_string()),
+                ),
+                vec![
+                    Expression::string("loc"),
+                    Expression::number(Number::int(1)),
+                    Expression::number(Number::int(1)),
+                ],
+                CallInfo::default(),
+            ))],
+            env: Default::default(),
+            return_unit: true,
+            async_: false,
+            directive: None,
+        }));
+
+        assert_eq!(rendered, "() => Test_utils.eq(\"loc\", 1, 1)");
+    }
+
+    #[test]
+    fn test_print_unit_function_tail_if_drops_else_return_undefined() {
+        let foo = Ident::create_local("foo");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: foo,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![],
+                body: vec![Statement::new(StatementDesc::If(
+                    Expression::var(Ident::create_local("cond")),
+                    vec![Statement::exp(Expression::call(
+                        Expression::qualified(
+                            ModuleId {
+                                id: Ident::create_local("console"),
+                                kind: Kind::Ml,
+                                dynamic_import: false,
+                            },
+                            Some("log".to_string()),
+                        ),
+                        vec![Expression::string("hit")],
+                        CallInfo::default(),
+                    ))],
+                    vec![Statement::return_(Expression::undefined(true))],
+                ))],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (cond) {"));
+        assert!(rendered.contains("console.log(\"hit\");"));
+        assert!(!rendered.contains("else"));
+        assert!(!rendered.contains("return;"));
     }
 
     #[test]

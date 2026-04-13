@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 172 / 657 JS snapshots passing, 0 compile errors, 485 output diffs
+**Status:** 182 / 657 JS snapshots passing, 0 compile errors, 475 output diffs
 
 ## Goal
 
@@ -35,13 +35,51 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **172 / 657**
+- JS snapshot parity: **182 / 657**
 - Compile errors: **0**
-- Output diffs: **485**
+- Output diffs: **475**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- This iteration stayed on an OCaml-backed repeated printer cluster instead of
+  treating the extra trailing `return` statements as file-local drift:
+  `compiler-rust/src/js_ir/printer.rs` now mirrors
+  `compiler/core/js_dump.ml` `function_body` more closely for unit-returning
+  functions. Rust now drops trailing `return undefined`, rewrites tail
+  `return expr` into a bare expression statement when `return_unit` is set,
+  and collapses the single-statement `if (...) { ... } else { return undefined; }`
+  function-tail case the same way OCaml prints it
+- The same printer slice now also matches the OCaml arrow-function fast path
+  more closely: single-expression arrow bodies can be printed from either
+  `Return expr` or `Exp expr`, which keeps unit-return callbacks on the same
+  byte shape as the OCaml snapshots after the tail rewrite
+- Added focused regression coverage in `js_ir::printer::tests` for:
+  - named unit-return functions that should print a bare side-effect statement
+  - unit-return arrow callbacks that should print expression bodies without an
+    explicit `return`
+  - unit-return function tails whose `else` branch is just `return undefined`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_unit_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact `compiler-args` repro for `tests/tests/src/gpr_4265_test.res`
+  - exact `compiler-args` repro for `tests/tests/src/gpr_4442_test.res`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/gpr_4265_test.res` and
+  `tests/tests/src/gpr_4442_test.res` now match their checked-in `.mjs`
+  snapshots exactly under the real test harness compiler args, and
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same printer change
+- `tests/tests/src/dollar_escape_test.res` and
+  `tests/tests/src/functor_app_test.res` also dropped out of the authoritative
+  diff cache on the full rerun, which confirms this OCaml-aligned unit-return
+  printer rule was a shared cluster rather than a single-file adjustment
+- The authoritative JS snapshot baseline now reports **182 / 657** passing,
+  **0** compile errors, and **475** output diffs after this OCaml-aligned
+  `js_dump.ml` function-body port; this is a net **+10** over the previous
+  recorded baseline
 
 - Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
   from `PLAN.md`; this iteration stayed on the module side-effect metadata path
