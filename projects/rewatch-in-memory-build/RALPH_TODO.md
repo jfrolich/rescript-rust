@@ -54,6 +54,13 @@ Test policy:
 - Do not weaken `rewatch/tests/in-process.sh` or the project acceptance criteria by editing testrepo sources to hide unsupported compiler behavior.
 - If a reduced repro is needed, keep it in a separate diagnostic path, not in the acceptance suite.
 
+Temporary stack policy:
+
+- Do not block this project on stack-usage optimization.
+- If the current compiler only works in-process with very large stack allowances, that is acceptable as a temporary measure.
+- Raising the limit aggressively, even into multi-GB territory, is within scope for this project if that is what gets the in-process path working reliably.
+- The optimization/stack-reduction work is happening elsewhere; this project should optimize for correctness and clean integration first.
+
 ## Current Findings
 
 - `node_modules` packages are already source-backed in `rewatch`; the special disk-backed bootstrap case is `@rescript/runtime`.

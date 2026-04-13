@@ -150,6 +150,19 @@ Test discipline:
 - Do not treat edits to `rewatch/testrepo` source files as acceptance for the feature.
 - Keep the acceptance suite representative of the real build graph. If you need a smaller repro, add a separate diagnostic path rather than weakening `rewatch/tests/in-process.sh`.
 
+## Temporary Stack Policy
+
+This project is not the stack-usage optimization project.
+
+For `--in-process`, correctness and end-to-end functionality matter more than stack efficiency right now. If the current compiler needs extremely large stack allowances to compile successfully in-process, that is an acceptable temporary workaround.
+
+Guidance:
+
+- raise the allowed stack size aggressively if needed rather than blocking the project on stack-depth cleanup
+- if the practical temporary fix is a very large stack reservation, even into multi-GB territory, that is acceptable for this project
+- do not treat large stack settings as a final design win; they are a stopgap until the separate optimization/stack-reduction work lands
+- do not let stack tuning pull focus away from the main goal: a correct, clean, fully working in-process build path
+
 ## Per-File `PersistentEnv`
 
 One `PersistentEnv` per file is acceptable and may be the simplest correct design.

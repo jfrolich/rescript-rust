@@ -104,6 +104,7 @@ Steering note:
 - Do not use that as justification to keep growing the in-process `PersistentEnv` design.
 - Do not add more disk/source fallback behavior to make missing interfaces resolve. In `--in-process`, a lookup miss means the scheduler or bootstrap ordering is wrong.
 - Do not weaken acceptance by editing `rewatch/testrepo` sources or relying on stubbed package replacements in the final in-process suite. Reduced repros are allowed only as separate diagnostic tooling.
+- This project is not responsible for stack-usage optimization. If the temporary practical fix is to raise allowed stack sizes very aggressively, even into multi-GB territory, that is acceptable while the separate optimization work happens elsewhere.
 
 Priority order from here:
 
@@ -112,6 +113,11 @@ Priority order from here:
 3. Enforce snapshot-only resolver lookup in `--in-process`.
 4. Remove internal `PersistentEnv::from_registry(...)` construction and move to a borrowed resolver session.
 5. Only then optimize performance details of the clean design.
+
+Temporary allowance:
+
+- Do not block in-process correctness on stack-efficiency work.
+- If a huge stack limit is what makes the current compiler run end-to-end, use it for now.
 
 Do not keep any fallback compiler-asset protocol alive inside `--in-process` for runtime bootstrap, `node_modules`, namespace handling, startup reconstruction, or stale-build detection.
 
