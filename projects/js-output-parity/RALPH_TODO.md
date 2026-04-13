@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 244 / 657 JS snapshots passing, 0 compile errors, 413 output diffs
+**Status:** 249 / 657 JS snapshots passing, 0 compile errors, 408 output diffs
 
 ## Goal
 
@@ -35,13 +35,48 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **244 / 657**
+- JS snapshot parity: **249 / 657**
 - Compile errors: **0**
-- Output diffs: **413**
+- Output diffs: **408**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed empty arrow-function body
+  printer slice in `compiler/core/js_dump.ml`
+- After reading OCaml's `pp_function` branch there for
+  `[{statement_desc = Return {expression_desc = Undefined _}}] when arrow`,
+  the Rust printer in `compiler-rust/src/js_ir/printer.rs` now emits the same
+  compact `() => {}` form for arrow functions whose body is exactly
+  `return undefined`, instead of routing them through the generic block-body
+  printer and expanding them into multi-line empty blocks
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_arrow_function_with_undefined_body_uses_compact_empty_block`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_arrow_function_with_undefined_body_uses_compact_empty_block' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_arrow_function_parenthesizes_object_literal_body' -- --exact --nocapture`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/tuple_alloc.res -o /tmp/tuple_alloc.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_while_closure.res -o /tmp/test_while_closure.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/tuple_alloc.res` now matches its checked-in snapshot
+  exactly again, `tests/tests/src/ExternalShadow.res` remains an exact
+  guard-file match, and `tests/tests/src/test_while_closure.res` no longer
+  differs on the empty `() => {}` closure shape and is reduced to separate
+  loop-lowering / declaration-order drift
+- Across cached diff artifacts, the empty-arrow-body motif
+  (`+...=> {` multiline expansion) shrank from **55** diff files to **37**
+  after the authoritative rerun; confirmed files that dropped out of the diff
+  set on this slice include `tuple_alloc.res`, `bs_auto_uncurry.res`,
+  `test_closure.res`, and `js_global_test.res`
+- The authoritative JS snapshot baseline now reports **249 / 657** passing,
+  **0** compile errors, and **408** output diffs; this is a net **+5**
+  passing snapshots and **-5** output diffs from the previously recorded
+  **244 / 657**, **0** compile errors, **413** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed arrow-function body

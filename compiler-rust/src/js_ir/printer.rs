@@ -1102,6 +1102,21 @@ impl JsPrinter {
                     // Body
                     if use_arrow
                         && directive.is_none()
+                        && body.as_slice().len() == 1
+                        && matches!(
+                            body[0].desc,
+                            StatementDesc::Return(Expression {
+                                desc: ExpressionDesc::Undefined { .. },
+                                ..
+                            })
+                        )
+                    {
+                        this.write(" {}");
+                        return;
+                    }
+
+                    if use_arrow
+                        && directive.is_none()
                         && let Some(expr) = single_arrow_function_expr(body)
                     {
                         this.write(" ");
@@ -2638,6 +2653,21 @@ mod tests {
         }));
 
         assert_eq!(rendered, "() => Test_utils.eq(\"loc\", 1, 1)");
+    }
+
+    #[test]
+    fn test_print_arrow_function_with_undefined_body_uses_compact_empty_block() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
+            is_method: false,
+            params: vec![],
+            body: vec![Statement::return_(Expression::undefined(false))],
+            env: Default::default(),
+            return_unit: false,
+            async_: false,
+            directive: None,
+        }));
+
+        assert_eq!(rendered, "() => {}");
     }
 
     #[test]
