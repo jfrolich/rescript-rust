@@ -25,7 +25,7 @@ use crate::cmi::persistent_env::{CmjExportConstant, PersistentEnv};
 use crate::ident::Ident;
 use crate::lambda::tag_info::TagInfo;
 pub use op::{BinOp, IdentInfo, Kind, LengthObject, MutableFlag, Number, Property, PropertyName};
-pub use printer::{print_block, print_deps_program, print_expression, print_program, JsPrinter};
+pub use printer::{JsPrinter, print_block, print_deps_program, print_expression, print_program};
 
 /// Module identifier for imports/requires
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -603,6 +603,39 @@ impl Expression {
             }
         }
 
+        match &test.desc {
+            ExpressionDesc::Bool(false)
+            | ExpressionDesc::Number(Number::Int { i: 0, .. }) => return alternate,
+            ExpressionDesc::Bool(true) => return consequent,
+            ExpressionDesc::Number(_)
+            | ExpressionDesc::Array(_, _)
+            | ExpressionDesc::CamlBlock(_, _, _, _)
+                if expression_has_no_side_effects(&test) =>
+            {
+                return consequent;
+            }
+            _ => {}
+        }
+
+        if matches!(
+            (&consequent.desc, &alternate.desc),
+            (ExpressionDesc::Bool(true), ExpressionDesc::Bool(false))
+        ) {
+            return test;
+        }
+
+        if let ExpressionDesc::JsNot(inner) = test.desc {
+            if expression_branch_is_not_empty(&alternate) {
+                return Self::cond(*inner, alternate, consequent);
+            }
+
+            return Self::new(ExpressionDesc::Cond(
+                Box::new(Expression::new(ExpressionDesc::JsNot(inner))),
+                Box::new(consequent),
+                Box::new(alternate),
+            ));
+        }
+
         Self::new(ExpressionDesc::Cond(
             Box::new(test),
             Box::new(consequent),
@@ -661,7 +694,11 @@ impl Expression {
     }
 }
 
-fn fold_strict_nullish_comparison(op: BinOp, left: &Expression, right: &Expression) -> Option<bool> {
+fn fold_strict_nullish_comparison(
+    op: BinOp,
+    left: &Expression,
+    right: &Expression,
+) -> Option<bool> {
     let equality = match op {
         BinOp::EqEqEq => true,
         BinOp::NotEqEq => false,
@@ -719,7 +756,7 @@ fn is_nullish_eq_impossible_non_null_expr(expr: &Expression) -> bool {
     ) && expression_has_no_side_effects(expr)
 }
 
-fn expression_has_no_side_effects(expr: &Expression) -> bool {
+pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
     match &expr.desc {
         ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
@@ -775,6 +812,13 @@ fn expression_has_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::Await(_)
         | ExpressionDesc::Spread(_) => false,
     }
+}
+
+fn expression_branch_is_not_empty(expr: &Expression) -> bool {
+    !matches!(
+        expr.desc,
+        ExpressionDesc::Number(Number::Int { i: 0, .. }) | ExpressionDesc::Undefined { .. }
+    )
 }
 
 fn push_negation(expr: Expression) -> Option<Expression> {
@@ -970,7 +1014,7 @@ impl Statement {
 fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statement {
     match cond.desc {
         ExpressionDesc::Bool(value) => {
-            return Statement::new(StatementDesc::Block(if value { then_ } else { else_ }))
+            return Statement::new(StatementDesc::Block(if value { then_ } else { else_ }));
         }
         ExpressionDesc::JsNot(inner) if !else_.is_empty() => {
             return simplify_if_statement(*inner, else_, then_);
@@ -1235,7 +1279,10 @@ mod tests {
             Expression::var(Ident::create_local("value")),
         );
 
-        assert!(matches!(expr.desc, ExpressionDesc::Bin(BinOp::EqEqEq, _, _)));
+        assert!(matches!(
+            expr.desc,
+            ExpressionDesc::Bin(BinOp::EqEqEq, _, _)
+        ));
     }
 
     #[test]
@@ -1278,6 +1325,59 @@ mod tests {
                 ));
             }
             other => panic!("Expected De Morgan rewrite after negating &&, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_cond_true_simplifies_to_consequent() {
+        let expr = Expression::cond(
+            Expression::bool(true),
+            Expression::number(Number::int(1)),
+            Expression::number(Number::int(2)),
+        );
+
+        assert!(matches!(
+            expr.desc,
+            ExpressionDesc::Number(Number::Int { i: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn test_cond_negated_test_swaps_non_empty_branches() {
+        let value = Ident::create_local("value");
+        let expr = Expression::cond(
+            Expression::new(ExpressionDesc::JsNot(Box::new(Expression::var(
+                value.clone(),
+            )))),
+            Expression::number(Number::int(1)),
+            Expression::number(Number::int(2)),
+        );
+
+        match expr.desc {
+            ExpressionDesc::Cond(test, consequent, alternate) => {
+                assert!(matches!(
+                    test.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&value)
+                ));
+                assert!(matches!(
+                    consequent.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 2, .. }),
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    alternate.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                        ..
+                    }
+                ));
+            }
+            other => panic!("Expected negated condition to be swapped, got {other:?}"),
         }
     }
 

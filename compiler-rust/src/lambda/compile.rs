@@ -18,7 +18,7 @@ use crate::js_ir::printer::{convert_ident_name, is_js_keyword_or_global};
 use crate::js_ir::{
     BinOp, Block, CallInfo, CaseClause, Delim, DepsProgram, Expression, ExpressionDesc,
     ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc, StringClause,
-    VIdent, VariableDeclaration,
+    VIdent, VariableDeclaration, expression_has_no_side_effects,
 };
 use crate::lambda::analysis;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
@@ -2472,21 +2472,9 @@ impl LambdaCompiler {
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
-            Porint => Expression::bin(
-                BinOp::Bor,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
-            ),
-            Pxorint => Expression::bin(
-                BinOp::Bxor,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
-            ),
-            Plslint => Expression::bin(
-                BinOp::Lsl,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
-            ),
+            Porint => int32_bor(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pxorint => int32_bxor(compiled_args[0].clone(), compiled_args[1].clone()),
+            Plslint => int32_lsl(compiled_args[0].clone(), compiled_args[1].clone()),
             Plsrint => int32_lsr(compiled_args[0].clone(), compiled_args[1].clone()),
             Pasrint => Expression::bin(
                 BinOp::Asr,
@@ -4602,11 +4590,21 @@ fn is_zero_int(expr: &Expression) -> bool {
     int_literal(expr) == Some(0)
 }
 
-fn to_int32(expr: Expression) -> Expression {
-    match &expr.desc {
-        ExpressionDesc::Bin(BinOp::Bor, _, right) if is_zero_int(right) => expr,
-        _ => Expression::bin(BinOp::Bor, expr, int_expr(0)),
+fn positive_power_of_two_shift(value: i32) -> Option<u32> {
+    if value <= 0 {
+        return None;
     }
+
+    let value = value as u32;
+    if value.is_power_of_two() {
+        Some(value.trailing_zeros())
+    } else {
+        None
+    }
+}
+
+fn to_int32(expr: Expression) -> Expression {
+    int32_bor(expr, int_expr(0))
 }
 
 fn int32_add(left: Expression, right: Expression) -> Expression {
@@ -4625,7 +4623,17 @@ fn int32_minus(left: Expression, right: Expression) -> Expression {
 
 fn int32_mul(left: Expression, right: Expression) -> Expression {
     match (int_literal(&left), int_literal(&right)) {
+        (_, Some(0)) if expression_has_no_side_effects(&left) => int_expr(0),
+        (Some(0), _) if expression_has_no_side_effects(&right) => int_expr(0),
         (Some(lhs), Some(rhs)) => int_expr(lhs.wrapping_mul(rhs)),
+        (_, Some(rhs)) => match positive_power_of_two_shift(rhs) {
+            Some(shift) => int32_lsl(left, int_expr(shift as i32)),
+            None => to_int32(Expression::bin(BinOp::Mul, left, right)),
+        },
+        (Some(lhs), _) => match positive_power_of_two_shift(lhs) {
+            Some(shift) => int32_lsl(right, int_expr(shift as i32)),
+            None => to_int32(Expression::bin(BinOp::Mul, left, right)),
+        },
         _ => to_int32(Expression::bin(BinOp::Mul, left, right)),
     }
 }
@@ -4638,8 +4646,104 @@ fn int32_mod(left: Expression, right: Expression) -> Expression {
     Expression::bin(BinOp::Mod, left, right)
 }
 
+fn int32_lsl(left: Expression, right: Expression) -> Expression {
+    match (int_literal(&left), int_literal(&right)) {
+        (Some(lhs), Some(rhs)) => int_expr(lhs.wrapping_shl(rhs as u32)),
+        _ => Expression::bin(BinOp::Lsl, left, right),
+    }
+}
+
+fn int32_bor(left: Expression, right: Expression) -> Expression {
+    match (&left.desc, &right.desc) {
+        (
+            ExpressionDesc::Number(Number::Int { i: lhs, .. }),
+            ExpressionDesc::Number(Number::Int { i: rhs, .. }),
+        ) => int_expr(*lhs | *rhs),
+        (
+            _,
+            ExpressionDesc::Bin(
+                BinOp::Lsr,
+                inner,
+                shift,
+            ),
+        ) if is_zero_int(shift.as_ref()) => int32_bor(left, inner.as_ref().clone()),
+        (
+            ExpressionDesc::Bin(
+                BinOp::Lsr,
+                inner,
+                shift,
+            ),
+            _,
+        ) if is_zero_int(shift.as_ref()) => int32_bor(inner.as_ref().clone(), right),
+        (
+            ExpressionDesc::Bin(
+                BinOp::Lsr,
+                _,
+                shift,
+            ),
+            _,
+        ) if is_zero_int(&right) && int_literal(shift.as_ref()).is_some_and(|value| value > 0) => {
+            left
+        }
+        (
+            ExpressionDesc::Bin(
+                BinOp::Bor,
+                inner,
+                truncation,
+            ),
+            _,
+        ) if is_zero_int(&right) && is_zero_int(truncation.as_ref()) => {
+            int32_bor(inner.as_ref().clone(), right)
+        }
+        _ => Expression::bin(BinOp::Bor, left, right),
+    }
+}
+
 fn int32_lsr(left: Expression, right: Expression) -> Expression {
-    to_int32(Expression::bin(BinOp::Lsr, left, right))
+    match (&left.desc, &right.desc) {
+        (
+            ExpressionDesc::Number(Number::Int { i: lhs, .. }),
+            ExpressionDesc::Number(Number::Int { i: rhs, .. }),
+        ) => int_expr(((*lhs as u32) >> (*rhs as u32)) as i32),
+        (ExpressionDesc::Bin(BinOp::Lsr, _, _), _) if is_zero_int(&right) => left,
+        (
+            ExpressionDesc::Bin(
+                BinOp::Bor,
+                inner,
+                truncation,
+            ),
+            _,
+        ) if is_zero_int(&right) && is_zero_int(truncation.as_ref()) => {
+            int32_lsr(inner.as_ref().clone(), right)
+        }
+        _ => to_int32(Expression::bin(BinOp::Lsr, left, right)),
+    }
+}
+
+fn int32_bxor(left: Expression, right: Expression) -> Expression {
+    match (&left.desc, &right.desc) {
+        (
+            ExpressionDesc::Number(Number::Int { i: lhs, .. }),
+            ExpressionDesc::Number(Number::Int { i: rhs, .. }),
+        ) => int_expr(*lhs ^ *rhs),
+        (
+            _,
+            ExpressionDesc::Bin(
+                BinOp::Lsr,
+                inner,
+                shift,
+            ),
+        ) if is_zero_int(shift.as_ref()) => int32_bxor(left, inner.as_ref().clone()),
+        (
+            ExpressionDesc::Bin(
+                BinOp::Lsr,
+                inner,
+                shift,
+            ),
+            _,
+        ) if is_zero_int(shift.as_ref()) => int32_bxor(inner.as_ref().clone(), right),
+        _ => Expression::bin(BinOp::Bxor, left, right),
+    }
 }
 
 fn int32_offset(expr: Expression, offset: i32) -> Expression {
@@ -12480,6 +12584,72 @@ mod tests {
                 ));
             }
             other => panic!("expected `value >>> shift | 0`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_pmulint_by_positive_power_of_two_to_shift() {
+        let value = Ident::create_local("value");
+        let expr = int32_mul(Expression::var(value.clone()), int_expr(2));
+
+        match expr.desc {
+            ExpressionDesc::Bin(BinOp::Lsl, left, right) => {
+                assert!(matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&value)
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected `value << 1`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_pxorint_literal_operands_to_folded_constant() {
+        let expr = int32_bxor(int_expr(2), int_expr(-3));
+
+        match expr.desc {
+            ExpressionDesc::Number(Number::Int { i: -1, .. }) => {}
+            other => panic!("expected folded `-1`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_int32_drops_redundant_bor_after_logical_shift() {
+        let value = Ident::create_local("value");
+        let expr = to_int32(Expression::bin(
+            BinOp::Lsr,
+            Expression::var(value.clone()),
+            int_expr(3),
+        ));
+
+        match expr.desc {
+            ExpressionDesc::Bin(BinOp::Lsr, left, right) => {
+                assert!(matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&value)
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected bare logical shift, got {other:?}"),
         }
     }
 

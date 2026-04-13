@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 266 / 657 JS snapshots passing, 0 compile errors, 391 output diffs
+**Status:** 270 / 657 JS snapshots passing, 0 compile errors, 387 output diffs
 
 ## Goal
 
@@ -35,13 +35,60 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **266 / 657**
+- JS snapshot parity: **270 / 657**
 - Compile errors: **0**
-- Output diffs: **391**
+- Output diffs: **387**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed `Js_exp_make` expression
+  builder slice across `compiler/core/js_exp_make.ml` together with the
+  primitive lowering entry points in `compiler/core/lam_compile_primitive.ml`
+- After reading OCaml's `econd`, `int32_mul`, `int32_bxor`, `int32_bor`,
+  `int32_lsr`, and `to_int32` there, the Rust backend in
+  `compiler-rust/src/js_ir/mod.rs` and `compiler-rust/src/lambda/compile.rs`
+  now mirrors those builder-level simplifications more closely: literal
+  conditionals collapse before printing, negated conditionals swap branches the
+  same way, power-of-two int multiplies lower to shifts, literal xor folds
+  eagerly, and redundant `| 0` after logical shifts is dropped
+- Added focused regression coverage in
+  `js_ir::tests::test_cond_true_simplifies_to_consequent`,
+  `js_ir::tests::test_cond_negated_test_swaps_non_empty_branches`,
+  `lambda::compile::tests::lowers_pmulint_by_positive_power_of_two_to_shift`,
+  `lambda::compile::tests::lowers_pxorint_literal_operands_to_folded_constant`,
+  and
+  `lambda::compile::tests::to_int32_drops_redundant_bor_after_logical_shift`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release cond_ -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release power_of_two_to_shift -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release pxorint_literal_operands -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release to_int32_drops_redundant_bor_after_logical_shift -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact harness-mode snapshot repros for
+    `tests/tests/src/js_null_test.res`,
+    `tests/tests/src/belt_int_test.res`,
+    `tests/tests/src/const_defs_test.res`, and
+    `tests/tests/src/js_undefined_test.res` from `tests/tests/lib/bs`
+    using the checked-in `compiler-args`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/const_defs_test.res` and
+  `tests/tests/src/belt_int_test.res` now match their checked-in snapshots
+  exactly again, `tests/tests/src/ExternalShadow.res` remains an exact
+  guard-file match, and
+  `tests/tests/src/js_null_test.res` plus
+  `tests/tests/src/js_undefined_test.res` both collapsed to their remaining
+  `some(undefined)` / arrow-parentheses drift instead of the original
+  conditional and multiply-lowering mismatches
+- The authoritative JS snapshot baseline now reports **270 / 657** passing,
+  **0** compile errors, and **387** output diffs; this is a net **+4**
+  passing snapshots and **-4** output diffs from the previously recorded
+  **266 / 657**, **0** compile errors, **391** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed cross-module constant-field
