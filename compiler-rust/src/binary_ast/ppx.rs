@@ -198,6 +198,16 @@ pub enum JsExpClassification {
     JsExpUnknown,
 }
 
+/// Result of classifying a JavaScript statement fragment.
+/// This mirrors OCaml's `Js_raw_info.stmt` type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsStmtClassification {
+    /// A comment-only statement fragment.
+    JsStmtComment,
+    /// Unknown statement fragment.
+    JsStmtUnknown,
+}
+
 /// Check if an OXC expression is an object literal (recursively).
 /// This matches OCaml's `is_obj_literal` function.
 fn is_obj_literal(expr: &oxc_ast::ast::Expression<'_>) -> bool {
@@ -309,6 +319,24 @@ pub fn classify_js_exp(s: &str) -> JsExpClassification {
     // Explicitly drop allocator before returning (though this should happen anyway)
     drop(allocator);
     result
+}
+
+/// Classify a JavaScript statement fragment.
+/// This mirrors OCaml's `Classify_function.classify_stmt`.
+pub fn classify_js_stmt(s: &str) -> JsStmtClassification {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    let source_type = SourceType::default();
+    let parser_return = Parser::new(&allocator, s, source_type).parse();
+
+    if parser_return.errors.is_empty() && parser_return.program.body.is_empty() {
+        JsStmtClassification::JsStmtComment
+    } else {
+        JsStmtClassification::JsStmtUnknown
+    }
 }
 
 /// Detect if a JavaScript string contains a function expression.

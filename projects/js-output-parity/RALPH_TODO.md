@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 171 / 657 JS snapshots passing, 0 compile errors, 486 output diffs
+**Status:** 172 / 657 JS snapshots passing, 0 compile errors, 485 output diffs
 
 ## Goal
 
@@ -35,13 +35,46 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **171 / 657**
+- JS snapshot parity: **172 / 657**
 - Compile errors: **0**
-- Output diffs: **486**
+- Output diffs: **485**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed on the module side-effect metadata path
+  instead of treating `epsilon_test.res` as a one-off trailer comment mismatch
+- `compiler-rust/src/lambda/analysis.rs` now matches the OCaml
+  `compiler/core/lam_analysis.ml` raw-JS purity slice more closely:
+  `PrawJsCode` is no longer treated as pure just because it is an expression.
+  Rust now reuses the existing OXC-backed raw-JS expression classifier and a
+  new matching statement classifier so that only OCaml-equivalent raw
+  functions, literals, and comment-only statement fragments count as
+  side-effect-free
+- `compiler-rust/src/binary_ast/ppx.rs` now exposes the missing raw statement
+  classification alongside the existing raw expression classification, which
+  lets the backend side-effect analysis distinguish comment-only raw statement
+  payloads from arbitrary raw programs the same way OCaml does
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::analysis::tests::test_no_side_effects_raw_js_matches_ocaml_classification -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/epsilon_test.res` now matches its checked-in `.mjs`
+  snapshot again; it dropped out of the authoritative diff cache once raw JS
+  expressions stopped being treated as generically pure on the Rust side
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change, which confirms this raw-JS purity slice stays isolated from
+  the already-stable external-shadow path
+- `tests/tests/src/ExternalExtension.res` still differs after the change, which
+  shows the remaining drift there is not just raw-JS purity classification; the
+  next signal in that file is still later backend lowering and byte shape
+- The authoritative JS snapshot baseline now reports **172 / 657** passing,
+  **0** compile errors, and **485** output diffs after this OCaml-aligned
+  raw-JS purity classification fix; this is a net **+1** over the previous
+  recorded baseline
 
 - Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
   from `PLAN.md`; this iteration stayed on the surviving direct

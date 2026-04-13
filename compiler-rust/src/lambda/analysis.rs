@@ -6,6 +6,9 @@
 //! - Inlining hints: determines if a function is safe/profitable to inline
 
 use crate::ident::Ident;
+use crate::binary_ast::ppx::{
+    classify_js_exp, classify_js_stmt, JsExpClassification, JsStmtClassification,
+};
 use crate::lambda::compat::FieldDbgInfo;
 use crate::lambda::constant::Constant;
 use crate::lambda::primitive::Primitive;
@@ -249,11 +252,7 @@ fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
         | Primitive::PhashFinalmix => true,
 
         // Raw JS code - check if it's a pure expression
-        Primitive::PrawJsCode(info) => {
-            // Only certain JS code patterns are pure
-            // TODO: Check code_info for Js_function, Js_literal, Js_stmt_comment
-            !info.is_stmt
-        }
+        Primitive::PrawJsCode(info) => raw_js_is_pure(info),
 
         // Impure primitives
         Primitive::PjsApply
@@ -270,6 +269,17 @@ fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
         | Primitive::Poffsetref(_)
         | Primitive::Praise
         | Primitive::Psetfield(_, _) => false,
+    }
+}
+
+fn raw_js_is_pure(info: &crate::lambda::primitive::JsRawInfo) -> bool {
+    if info.is_stmt {
+        matches!(classify_js_stmt(&info.code), JsStmtClassification::JsStmtComment)
+    } else {
+        matches!(
+            classify_js_exp(&info.code),
+            JsExpClassification::JsFunction { .. } | JsExpClassification::JsLiteral
+        )
     }
 }
 
@@ -589,6 +599,39 @@ mod tests {
             Location::none(),
         );
         assert!(!no_side_effects(&raise));
+    }
+
+    #[test]
+    fn test_no_side_effects_raw_js_matches_ocaml_classification() {
+        let raw_literal = Lambda::prim(
+            Primitive::PrawJsCode(crate::lambda::primitive::JsRawInfo {
+                code: "null".to_string(),
+                is_stmt: false,
+            }),
+            vec![],
+            Location::none(),
+        );
+        assert!(no_side_effects(&raw_literal));
+
+        let raw_unknown = Lambda::prim(
+            Primitive::PrawJsCode(crate::lambda::primitive::JsRawInfo {
+                code: "Number.EPSILON ? Number.EPSILON : 2.220446049250313e-16".to_string(),
+                is_stmt: false,
+            }),
+            vec![],
+            Location::none(),
+        );
+        assert!(!no_side_effects(&raw_unknown));
+
+        let raw_comment_stmt = Lambda::prim(
+            Primitive::PrawJsCode(crate::lambda::primitive::JsRawInfo {
+                code: "/* comment */".to_string(),
+                is_stmt: true,
+            }),
+            vec![],
+            Location::none(),
+        );
+        assert!(no_side_effects(&raw_comment_stmt));
     }
 
     #[test]
