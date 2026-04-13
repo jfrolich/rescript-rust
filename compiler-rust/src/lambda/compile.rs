@@ -13818,4 +13818,74 @@ mod tests {
             "expected assignments to target renamed loop params:\n{rendered}"
         );
     }
+
+    #[test]
+    fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
+        let mut compiler = LambdaCompiler::new();
+        let f = Ident::create_local("f");
+        let n = Ident::create_local("n");
+        let acc = Ident::create_local("acc");
+        let body = Lambda::if_(
+            Lambda::var(n.clone()),
+            Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::var(f.clone())),
+                ap_args: vec![
+                    Lambda::prim(
+                        Primitive::Psubint,
+                        vec![Lambda::var(n.clone()), Lambda::const_(Constant::int(1))],
+                        Location::none(),
+                    ),
+                    Lambda::function_(
+                        1,
+                        vec![Ident::create_local("param")],
+                        Lambda::var(acc.clone()),
+                        FunctionAttribute::default(),
+                    ),
+                ],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            }),
+            Lambda::var(acc.clone()),
+        );
+        let lam = Lambda::letrec(
+            vec![(
+                f.clone(),
+                Lambda::function_(
+                    2,
+                    vec![n.clone(), acc.clone()],
+                    body,
+                    FunctionAttribute::default(),
+                ),
+            )],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+        let alias_start = rendered
+            .find("let acc = _acc;")
+            .expect("expected acc alias in loop body");
+        let alias_next = rendered
+            .find("let n = _n;")
+            .expect("expected n alias in loop body");
+        let assign_start = rendered
+            .find("_acc =")
+            .expect("expected acc reassignment in loop body");
+        let assign_next = rendered
+            .find("_n =")
+            .expect("expected n reassignment in loop body");
+
+        assert!(
+            alias_start < alias_next,
+            "expected acc alias before n alias:\n{rendered}"
+        );
+        assert!(
+            assign_start < assign_next,
+            "expected acc reassignment before n reassignment:\n{rendered}"
+        );
+    }
 }
