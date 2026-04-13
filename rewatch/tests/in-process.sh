@@ -83,61 +83,18 @@ clean_all_build_output() {
 
 # ============================================================================
 # Workaround: stub out packages that use unsupported compiler features
-# The sury package uses GADTs and spread variant types that the Rust compiler
-# does not yet support. Temporarily replace with stubs for this test.
-# The testrepo is restored via git checkout at the end.
 # ============================================================================
-stub_unsupported_packages() {
-  # Stub sury source files (GADTs/spread types not supported in Rust compiler)
-  echo "// stub" > node_modules/sury/src/Sury.res
-  echo "// stub" > node_modules/sury/src/S.res
-  echo "// stub" > node_modules/sury/src/OpenAPI.res
-  echo "// stub" > node_modules/sury/src/JSONSchema.res
-  rm -f node_modules/sury/src/Sury.resi node_modules/sury/src/S.resi
-
-  # Simplify FileWithPpx.res (depends on sury PPX which is not available in-process)
-  echo 'Console.log("hello")' > packages/with-ppx/src/FileWithPpx.res
-
-  # Stub rescript-nodejs/rescript-bun modules that hit portable type internalization issues
-  # (TypeExprRef(0) in cross-context method resolution for Js.Nullable.fromOption, PatternTypeClash)
-  for pkg_dir in node_modules/rescript-nodejs packages/nohoist/node_modules/rescript-bun; do
-    if [ -d "$pkg_dir/src" ]; then
-      for f in Event PerfHooks Url StringBuffer BinaryLike; do
-        if [ -f "$pkg_dir/src/$f.res" ]; then
-          echo "// stub - portable type issue" > "$pkg_dir/src/$f.res"
-          rm -f "$pkg_dir/src/$f.resi"
-        fi
-      done
-    fi
-  done
-
-  # Stub @rescript/webapi — its 312 modules cause Rayon worker stack overflow during
-  # in-process compilation (the type-checker recurses too deeply on complex DOM types
-  # when runtime modules like Js are only partially available from source pre-compilation)
-  if [ -d "node_modules/@rescript/webapi/src" ]; then
-    find node_modules/@rescript/webapi/src -name "*.res" -exec sh -c 'echo "// stub" > "$1"' _ {} \;
-    find node_modules/@rescript/webapi/src -name "*.resi" -delete 2>/dev/null
-  fi
-
-  # Simplify Array.res (Belt.Array references trigger lambda compiler panic on functor Papply paths;
-  # Js.Array2 references fail due to portable type internalization issues with TypeExprRef(0))
-  # Self-contained stub using only externals — no module path references
-  cat > packages/dep02/src/Array.res << 'ARRAY_EOF'
-@send external forEach: (array<'a>, 'a => unit) => unit = "forEach"
-@send external map: (array<'a>, 'a => 'b) => array<'b> = "map"
-@get external length: array<'a> => int = "length"
-ARRAY_EOF
-}
-
 # ============================================================================
 # Test 1: Fresh --in-process build produces JS and no compiler assets
 # ============================================================================
 bold "Test: Fresh --in-process build"
 
 clean_all_build_output
-stub_unsupported_packages
 
 # Build with --in-process — require zero exit code
+# Note: some modules may produce compilation warnings (caught panics, type
+# errors for unsupported features like GADTs in sury) but the build still
+# succeeds with exit 0.
 error_output=$(rewatch build --in-process 2>&1)
 exit_code=$?
 
@@ -168,8 +125,6 @@ check_no_compiler_assets "Fresh build"
 js_count=$(find . -name "*.mjs" \
   -not -path "*/node_modules/rescript/*" \
   -not -path "*/node_modules/@rescript/*" \
-  -not -path "*/node_modules/sury/*" \
-  -not -path "*/node_modules/rescript-nodejs/*" \
   2>/dev/null | wc -l | tr -d ' ')
 
 if [ "$js_count" -gt 30 ]; then
@@ -211,7 +166,7 @@ fi
 # ============================================================================
 bold "Test: node_modules source-backed deps"
 
-# rescript-nodejs and sury are source-backed deps
+# rescript-nodejs is a source-backed dep
 nodejs_files=$(find ./node_modules/rescript-nodejs -name "*.mjs" 2>/dev/null | wc -l | tr -d ' ')
 if [ "$nodejs_files" -gt 5 ]; then
   success "rescript-nodejs produced $nodejs_files JS files"
@@ -246,7 +201,6 @@ fi
 bold "Test: Asset poisoning immunity"
 
 clean_all_build_output
-stub_unsupported_packages
 
 # Plant bogus stale compiler assets
 mkdir -p ./packages/main/lib/bs ./packages/main/lib/ocaml

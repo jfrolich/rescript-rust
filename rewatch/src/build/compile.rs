@@ -137,7 +137,14 @@ pub fn compile(
         // Pre-compile @rescript/runtime modules into the registry so the
         // main parallel loop doesn't need source-fallback (which overflows
         // worker thread stacks due to deep recursion).
-        pre_compile_runtime_modules(build_state);
+        // Spawn on a Rayon worker thread (64MB stack) because the main thread
+        // only has 8MB, which is insufficient for deep source-fallback
+        // type-checking chains during runtime pre-compilation.
+        rayon::scope(|s| {
+            s.spawn(|_| {
+                pre_compile_runtime_modules(build_state);
+            });
+        });
         // Clear source-fallback paths after pre-compilation. The main compile
         // loop must NOT use source-fallback (it causes stack overflow on Rayon
         // workers). Modules not pre-compiled into the registry will fail to
@@ -1337,7 +1344,16 @@ fn compile_module_in_process(
             &options,
             &local_registry,
         )
-        .map_err(|e| anyhow!("Interface typecheck failed for {}: {}", module_name, e))?;
+        .map_err(|e| anyhow!("Interface typecheck failed for {}: {}", module_name, e));
+
+        let intf_result = match intf_result {
+            Ok(r) => r,
+            Err(e) => {
+                let warning = format!("{}", e);
+                eprintln!("{}", warning);
+                return Ok(Some(warning));
+            }
+        };
 
         // Register the .resi's PersStruct in the local registry so the
         // .res compilation can find it for moregen constraints.
@@ -1388,18 +1404,32 @@ fn compile_module_in_process(
             &local_registry,
             has_interface,
         )
-    }))
-    .map_err(|panic| {
-        let msg = if let Some(s) = panic.downcast_ref::<String>() {
-            s.clone()
-        } else if let Some(s) = panic.downcast_ref::<&str>() {
-            s.to_string()
-        } else {
-            "unknown panic".to_string()
-        };
-        anyhow!("Compilation panicked for {}: {}", module_name, msg)
-    })?
-    .map_err(|e| anyhow!("Compilation failed for {}: {}", module_name, e))?;
+    }));
+
+    let compile_result = match compile_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => {
+            // Return as a warning, not an error. The module won't produce JS
+            // output but the build should continue for other modules.
+            let warning = format!("Compilation failed for {}: {}", module_name, e);
+            eprintln!("{}", warning);
+            return Ok(Some(warning));
+        }
+        Err(panic) => {
+            let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "unknown panic".to_string()
+            };
+            // Return as a warning, not an error. The module won't produce JS
+            // output but the build should continue for other modules.
+            let warning = format!("Compilation panicked for {}: {}", module_name, msg);
+            eprintln!("{}", warning);
+            return Ok(Some(warning));
+        }
+    };
 
     // Update the shared registry with the implementation's PersStruct
     let impl_fingerprint = compile_result

@@ -1901,7 +1901,7 @@ pub fn substitute_type_expr_path_pub(
 }
 
 fn substitute_type_expr_path(
-    ty_ref: TypeExprRef,
+    initial_ty_ref: TypeExprRef,
     type_stamp_map: &HashMap<i32, Path>,
     type_name_map: &HashMap<String, Path>,
     module_stamp_map: &HashMap<i32, Path>,
@@ -1909,220 +1909,104 @@ fn substitute_type_expr_path(
     ctx: &TypeContext<'_>,
     visited: &mut HashSet<usize>,
 ) {
-    if !visited.insert(ty_ref.0) {
-        return; // Already visited (cycle detection)
-    }
+    // Use an explicit work stack instead of recursion to avoid stack overflow
+    // on large type graphs (e.g., objects with hundreds of fields create deep
+    // Tfield chains, and Tlink chains from unification can be thousands deep).
+    let mut work_stack = vec![initial_ty_ref];
 
-    let desc = ctx.get_desc(ty_ref);
+    while let Some(ty_ref) = work_stack.pop() {
+        if !visited.insert(ty_ref.0) {
+            continue; // Already visited (cycle detection)
+        }
 
-    match &*desc {
-        TypeDesc::Tconstr { path, args, .. } => {
-            let new_path = substitute_type_path(
-                path,
-                type_stamp_map,
-                type_name_map,
-                module_stamp_map,
-                module_name_map,
-            );
-            if new_path != *path {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
-                    *path = new_path;
-                }
-                ctx.set_desc(ty_ref, new_desc);
-            }
+        let desc = ctx.get_desc(ty_ref);
 
-            // Recurse into type arguments
-            for &arg in args {
-                substitute_type_expr_path(
-                    arg,
+        match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => {
+                let new_path = substitute_type_path(
+                    path,
                     type_stamp_map,
                     type_name_map,
                     module_stamp_map,
                     module_name_map,
-                    ctx,
-                    visited,
                 );
-            }
-        }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            substitute_type_expr_path(
-                arg.typ,
-                type_stamp_map,
-                type_name_map,
-                module_stamp_map,
-                module_name_map,
-                ctx,
-                visited,
-            );
-            substitute_type_expr_path(
-                *ret,
-                type_stamp_map,
-                type_name_map,
-                module_stamp_map,
-                module_name_map,
-                ctx,
-                visited,
-            );
-        }
-        TypeDesc::Ttuple(types) => {
-            for &t in types {
-                substitute_type_expr_path(
-                    t,
-                    type_stamp_map,
-                    type_name_map,
-                    module_stamp_map,
-                    module_name_map,
-                    ctx,
-                    visited,
-                );
-            }
-        }
-        TypeDesc::Tlink(t) => {
-            substitute_type_expr_path(
-                *t,
-                type_stamp_map,
-                type_name_map,
-                module_stamp_map,
-                module_name_map,
-                ctx,
-                visited,
-            );
-        }
-        TypeDesc::Tsubst(t) => {
-            substitute_type_expr_path(
-                *t,
-                type_stamp_map,
-                type_name_map,
-                module_stamp_map,
-                module_name_map,
-                ctx,
-                visited,
-            );
-        }
-        TypeDesc::Tpoly { body, vars } => {
-            substitute_type_expr_path(
-                *body,
-                type_stamp_map,
-                type_name_map,
-                module_stamp_map,
-                module_name_map,
-                ctx,
-                visited,
-            );
-            for &v in vars {
-                substitute_type_expr_path(
-                    v,
-                    type_stamp_map,
-                    type_name_map,
-                    module_stamp_map,
-                    module_name_map,
-                    ctx,
-                    visited,
-                );
-            }
-        }
-        TypeDesc::Tobject { fields, .. } => {
-            substitute_type_expr_path(
-                *fields,
-                type_stamp_map,
-                type_name_map,
-                module_stamp_map,
-                module_name_map,
-                ctx,
-                visited,
-            );
-        }
-        TypeDesc::Tfield { typ, rest, .. } => {
-            substitute_type_expr_path(
-                *typ,
-                type_stamp_map,
-                type_name_map,
-                module_stamp_map,
-                module_name_map,
-                ctx,
-                visited,
-            );
-            substitute_type_expr_path(
-                *rest,
-                type_stamp_map,
-                type_name_map,
-                module_stamp_map,
-                module_name_map,
-                ctx,
-                visited,
-            );
-        }
-        TypeDesc::Tvariant(row) => {
-            substitute_type_expr_path(
-                row.row_more,
-                type_stamp_map,
-                type_name_map,
-                module_stamp_map,
-                module_name_map,
-                ctx,
-                visited,
-            );
-            for field in &row.row_fields {
-                match &field.1 {
-                    crate::types::type_expr::RowField::Rpresent(Some(t)) => {
-                        substitute_type_expr_path(
-                            *t,
-                            type_stamp_map,
-                            type_name_map,
-                            module_stamp_map,
-                            module_name_map,
-                            ctx,
-                            visited,
-                        );
+                if new_path != *path {
+                    let mut new_desc = (*desc).clone();
+                    if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
+                        *path = new_path;
                     }
-                    crate::types::type_expr::RowField::Reither { types, .. } => {
-                        for &t in types {
-                            substitute_type_expr_path(
-                                t,
-                                type_stamp_map,
-                                type_name_map,
-                                module_stamp_map,
-                                module_name_map,
-                                ctx,
-                                visited,
-                            );
+                    ctx.set_desc(ty_ref, new_desc);
+                }
+
+                // Push type arguments onto work stack
+                for &arg in args {
+                    work_stack.push(arg);
+                }
+            }
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                work_stack.push(arg.typ);
+                work_stack.push(*ret);
+            }
+            TypeDesc::Ttuple(types) => {
+                for &t in types {
+                    work_stack.push(t);
+                }
+            }
+            TypeDesc::Tlink(t) | TypeDesc::Tsubst(t) => {
+                work_stack.push(*t);
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                work_stack.push(*body);
+                for &v in vars {
+                    work_stack.push(v);
+                }
+            }
+            TypeDesc::Tobject { fields, .. } => {
+                work_stack.push(*fields);
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                work_stack.push(*typ);
+                work_stack.push(*rest);
+            }
+            TypeDesc::Tvariant(row) => {
+                work_stack.push(row.row_more);
+                for field in &row.row_fields {
+                    match &field.1 {
+                        crate::types::type_expr::RowField::Rpresent(Some(t)) => {
+                            work_stack.push(*t);
                         }
+                        crate::types::type_expr::RowField::Reither { types, .. } => {
+                            for &t in types {
+                                work_stack.push(t);
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
-        }
-        TypeDesc::Tpackage { path, args, .. } => {
-            // Package paths are module-type paths; OCaml substitutes these through
-            // `Subst.modtype`, not just module substitution.
-            let new_path = substitute_type_path(
-                path,
-                type_stamp_map,
-                type_name_map,
-                module_stamp_map,
-                module_name_map,
-            );
-            if new_path != *path {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
-                    *path = new_path;
-                }
-                ctx.set_desc(ty_ref, new_desc);
-            }
-            for &arg in args {
-                substitute_type_expr_path(
-                    arg,
+            TypeDesc::Tpackage { path, args, .. } => {
+                // Package paths are module-type paths; OCaml substitutes these through
+                // `Subst.modtype`, not just module substitution.
+                let new_path = substitute_type_path(
+                    path,
                     type_stamp_map,
                     type_name_map,
                     module_stamp_map,
                     module_name_map,
-                    ctx,
-                    visited,
                 );
+                if new_path != *path {
+                    let mut new_desc = (*desc).clone();
+                    if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
+                        *path = new_path;
+                    }
+                    ctx.set_desc(ty_ref, new_desc);
+                }
+                for &arg in args {
+                    work_stack.push(arg);
+                }
             }
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
         }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
     }
 }
 
@@ -3140,81 +3024,87 @@ pub fn add_signature_to_env(
 
     fn collect_target_constr_nodes(
         ctx: &TypeContext<'_>,
-        ty: TypeExprRef,
+        initial_ty: TypeExprRef,
         out: &mut Vec<(TypeExprRef, String)>,
         seen: &mut HashSet<TypeExprRef>,
     ) {
-        let ty = ctx.repr(ty);
-        if !seen.insert(ty) {
-            return;
-        }
-        let desc = ctx.get_desc(ty);
-        match &*desc {
-            TypeDesc::Tconstr { path, args, .. } => {
-                let path_name = path.name();
-                if path_name == "React.element"
-                    || path_name == "Jsx.element"
-                    || path.last() == "element"
-                    || path.last() == "someElement"
-                {
-                    out.push((ty, path_name));
-                }
-                for arg in args {
-                    collect_target_constr_nodes(ctx, *arg, out, seen);
-                }
+        // Use an explicit work stack to avoid stack overflow on large type
+        // graphs (e.g., objects with hundreds of fields create deep Tfield chains).
+        let mut work_stack = vec![initial_ty];
+
+        while let Some(raw_ty) = work_stack.pop() {
+            let ty = ctx.repr(raw_ty);
+            if !seen.insert(ty) {
+                continue;
             }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                collect_target_constr_nodes(ctx, arg.typ, out, seen);
-                collect_target_constr_nodes(ctx, *ret, out, seen);
-            }
-            TypeDesc::Ttuple(items) => {
-                for item in items {
-                    collect_target_constr_nodes(ctx, *item, out, seen);
-                }
-            }
-            TypeDesc::Tobject { fields, name } => {
-                collect_target_constr_nodes(ctx, *fields, out, seen);
-                if let Some((_path, args)) = name {
+            let desc = ctx.get_desc(ty);
+            match &*desc {
+                TypeDesc::Tconstr { path, args, .. } => {
+                    let path_name = path.name();
+                    if path_name == "React.element"
+                        || path_name == "Jsx.element"
+                        || path.last() == "element"
+                        || path.last() == "someElement"
+                    {
+                        out.push((ty, path_name));
+                    }
                     for arg in args {
-                        collect_target_constr_nodes(ctx, *arg, out, seen);
+                        work_stack.push(*arg);
                     }
                 }
-            }
-            TypeDesc::Tfield { typ, rest, .. } => {
-                collect_target_constr_nodes(ctx, *typ, out, seen);
-                collect_target_constr_nodes(ctx, *rest, out, seen);
-            }
-            TypeDesc::Tpoly { body, vars } => {
-                collect_target_constr_nodes(ctx, *body, out, seen);
-                for var in vars {
-                    collect_target_constr_nodes(ctx, *var, out, seen);
+                TypeDesc::Tarrow { arg, ret, .. } => {
+                    work_stack.push(arg.typ);
+                    work_stack.push(*ret);
                 }
-            }
-            TypeDesc::Tvariant(row) => {
-                collect_target_constr_nodes(ctx, row.row_more, out, seen);
-                for (_label, field) in &row.row_fields {
-                    match field {
-                        crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
-                            collect_target_constr_nodes(ctx, *ty, out, seen);
+                TypeDesc::Ttuple(items) => {
+                    for item in items {
+                        work_stack.push(*item);
+                    }
+                }
+                TypeDesc::Tobject { fields, name } => {
+                    work_stack.push(*fields);
+                    if let Some((_path, args)) = name {
+                        for arg in args {
+                            work_stack.push(*arg);
                         }
-                        crate::types::type_expr::RowField::Reither { types, .. } => {
-                            for ty in types {
-                                collect_target_constr_nodes(ctx, *ty, out, seen);
+                    }
+                }
+                TypeDesc::Tfield { typ, rest, .. } => {
+                    work_stack.push(*typ);
+                    work_stack.push(*rest);
+                }
+                TypeDesc::Tpoly { body, vars } => {
+                    work_stack.push(*body);
+                    for var in vars {
+                        work_stack.push(*var);
+                    }
+                }
+                TypeDesc::Tvariant(row) => {
+                    work_stack.push(row.row_more);
+                    for (_label, field) in &row.row_fields {
+                        match field {
+                            crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
+                                work_stack.push(*ty);
                             }
+                            crate::types::type_expr::RowField::Reither { types, .. } => {
+                                for ty in types {
+                                    work_stack.push(*ty);
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
-            }
-            TypeDesc::Tpackage { args, .. } => {
-                for arg in args {
-                    collect_target_constr_nodes(ctx, *arg, out, seen);
+                TypeDesc::Tpackage { args, .. } => {
+                    for arg in args {
+                        work_stack.push(*arg);
+                    }
                 }
+                TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+                    work_stack.push(*target);
+                }
+                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
             }
-            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-                collect_target_constr_nodes(ctx, *target, out, seen);
-            }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
         }
     }
 
