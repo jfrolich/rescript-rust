@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 302 / 657 JS snapshots passing, 0 compile errors, 355 output diffs
+**Status:** 304 / 657 JS snapshots passing, 0 compile errors, 353 output diffs
 
 ## Goal
 
@@ -35,56 +35,48 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **302 / 657**
+- JS snapshot parity: **304 / 657**
 - Compile errors: **0**
-- Output diffs: **355**
+- Output diffs: **353**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
-  and this iteration isolated one OCaml-backed `lam_pass_lets_dce`
+  and this iteration narrowed one OCaml-backed `lam_pass_lets_dce`
   substitution boundary in `compiler/core/lam_pass_lets_dce.ml`
-- After reading that OCaml pass, the Rust JS-backend simplifier in
-  `compiler-rust/src/lambda/simplify.rs` now only seeds body substitutions
-  from bindings whose **original** RHS was already a direct simple candidate
-  (`Lvar`, non-allocating `Lconst`, or the module-field form), instead of
-  treating any RHS that merely *simplified into* a simple value as equivalent
-- This matches the OCaml pass structure, where the substitution cases inspect
-  the original lambda shape before simplification; reduced results from named
-  function calls like `compose(...)` are still folded, but they no longer get
-  dropped into the export payload as if they had started life as literals
+- After rereading that OCaml pass, the Rust JS-backend simplifier in
+  `compiler-rust/src/lambda/simplify.rs` now still substitutes from the
+  simplified RHS when it ends in a simple export-safe shape, but it refuses to
+  seed body substitutions when the **original** RHS was `Lapply(_)`
+- This matches the OCaml pass structure more closely: named-function results
+  like `compose(...)` can still fold to literals, but they no longer get
+  treated as if their original binding had been a literal or direct alias,
+  while module-field exports such as `each2 = O.forEach` still simplify
+  through the ordinary export path
 - Added focused regression coverage in
   `lambda::simplify::tests::keeps_export_bindings_reduced_from_named_function_calls`
+  and retained the existing export-payload/coercion regression tests for the
+  surrounding path
 - Verified focused guards for this slice:
   - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release keeps_export_bindings_reduced_from_named_function_calls -- --nocapture`
   - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release simplifies_export_payloads_before_export_coercion -- --nocapture`
   - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release simplifies_module_alias_export_payloads_before_export_coercion -- --nocapture`
   - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_deps_program_rebinds_exported_constants_after_surviving_function_bindings -- --nocapture`
-  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
   - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsCurried.res -o /tmp/DerivingAccessorsCurried.mjs`
-  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsUncurried.res -o /tmp/DerivingAccessorsUncurried.mjs`
-  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Coercion.res -o /tmp/Coercion.mjs`
   - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
   - `timeout 1800 ./scripts/test_js_output_parity.sh`
 - Focused outcome:
-  `tests/tests/src/DerivingAccessorsCurried.res` and
-  `tests/tests/src/DerivingAccessorsUncurried.res` now match their checked-in
-  `.mjs` snapshots exactly again, while
-  `tests/tests/src/Coercion.res` and
-  `tests/tests/src/ExternalShadow.res` remain exact guard-file matches
-- Resolved checked-in snapshot files for this slice:
-  `tests/tests/src/DerivingAccessorsCurried.res` and
-  `tests/tests/src/DerivingAccessorsUncurried.res` no longer appear under
-  `temp/rust-parity/diffs`
-- The authoritative JS snapshot baseline remains **302 / 657** passing,
-  **0** compile errors, and **355** output diffs; this is a net **0**
-  baseline delta from the previously recorded run because the accessor pair
-  was offset by new regressions elsewhere, with
-  `tests/tests/src/Import.res` now showing the same kind of top-level export
-  placement sensitivity (`each2 = O.forEach` moved earlier than the OCaml
-  snapshot)
+  `tests/tests/src/DerivingAccessorsCurried.res` is an exact direct snapshot
+  match again, `tests/tests/src/ExternalShadow.res` remains an exact guard-file
+  match, and the cached diff corpus no longer contains
+  `DerivingAccessorsCurried.res`, `DerivingAccessorsUncurried.res`,
+  `Import.res`, `Coercion.res`, or `ExternalShadow.res`
+- The authoritative JS snapshot baseline now reports **304 / 657** passing,
+  **0** compile errors, and **353** output diffs; this is a net **+2**
+  passing snapshots and **-2** output diffs from the previously recorded
+  **302 / 657**, **0** compile errors, **355** output diffs
 - Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,

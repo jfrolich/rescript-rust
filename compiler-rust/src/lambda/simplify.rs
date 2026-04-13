@@ -1539,7 +1539,11 @@ fn substitution_candidate(kind: LetKind, original_value: &Lambda, simplified_val
         return None;
     }
 
-    match original_value {
+    if matches!(original_value, Lambda::Lapply(_)) {
+        return None;
+    }
+
+    match simplified_value {
         Lambda::Lvar(_) | Lambda::LglobalModule(_, _) => Some(simplified_value.clone()),
         Lambda::Lconst(constant) if !constant.is_allocating() => Some(simplified_value.clone()),
         Lambda::Lprim(info)
