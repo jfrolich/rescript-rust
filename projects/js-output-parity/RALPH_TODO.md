@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 184 / 657 JS snapshots passing, 0 compile errors, 473 output diffs
+**Status:** 185 / 657 JS snapshots passing, 0 compile errors, 472 output diffs
 
 ## Goal
 
@@ -35,13 +35,74 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **184 / 657**
+- JS snapshot parity: **185 / 657**
 - Compile errors: **0**
-- Output diffs: **473**
+- Output diffs: **472**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed comparison/runtime-helper slice
+  in `compiler/core/lam_compile_primitive.ml` plus one still-separate strict
+  comparison route that is not fully wired into the emitting backend yet
+- `compiler-rust/src/lambda/compile.rs` now matches the OCaml backend more
+  closely for the missing primitive comparison/order/min/max families:
+  `Pobjcomp`, `Pobjorder`, `Pobjmin`, `Pobjmax`, `Pboolorder`,
+  `Pboolmin`, `Pboolmax`, `Pintorder`, `Pintmin`, `Pintmax`,
+  `Pfloatorder`, `Pfloatmin`, `Pfloatmax`, `Pbigintorder`,
+  `Pbigintmin`, `Pbigintmax`, `Pstringorder`, `Pstringmin`, and
+  `Pstringmax` now lower to the corresponding `Primitive_*` runtime helpers or
+  the same literal fast paths OCaml uses instead of falling through to
+  `undefined`
+- `compiler-rust/src/js_ir/mod.rs` now folds strict null/undefined comparisons
+  against side-effect-free bool/number/typeof/function/array/caml-block
+  expressions in the shared JS IR builder, matching the OCaml
+  `js_exp_make.ml` nullish strict-comparison behavior closely enough for the
+  backend paths that already route through this builder
+- Added focused regression coverage in:
+  `lambda::compile::tests::compile_int_order_uses_primitive_int_compare`,
+  `compile_string_order_uses_primitive_string_compare`,
+  `compile_obj_compare_against_null_uses_strict_equality`,
+  `compile_obj_compare_null_against_number_literal_folds_false`,
+  `compile_obj_notequal_undefined_against_number_literal_folds_true`,
+  `compile_obj_order_uses_primitive_object_compare`,
+  `compile_bigint_min_literals_use_conditional_fast_path`,
+  `js_ir::tests::test_strict_eq_null_against_number_folds_false`,
+  `test_strict_neq_undefined_against_number_folds_true`, and
+  `test_strict_eq_null_against_variable_is_preserved`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_int_order_uses_primitive_int_compare' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_string_order_uses_primitive_string_compare' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_obj_compare_against_null_uses_strict_equality' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_obj_compare_null_against_number_literal_folds_false' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_obj_notequal_undefined_against_number_literal_folds_true' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_obj_order_uses_primitive_object_compare' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_bigint_min_literals_use_conditional_fast_path' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'js_ir::tests::test_strict_eq_null_against_number_folds_false' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'js_ir::tests::test_strict_neq_undefined_against_number_folds_true' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'js_ir::tests::test_strict_eq_null_against_variable_is_preserved' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - focused harness-accurate snapshot repros for
+    `tests/tests/src/string_set.res`,
+    `tests/tests/src/bs_min_max_test.res`, and
+    `tests/tests/src/ExternalShadow.res`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/string_set.res` improved materially inside this cluster:
+  the old cached baseline diff emitted `undefined | 0` in the comparator path,
+  while the fresh direct repro now emits `Primitive_string.compare(...)` there
+  and drops from **481** diff lines to **462** diff lines, even though the file
+  still fails on broader recursive/function-shape drift
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change
+- `tests/tests/src/bs_min_max_test.res` still fails because the remaining
+  `undefined !== 5` vs `true` drift is coming through a separate strict
+  comparison route, which indicates a follow-up backend-routing or JS-pass
+  cleanup task rather than another missing `Primitive_*` helper lowering
+- The authoritative JS snapshot baseline now reports **185 / 657** passing,
+  **0** compile errors, and **472** output diffs after this comparison/runtime
+  helper port; this is a net **+1** over the previously recorded baseline
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   but this iteration isolated one still-missing post-lowering alias

@@ -560,6 +560,9 @@ impl Expression {
 
     /// Create a binary operation
     pub fn bin(op: BinOp, left: Expression, right: Expression) -> Self {
+        if let Some(value) = fold_strict_nullish_comparison(op, &left, &right) {
+            return Expression::bool(value);
+        }
         Self::new(ExpressionDesc::Bin(op, Box::new(left), Box::new(right)))
     }
 
@@ -625,6 +628,122 @@ impl Expression {
                 })
             }
         }
+    }
+}
+
+fn fold_strict_nullish_comparison(op: BinOp, left: &Expression, right: &Expression) -> Option<bool> {
+    let equality = match op {
+        BinOp::EqEqEq => true,
+        BinOp::NotEqEq => false,
+        _ => return None,
+    };
+
+    let same_nullish = matches!(
+        (&left.desc, &right.desc),
+        (ExpressionDesc::Null, ExpressionDesc::Null)
+            | (
+                ExpressionDesc::Undefined { .. },
+                ExpressionDesc::Undefined { .. }
+            )
+    );
+    if same_nullish {
+        return Some(equality);
+    }
+
+    let mismatched_nullish = matches!(
+        (&left.desc, &right.desc),
+        (ExpressionDesc::Null, ExpressionDesc::Undefined { .. })
+            | (ExpressionDesc::Undefined { .. }, ExpressionDesc::Null)
+    );
+    if mismatched_nullish {
+        return Some(!equality);
+    }
+
+    if is_nullish_literal(left) && is_nullish_eq_impossible_non_null_expr(right) {
+        return Some(!equality);
+    }
+
+    if is_nullish_literal(right) && is_nullish_eq_impossible_non_null_expr(left) {
+        return Some(!equality);
+    }
+
+    None
+}
+
+fn is_nullish_literal(expr: &Expression) -> bool {
+    matches!(
+        expr.desc,
+        ExpressionDesc::Null | ExpressionDesc::Undefined { .. }
+    )
+}
+
+fn is_nullish_eq_impossible_non_null_expr(expr: &Expression) -> bool {
+    matches!(
+        expr.desc,
+        ExpressionDesc::Bool(_)
+            | ExpressionDesc::Number(_)
+            | ExpressionDesc::Typeof(_)
+            | ExpressionDesc::Fun { .. }
+            | ExpressionDesc::Array(_, _)
+            | ExpressionDesc::CamlBlock(_, _, _, _)
+    ) && expression_has_no_side_effects(expr)
+}
+
+fn expression_has_no_side_effects(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Var(_)
+        | ExpressionDesc::Fun { .. }
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Str { .. } => true,
+        ExpressionDesc::StaticIndex(target, _, _) => expression_has_no_side_effects(target),
+        ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right)
+        | ExpressionDesc::In(left, right)
+        | ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::Seq(left, right) => {
+            expression_has_no_side_effects(left) && expression_has_no_side_effects(right)
+        }
+        ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::OptionalBlock(inner, _) => expression_has_no_side_effects(inner),
+        ExpressionDesc::Array(items, _) => items.iter().all(expression_has_no_side_effects),
+        ExpressionDesc::CamlBlock(items, _, _, _) => {
+            items.iter().all(expression_has_no_side_effects)
+        }
+        ExpressionDesc::Object(dup, props) => {
+            dup.as_deref().is_none_or(expression_has_no_side_effects)
+                && props
+                    .iter()
+                    .all(|(_, value)| expression_has_no_side_effects(value))
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            expression_has_no_side_effects(test)
+                && expression_has_no_side_effects(consequent)
+                && expression_has_no_side_effects(alternate)
+        }
+        ExpressionDesc::Bin(op, left, right) => {
+            *op != BinOp::Eq
+                && expression_has_no_side_effects(left)
+                && expression_has_no_side_effects(right)
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            expression_has_no_side_effects(tag)
+                && strings.iter().all(expression_has_no_side_effects)
+                && values.iter().all(expression_has_no_side_effects)
+        }
+        ExpressionDesc::FlatCall(_, _)
+        | ExpressionDesc::Call(_, _, _)
+        | ExpressionDesc::New(_, _)
+        | ExpressionDesc::RawJsCode(_)
+        | ExpressionDesc::Await(_)
+        | ExpressionDesc::Spread(_) => false,
     }
 }
 
@@ -1054,6 +1173,39 @@ mod tests {
             ExpressionDesc::Bin(BinOp::Plus, _, _) => {}
             _ => panic!("Expected Bin(Plus)"),
         }
+    }
+
+    #[test]
+    fn test_strict_eq_null_against_number_folds_false() {
+        let expr = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::null(),
+            Expression::number(Number::int(5)),
+        );
+
+        assert!(matches!(expr.desc, ExpressionDesc::Bool(false)));
+    }
+
+    #[test]
+    fn test_strict_neq_undefined_against_number_folds_true() {
+        let expr = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::undefined(false),
+            Expression::number(Number::int(5)),
+        );
+
+        assert!(matches!(expr.desc, ExpressionDesc::Bool(true)));
+    }
+
+    #[test]
+    fn test_strict_eq_null_against_variable_is_preserved() {
+        let expr = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::null(),
+            Expression::var(Ident::create_local("value")),
+        );
+
+        assert!(matches!(expr.desc, ExpressionDesc::Bin(BinOp::EqEqEq, _, _)));
     }
 
     #[test]

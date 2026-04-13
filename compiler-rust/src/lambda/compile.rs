@@ -2159,11 +2159,117 @@ impl LambdaCompiler {
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
+            Pobjcomp(cmp) => self.compile_object_comparison(
+                *cmp,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
             Pboolcomp(cmp) | Pintcomp(cmp) | Pfloatcomp(cmp) | Pbigintcomp(cmp)
             | Pstringcomp(cmp) | Pjscomp(cmp) => {
                 let op = comparison_to_binop(*cmp);
                 Expression::bin(op, compiled_args[0].clone(), compiled_args[1].clone())
             }
+            Pobjorder => self.runtime_call_expr("Primitive_object", "compare", compiled_args),
+            Pobjmin => self.runtime_call_expr("Primitive_object", "min", compiled_args),
+            Pobjmax => self.runtime_call_expr("Primitive_object", "max", compiled_args),
+            Pboolorder => match (
+                bool_literal(&compiled_args[0]),
+                bool_literal(&compiled_args[1]),
+            ) {
+                (Some(left), Some(right)) => {
+                    let result = match left.cmp(&right) {
+                        std::cmp::Ordering::Less => -1,
+                        std::cmp::Ordering::Equal => 0,
+                        std::cmp::Ordering::Greater => 1,
+                    };
+                    int_expr(result)
+                }
+                _ => self.runtime_call_expr("Primitive_bool", "compare", compiled_args),
+            },
+            Pboolmin => self.compile_typed_min_max(
+                "Primitive_bool",
+                "min",
+                Comparison::Lt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_bool_literals,
+            ),
+            Pboolmax => self.compile_typed_min_max(
+                "Primitive_bool",
+                "max",
+                Comparison::Gt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_bool_literals,
+            ),
+            Pintorder => self.runtime_call_expr("Primitive_int", "compare", compiled_args),
+            Pintmin => self.compile_typed_min_max(
+                "Primitive_int",
+                "min",
+                Comparison::Lt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_int_literals,
+            ),
+            Pintmax => self.compile_typed_min_max(
+                "Primitive_int",
+                "max",
+                Comparison::Gt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_int_literals,
+            ),
+            Pfloatorder => self.runtime_call_expr("Primitive_float", "compare", compiled_args),
+            Pfloatmin => self.compile_typed_min_max(
+                "Primitive_float",
+                "min",
+                Comparison::Lt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_float_literals,
+            ),
+            Pfloatmax => self.compile_typed_min_max(
+                "Primitive_float",
+                "max",
+                Comparison::Gt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_float_literals,
+            ),
+            Pbigintorder => self.runtime_call_expr("Primitive_bigint", "compare", compiled_args),
+            Pbigintmin => self.compile_typed_min_max(
+                "Primitive_bigint",
+                "min",
+                Comparison::Lt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_bigint_literals,
+            ),
+            Pbigintmax => self.compile_typed_min_max(
+                "Primitive_bigint",
+                "max",
+                Comparison::Gt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_bigint_literals,
+            ),
+            Pstringorder => self.runtime_call_expr("Primitive_string", "compare", compiled_args),
+            Pstringmin => self.compile_typed_min_max(
+                "Primitive_string",
+                "min",
+                Comparison::Lt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_string_literals,
+            ),
+            Pstringmax => self.compile_typed_min_max(
+                "Primitive_string",
+                "max",
+                Comparison::Gt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_string_literals,
+            ),
             Psequand => Expression::bin(
                 BinOp::And,
                 compiled_args[0].clone(),
@@ -2585,6 +2691,46 @@ impl LambdaCompiler {
             ),
             "@__PURE__",
         )
+    }
+
+    fn compile_object_comparison(
+        &self,
+        cmp: Comparison,
+        left: Expression,
+        right: Expression,
+    ) -> Expression {
+        match cmp {
+            Comparison::Eq | Comparison::Neq
+                if is_nullish_literal(&left).is_some() || is_nullish_literal(&right).is_some() =>
+            {
+                compile_nullish_strict_comparison(cmp, left, right)
+            }
+            _ => self.runtime_call_expr(
+                "Primitive_object",
+                comparison_to_runtime_member(cmp),
+                vec![left, right],
+            ),
+        }
+    }
+
+    fn compile_typed_min_max(
+        &self,
+        module_name: &str,
+        member: &str,
+        compare: Comparison,
+        left: Expression,
+        right: Expression,
+        literal_fast_path: fn(&Expression, &Expression) -> bool,
+    ) -> Expression {
+        if literal_fast_path(&left, &right) {
+            Expression::cond(
+                Expression::bin(comparison_to_binop(compare), left.clone(), right.clone()),
+                left,
+                right,
+            )
+        } else {
+            self.runtime_call_expr(module_name, member, vec![left, right])
+        }
     }
 
     fn external_module_id(
@@ -3936,6 +4082,101 @@ fn comparison_to_binop(cmp: Comparison) -> BinOp {
         Comparison::Gt => BinOp::Gt,
         Comparison::Ge => BinOp::Ge,
     }
+}
+
+fn comparison_to_runtime_member(cmp: Comparison) -> &'static str {
+    match cmp {
+        Comparison::Eq => "equal",
+        Comparison::Neq => "notequal",
+        Comparison::Lt => "lessthan",
+        Comparison::Le => "lessequal",
+        Comparison::Gt => "greaterthan",
+        Comparison::Ge => "greaterequal",
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NullishLiteral {
+    Null,
+    Undefined,
+}
+
+fn is_nullish_literal(expr: &Expression) -> Option<NullishLiteral> {
+    match expr.desc {
+        ExpressionDesc::Null => Some(NullishLiteral::Null),
+        ExpressionDesc::Undefined { .. } => Some(NullishLiteral::Undefined),
+        _ => None,
+    }
+}
+
+fn is_nullish_eq_impossible_non_null_expr(expr: &Expression) -> bool {
+    matches!(
+        expr.desc,
+        ExpressionDesc::Bool(_)
+            | ExpressionDesc::Number(_)
+            | ExpressionDesc::Typeof(_)
+            | ExpressionDesc::Fun { .. }
+            | ExpressionDesc::Array(_, _)
+            | ExpressionDesc::CamlBlock(_, _, _, _)
+    ) && js_expr_no_side_effects(expr)
+}
+
+fn compile_nullish_strict_comparison(
+    cmp: Comparison,
+    left: Expression,
+    right: Expression,
+) -> Expression {
+    match (is_nullish_literal(&left), is_nullish_literal(&right)) {
+        (Some(NullishLiteral::Null), Some(NullishLiteral::Null))
+        | (Some(NullishLiteral::Undefined), Some(NullishLiteral::Undefined)) => {
+            return Expression::bool(matches!(cmp, Comparison::Eq));
+        }
+        (Some(NullishLiteral::Null), Some(NullishLiteral::Undefined))
+        | (Some(NullishLiteral::Undefined), Some(NullishLiteral::Null)) => {
+            return Expression::bool(matches!(cmp, Comparison::Neq));
+        }
+        _ => {}
+    }
+
+    if is_nullish_literal(&left).is_some() && is_nullish_eq_impossible_non_null_expr(&right) {
+        return Expression::bool(matches!(cmp, Comparison::Neq));
+    }
+
+    if is_nullish_literal(&right).is_some() && is_nullish_eq_impossible_non_null_expr(&left) {
+        return Expression::bool(matches!(cmp, Comparison::Neq));
+    }
+
+    Expression::bin(comparison_to_binop(cmp), left, right)
+}
+
+fn bool_literal(expr: &Expression) -> Option<bool> {
+    match expr.desc {
+        ExpressionDesc::Bool(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn both_bool_literals(left: &Expression, right: &Expression) -> bool {
+    bool_literal(left).is_some() && bool_literal(right).is_some()
+}
+
+fn both_int_literals(left: &Expression, right: &Expression) -> bool {
+    int_literal(left).is_some() && int_literal(right).is_some()
+}
+
+fn both_float_literals(left: &Expression, right: &Expression) -> bool {
+    matches!(left.desc, ExpressionDesc::Number(Number::Float(_)))
+        && matches!(right.desc, ExpressionDesc::Number(Number::Float(_)))
+}
+
+fn both_bigint_literals(left: &Expression, right: &Expression) -> bool {
+    matches!(left.desc, ExpressionDesc::Number(Number::BigInt(_)))
+        && matches!(right.desc, ExpressionDesc::Number(Number::BigInt(_)))
+}
+
+fn both_string_literals(left: &Expression, right: &Expression) -> bool {
+    matches!(left.desc, ExpressionDesc::Str { .. })
+        && matches!(right.desc, ExpressionDesc::Str { .. })
 }
 
 fn int_expr(value: i32) -> Expression {
@@ -7543,6 +7784,125 @@ mod tests {
                 ..
             }] if id.same(&exn)
         ));
+    }
+
+    #[test]
+    fn compile_int_order_uses_primitive_int_compare() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("left");
+        let right = Ident::create_local("right");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pintorder,
+            vec![Lambda::var(left), Lambda::var(right)],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_int.compare(left, right)"
+        );
+    }
+
+    #[test]
+    fn compile_string_order_uses_primitive_string_compare() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("left");
+        let right = Ident::create_local("right");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pstringorder,
+            vec![Lambda::var(left), Lambda::var(right)],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_string.compare(left, right)"
+        );
+    }
+
+    #[test]
+    fn compile_obj_compare_against_null_uses_strict_equality() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pobjcomp(Comparison::Eq),
+            vec![Lambda::const_(Constant::JsNull), Lambda::var(value)],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "null === value");
+    }
+
+    #[test]
+    fn compile_obj_compare_null_against_number_literal_folds_false() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pobjcomp(Comparison::Eq),
+            vec![Lambda::const_(Constant::JsNull), Lambda::const_(Constant::int(5))],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "false");
+    }
+
+    #[test]
+    fn compile_obj_notequal_undefined_against_number_literal_folds_true() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pobjcomp(Comparison::Neq),
+            vec![
+                Lambda::const_(Constant::JsUndefined { is_unit: false }),
+                Lambda::const_(Constant::int(5)),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "true");
+    }
+
+    #[test]
+    fn compile_obj_order_uses_primitive_object_compare() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("left");
+        let right = Ident::create_local("right");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pobjorder,
+            vec![Lambda::var(left), Lambda::var(right)],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_object.compare(left, right)"
+        );
+    }
+
+    #[test]
+    fn compile_bigint_min_literals_use_conditional_fast_path() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pbigintmin,
+            vec![
+                Lambda::const_(Constant::BigInt {
+                    negative: false,
+                    value: "9".to_string(),
+                }),
+                Lambda::const_(Constant::BigInt {
+                    negative: false,
+                    value: "1".to_string(),
+                }),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "9n < 1n ? 9n : 1n");
     }
 
     #[test]
