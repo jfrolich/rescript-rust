@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
 use blake3::Hash;
+use rescript_compiler::binary_ast::Dependencies;
 use rescript_compiler::cmi::persistent_env::PersistentEnv;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
@@ -210,6 +211,10 @@ pub struct BuildCommandState {
     // Shared PersistentEnv for --in-process mode. Holds cached module interfaces
     // and metadata needed by the compiler for dependency resolution.
     pub persistent_env: Mutex<Option<PersistentEnv>>,
+    // In-memory extracted dependencies from the parse phase for --in-process mode.
+    // Keyed by "{module_name}:impl" or "{module_name}:intf" (matching stored_asts convention).
+    // Values are the raw module names extracted from the parsed AST.
+    pub in_memory_deps: Mutex<AHashMap<String, Dependencies>>,
 }
 
 impl std::fmt::Debug for BuildCommandState {
@@ -227,6 +232,7 @@ impl std::fmt::Debug for BuildCommandState {
                 &self.interface_generation.load(Ordering::Relaxed),
             )
             .field("persistent_env", &"<Mutex<Option<PersistentEnv>>>")
+            .field("in_memory_deps", &"<Mutex<..>>")
             .finish()
     }
 }
@@ -293,6 +299,7 @@ impl BuildCommandState {
             in_memory_interfaces: Mutex::new(AHashMap::new()),
             interface_generation: AtomicU64::new(0),
             persistent_env: Mutex::new(None),
+            in_memory_deps: Mutex::new(AHashMap::new()),
         }
     }
 
@@ -361,6 +368,18 @@ impl BuildCommandState {
     /// Return the PersistentEnv after compilation.
     pub fn return_persistent_env(&self, env: PersistentEnv) {
         *self.persistent_env.lock().unwrap() = Some(env);
+    }
+
+    /// Store extracted dependencies from the parse phase for a module file.
+    /// Key should be "{module_name}:impl" or "{module_name}:intf".
+    pub fn store_in_memory_deps(&self, key: String, deps: Dependencies) {
+        self.in_memory_deps.lock().unwrap().insert(key, deps);
+    }
+
+    /// Get the extracted dependencies for a module file.
+    /// Returns None if no deps have been stored (e.g., not in --in-process mode).
+    pub fn get_in_memory_deps(&self, key: &str) -> Option<Dependencies> {
+        self.in_memory_deps.lock().unwrap().get(key).cloned()
     }
 
     pub fn module_name_package_pairs(&self) -> Vec<(String, String)> {

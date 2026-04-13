@@ -1,7 +1,7 @@
 # Ralph TODO: Rewatch In-Memory Build
 
 **Last Updated:** 2026-04-13
-**Status:** 8/16 tasks complete
+**Status:** 10/16 tasks complete
 
 ## Goal
 
@@ -51,9 +51,12 @@ Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-
 
 - [x] Extend `rewatch/src/build/build_types.rs` with in-memory parsed-module state, published-interface state, and interface generations/fingerprints for each module.
   - **Done:** Added `InMemoryModuleState` struct (signature: `DeclSignature`, generation: `u64`, is_pure: `bool`) for per-module in-memory compilation state. Added to `BuildCommandState`: `in_memory_interfaces: Mutex<AHashMap<String, InMemoryModuleState>>` for the interface registry, `interface_generation: AtomicU64` for monotonic generation counter (replaces `last_compiled_cmi`/`last_compiled_cmt` timestamps in `--in-process`), and `persistent_env: Mutex<Option<PersistentEnv>>` for sharing the compiler's `PersistentEnv` across compilations. Added helper methods: `next_interface_generation()`, `register_in_memory_interface()`, `get_interface_generation()`, `take_persistent_env()`, `return_persistent_env()`. Implemented manual `Debug` for `BuildCommandState` since `PersistentEnv` doesn't derive `Debug`. Build passes clean. Default-mode test failures are pre-existing (mlmap `randjbuildsystem` error, not related to these changes).
-- [ ] Stop writing `.ast` / `.iast` in the `--in-process` parse path in `rewatch/src/build/parse.rs`; keep parse results in memory and extract deps directly from the parsed AST.
-- [ ] Make `--in-process` parsing always use the Rust parser path; do not shell out to `bsc` for parsing in that mode.
-- [ ] Switch `rewatch/src/build/deps.rs` to read dependencies from in-memory parse results instead of rereading `.ast` files.
+- [x] Stop writing `.ast` / `.iast` in the `--in-process` parse path in `rewatch/src/build/parse.rs`; keep parse results in memory and extract deps directly from the parsed AST.
+  - **Done:** Modified `generate_ast_with_rust_parser` to accept `in_process: bool`. When true: applies `binary_ast::ppx::rewrite_structure/rewrite_signature` for accurate dep extraction, calls `extract_structure_deps`/`extract_signature_deps` to get module dependencies, skips `write_structure_ast_current_with_extra_deps`/`write_signature_ast_current_with_extra_deps` (no `.ast`/`.iast` written). Also skips `.ast` → ocaml build path copy and build directory creation. Deps are stored in `BuildCommandState::in_memory_deps` (new `Mutex<AHashMap<String, Dependencies>>` field, keyed by `"{module_name}:impl"` / `"{module_name}:intf"`). All result types extended with `Option<Dependencies>` to thread deps through the parallel map → sequential for_each pipeline.
+- [x] Make `--in-process` parsing always use the Rust parser path; do not shell out to `bsc` for parsing in that mode.
+  - **Done:** Already handled: `BuildMode::InProcess` returns `true` from `use_rust_parser()`, so the Rust parser branch is always taken. The `bsc` subprocess branch is unreachable when `in_process` is true. Additionally, the `in_process` flag is only set when `use_rust_parser` is true, so the in-process dep extraction code is always on the Rust parser path.
+- [x] Switch `rewatch/src/build/deps.rs` to read dependencies from in-memory parse results instead of rereading `.ast` files.
+  - **Done:** Changed `get_deps` to accept `&mut BuildCommandState` (was `&mut BuildState`). When `build_mode().is_in_process()`, snapshots `in_memory_deps` before the parallel iteration to avoid per-iteration mutex locking. Refactored `get_dep_modules` by extracting `read_raw_deps_from_file` (file I/O) and `resolve_dep_modules` (namespace resolution + package filtering). In `--in-process`, the parallel map calls `resolve_dep_modules` directly with the in-memory deps, bypassing all `.ast` file reads. The namespace/package filtering logic is shared between both code paths. Build passes clean (62/62 unit tests). Default-mode test failures are pre-existing (mlmap `randjbuildsystem` error).
 - [ ] Replace the `bsc` subprocess path in `rewatch/src/build/compile.rs` with direct compiler-rust calls for `--in-process`, and publish interfaces into build state rather than serializing them.
 - [ ] Preserve existing module semantics exactly: `M.resi` publishes the interface when present; otherwise `M.res` publishes its inferred interface.
 - [ ] Replace `last_compiled_cmi` / `last_compiled_cmt` timestamp invalidation with an in-memory interface-generation or fingerprint-based scheme for `--in-process`.
