@@ -3063,7 +3063,7 @@ impl LambdaCompiler {
     fn val_from_option_expr(&self, arg: Expression) -> Expression {
         match arg.desc {
             ExpressionDesc::OptionalBlock(inner, _) => *inner,
-            _ => self.runtime_call_expr("Caml_option", "valFromOption", vec![arg]),
+            _ => self.runtime_call_expr("Primitive_option", "valFromOption", vec![arg]),
         }
     }
 
@@ -7839,6 +7839,14 @@ fn global_this_field(name: &str) -> Expression {
     ))
 }
 
+fn runtime_module_id(module_name: &str) -> ModuleId {
+    ModuleId {
+        id: Ident::create_persistent(module_name),
+        kind: Kind::Runtime,
+        dynamic_import: false,
+    }
+}
+
 fn collect_modules_from_block(block: &Block, seen: &mut std::collections::HashSet<ModuleId>) {
     for stmt in block {
         collect_modules_from_statement(stmt, seen);
@@ -7923,8 +7931,13 @@ fn collect_modules_from_expression(
         | ExpressionDesc::JsBnot(inner)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::OptionalBlock(inner, _) => collect_modules_from_expression(inner, seen),
+        | ExpressionDesc::CamlBlockTag(inner, _) => collect_modules_from_expression(inner, seen),
+        ExpressionDesc::OptionalBlock(inner, identity) => {
+            if !identity {
+                seen.insert(runtime_module_id("Primitive_option"));
+            }
+            collect_modules_from_expression(inner, seen);
+        }
         ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
@@ -8047,7 +8060,7 @@ fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option<String> {
 mod tests {
     use super::*;
     use crate::cmi::persistent_env::PersistentEnv;
-    use crate::js_ir::{ModulePathResolver, print_block, print_expression};
+    use crate::js_ir::{ModulePathResolver, print_block, print_deps_program, print_expression};
     use crate::lambda::constant::{Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo};
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
@@ -12450,6 +12463,78 @@ mod tests {
             }) => assert!(id.same(&value)),
             other => panic!("expected optional unwrap to lower to the inner value, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lowers_pval_from_option_to_primitive_option_runtime_call() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PvalFromOption,
+            vec![Lambda::var(value.clone())],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        let ExpressionDesc::Call(func, args, _) = &compiled.expr.desc else {
+            panic!("expected option unwrap to lower to a runtime call");
+        };
+        assert!(matches!(
+            func.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, Some(member))),
+                ..
+            } if module.id.name() == "Primitive_option" && member == "valFromOption"
+        ));
+        assert!(matches!(
+            args.as_slice(),
+            [Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            }] if id.same(&value)
+        ));
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_option.valFromOption(value)"
+        );
+    }
+
+    #[test]
+    fn compile_deps_program_imports_primitive_option_for_non_identity_optional_block() {
+        let mut compiler = LambdaCompiler::new();
+        let global = Ident::create_persistent("value");
+        let exported = Ident::create_local("wrapped");
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            exported.clone(),
+            Lambda::prim(
+                Primitive::Psome,
+                vec![Lambda::var(global.clone())],
+                Location::none(),
+            ),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::ModuleExport(vec![exported.clone()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::var(exported.clone())],
+                Location::none(),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+        assert!(deps.modules.iter().any(|module| {
+            module.kind == Kind::Runtime && module.id.name() == "Primitive_option"
+        }));
+
+        let resolver =
+            ModulePathResolver::from_compile_options(None, Some(std::path::Path::new("/tmp/wrapped.mjs")), None, None);
+        let rendered = print_deps_program(&deps, Some(&resolver));
+        assert!(rendered.contains(
+            "import * as Primitive_option from \"@rescript/runtime/lib/es6/Primitive_option.js\";"
+        ));
+        assert!(rendered.contains("let wrapped = Primitive_option.some(value);"));
     }
 
     #[test]

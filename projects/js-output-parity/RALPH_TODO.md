@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 256 / 657 JS snapshots passing, 0 compile errors, 401 output diffs
+**Status:** 260 / 657 JS snapshots passing, 0 compile errors, 397 output diffs
 
 ## Goal
 
@@ -35,13 +35,53 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **256 / 657**
+- JS snapshot parity: **260 / 657**
 - Compile errors: **0**
-- Output diffs: **401**
+- Output diffs: **397**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed option-runtime emission slice
+  across `compiler/core/lam_compile_primitive.ml`,
+  `compiler/core/js_of_lam_option.ml`, `compiler/core/js_dump.ml`, and
+  `compiler/ext/primitive_modules.ml`
+- After reading OCaml's `Primitive_modules.option = "Primitive_option"` there,
+  plus `Js_of_lam_option.val_from_option` and the `Optional_block` printer path
+  in `js_dump.ml` that re-expands to
+  `E.runtime_call Primitive_modules.option "some" [e]`, the Rust backend now
+  uses `Primitive_option` instead of `Caml_option` for non-identity option
+  wrappers and `valFromOption`, and the JS backend in
+  `compiler-rust/src/lambda/compile.rs` now records `Primitive_option` as a
+  required runtime module whenever `OptionalBlock(_, false)` survives into the
+  printed JS so the import is emitted on the same path as OCaml
+- Added focused regression coverage in
+  `lambda::compile::tests::lowers_pval_from_option_to_primitive_option_runtime_call`
+  and
+  `lambda::compile::tests::compile_deps_program_imports_primitive_option_for_non_identity_optional_block`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release primitive_option -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_unknown.res -o /tmp/test_unknown.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/test_unknown.res` now matches its checked-in snapshot again,
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match, the
+  option-runtime motif in cached diff files shrank from **40** failing files to
+  **33**, and the authoritative rerun dropped
+  `undef_regression_test.res`, `gpr_3566_drive_test.res`,
+  `reactTestUtils.res`, and `test_unknown.res` out of
+  `temp/rust-parity/diffs`; the remaining option-heavy files are now on the
+  separate `some(undefined)` / `toUndefined` / option-shape lowering issues
+  rather than the wrong runtime-module import path
+- The authoritative JS snapshot baseline now reports **260 / 657** passing,
+  **0** compile errors, and **397** output diffs; this is a net **+4**
+  passing snapshots and **-4** output diffs from the previously recorded
+  **256 / 657**, **0** compile errors, **401** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed raw-`%%raw` payload

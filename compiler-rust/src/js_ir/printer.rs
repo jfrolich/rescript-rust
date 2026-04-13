@@ -1209,7 +1209,7 @@ impl JsPrinter {
                     self.print_expression(e, level);
                 } else {
                     // Would call runtime "some" function
-                    self.write("Caml_option.some(");
+                    self.write("Primitive_option.some(");
                     self.print_expression(e, 1);
                     self.write_char(')');
                 }
