@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 243 / 657 JS snapshots passing, 0 compile errors, 414 output diffs
+**Status:** 244 / 657 JS snapshots passing, 0 compile errors, 413 output diffs
 
 ## Goal
 
@@ -35,13 +35,48 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **243 / 657**
+- JS snapshot parity: **244 / 657**
 - Compile errors: **0**
-- Output diffs: **414**
+- Output diffs: **413**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed arrow-function body
+  parenthesization slice in `compiler/core/js_dump.ml`
+- After reading OCaml's `pp_function` / `function_body` path there together
+  with `exp_need_paren ~arrow:true`, the Rust printer in
+  `compiler-rust/src/js_ir/printer.rs` now applies the same arrow-specific
+  paren rule for concise bodies that are object-like expressions, instead of
+  reusing the looser generic expression paren check and emitting block-shaped
+  arrow bodies for object literals and constructor blocks
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_arrow_function_parenthesizes_object_literal_body`
+  and
+  `js_ir::printer::tests::test_print_arrow_function_parenthesizes_constructor_block_body`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_arrow_function_parenthesizes_object_literal_body' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_arrow_function_parenthesizes_constructor_block_body' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_7012_test.res -o /tmp/gpr_7012_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/react.res -o /tmp/react.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/gpr_7012_test.res` now matches its checked-in snapshot
+  exactly again, which confirms concise arrow functions returning
+  object-shaped expressions are back on the OCaml printer path; meanwhile
+  `tests/tests/src/react.res` no longer differs on the missing
+  `async () => ({ ... })` parentheses and is reduced to a separate quoted-key
+  drift on `"default"`, while `tests/tests/src/ExternalShadow.res` remains an
+  exact guard-file match after the same printer change
+- The authoritative JS snapshot baseline now reports **244 / 657** passing,
+  **0** compile errors, and **413** output diffs; this is a net **+1**
+  passing snapshot and **-1** output diff from the previously recorded
+  **243 / 657**, **0** compile errors, **414** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed inline-record constructor-object

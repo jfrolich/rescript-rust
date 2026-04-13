@@ -756,6 +756,25 @@ impl JsPrinter {
         )
     }
 
+    fn arrow_expr_needs_paren(&self, expr: &Expression) -> bool {
+        match &expr.desc {
+            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) => true,
+            ExpressionDesc::RawJsCode(info) => !info.is_stmt,
+            ExpressionDesc::CamlBlock(_, _, _, tag_info) => matches!(
+                tag_info,
+                crate::lambda::TagInfo::Record { .. }
+                    | crate::lambda::TagInfo::Module(_)
+                    | crate::lambda::TagInfo::PolyVar(_)
+                    | crate::lambda::TagInfo::Extension
+                    | crate::lambda::TagInfo::RecordExt { .. }
+                    | crate::lambda::TagInfo::RecordInlined { .. }
+                    | crate::lambda::TagInfo::Constructor { .. }
+            ),
+            ExpressionDesc::OptionalBlock(inner, true) => self.arrow_expr_needs_paren(inner),
+            _ => false,
+        }
+    }
+
     /// Print an expression
     pub fn print_expression(&mut self, expr: &Expression, level: u8) {
         // Print comment if present
@@ -1086,7 +1105,7 @@ impl JsPrinter {
                         && let Some(expr) = single_arrow_function_expr(body)
                     {
                         this.write(" ");
-                        let needs_paren = this.expr_needs_paren(expr);
+                        let needs_paren = this.arrow_expr_needs_paren(expr);
                         if needs_paren {
                             this.write_char('(');
                         }
@@ -2619,6 +2638,44 @@ mod tests {
         }));
 
         assert_eq!(rendered, "() => Test_utils.eq(\"loc\", 1, 1)");
+    }
+
+    #[test]
+    fn test_print_arrow_function_parenthesizes_object_literal_body() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
+            is_method: false,
+            params: vec![],
+            body: vec![Statement::return_(Expression::new(ExpressionDesc::Object(
+                None,
+                vec![(PropertyName::lit("default"), Expression::number(Number::int(1)))],
+            )))],
+            env: Default::default(),
+            return_unit: false,
+            async_: false,
+            directive: None,
+        }));
+
+        assert_eq!(rendered, "() => ({\n  \"default\": 1\n})");
+    }
+
+    #[test]
+    fn test_print_arrow_function_parenthesizes_constructor_block_body() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
+            is_method: false,
+            params: vec![],
+            body: vec![Statement::return_(Expression::new(ExpressionDesc::CamlBlock(
+                vec![Expression::number(Number::int(1))],
+                MutableFlag::Immutable,
+                Box::new(Expression::number(Number::int(0))),
+                TagInfo::constructor("Some", 1, 0),
+            )))],
+            env: Default::default(),
+            return_unit: false,
+            async_: false,
+            directive: None,
+        }));
+
+        assert_eq!(rendered, "() => ({\n  TAG: \"Some\",\n  _0: 1\n})");
     }
 
     #[test]
