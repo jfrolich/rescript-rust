@@ -858,11 +858,16 @@ fn simplify_primitive(
         (Primitive::Pfield(index, dbg), [arg]) => {
             simplify_field_access(*index, dbg, arg, env, &info.primitive, &info.loc)
         }
-        (Primitive::PvalFromOption | Primitive::PvalFromOptionNotNest, [Lambda::Lvar(id)]) => env
+        (Primitive::PvalFromOption, [Lambda::Lvar(id)]) => env
             .optional_blocks
             .get(id)
             .map(|optional| optional.value.clone())
             .unwrap_or_else(|| Lambda::prim(info.primitive.clone(), args, info.loc.clone())),
+        (Primitive::PvalFromOptionNotNest, [Lambda::Lvar(id)]) => env
+            .optional_blocks
+            .get(id)
+            .map(|optional| optional.value.clone())
+            .unwrap_or_else(|| Lambda::var(id.clone())),
         (
             Primitive::Pstringadd,
             [
@@ -2772,6 +2777,18 @@ mod tests {
             else_.as_ref(),
             Lambda::Lconst(Constant::Int { i: 0, .. })
         ));
+    }
+
+    #[test]
+    fn unboxes_plain_val_from_option_not_nest_vars() {
+        let value = Ident::create_local("value");
+        let simplified = simplify_for_js_backend(&Lambda::prim(
+            Primitive::PvalFromOptionNotNest,
+            vec![Lambda::var(value.clone())],
+            Location::none(),
+        ));
+
+        assert!(matches!(simplified, Lambda::Lvar(id) if id == value));
     }
 
     #[test]

@@ -44,6 +44,35 @@ reported:
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed alias-removal slice in
+  `compiler/core/lam_pass_remove_alias.ml`
+- After reading OCaml's fallback for
+  `Pval_from_option_not_nest (Lvar v) -> v`, the Rust JS-backend simplifier in
+  `compiler-rust/src/lambda/simplify.rs` now applies the same rewrite even when
+  the value was not introduced by the narrower nullable-wrapper tracking
+- Added focused regression coverage in
+  `lambda::simplify::tests::unboxes_plain_val_from_option_not_nest_vars`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib unboxes_plain_val_from_option_not_nest_vars -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib rewrites_nullable_alias_checks_to_raw_nullable_predicates -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/json_decorders.res -o /tmp/json_decorders.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/json_decorders.res` now collapses the optional-email branch
+  to a single conditional assignment
+  (`ifres = email !== undefined ? (typeof email === "string" ? email : undefined) : undefined`)
+  instead of the older nested alias + branch-body form
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same simplifier change
+- The authoritative JS snapshot baseline remains **235 / 657** passing,
+  **0** compile errors, and **422** output diffs after this OCaml-aligned
+  alias-removal fix; the headline total is flat, but the optional-unbox drift
+  in `json_decorders.res` is measurably narrower
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed assignment-continuation slice in
   `compiler/core/lam_compile.ml`
 - After reading OCaml's `compile_ifthenelse` handling for `Assign id`,
