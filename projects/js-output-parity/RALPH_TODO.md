@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 164 / 657 JS snapshots passing, 0 compile errors, 493 output diffs
+**Status:** 166 / 657 JS snapshots passing, 0 compile errors, 491 output diffs
 
 ## Goal
 
@@ -35,13 +35,54 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **164 / 657**
+- JS snapshot parity: **166 / 657**
 - Compile errors: **0**
-- Output diffs: **493**
+- Output diffs: **491**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed in the OCaml ML-module field-access
+  path instead of treating `es6_import.res` as a local printer-only keyword
+  escape issue
+- `compiler-rust/src/lambda/compile.rs` now matches the OCaml
+  `compiler/core/lam_compile.ml` `compile_external_field` / `E.ml_var_dot`
+  slice more closely on the Rust JS path:
+  `Pfield(..., FieldDbgInfo::Module)` now keeps qualified ML-module namespace
+  accesses as qualified members instead of pre-converting them into
+  `StaticIndex` property names, which preserves OCaml's special
+  `default` export access while still routing reserved names like `catch`
+  through the existing identifier-conversion printer path
+- Added focused coverage for this slice in
+  `lowers_qualified_ml_module_default_field_without_preconverting_the_member_name`
+  and `lowers_qualified_ml_module_reserved_fields_through_vident_printing`,
+  alongside the existing
+  `lowers_module_pfield_with_ocaml_identifier_conversion` regression test
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lowers_qualified_ml_module_ -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lowers_module_pfield_with_ocaml_identifier_conversion -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/SafePromises.res -o /tmp/SafePromises.mjs`
+  - exact compiler-args repro for `tests/tests/src/es6_import.res`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/es6_import.res` now matches its checked-in `.mjs`
+  snapshot exactly; the old `Es6_export.$$default` drift came from lowering a
+  qualified ML-module field through the wrong OCaml backend path instead of
+  keeping the `default` member name for final JS emission
+- `tests/tests/src/ExternalShadow.res` and
+  `tests/tests/src/SafePromises.res` remain exact guard-file matches after the
+  change, which confirms the qualified-member fix stays isolated from the
+  already-stable external-shadow/import path and the earlier reserved-name
+  module-field slice
+- The authoritative JS snapshot baseline now reports **166 / 657** passing,
+  **0** compile errors, and **491** output diffs after this OCaml-aligned
+  qualified-ML-module field-access fix; the +2 improvement confirms the
+  default-member bug reached beyond the single focused file
+- Diff file `temp/rust-parity/diffs/js_src_es6_import.res.diff` is now absent
+  after the rerun
 
 - Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
   from `PLAN.md`; this iteration stayed in the OCaml export-coercion path

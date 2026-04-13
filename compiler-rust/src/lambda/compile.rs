@@ -2460,11 +2460,16 @@ impl LambdaCompiler {
         target: &Expression,
     ) -> Expression {
         match info {
-            FieldDbgInfo::Module { name } => Expression::new(ExpressionDesc::StaticIndex(
-                Box::new(target.clone()),
-                convert_ident_name(name),
-                Some(idx),
-            )),
+            FieldDbgInfo::Module { name } => match &target.desc {
+                ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, None)) => {
+                    Expression::qualified(module.clone(), Some(name.clone()))
+                }
+                _ => Expression::new(ExpressionDesc::StaticIndex(
+                    Box::new(target.clone()),
+                    convert_ident_name(name),
+                    Some(idx),
+                )),
+            },
             FieldDbgInfo::Record { name, .. }
             | FieldDbgInfo::RecordInline { name }
             | FieldDbgInfo::RecordExtension { name } => Expression::new(
@@ -10753,6 +10758,70 @@ mod tests {
             }
             other => panic!(
                 "expected module field access to lower to converted static index, got {other:?}"
+            ),
+        }
+
+        assert_eq!(print_expression(&expr), "Js_promise2.$$catch");
+    }
+
+    #[test]
+    fn lowers_qualified_ml_module_default_field_without_preconverting_the_member_name() {
+        let compiler = LambdaCompiler::new();
+        let expr = compiler.compile_field_access(
+            0,
+            &FieldDbgInfo::Module {
+                name: "default".to_string(),
+            },
+            &Expression::qualified(
+                ModuleId {
+                    id: Ident::create_persistent("Es6_export"),
+                    kind: Kind::Ml,
+                    dynamic_import: false,
+                },
+                None,
+            ),
+        );
+
+        match &expr.desc {
+            ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, Some(member))) => {
+                assert_eq!(module.id.name(), "Es6_export");
+                assert!(matches!(module.kind, Kind::Ml));
+                assert_eq!(member, "default");
+            }
+            other => panic!(
+                "expected qualified ml-module access for default export, got {other:?}"
+            ),
+        }
+
+        assert_eq!(print_expression(&expr), "Es6_export.default");
+    }
+
+    #[test]
+    fn lowers_qualified_ml_module_reserved_fields_through_vident_printing() {
+        let compiler = LambdaCompiler::new();
+        let expr = compiler.compile_field_access(
+            3,
+            &FieldDbgInfo::Module {
+                name: "catch".to_string(),
+            },
+            &Expression::qualified(
+                ModuleId {
+                    id: Ident::create_persistent("Js_promise2"),
+                    kind: Kind::Ml,
+                    dynamic_import: false,
+                },
+                None,
+            ),
+        );
+
+        match &expr.desc {
+            ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, Some(member))) => {
+                assert_eq!(module.id.name(), "Js_promise2");
+                assert!(matches!(module.kind, Kind::Ml));
+                assert_eq!(member, "catch");
+            }
+            other => panic!(
+                "expected qualified ml-module access for reserved field, got {other:?}"
             ),
         }
 
