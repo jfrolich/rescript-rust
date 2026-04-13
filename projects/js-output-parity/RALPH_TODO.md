@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 195 / 657 JS snapshots passing, 0 compile errors, 462 output diffs
+**Status:** 234 / 657 JS snapshots passing, 0 compile errors, 423 output diffs
 
 ## Goal
 
@@ -35,13 +35,52 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **195 / 657**
+- JS snapshot parity: **234 / 657**
 - Compile errors: **0**
-- Output diffs: **462**
+- Output diffs: **423**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed printer slice in
+  `compiler/core/js_dump.ml`
+- After reading the OCaml `Array`, `Object`, and `Caml_block` constructor
+  branches there, the Rust printer in `compiler-rust/src/js_ir/printer.rs`
+  now follows the same vertical-layout rules more closely:
+  non-singleton JS arrays print with one item per line, cons / constructor /
+  polyvariant object blocks print through the shared object-literal path, and
+  numeric-field record blocks that lower to arrays now use the same multiline
+  array layout too
+- This removes the old compact-array / compact-record / compact-constructor
+  byte drift that was still visible after the earlier list-comment fix
+- Added focused regression coverage in:
+  `js_ir::printer::tests::test_print_array`,
+  `test_print_cons_constructor_as_hd_tl_object`,
+  `test_print_non_cons_constructor_keeps_tag_object_shape`, and
+  `test_print_numeric_named_record_as_array`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_array -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_cons_constructor_as_hd_tl_object -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_non_cons_constructor_keeps_tag_object_shape -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_numeric_named_record_as_array -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact harness-mode AST repro for `tests/tests/src/Import.res` from
+    `tests/tests/lib/bs` using the checked-in `compiler-args`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/Import.res` no longer differs on the nested list literal or
+  multiline array-return shape; its remaining drift is now only the later
+  statement-order issue around `each` / `each2`
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same printer change
+- The authoritative JS snapshot baseline now reports **234 / 657** passing,
+  **0** compile errors, and **423** output diffs; this is a net **+39**
+  passing snapshots and **-39** output diffs from the previously recorded
+  **195 / 657**, **0** compile errors, **462** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed constant-lowering / dumper

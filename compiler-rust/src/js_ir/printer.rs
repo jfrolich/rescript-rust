@@ -796,14 +796,7 @@ impl JsPrinter {
             }
 
             ExpressionDesc::Array(elements, _) => {
-                self.write_char('[');
-                for (i, elem) in elements.iter().enumerate() {
-                    if i > 0 {
-                        self.write(", ");
-                    }
-                    self.print_expression(elem, 1);
-                }
-                self.write_char(']');
+                self.print_array_literal(elements);
             }
 
             ExpressionDesc::Object(dup, props) => self.print_object_literal(
@@ -1180,14 +1173,7 @@ impl JsPrinter {
                 match tag_info {
                     TagInfo::Record { fields, .. } if fields.len() == elements.len() => {
                         if record_uses_array_syntax(fields) {
-                            self.write_char('[');
-                            for (i, elem) in elements.iter().enumerate() {
-                                if i > 0 {
-                                    self.write(", ");
-                                }
-                                self.print_expression(elem, 1);
-                            }
-                            self.write_char(']');
+                            self.print_array_literal(elements);
                         } else {
                             self.print_object_literal(
                                 level,
@@ -1243,57 +1229,74 @@ impl JsPrinter {
                         );
                     }
                     TagInfo::Constructor { name, .. } => {
-                        self.write_char('{');
                         if name == "::" {
-                            for (i, elem) in elements.iter().enumerate() {
-                                if i > 0 {
-                                    self.write(", ");
-                                }
-                                match i {
-                                    0 => self.write("hd"),
-                                    1 => self.write("tl"),
-                                    _ => {
-                                        self.write("_");
-                                        self.write(&i.to_string());
+                            self.print_object_literal(
+                                level,
+                                None,
+                                elements.iter().enumerate(),
+                                |this, (i, elem)| {
+                                    match i {
+                                        0 => this.write("hd"),
+                                        1 => this.write("tl"),
+                                        _ => {
+                                            this.write("_");
+                                            this.write(&i.to_string());
+                                        }
                                     }
-                                }
-                                self.write(": ");
-                                self.print_expression(elem, 1);
-                            }
+                                    this.write(": ");
+                                    this.print_expression(elem, 1);
+                                },
+                            );
                         } else {
-                            self.write("TAG: ");
-                            self.print_string(name);
-                            for (i, elem) in elements.iter().enumerate() {
-                                self.write(", _");
-                                self.write(&i.to_string());
-                                self.write(": ");
-                                self.print_expression(elem, 1);
-                            }
+                            self.print_object_literal(
+                                level,
+                                None,
+                                std::iter::once((None, None))
+                                    .chain(elements.iter().enumerate().map(|(i, elem)| {
+                                        (Some(i), Some(elem))
+                                    })),
+                                |this, prop| match prop {
+                                    (None, None) => {
+                                        this.write("TAG: ");
+                                        this.print_string(name);
+                                    }
+                                    (Some(i), Some(elem)) => {
+                                        this.write("_");
+                                        this.write(&i.to_string());
+                                        this.write(": ");
+                                        this.print_expression(elem, 1);
+                                    }
+                                    _ => unreachable!("constructor literal properties stay aligned"),
+                                },
+                            );
                         }
-                        self.write_char('}');
                     }
                     TagInfo::PolyVar(name) => {
-                        // Output as JS object with NAME field: {NAME: "name", VAL: val}
-                        self.write_char('{');
-                        self.write("NAME: ");
-                        self.print_string(name);
-                        if let Some(val) = elements.get(1) {
-                            // First element is the NAME constant, second is the value
-                            self.write(", VAL: ");
-                            self.print_expression(val, 1);
-                        }
-                        self.write_char('}');
+                        self.print_object_literal(
+                            level,
+                            None,
+                            std::iter::once((false, None)).chain(
+                                elements
+                                    .get(1)
+                                    .into_iter()
+                                    .map(|value| (true, Some(value))),
+                            ),
+                            |this, (is_value, value)| {
+                                if is_value {
+                                    this.write("VAL: ");
+                                    this.print_expression(
+                                        value.expect("polyvar value property must exist"),
+                                        1,
+                                    );
+                                } else {
+                                    this.write("NAME: ");
+                                    this.print_string(name);
+                                }
+                            },
+                        );
                     }
                     _ => {
-                        // Output as array for tuples, etc.
-                        self.write_char('[');
-                        for (i, elem) in elements.iter().enumerate() {
-                            if i > 0 {
-                                self.write(", ");
-                            }
-                            self.print_expression(elem, 1);
-                        }
-                        self.write_char(']');
+                        self.print_array_literal(elements);
                     }
                 }
             }
@@ -1457,6 +1460,27 @@ impl JsPrinter {
         if needs_paren {
             self.write_char(')');
         }
+    }
+
+    fn print_array_literal(&mut self, elements: &[Expression]) {
+        self.write_char('[');
+        match elements {
+            [] => {}
+            [single] => self.print_expression(single, 1),
+            _ => {
+                self.indent();
+                for (index, elem) in elements.iter().enumerate() {
+                    self.newline();
+                    self.print_expression(elem, 1);
+                    if index + 1 < elements.len() {
+                        self.write_char(',');
+                    }
+                }
+                self.dedent();
+                self.newline();
+            }
+        }
+        self.write_char(']');
     }
 
     fn print_literal_property_name(&mut self, name: &str) {
@@ -2334,7 +2358,7 @@ mod tests {
             ],
             MutableFlag::Immutable,
         );
-        assert_eq!(print_expression(&expr), "[1, 2, 3]");
+        assert_eq!(print_expression(&expr), "[\n  1,\n  2,\n  3\n]");
     }
 
     #[test]
@@ -2979,7 +3003,7 @@ mod tests {
             TagInfo::constructor("::", 1, 0),
         ));
 
-        assert_eq!(print_expression(&expr), "{hd: 1, tl: 0}");
+        assert_eq!(print_expression(&expr), "{\n  hd: 1,\n  tl: 0\n}");
     }
 
     #[test]
@@ -2991,7 +3015,7 @@ mod tests {
             TagInfo::constructor("Some", 1, 0),
         ));
 
-        assert_eq!(print_expression(&expr), "{TAG: \"Some\", _0: 1}");
+        assert_eq!(print_expression(&expr), "{\n  TAG: \"Some\",\n  _0: 1\n}");
     }
 
     #[test]
@@ -3027,7 +3051,7 @@ mod tests {
             ),
         ));
 
-        assert_eq!(print_expression(&expr), "[1, 2]");
+        assert_eq!(print_expression(&expr), "[\n  1,\n  2\n]");
     }
 
     #[test]
