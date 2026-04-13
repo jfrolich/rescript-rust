@@ -43,6 +43,37 @@ reported:
 
 Interpretation:
 
+- `compiler-rust/src/js_ir/mod.rs` and
+  `compiler-rust/src/lambda/compile.rs` now match another OCaml backend slice
+  from `core/js_exp_make.ml` more closely:
+  Rust now uses an OCaml-style smart negation constructor instead of emitting
+  raw `JsNot` nodes from backend call sites, so negated equality/order tests
+  fold into `!==`, `===`, `<=`, `>=`, and De Morgan rewrites before printing
+- Added focused coverage for this slice in
+  `test_not_simplifies_equality_negation` and
+  `test_not_pushes_negation_through_and`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib test_not_ -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib test_if_statement -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/return_check.res -o /tmp/return_check.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/LetUnwrap.res -o /tmp/LetUnwrap.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/return_check.res` now emits the OCaml-style null guard in
+  `test` (`elem !== null` instead of `!(elem === null)`); the remaining drift
+  there is later alias cleanup and assert-block byte shape, not raw negation
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  threading smart negation through the backend, which confirms the change stays
+  isolated from the already-stable external-shadow/import path
+- The cached raw-negation motif shrank materially after the authoritative
+  rerun: diff files containing `!(` dropped from **38** to **10**
+- The authoritative JS snapshot baseline remains **146 / 657** passing,
+  **0** compile errors, and **511** output diffs after this OCaml-aligned
+  smart-negation port; the topline stays flat because the affected files still
+  carry later alias/branch-expression cleanup mismatches even though the
+  boolean-test IR is now closer to OCaml
+
 - `compiler-rust/src/js_ir/mod.rs` now matches one more slice of
   OCaml `core/js_stmt_make.ml` on the Rust JS-output path:
   `Statement::if_` is now a smart constructor instead of a raw `If` wrapper,

@@ -540,7 +540,7 @@ impl LambdaCompiler {
                 }
                 (true, false) => {
                     block.push(Statement::if_(
-                        Expression::new(ExpressionDesc::JsNot(Box::new(cond_expr))),
+                        Expression::not(cond_expr),
                         self.compiled_to_effect_block(else_compiled),
                         vec![],
                     ));
@@ -551,7 +551,7 @@ impl LambdaCompiler {
 
         if then_prelude_empty && then_expr_pure {
             block.push(Statement::if_(
-                Expression::new(ExpressionDesc::JsNot(Box::new(cond_expr))),
+                Expression::not(cond_expr),
                 self.compiled_to_effect_block(else_compiled),
                 vec![],
             ));
@@ -872,11 +872,7 @@ impl LambdaCompiler {
             if else_block.is_empty() {
                 vec![]
             } else {
-                vec![Statement::if_(
-                    Expression::new(ExpressionDesc::JsNot(Box::new(cond))),
-                    else_block,
-                    vec![],
-                )]
+                vec![Statement::if_(Expression::not(cond), else_block, vec![])]
             }
         } else if else_block.is_empty() {
             vec![Statement::if_(cond, then_block, vec![])]
@@ -1841,7 +1837,7 @@ impl LambdaCompiler {
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
-            Pnot => Expression::new(ExpressionDesc::JsNot(Box::new(compiled_args[0].clone()))),
+            Pnot => Expression::not(compiled_args[0].clone()),
             Pnegint => int32_minus(int_expr(0), compiled_args[0].clone()),
             Pnegfloat => Expression::bin(BinOp::Minus, int_expr(0), compiled_args[0].clone()),
             Pnotint => int_bnot(compiled_args[0].clone()),

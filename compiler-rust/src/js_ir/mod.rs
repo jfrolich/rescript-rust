@@ -522,6 +522,92 @@ impl Expression {
             Box::new(alternate),
         ))
     }
+
+    /// Create a negated boolean expression, mirroring OCaml `Js_exp_make.not`.
+    pub fn not(expr: Expression) -> Self {
+        let Expression { desc, comment } = expr;
+        match desc {
+            ExpressionDesc::Number(Number::Int { i, .. }) => Expression {
+                desc: ExpressionDesc::Bool(i == 0),
+                comment,
+            },
+            ExpressionDesc::JsNot(inner) => *inner,
+            ExpressionDesc::Bool(value) => Expression {
+                desc: ExpressionDesc::Bool(!value),
+                comment,
+            },
+            ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => Expression {
+                desc: ExpressionDesc::Bin(BinOp::NotEqEq, left, right),
+                comment,
+            },
+            ExpressionDesc::Bin(BinOp::NotEqEq, left, right) => Expression {
+                desc: ExpressionDesc::Bin(BinOp::EqEqEq, left, right),
+                comment,
+            },
+            ExpressionDesc::Bin(BinOp::Lt, left, right) => Expression {
+                desc: ExpressionDesc::Bin(BinOp::Ge, left, right),
+                comment,
+            },
+            ExpressionDesc::Bin(BinOp::Ge, left, right) => Expression {
+                desc: ExpressionDesc::Bin(BinOp::Lt, left, right),
+                comment,
+            },
+            ExpressionDesc::Bin(BinOp::Le, left, right) => Expression {
+                desc: ExpressionDesc::Bin(BinOp::Gt, left, right),
+                comment,
+            },
+            ExpressionDesc::Bin(BinOp::Gt, left, right) => Expression {
+                desc: ExpressionDesc::Bin(BinOp::Le, left, right),
+                comment,
+            },
+            other => {
+                let expr = Expression {
+                    desc: other,
+                    comment,
+                };
+                push_negation(expr.clone()).unwrap_or_else(|| Expression {
+                    desc: ExpressionDesc::JsNot(Box::new(expr)),
+                    comment: None,
+                })
+            }
+        }
+    }
+}
+
+fn push_negation(expr: Expression) -> Option<Expression> {
+    let Expression { desc, comment } = expr;
+    match desc {
+        ExpressionDesc::JsNot(inner) => Some(*inner),
+        ExpressionDesc::Bool(value) => Some(Expression {
+            desc: ExpressionDesc::Bool(!value),
+            comment,
+        }),
+        ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => Some(Expression {
+            desc: ExpressionDesc::Bin(BinOp::NotEqEq, left, right),
+            comment,
+        }),
+        ExpressionDesc::Bin(BinOp::NotEqEq, left, right) => Some(Expression {
+            desc: ExpressionDesc::Bin(BinOp::EqEqEq, left, right),
+            comment,
+        }),
+        ExpressionDesc::Bin(BinOp::And, left, right) => {
+            let left = push_negation(*left)?;
+            let right = push_negation(*right)?;
+            Some(Expression {
+                desc: ExpressionDesc::Bin(BinOp::Or, Box::new(left), Box::new(right)),
+                comment,
+            })
+        }
+        ExpressionDesc::Bin(BinOp::Or, left, right) => {
+            let left = push_negation(*left)?;
+            let right = push_negation(*right)?;
+            Some(Expression {
+                desc: ExpressionDesc::Bin(BinOp::And, Box::new(left), Box::new(right)),
+                comment,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Switch case clause
@@ -809,18 +895,7 @@ fn single_exp_expr(block: &Block) -> Option<Expression> {
 }
 
 fn negate_condition(cond: Expression) -> Expression {
-    match cond.desc {
-        ExpressionDesc::Bool(value) => Expression::bool(!value),
-        ExpressionDesc::JsNot(inner) => *inner,
-        ExpressionDesc::Bin(op, left, right) => match op {
-            BinOp::EqEqEq => Expression::bin(BinOp::NotEqEq, *left, *right),
-            BinOp::NotEqEq => Expression::bin(BinOp::EqEqEq, *left, *right),
-            other => Expression::new(ExpressionDesc::JsNot(Box::new(Expression::new(
-                ExpressionDesc::Bin(other, left, right),
-            )))),
-        },
-        other => Expression::new(ExpressionDesc::JsNot(Box::new(Expression::new(other)))),
-    }
+    Expression::not(cond)
 }
 
 /// Block of statements
@@ -923,6 +998,43 @@ mod tests {
         match &expr.desc {
             ExpressionDesc::Bin(BinOp::Plus, _, _) => {}
             _ => panic!("Expected Bin(Plus)"),
+        }
+    }
+
+    #[test]
+    fn test_not_simplifies_equality_negation() {
+        let expr = Expression::not(Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(Ident::create_local("x")),
+            Expression::null(),
+        ));
+
+        match &expr.desc {
+            ExpressionDesc::Bin(BinOp::NotEqEq, _, _) => {}
+            other => panic!("Expected !== after negating ===, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_not_pushes_negation_through_and() {
+        let left = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(Ident::create_local("x")),
+            Expression::number(Number::int(1)),
+        );
+        let right = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(Ident::create_local("y")),
+            Expression::number(Number::int(2)),
+        );
+        let expr = Expression::not(Expression::bin(BinOp::And, left, right));
+
+        match &expr.desc {
+            ExpressionDesc::Bin(BinOp::Or, left, right) => {
+                assert!(matches!(left.desc, ExpressionDesc::Bin(BinOp::NotEqEq, _, _)));
+                assert!(matches!(right.desc, ExpressionDesc::Bin(BinOp::NotEqEq, _, _)));
+            }
+            other => panic!("Expected De Morgan rewrite after negating &&, got {other:?}"),
         }
     }
 
