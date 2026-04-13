@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 262 / 657 JS snapshots passing, 0 compile errors, 395 output diffs
+**Status:** 266 / 657 JS snapshots passing, 0 compile errors, 391 output diffs
 
 ## Goal
 
@@ -35,13 +35,53 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **262 / 657**
+- JS snapshot parity: **266 / 657**
 - Compile errors: **0**
-- Output diffs: **395**
+- Output diffs: **391**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed cross-module constant-field
+  lowering slice in `compiler/core/lam_compile.ml` together with
+  `compiler/core/js_cmj_format.ml` and `compiler/core/lam_stats_export.ml`
+- After reading OCaml's `compile_external_field`, which consults
+  `Lam_compile_env.query_external_id_info` and compiles a
+  `persistent_closed_lambda` directly when the exported field is a closed
+  non-function lambda, the Rust backend now mirrors that behavior for the
+  closed constants that OCaml preserves in `.cmj` files with
+  `cross_module_inline = false`: `null`, `undefined`, `true`, and `false`
+- Rust now reads keyed constant exports from companion `.cmj` files through
+  `compiler-rust/src/cmi/persistent_env.rs`, threads that lookup through
+  `compiler-rust/src/js_ir/mod.rs`, and uses it in
+  `compiler-rust/src/lambda/compile.rs` before falling back to ordinary
+  `module.field` emission for ML module accesses
+- Added focused regression coverage in
+  `cmi::persistent_env::tests::reads_belt_map_string_empty_as_closed_undefined_constant_from_cmj`
+  and
+  `lambda::compile::tests::lowers_qualified_ml_module_closed_undefined_constant_from_cmj`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release reads_belt_map_string_empty_as_closed_undefined_constant_from_cmj -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lowers_qualified_ml_module_closed_undefined_constant_from_cmj -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_functor_dead_code.res -o /tmp/test_functor_dead_code.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_int_map_find.res -o /tmp/test_int_map_find.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/test_functor_dead_code.res`,
+  `tests/tests/src/test_string_map.res`, and
+  `tests/tests/src/test_int_map_find.res` now match their checked-in
+  snapshots exactly again, `tests/tests/src/ExternalShadow.res` remains an
+  exact guard-file match, and the cached diff corpus no longer contains the
+  `Belt_MapString.empty` / `Belt_MapInt.empty` motif at all
+- The authoritative JS snapshot baseline now reports **266 / 657** passing,
+  **0** compile errors, and **391** output diffs; this is a net **+4**
+  passing snapshots and **-4** output diffs from the previously recorded
+  **262 / 657**, **0** compile errors, **395** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   but this iteration first eliminated a local worktree regression that had

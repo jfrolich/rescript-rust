@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::cmi::persistent_env::CmjExportConstant;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::js_ir::op::{
@@ -48,6 +49,7 @@ struct StaticHandler {
 pub struct LambdaCompiler {
     id_gen: IdGenerator,
     module_path_resolver: Option<ModulePathResolver>,
+    cmj_constant_cache: HashMap<String, Option<HashMap<String, CmjExportConstant>>>,
     static_handlers: Vec<StaticHandler>,
 }
 
@@ -63,6 +65,7 @@ impl LambdaCompiler {
         Self {
             id_gen: IdGenerator::new(),
             module_path_resolver: None,
+            cmj_constant_cache: HashMap::new(),
             static_handlers: Vec::new(),
         }
     }
@@ -72,6 +75,7 @@ impl LambdaCompiler {
         Self {
             id_gen: IdGenerator::new(),
             module_path_resolver,
+            cmj_constant_cache: HashMap::new(),
             static_handlers: Vec::new(),
         }
     }
@@ -2776,8 +2780,42 @@ impl LambdaCompiler {
         }
     }
 
+    fn cmj_export_constant_expr(constant: CmjExportConstant) -> Expression {
+        match constant {
+            CmjExportConstant::Bool(value) => Expression::bool(value),
+            CmjExportConstant::Null => Expression::null(),
+            CmjExportConstant::Undefined { is_unit } => Expression::undefined(is_unit),
+        }
+    }
+
+    fn resolve_cmj_module_field_constant(
+        &mut self,
+        module: &ModuleId,
+        field_name: &str,
+    ) -> Option<Expression> {
+        if !matches!(module.kind, Kind::Ml) {
+            return None;
+        }
+
+        if !self.cmj_constant_cache.contains_key(module.id.name()) {
+            let constants = self
+                .module_path_resolver
+                .as_ref()
+                .and_then(|resolver| resolver.module_cmj_export_constants(module.id.name()));
+            self.cmj_constant_cache
+                .insert(module.id.name().to_string(), constants);
+        }
+
+        let constants = self
+            .cmj_constant_cache
+            .get(module.id.name())
+            .and_then(|constants| constants.as_ref())?;
+        let constant = constants.get(field_name).copied()?;
+        Some(Self::cmj_export_constant_expr(constant))
+    }
+
     fn compile_field_access(
-        &self,
+        &mut self,
         idx: i32,
         info: &FieldDbgInfo,
         target: &Expression,
@@ -2785,6 +2823,9 @@ impl LambdaCompiler {
         match info {
             FieldDbgInfo::Module { name } => match &target.desc {
                 ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, None)) => {
+                    if let Some(constant) = self.resolve_cmj_module_field_constant(module, name) {
+                        return constant;
+                    }
                     Expression::qualified(module.clone(), Some(name.clone()))
                 }
                 _ => Expression::new(ExpressionDesc::StaticIndex(
@@ -8126,6 +8167,16 @@ mod tests {
                 .join("lib")
                 .join("ocaml"),
         );
+        persistent_env.add_load_path(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("repo root")
+                .join("packages")
+                .join("@rescript")
+                .join("runtime")
+                .join("lib")
+                .join("ocaml"),
+        );
         ModulePathResolver::from_compile_options(
             None,
             Some(std::path::Path::new("/tmp/Effect.mjs")),
@@ -12763,7 +12814,7 @@ mod tests {
 
     #[test]
     fn lowers_module_pfield_with_ocaml_identifier_conversion() {
-        let compiler = LambdaCompiler::new();
+        let mut compiler = LambdaCompiler::new();
         let module_value = Ident::create_local("Js_promise2");
         let expr = compiler.compile_field_access(
             3,
@@ -12795,7 +12846,7 @@ mod tests {
 
     #[test]
     fn lowers_qualified_ml_module_default_field_without_preconverting_the_member_name() {
-        let compiler = LambdaCompiler::new();
+        let mut compiler = LambdaCompiler::new();
         let expr = compiler.compile_field_access(
             0,
             &FieldDbgInfo::Module {
@@ -12827,7 +12878,7 @@ mod tests {
 
     #[test]
     fn lowers_qualified_ml_module_reserved_fields_through_vident_printing() {
-        let compiler = LambdaCompiler::new();
+        let mut compiler = LambdaCompiler::new();
         let expr = compiler.compile_field_access(
             3,
             &FieldDbgInfo::Module {
@@ -12855,6 +12906,32 @@ mod tests {
         }
 
         assert_eq!(print_expression(&expr), "Js_promise2.$$catch");
+    }
+
+    #[test]
+    fn lowers_qualified_ml_module_closed_undefined_constant_from_cmj() {
+        let resolver = resolver_with_checked_in_cmj();
+        let mut compiler = LambdaCompiler::with_module_path_resolver(Some(resolver));
+        let expr = compiler.compile_field_access(
+            0,
+            &FieldDbgInfo::Module {
+                name: "empty".to_string(),
+            },
+            &Expression::qualified(
+                ModuleId {
+                    id: Ident::create_persistent("Belt_MapString"),
+                    kind: Kind::Ml,
+                    dynamic_import: false,
+                },
+                None,
+            ),
+        );
+
+        assert!(matches!(
+            expr.desc,
+            ExpressionDesc::Undefined { is_unit: false }
+        ));
+        assert_eq!(print_expression(&expr), "undefined");
     }
 
     #[test]

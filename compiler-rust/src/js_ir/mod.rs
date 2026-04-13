@@ -21,7 +21,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path as FsPath, PathBuf};
 
-use crate::cmi::persistent_env::PersistentEnv;
+use crate::cmi::persistent_env::{CmjExportConstant, PersistentEnv};
 use crate::ident::Ident;
 use crate::lambda::tag_info::TagInfo;
 pub use op::{BinOp, IdentInfo, Kind, LengthObject, MutableFlag, Number, Property, PropertyName};
@@ -123,6 +123,17 @@ impl ModulePathResolver {
             Kind::External { name, .. } => name.clone(),
             Kind::Runtime | Kind::Ml => module.id.name().to_string(),
         })
+    }
+
+    /// Read closed constant exports recorded in a module's companion `.cmj`.
+    pub fn module_cmj_export_constants(
+        &self,
+        module_name: &str,
+    ) -> Option<HashMap<String, CmjExportConstant>> {
+        self.persistent_env
+            .as_ref()
+            .and_then(|env| env.module_cmj_export_constants(module_name))
+            .map(|exports| exports.into_iter().collect())
     }
 
     fn runtime_module_path(&self, module_name: &str) -> String {

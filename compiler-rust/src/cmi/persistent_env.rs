@@ -15,7 +15,7 @@ use std::fs;
 use std::path::Path as FsPath;
 use std::path::PathBuf;
 
-use crate::cmi::marshal_reader::MarshalReader;
+use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::driver::{
     CompilerOptions, jsx_version_for_structure, load_pervasives, normalize_signature_types,
 };
@@ -47,6 +47,13 @@ pub struct PersStruct {
     pub ps_sig: Signature,
     /// Source filename
     pub ps_filename: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmjExportConstant {
+    Bool(bool),
+    Null,
+    Undefined { is_unit: bool },
 }
 
 /// Persistent environment for module loading.
@@ -256,6 +263,17 @@ impl PersistentEnv {
     pub fn module_cmj_is_pure(&self, name: &str) -> Option<bool> {
         let path = self.resolve_module_cmj_path(name)?;
         read_cmj_pure(&path)
+    }
+
+    /// Read closed constant exports recorded in a module's `.cmj` metadata.
+    ///
+    /// This matches OCaml's `Js_cmj_format.query_by_name` behavior under the
+    /// default `cross_module_inline = false` mode, where only
+    /// `null`/`undefined`/`true`/`false` closed lambdas are kept for
+    /// cross-module inlining.
+    pub fn module_cmj_export_constants(&self, name: &str) -> Option<HashMap<String, CmjExportConstant>> {
+        let path = self.resolve_module_cmj_path(name)?;
+        read_cmj_export_constants(&path)
     }
 
     fn read_source_latin1(path: &FsPath) -> Option<String> {
@@ -650,15 +668,69 @@ fn find_in_path(load_path: &[PathBuf], filename: &str) -> Option<String> {
     None
 }
 
-fn read_cmj_pure(path: &FsPath) -> Option<bool> {
+fn read_marshaled_cmj(path: &FsPath) -> Option<OcamlValue> {
     const CMJ_DIGEST_LEN: usize = 16;
 
     let bytes = fs::read(path).ok()?;
     let marshaled = bytes.get(CMJ_DIGEST_LEN..)?;
     let mut reader = MarshalReader::new();
-    let value = reader.read_from_bytes(marshaled).ok()?;
+    reader.read_from_bytes(marshaled).ok()
+}
+
+fn read_cmj_pure(path: &FsPath) -> Option<bool> {
+    let value = read_marshaled_cmj(path)?;
     let (_, fields) = value.as_block_opt()?;
     fields.get(1).map(|field| field.as_bool())
+}
+
+fn read_cmj_export_constants(path: &FsPath) -> Option<HashMap<String, CmjExportConstant>> {
+    let value = read_marshaled_cmj(path)?;
+    let (_, fields) = value.as_block_opt()?;
+    let values_field = fields.first()?;
+    let (_, values) = values_field.as_block_opt()?;
+    let mut exports = HashMap::new();
+
+    for entry in values {
+        let Some((_, entry_fields)) = entry.as_block_opt() else {
+            continue;
+        };
+        if entry_fields.len() != 3 {
+            continue;
+        }
+        let name = match &entry_fields[0] {
+            OcamlValue::String(name) => name.clone(),
+            _ => continue,
+        };
+        let Some(constant) = decode_cmj_persistent_closed_constant(&entry_fields[2]) else {
+            continue;
+        };
+        exports.insert(name, constant);
+    }
+
+    Some(exports)
+}
+
+fn decode_cmj_persistent_closed_constant(value: &OcamlValue) -> Option<CmjExportConstant> {
+    let lam = value.as_option()?;
+    let (tag, fields) = lam.as_block_opt()?;
+    if tag != 2 || fields.len() != 1 {
+        return None;
+    }
+    decode_cmj_constant(&fields[0])
+}
+
+fn decode_cmj_constant(value: &OcamlValue) -> Option<CmjExportConstant> {
+    match value {
+        OcamlValue::Int(0) => Some(CmjExportConstant::Null),
+        OcamlValue::Int(1) => Some(CmjExportConstant::Bool(true)),
+        OcamlValue::Int(2) => Some(CmjExportConstant::Bool(false)),
+        OcamlValue::Block(tag, fields) if *tag == 0 && fields.len() == 1 => Some(
+            CmjExportConstant::Undefined {
+                is_unit: fields[0].as_bool(),
+            },
+        ),
+        _ => None,
+    }
 }
 
 /// This is the core of `open_signature` from OCaml's `env.ml`.
@@ -763,6 +835,36 @@ fn insert_module_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident
     } else {
         maps.module_name_map
             .insert(old_id.name().to_string(), new_path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_belt_map_string_empty_as_closed_undefined_constant_from_cmj() {
+        let mut env = PersistentEnv::new();
+        env.add_load_path(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("repo root")
+                .join("packages")
+                .join("@rescript")
+                .join("runtime")
+                .join("lib")
+                .join("ocaml"),
+        );
+
+        let exports = env
+            .module_cmj_export_constants("Belt_MapString")
+            .expect("expected runtime cmj exports");
+
+        assert_eq!(
+            exports.get("empty"),
+            Some(&CmjExportConstant::Undefined { is_unit: false })
+        );
+        assert!(!exports.contains_key("isEmpty"));
     }
 }
 
