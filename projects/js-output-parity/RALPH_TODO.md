@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 166 / 657 JS snapshots passing, 0 compile errors, 491 output diffs
+**Status:** 168 / 657 JS snapshots passing, 0 compile errors, 489 output diffs
 
 ## Goal
 
@@ -35,13 +35,53 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **166 / 657**
+- JS snapshot parity: **168 / 657**
 - Compile errors: **0**
-- Output diffs: **491**
+- Output diffs: **489**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed in the OCaml post-flatten
+  function-application path instead of treating `submodule.res` as a local
+  constant-folding oddity
+- `compiler-rust/src/lambda/simplify.rs` now matches another slice of
+  OCaml `compiler/core/lam_pass_collect.ml` and
+  `compiler/core/lam_pass_remove_alias.ml` more closely on the Rust JS path:
+  inlineable non-recursive functions are now collected across the flattened
+  lambda before simplification, and `Lapply` now retries the `Lvar` inlining
+  path after simplifying the callee expression, which mirrors the extra OCaml
+  alias-removal round that sees module-field projections after they flatten to
+  plain identifiers
+- The same `Lvar` retry path now also carries OCaml's self-application guard:
+  Rust skips the post-simplification inline step when the callee identifier
+  appears in any argument, which avoids the `g(g)`-style nontermination that
+  surfaced as a stack overflow in `unboxed_crash.res`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/submodule.res -o /tmp/submodule.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/unboxed_crash.res -o /tmp/unboxed_crash.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_1692_test.res -o /tmp/gpr_1692_test.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/submodule.res` now matches its checked-in `.mjs` snapshot
+  exactly; the old `let v0 = a0(1, 2);` drift came from missing the OCaml
+  alias-removal round after module-field flattening rather than from printer or
+  arithmetic lowering
+- `tests/tests/src/unboxed_crash.res` also now matches its checked-in `.mjs`
+  snapshot again; the transient stack overflow came from the missing
+  self-application guard on the new post-simplification `Lvar` inline path
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the change, and `tests/tests/src/gpr_1692_test.res` stays unchanged, which
+  confirms this slice is isolated to flattened identifier calls rather than the
+  earlier `Pjs_fn_make` wrapper frontier
+- The authoritative JS snapshot baseline now reports **168 / 657** passing,
+  **0** compile errors, and **489** output diffs after this OCaml-aligned
+  post-flatten `Lvar` inlining change; this is a net **+2** over the previous
+  recorded baseline and removes the transient compile-error regression from the
+  first attempt at the same backend slice
 
 - Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
   from `PLAN.md`; this iteration stayed in the OCaml ML-module field-access

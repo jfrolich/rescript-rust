@@ -72,7 +72,11 @@ impl SimplifyEnv {
 pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     let flattened = deep_flatten_for_js_backend(lam);
     let exports = collect_exported_idents(&flattened);
-    simplify_with_env(&flattened, &SimplifyEnv::default(), &exports)
+    let env = SimplifyEnv {
+        functions: collect_inlineable_functions(&flattened),
+        ..SimplifyEnv::default()
+    };
+    simplify_with_env(&flattened, &env, &exports)
 }
 
 fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
@@ -701,6 +705,76 @@ fn optional_is_some_predicate(value: Lambda, kind: BoxedNullable) -> Lambda {
     )
 }
 
+fn lambda_hits_variable(target: &Ident, lam: &Lambda) -> bool {
+    match lam {
+        Lambda::Lvar(id) => id.same(target),
+        Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lapply(apply) => {
+            lambda_hits_variable(target, &apply.ap_func)
+                || apply
+                    .ap_args
+                    .iter()
+                    .any(|arg| lambda_hits_variable(target, arg))
+        }
+        Lambda::Lfunction(func) => lambda_hits_variable(target, &func.body),
+        Lambda::Llet(_, _, value, body) => {
+            lambda_hits_variable(target, value) || lambda_hits_variable(target, body)
+        }
+        Lambda::Lletrec(bindings, body) => {
+            lambda_hits_variable(target, body)
+                || bindings
+                    .iter()
+                    .any(|(_, lam)| lambda_hits_variable(target, lam))
+        }
+        Lambda::Lprim(info) => info
+            .args
+            .iter()
+            .any(|arg| lambda_hits_variable(target, arg)),
+        Lambda::Lswitch(arg, switch) => {
+            lambda_hits_variable(target, arg)
+                || switch
+                    .sw_consts
+                    .iter()
+                    .any(|(_, lam)| lambda_hits_variable(target, lam))
+                || switch
+                    .sw_blocks
+                    .iter()
+                    .any(|(_, lam)| lambda_hits_variable(target, lam))
+                || switch
+                    .sw_failaction
+                    .as_deref()
+                    .is_some_and(|lam| lambda_hits_variable(target, lam))
+        }
+        Lambda::LstringSwitch(arg, cases, default) => {
+            lambda_hits_variable(target, arg)
+                || cases
+                    .iter()
+                    .any(|(_, lam)| lambda_hits_variable(target, lam))
+                || default
+                    .as_deref()
+                    .is_some_and(|lam| lambda_hits_variable(target, lam))
+        }
+        Lambda::LstaticRaise(_, args) => args.iter().any(|arg| lambda_hits_variable(target, arg)),
+        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+            lambda_hits_variable(target, body) || lambda_hits_variable(target, handler)
+        }
+        Lambda::LifThenElse(cond, then_, else_) => {
+            lambda_hits_variable(target, cond)
+                || lambda_hits_variable(target, then_)
+                || lambda_hits_variable(target, else_)
+        }
+        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+            lambda_hits_variable(target, first) || lambda_hits_variable(target, second)
+        }
+        Lambda::Lfor(_, start, end, _, body) => {
+            lambda_hits_variable(target, start)
+                || lambda_hits_variable(target, end)
+                || lambda_hits_variable(target, body)
+        }
+        Lambda::Lassign(id, value) => id.same(target) || lambda_hits_variable(target, value),
+    }
+}
+
 fn inlineable_local_function(value: &Lambda) -> Option<LFunction> {
     match value {
         Lambda::Lfunction(func) => Some(func.clone()),
@@ -819,15 +893,29 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
         .collect();
 
     if let Lambda::Lvar(id) = &*apply.ap_func {
-        if let Some(func) = env.functions.get(id) {
-            if should_inline_function(func, &args) {
-                let reduced = beta_reduce::no_names_beta_reduce(&func.params, &func.body, &args);
-                return simplify_with_env(&reduced, env, exports);
+        if !args.iter().any(|arg| lambda_hits_variable(id, arg)) {
+            if let Some(func) = env.functions.get(id) {
+                if should_inline_function(func, &args) {
+                    let reduced =
+                        beta_reduce::no_names_beta_reduce(&func.params, &func.body, &args);
+                    return simplify_with_env(&reduced, env, exports);
+                }
             }
         }
     }
 
     let func = simplify_with_env(&apply.ap_func, env, exports);
+    if let Lambda::Lvar(id) = &func {
+        if !args.iter().any(|arg| lambda_hits_variable(id, arg)) {
+            if let Some(func) = env.functions.get(id) {
+                if should_inline_function(func, &args) {
+                    let reduced =
+                        beta_reduce::no_names_beta_reduce(&func.params, &func.body, &args);
+                    return simplify_with_env(&reduced, env, exports);
+                }
+            }
+        }
+    }
     if let Lambda::Lfunction(inline_func) = &func {
         if should_inline_function(inline_func, &args) {
             let reduced =
@@ -848,6 +936,92 @@ fn should_inline_function(func: &LFunction, args: &[Lambda]) -> bool {
     func.params.len() == args.len()
         && analysis::lfunction_can_be_inlined(func)
         && analysis::ok_to_inline_fun_when_app(func, args)
+}
+
+fn collect_inlineable_functions(lam: &Lambda) -> HashMap<Ident, LFunction> {
+    fn collect_into(lam: &Lambda, functions: &mut HashMap<Ident, LFunction>) {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
+            Lambda::Lapply(apply) => {
+                collect_into(&apply.ap_func, functions);
+                for arg in &apply.ap_args {
+                    collect_into(arg, functions);
+                }
+            }
+            Lambda::Lfunction(func) => collect_into(&func.body, functions),
+            Lambda::Llet(kind, id, value, body) => {
+                collect_into(value, functions);
+                if *kind != LetKind::Variable {
+                    if let Some(func) = inlineable_local_function(value) {
+                        if analysis::lfunction_can_be_inlined(&func) {
+                            functions.insert(id.clone(), func);
+                        }
+                    }
+                }
+                collect_into(body, functions);
+            }
+            Lambda::Lletrec(bindings, body) => {
+                for (_, expr) in bindings {
+                    collect_into(expr, functions);
+                }
+                collect_into(body, functions);
+            }
+            Lambda::Lprim(info) => {
+                for arg in &info.args {
+                    collect_into(arg, functions);
+                }
+            }
+            Lambda::Lswitch(scrutinee, switch) => {
+                collect_into(scrutinee, functions);
+                for (_, lam) in &switch.sw_consts {
+                    collect_into(lam, functions);
+                }
+                for (_, lam) in &switch.sw_blocks {
+                    collect_into(lam, functions);
+                }
+                if let Some(failaction) = &switch.sw_failaction {
+                    collect_into(failaction, functions);
+                }
+            }
+            Lambda::LstringSwitch(scrutinee, cases, default) => {
+                collect_into(scrutinee, functions);
+                for (_, lam) in cases {
+                    collect_into(lam, functions);
+                }
+                if let Some(default) = default {
+                    collect_into(default, functions);
+                }
+            }
+            Lambda::LstaticRaise(_, args) => {
+                for arg in args {
+                    collect_into(arg, functions);
+                }
+            }
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                collect_into(body, functions);
+                collect_into(handler, functions);
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                collect_into(cond, functions);
+                collect_into(then_, functions);
+                collect_into(else_, functions);
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                collect_into(first, functions);
+                collect_into(second, functions);
+            }
+            Lambda::Lfor(_, start, end, _, body) => {
+                collect_into(start, functions);
+                collect_into(end, functions);
+                collect_into(body, functions);
+            }
+            Lambda::Lassign(_, value) => collect_into(value, functions),
+        }
+    }
+
+    let mut functions = HashMap::new();
+    collect_into(lam, &mut functions);
+    functions
 }
 
 fn substitution_candidate(kind: LetKind, value: &Lambda) -> Option<Lambda> {
