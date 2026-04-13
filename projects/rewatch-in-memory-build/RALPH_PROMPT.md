@@ -63,6 +63,12 @@ Apply the same boundary to `PersistentEnv`:
 - acceptable: seeding that env from the already-published dependency interface snapshot for the current wave
 - not acceptable: one globally shared mutable env token that serializes the whole ready batch
 
+Cleaner target for this project:
+
+- `PersistentEnv` must not be the permanent in-process abstraction
+- `--in-process` should move to a module-registry plus resolver-session design
+- `PersistentEnv` may remain only as a temporary compatibility adapter for file-backed mode during migration
+
 Do not keep any fallback compiler-asset protocol alive inside `--in-process` for runtime bootstrap, `node_modules`, namespace handling, startup reconstruction, or stale-build detection.
 
 ## Important Constraints
@@ -78,6 +84,7 @@ Do not keep any fallback compiler-asset protocol alive inside `--in-process` for
 9. A sequential `for module in current_in_progress_modules` implementation in the `--in-process` path is not acceptable as the finished design.
 10. Do not serialize the entire ready batch behind one shared mutable `PersistentEnv` token. If interface publication needs synchronization, keep the critical section narrow and preserve worker parallelism.
 11. A single `PersistentEnv` per file is acceptable. `PersistentEnv` is compilation-local context plus caches; `BuildCommandState` is the authoritative cross-file registry of published interfaces and metadata.
+12. Final in-process acceptance requires removing `PersistentEnv` from the in-process compiler API. Do not declare victory on a design that still takes/returns `PersistentEnv` for `--in-process`.
 
 ## Your Task Each Iteration
 

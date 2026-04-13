@@ -7,6 +7,13 @@
 
 Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-process, keeps dependency interfaces in memory, and stops emitting or reading compiler assets anywhere in that build graph. Only final JS outputs should be written in `--in-process`.
 
+Clean architecture target for this project:
+
+- `--in-process` must not depend on `PersistentEnv`
+- shared truth lives in build-state module/interface registries
+- per-file compilation uses a local resolver session, not a shared mutable env token
+- `PersistentEnv` may survive temporarily only as a file-backed compatibility adapter during migration, but do not extend it further for `--in-process`
+
 ## Current Findings
 
 - `node_modules` packages are already source-backed in `rewatch`; the special disk-backed bootstrap case is `@rescript/runtime`.
@@ -26,6 +33,7 @@ Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-
 - The in-process transport boundary should be: parsed AST in build state, published interface in build state, and full typedtree kept local to one compilation. Do not try to retain or ship typedtree/type-context state through `BuildCommandState`.
 - Current `rewatch/src/build/compile.rs` work-in-progress has an `--in-process` branch, but it compiles the ready batch sequentially and takes/returns one shared `PersistentEnv`. That is not an acceptable end state: `--in-process` must preserve parallel compilation for dependency-independent modules.
 - A `PersistentEnv` per file is acceptable. The problem is not "multiple envs"; the problem is one shared mutable env token for the whole batch. In `--in-process`, build state is the source of truth for published interfaces and module metadata. `PersistentEnv` can be compilation-local resolver/cache state seeded from that shared registry.
+- Cleaner end state: replace `PersistentEnv` in `--in-process` with a dedicated module-registry plus per-file resolver session. Do not let `PersistentEnv` become the permanent in-process architecture.
 
 ## Phase 0: Mode Model And CLI
 
@@ -41,6 +49,11 @@ Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-
 
 ## Phase 1: Compiler-Rust Memory Protocol
 
+- [ ] Introduce a clean module-resolution abstraction for `--in-process`:
+  - a canonical module/interface registry shared across files
+  - a per-file resolver session for derived state and lazy memoization
+  - no `PersistentEnv` argument/return value in the in-process compiler API
+  - `PersistentEnv` can remain temporarily only behind the file-backed/default path
 - [x] Add a memory-backed module/interface provider abstraction to `compiler-rust/src/cmi/persistent_env.rs`, so module interfaces, source paths, and purity can come from an in-memory registry instead of compiler assets on disk.
   - **Done:** Added `InMemoryModuleInfo` struct (source_path, is_pure, is_runtime) and `in_memory_modules: HashMap<String, InMemoryModuleInfo>` to `PersistentEnv`. Added `register_in_memory_module()` for metadata, `register_in_memory_signature()` for direct cache population bypassing `.cmi` loading. Modified `resolve_module_source_path()`, `module_cmj_is_pure()` to check in-memory registry first. Modified `ModulePathResolver::is_runtime_module()` in `js_ir/mod.rs` to check in-memory registry before probing disk for `.cmi/.ast/.iast` files. All existing tests pass (732/732, same 19 pre-existing failures from missing runtime artifacts).
 - [x] Extend `compiler-rust/src/driver.rs` with an in-process API that returns final JS plus the published interface, interface fingerprint/generation, and any metadata the backend still needs for downstream compilation.
@@ -64,6 +77,7 @@ Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-
   - **Done:** Added `compile_module_in_process()` function that compiles a single module fully in-process: reads source from disk, builds `CompilerOptions` from package config (include paths, runtime path, JSX version, namespace opens, output path), takes the shared `PersistentEnv` from `BuildCommandState`, typechecks `.resi` first if present (via `typecheck_interface_in_process`), compiles `.res` (via `compile_source_in_process`), writes only JS output (no `.cmi`/`.cmj`/`.cmt`/`.cmti`), and returns the `PersistentEnv`. Added `build_compiler_options()` and `write_js_output()` helper functions. Modified the compile loop: when `is_in_process()`, uses sequential iteration instead of `par_iter` and calls `compile_module_in_process` instead of `compile_file`. Modified `compile_source_in_process` and `typecheck_interface_in_process` in `driver.rs` to accept a `module_name` parameter and self-register the compiled module's signature into the PersistentEnv before returning it — `.resi` signatures are registered by `typecheck_interface_in_process`, inferred signatures (no `.resi`) by `compile_source_in_process`.
   - **Known limitation:** In-process compilation is currently sequential within each batch (not parallel via `par_iter`). True parallelism requires either cloning+merging PersistentEnv per module (complex due to `finalize_loaded_signature` needing TypeContext) or making PersistentEnv thread-safe with `Arc<Mutex>`. This is a follow-up optimization.
   - **Clarification:** A fresh or cloned `PersistentEnv` per file is an acceptable design if each worker seeds it from the already-published dependency interface snapshot for that wave. That is preferable to one shared mutable env that forces batch serialization.
+  - **Clean-up required:** This is not the final architecture. Replace the in-process `PersistentEnv` plumbing with the new registry/session abstraction before considering the project complete.
   - **Cannot be end-to-end tested yet:** The testrepo build fails at the namespace mlmap phase (pre-existing `randjbuildsystem` error) before reaching the compile phase. End-to-end validation depends on Phase 3 (namespace handling).
 - [x] Preserve existing module semantics exactly: `M.resi` publishes the interface when present; otherwise `M.res` publishes its inferred interface.
   - **Done:** `compile_module_in_process` handles both cases: when `.resi` exists, it typechecks the interface first via `typecheck_interface_in_process` (which self-registers the `.resi` signature), then compiles the `.res` with `has_interface: true` so moregen constraints are applied. When no `.resi`, `compile_source_in_process` self-registers the inferred signature. The published interface in `BuildCommandState::in_memory_interfaces` comes from the `.resi` signature when present, otherwise from the inferred `.res` signature.
@@ -109,6 +123,7 @@ Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-
 - `--rust` builds still use the Rust subprocess path
 - `--in-process` builds use the Rust compiler fully in-process
 - `--in-process` preserves parallel compilation for dependency-independent modules; do not regress to a single-thread batch loop
+- `--in-process` compiler calls do not take or return `PersistentEnv`
 - `rewatch/tests/no-compiler-assets.sh` passes for `--in-process`
 - in `--in-process`, building or watching inside `rewatch/testrepo` never creates or reads `.ast`, `.iast`, `.cmi`, `.cmj`, `.cmt`, `.cmti`, `.compiler.log`, `.sourcedirs.json`, `compiler-info.json`, `build.ninja`, `.mlmap`, `.sexp`, or copied `.res/.resi` build mirrors
 - in `--in-process`, only final JS outputs remain on disk
