@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 238 / 657 JS snapshots passing, 0 compile errors, 419 output diffs
+**Status:** 241 / 657 JS snapshots passing, 0 compile errors, 416 output diffs
 
 ## Goal
 
@@ -35,13 +35,50 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **238 / 657**
+- JS snapshot parity: **241 / 657**
 - Compile errors: **0**
-- Output diffs: **419**
+- Output diffs: **416**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed recursive-function lowering
+  slice in `compiler/core/lam_compile.ml` via `compile_recursive_let`
+- After reading OCaml's recursive-let function path there, the Rust backend in
+  `compiler-rust/src/lambda/compile.rs` now routes `Lletrec` bindings whose
+  RHS is `Lfunction` through the same declared-binding path as non-rec lets,
+  instead of always falling back to a placeholder declaration followed by a
+  rebinding assignment
+- Added focused regression coverage in
+  `lambda::compile::tests::recursive_function_bindings_lower_directly_without_placeholder_assignments`
+  and
+  `mutually_recursive_function_bindings_lower_without_placeholder_assignments`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release recursive_function_bindings_lower -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/unboxed_attribute.res -o /tmp/unboxed_attribute.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/fib.res -o /tmp/fib.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/unboxed_attribute.res` and
+  `tests/tests/src/polymorphism_test.res` dropped out of
+  `temp/rust-parity/diffs`, which confirms this recursive-function
+  declaration slice now reaches at least two previously failing in-repo
+  snapshots end-to-end
+- `tests/tests/src/fib.res` no longer differs on the top-level
+  `let fib; fib = ...` recursive-function cluster; the remaining drift there is
+  now in separate conditional, loop, and mutable-state lowering for `fib`,
+  `fib2`, and `fib3`
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same backend change
+- The authoritative JS snapshot baseline now reports **241 / 657** passing,
+  **0** compile errors, and **416** output diffs; this is a net **+3**
+  passing snapshots and **-3** output diffs from the previously recorded
+  **238 / 657**, **0** compile errors, **419** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed top-level export-coercion slice

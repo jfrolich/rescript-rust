@@ -291,15 +291,27 @@ impl LambdaCompiler {
             }
             Lambda::Lletrec(bindings, body) => {
                 let mut prelude = vec![];
-                for (id, _) in bindings {
-                    prelude.push(Statement::variable(VariableDeclaration {
-                        ident: id.clone(),
-                        value: None,
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    }));
-                }
+                let mut deferred = Vec::new();
                 for (id, expr) in bindings {
+                    match expr {
+                        // OCaml's recursive-let path emits function bindings through the same
+                        // declared-binding route used by non-rec lets, which lets the printer
+                        // recover `function name(...)` at the top level.
+                        Lambda::Lfunction(_) => {
+                            prelude.extend(self.compile_let_binding(LetKind::Alias, id, expr));
+                        }
+                        _ => {
+                            prelude.push(Statement::variable(VariableDeclaration {
+                                ident: id.clone(),
+                                value: None,
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            }));
+                            deferred.push((id, expr));
+                        }
+                    }
+                }
+                for (id, expr) in deferred {
                     let compiled = self.compile_expr(expr);
                     prelude.extend(compiled.prelude);
                     let assign =
@@ -12683,5 +12695,87 @@ mod tests {
             ExpressionDesc::Fun { params, .. } => assert!(params.is_empty()),
             other => panic!("expected lowered JS function, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn recursive_function_bindings_lower_directly_without_placeholder_assignments() {
+        let mut compiler = LambdaCompiler::new();
+        let func = Ident::create_local("u");
+        let param = Ident::create_local("param");
+        let lam = Lambda::letrec(
+            vec![(
+                func.clone(),
+                Lambda::function_(
+                    1,
+                    vec![param],
+                    Lambda::var(func.clone()),
+                    FunctionAttribute::default(),
+                ),
+            )],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert!(
+            rendered.contains("function u(param)"),
+            "expected a direct recursive function declaration:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("let u;"),
+            "unexpected recursive placeholder declaration:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("u ="),
+            "unexpected recursive assignment fallback:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn mutually_recursive_function_bindings_lower_without_placeholder_assignments() {
+        let mut compiler = LambdaCompiler::new();
+        let even = Ident::create_local("even");
+        let odd = Ident::create_local("odd");
+        let n = Ident::create_local("n");
+        let lam = Lambda::letrec(
+            vec![
+                (
+                    even.clone(),
+                    Lambda::function_(
+                        1,
+                        vec![n.clone()],
+                        Lambda::var(odd.clone()),
+                        FunctionAttribute::default(),
+                    ),
+                ),
+                (
+                    odd.clone(),
+                    Lambda::function_(
+                        1,
+                        vec![n],
+                        Lambda::var(even.clone()),
+                        FunctionAttribute::default(),
+                    ),
+                ),
+            ],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert!(
+            rendered.contains("function even(n)"),
+            "expected the first recursive function to lower directly:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("function odd(n)"),
+            "expected the second recursive function to lower directly:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("let even;") && !rendered.contains("let odd;"),
+            "unexpected recursive placeholders remained:\n{rendered}"
+        );
     }
 }
