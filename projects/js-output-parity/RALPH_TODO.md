@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 237 / 657 JS snapshots passing, 0 compile errors, 420 output diffs
+**Status:** 238 / 657 JS snapshots passing, 0 compile errors, 419 output diffs
 
 ## Goal
 
@@ -35,13 +35,47 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **237 / 657**
+- JS snapshot parity: **238 / 657**
 - Compile errors: **0**
-- Output diffs: **420**
+- Output diffs: **419**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed top-level export-coercion slice
+  at the `lam_compile_main.ml` / `J.program.exports` boundary
+- After reading OCaml's backend flow there, the Rust backend in
+  `compiler-rust/src/lambda/compile.rs` now reuses an existing top-level
+  `undefined` export binding only when the remaining suffix is limited to
+  simple effect-free non-function bindings; otherwise it keeps the trailing
+  rebound placeholder path
+- Added focused regression coverage in
+  `lambda::compile::tests::coerce_toplevel_exports_reuses_existing_undefined_binding`,
+  `coerce_toplevel_exports_keeps_undefined_rebound_after_later_effects`, and
+  `coerce_toplevel_exports_skips_unreachable_undefined_placeholder_after_throw`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ModuleWithAlias.res -o /tmp/ModuleWithAlias.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/nested_module_alias.res -o /tmp/nested_module_alias.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalScopeShadow.res -o /tmp/ExternalScopeShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/ModuleWithAlias.res`,
+  `tests/tests/src/nested_module_alias.res`, and
+  `tests/tests/src/ExternalScopeShadow.res` now match the checked-in OCaml
+  snapshots on this top-level placeholder-order cluster, while
+  `tests/tests/src/conditional/cond_a.res` and `tests/tests/src/Import.res`
+  remain separate export/declaration-order drifts
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same backend change
+- The authoritative JS snapshot baseline now reports **238 / 657** passing,
+  **0** compile errors, and **419** output diffs; this is a net **+1**
+  passing snapshot and **-1** output diff from the previously recorded
+  **237 / 657**, **0** compile errors, **420** output diffs
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed declaration-continuation slice

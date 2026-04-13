@@ -147,6 +147,7 @@ impl LambdaCompiler {
 
         let mut declared = HashSet::new();
         collect_declared_idents(block, &mut declared);
+        let block_ended = block_terminates(block);
 
         let mut exports = Vec::with_capacity(extracted.exports.len());
         let mut rebound_exports = Vec::new();
@@ -163,6 +164,14 @@ impl LambdaCompiler {
                         continue;
                     }
                 }
+            }
+            if matches!(value.desc, ExpressionDesc::Undefined { .. })
+                && ((declared.contains(&export)
+                    && can_reuse_existing_undefined_export_binding(block, &export))
+                    || block_ended)
+            {
+                exports.push(export);
+                continue;
             }
 
             let rebound = self.id_gen.create(export.name());
@@ -4235,6 +4244,22 @@ fn extract_toplevel_exports(expr: Expression, block: &mut Block) -> Option<Extra
     }
 }
 
+fn can_reuse_existing_undefined_export_binding(block: &Block, export: &Ident) -> bool {
+    let flattened = flatten_toplevel_block(block);
+    let Some(export_index) = flattened.iter().position(|stmt| {
+        matches!(
+            &stmt.desc,
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(export)
+        )
+    }) else {
+        return false;
+    };
+
+    flattened[export_index + 1..]
+        .iter()
+        .all(statement_allows_undefined_export_reuse)
+}
+
 fn push_effect_expression(block: &mut Block, expr: Expression) {
     match expr.desc {
         ExpressionDesc::Seq(left, right) => {
@@ -4243,6 +4268,17 @@ fn push_effect_expression(block: &mut Block, expr: Expression) {
         }
         _ if js_expr_no_side_effects(&expr) => {}
         _ => block.push(Statement::exp(expr)),
+    }
+}
+
+fn statement_allows_undefined_export_reuse(stmt: &Statement) -> bool {
+    match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration { value, .. }) => value.as_ref().is_none_or(
+            |expr| {
+                !matches!(expr.desc, ExpressionDesc::Fun { .. }) && js_expr_no_side_effects(expr)
+            },
+        ),
+        _ => false,
     }
 }
 
@@ -8443,6 +8479,120 @@ mod tests {
             }
             other => panic!("expected only the original exported binding to remain, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_reuses_existing_undefined_binding() {
+        let mut compiler = LambdaCompiler::new();
+        let alias = Ident::create_local("VS");
+        let other = Ident::create_local("y");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: alias.clone(),
+                value: Some(Expression::undefined(false)),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: other.clone(),
+                value: Some(Expression::number(Number::int(13))),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![alias.clone(), other.clone()],
+                values: vec![Expression::undefined(false), Expression::var(other.clone())],
+            },
+        );
+
+        assert_eq!(exports, vec![alias.clone(), other.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected the existing bindings to be reused without rebound placeholders");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => assert!(ident.same(&alias)),
+            other => panic!("expected the original alias binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => assert!(ident.same(&other)),
+            other => panic!("expected the later binding second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_keeps_undefined_rebound_after_later_effects() {
+        let mut compiler = LambdaCompiler::new();
+        let alias = Ident::create_local("MyURL");
+        let callback = Ident::create_persistent("callback");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: alias.clone(),
+                value: Some(Expression::undefined(false)),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(callback),
+                vec![],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![alias.clone()],
+                values: vec![Expression::undefined(false)],
+            },
+        );
+
+        let [decl, effect, rebound] = block.as_slice() else {
+            panic!("expected the later effect to force a trailing rebound placeholder");
+        };
+        match &decl.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => assert!(ident.same(&alias)),
+            other => panic!("expected the original alias binding first, got {other:?}"),
+        }
+        assert!(matches!(effect.desc, StatementDesc::Exp(_)));
+        match &rebound.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(!ident.same(&alias), "expected a rebound export placeholder at the tail");
+                assert_eq!(ident.name(), alias.name());
+                assert_eq!(exports, vec![ident.clone()]);
+            }
+            other => panic!("expected the trailing rebound export placeholder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_skips_unreachable_undefined_placeholder_after_throw() {
+        let mut compiler = LambdaCompiler::new();
+        let exported = Ident::create_local("u");
+        let mut block = vec![Statement::throw(Expression::string("boom".to_string()))];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::undefined(false)],
+            },
+        );
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [stmt] = block.as_slice() else {
+            panic!("expected the terminating effect to stay alone in the block");
+        };
+        assert!(matches!(
+            stmt.desc,
+            StatementDesc::Throw(Expression {
+                desc: ExpressionDesc::Str { .. },
+                ..
+            })
+        ));
     }
 
     #[test]
