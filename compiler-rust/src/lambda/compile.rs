@@ -1603,6 +1603,21 @@ impl LambdaCompiler {
                 compiled_args[1].clone(),
             ),
             Poffsetint(offset) => int32_offset(compiled_args[0].clone(), *offset),
+            Poffsetref(offset) => {
+                let field = Expression::new(ExpressionDesc::StaticIndex(
+                    Box::new(compiled_args[0].clone()),
+                    "contents".to_string(),
+                    None,
+                ));
+                Expression::new(ExpressionDesc::Seq(
+                    Box::new(Expression::bin(
+                        BinOp::Eq,
+                        field.clone(),
+                        int32_offset(field, *offset),
+                    )),
+                    Box::new(Expression::undefined(false)),
+                ))
+            }
             Pmakearray => Expression::array(compiled_args, MutableFlag::Mutable),
             Pstringadd => Expression::new(ExpressionDesc::StringAppend(
                 Box::new(compiled_args[0].clone()),
@@ -8901,6 +8916,83 @@ mod tests {
                 ));
             }
             other => panic!("expected `lhs + rhs | 0`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_poffsetref_to_ref_contents_update() {
+        let mut compiler = LambdaCompiler::new();
+        let cell = Ident::create_local("cell");
+        let program = compiler.compile_program(&Lambda::prim(
+            Primitive::Poffsetref(1),
+            vec![Lambda::var(cell.clone())],
+            Location::none(),
+        ));
+
+        let [stmt] = program.block.as_slice() else {
+            panic!("expected a single effect statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Bin(BinOp::Eq, left, right),
+                ..
+            }) => {
+                assert!(matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::StaticIndex(target, field, None),
+                        ..
+                    } if field == "contents"
+                        && matches!(
+                            target.as_ref(),
+                            Expression {
+                                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                                ..
+                            } if id.same(&cell)
+                        )
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Bin(BinOp::Bor, offset_inner, truncation),
+                        ..
+                    }
+                    if matches!(
+                        truncation.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
+                            ..
+                        }
+                    ) && matches!(
+                        offset_inner.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Bin(BinOp::Plus, read_back, delta),
+                            ..
+                        }
+                        if matches!(
+                            read_back.as_ref(),
+                            Expression {
+                                desc: ExpressionDesc::StaticIndex(target, field, None),
+                                ..
+                            } if field == "contents"
+                                && matches!(
+                                    target.as_ref(),
+                                    Expression {
+                                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                                        ..
+                                    } if id.same(&cell)
+                                )
+                        ) && matches!(
+                            delta.as_ref(),
+                            Expression {
+                                desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                                ..
+                            }
+                        )
+                    )
+                ));
+            }
+            other => panic!("expected `cell.contents = cell.contents + 1 | 0`, got {other:?}"),
         }
     }
 

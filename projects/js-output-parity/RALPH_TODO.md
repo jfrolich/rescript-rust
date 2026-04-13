@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 129 / 657 JS snapshots passing, 0 compile errors, 528 output diffs
+**Status:** 130 / 657 JS snapshots passing, 0 compile errors, 527 output diffs
 
 ## Goal
 
@@ -35,13 +35,37 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **129 / 657**
+- JS snapshot parity: **130 / 657**
 - Compile errors: **0**
-- Output diffs: **528**
+- Output diffs: **527**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- `compiler-rust/src/lambda/compile.rs` now matches one more slice of
+  OCaml `core/lam_compile_primitive.ml` on the Rust JS path:
+  `Primitive::Poffsetref` no longer falls through the generic
+  `_ => undefined` fallback, and now lowers to the same ref-field update shape
+  OCaml emits (`ref.contents = ref.contents + n | 0; undefined`)
+- Added focused coverage for this slice in
+  `lambda::compile::tests::lowers_poffsetref_to_ref_contents_update`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib lambda::compile::tests::lowers_poffsetref_to_ref_contents_update -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/functor_def.res -o /tmp/functor_def.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_simple_ref.res -o /tmp/test_simple_ref.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/functor_def.res` now matches its checked-in `.mjs`
+  snapshot exactly again; the missing `v.contents = v.contents + 1 | 0`
+  side effect in `f` was entirely the unimplemented `Poffsetref` path
+- `tests/tests/src/test_simple_ref.res` narrowed materially:
+  the old missing increment in `gen()` is gone, and the remaining drift is now
+  later ref-allocation / escape shaping (`let a = 0` vs `{contents: 0}` and
+  `not_real_escape = a` vs `a.contents`) rather than dropped mutation effects
+- The authoritative JS snapshot baseline now reports **130 / 657** passing,
+  **0** compile errors, and **527** output diffs after the OCaml-aligned
+  `Poffsetref` lowering fix
 
 - `compiler-rust/src/lambda/compile.rs` now matches one more slice of
   OCaml `core/lam_compile.ml` on the Rust JS path:
