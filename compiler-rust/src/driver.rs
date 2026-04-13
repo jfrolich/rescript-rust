@@ -1502,6 +1502,285 @@ pub fn compile_file_to_js_with_options(
     compile_source_to_js_with_options(&source, &filename, options)
 }
 
+// ============================================================================
+// In-Process Compilation API
+// ============================================================================
+//
+// These entry points are designed for `rewatch --in-process` where the build
+// orchestrator owns the `PersistentEnv` and dependency interfaces live in
+// memory rather than on disk as `.cmi` files.
+
+use crate::types::decl::Signature as DeclSignature;
+
+/// Result of an in-process `.res` compilation.
+///
+/// Contains the generated JavaScript, the module's published interface
+/// (for downstream dependents), and the `PersistentEnv` (returned so the
+/// caller can continue to use it for subsequent compilations).
+pub struct InProcessCompileResult {
+    /// Generated JavaScript source text.
+    pub js_output: String,
+    /// The module's published signature (inferred from `.res`).
+    /// Suitable for passing to `PersistentEnv::register_in_memory_signature`.
+    pub signature: DeclSignature,
+    /// The `PersistentEnv` after compilation, with any new modules loaded
+    /// during this compilation cached inside.
+    pub persistent_env: PersistentEnv,
+}
+
+/// Result of an in-process `.resi` interface type-check.
+///
+/// Contains the interface signature and the `PersistentEnv`.
+pub struct InProcessInterfaceResult {
+    /// The module's published signature (from the `.resi` file).
+    /// Suitable for passing to `PersistentEnv::register_in_memory_signature`.
+    pub signature: DeclSignature,
+    /// The `PersistentEnv` after type-checking.
+    pub persistent_env: PersistentEnv,
+}
+
+/// Compile a `.res` source file fully in-process, returning JS output and
+/// the module's published interface.
+///
+/// Unlike `compile_source_to_js_with_options`, this function:
+/// - Takes ownership of a caller-provided `PersistentEnv` (with in-memory
+///   module interfaces already registered for dependencies).
+/// - Does NOT probe the filesystem for a sibling `.resi` file. Instead, the
+///   caller passes `has_interface: true` when a `.resi` exists and has
+///   already been typechecked and registered in `persistent_env`.
+/// - Returns the inferred `Signature` so the caller can register it for
+///   downstream dependents.
+/// - Returns the `PersistentEnv` back to the caller.
+pub fn compile_source_in_process(
+    source: &str,
+    filename: &str,
+    options: &CompilerOptions,
+    persistent_env: PersistentEnv,
+    has_interface: bool,
+) -> Result<InProcessCompileResult> {
+    // Parse
+    let mut parser = Parser::new(filename, source);
+    let structure = module::parse_structure(&mut parser);
+    if parser.has_errors() {
+        return Err(anyhow!(
+            "Parse failed with {} error(s)",
+            parser.diagnostics().len()
+        ));
+    }
+    let file_directives = extract_file_directives_from_structure(&structure, parser.arena())?;
+    let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
+    let structure = if let Some(jsx_version) = jsx_version {
+        jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
+    } else {
+        structure
+    };
+    let structure = ppx::expand_extensions(&structure, parser.arena_mut());
+    let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
+        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+
+    // Type check
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    let _ = id_gen.next_stamp();
+    let type_ctx = TypeContext::new(&id_gen);
+    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+    let mut env = initial_env(&type_ctx);
+
+    // Use the caller-provided PersistentEnv (with in-memory modules pre-registered)
+    let mut pers_env = persistent_env;
+    let load_path = build_load_path(options);
+    type_ctx.set_load_paths(load_path.clone());
+    pers_env.set_load_path(load_path);
+    pers_env.set_open_modules(options.open_modules.clone());
+    pers_env.set_jsx_version(options.jsx_version);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
+
+    tctx.set_persistent_env(pers_env);
+
+    let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
+        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+
+    // Apply interface constraints if a .resi was pre-registered.
+    // In --in-process mode we don't probe the filesystem; `has_interface` is
+    // set by the caller when the .resi has already been typechecked and its
+    // signature registered in the PersistentEnv.
+    if has_interface {
+        apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
+    }
+
+    // Normalize only when there's no .resi (matching OCaml's behavior).
+    if !has_interface {
+        normalize_signature_types(&type_ctx, &typed_structure, &final_env);
+    }
+
+    // Prepare the inferred signature for saving (renames idents).
+    prepare_inferred_signature_for_saving(
+        &type_ctx,
+        &typed_structure,
+        options.source_filename.as_deref(),
+        has_interface,
+    );
+
+    // Extract the published signature.
+    let published_signature = if has_interface {
+        // When .resi exists, the published interface comes from the .resi
+        // (already registered in pers_env). Return the simplified impl sig
+        // for completeness — the caller should use the .resi signature.
+        crate::types::includemod::simplify_signature(&typed_structure.str_type)
+    } else {
+        // No .resi: the published interface is the inferred signature.
+        crate::types::includemod::simplify_signature(&typed_structure.str_type)
+    };
+
+    // Lambda conversion
+    let lambda_start_stamp = type_ctx
+        .current_stamp()
+        .max(max_lambda_input_stamp(&typed_structure));
+
+    let unit_name = options
+        .source_filename
+        .as_deref()
+        .map(module_name_from_source_filename)
+        .unwrap_or_default();
+    let implementation_coercion =
+        compute_raw_implementation_coercion(&mut tctx, &type_ctx, &env, &typed_structure, options);
+    let mut raw_converter =
+        crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
+            parser.arena(),
+            &type_ctx,
+            &env,
+            lambda_start_stamp,
+            unit_name,
+        );
+    if let Some(persistent_env) = tctx.persistent_env.clone() {
+        raw_converter.set_persistent_env(persistent_env);
+    }
+    let raw_lambda =
+        raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+    let possible_required_modules = raw_converter.take_possible_required_modules();
+    let raw_lambda_current_stamp = raw_converter.current_stamp();
+
+    let lowered_lambda = crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
+        raw_lambda,
+        raw_lambda_current_stamp,
+    );
+
+    // Lambda -> JS IR
+    let mut module_path_resolver = ModulePathResolver::from_compile_options(
+        options.source_filename.as_deref(),
+        options.output_path.as_deref(),
+        options.runtime_path.as_deref(),
+        tctx.persistent_env.clone(),
+    );
+    for module in &possible_required_modules {
+        if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
+            if let Some(path) =
+                module_path_resolver.resolve_local_module_fallback_path(module.id.name())
+            {
+                module_path_resolver.set_module_path_override(module.id.name(), path);
+            }
+        }
+    }
+    let mut compiler =
+        LambdaCompiler::with_module_path_resolver(Some(module_path_resolver.clone()));
+    let program = compiler.compile_deps_program_with_possible_required_modules(
+        &lowered_lambda,
+        &possible_required_modules,
+    );
+
+    // JS IR -> JS source
+    let js =
+        print_deps_program_with_directives(&program, Some(&module_path_resolver), &file_directives);
+
+    // Return the PersistentEnv back to the caller.
+    let returned_env = tctx
+        .persistent_env
+        .take()
+        .unwrap_or_else(PersistentEnv::new);
+
+    Ok(InProcessCompileResult {
+        js_output: js,
+        signature: published_signature,
+        persistent_env: returned_env,
+    })
+}
+
+/// Type-check a `.resi` interface file fully in-process, returning the
+/// module's published signature.
+///
+/// Unlike `typecheck_interface_source`, this function:
+/// - Takes ownership of a caller-provided `PersistentEnv`.
+/// - Returns the `Signature` so the caller can register it for downstream
+///   dependents via `PersistentEnv::register_in_memory_signature`.
+/// - Returns the `PersistentEnv` back to the caller.
+pub fn typecheck_interface_in_process(
+    source: &str,
+    filename: &str,
+    options: &CompilerOptions,
+    persistent_env: PersistentEnv,
+) -> Result<InProcessInterfaceResult> {
+    // Parse as signature
+    let mut parser = Parser::new(filename, source);
+    let signature = module::parse_signature(&mut parser);
+    if parser.has_errors() {
+        return Err(anyhow!(
+            "Parse failed with {} error(s)",
+            parser.diagnostics().len()
+        ));
+    }
+
+    // Type check
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    let _ = id_gen.next_stamp();
+    let type_ctx = TypeContext::new(&id_gen);
+    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+    let mut env = initial_env(&type_ctx);
+
+    // Use the caller-provided PersistentEnv
+    let mut pers_env = persistent_env;
+    let load_path = build_load_path(options);
+    type_ctx.set_load_paths(load_path.clone());
+    pers_env.set_load_path(load_path);
+    pers_env.set_open_modules(options.open_modules.clone());
+    pers_env.set_jsx_version(options.jsx_version);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
+
+    tctx.set_persistent_env(pers_env);
+
+    let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
+        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+
+    // Extract the Signature (Vec<SignatureItem>) from the TypedSignature.
+    // This mirrors the pattern used in PersistentEnv::typecheck_source_fallback:
+    // wrap in TypedModuleType, then convert via decl_module_type_from_typed.
+    let typed_module_type = crate::types::typedtree::ModuleType {
+        mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature),
+        mty_loc: crate::parse_arena::LocIdx(0),
+        mty_attributes: crate::parser::ast::Attributes::new(),
+    };
+    let published_signature =
+        match crate::types::typemod::decl_module_type_from_typed(&typed_module_type) {
+            Some(crate::types::decl::ModuleType::MtySignature(sig)) => sig,
+            _ => {
+                return Err(anyhow!(
+                    "Failed to extract interface signature from typed tree"
+                ))
+            }
+        };
+
+    // Return the PersistentEnv back to the caller.
+    let returned_env = tctx
+        .persistent_env
+        .take()
+        .unwrap_or_else(PersistentEnv::new);
+
+    Ok(InProcessInterfaceResult {
+        signature: published_signature,
+        persistent_env: returned_env,
+    })
+}
+
 /// Build the load path from compiler options.
 ///
 /// Matches OCaml's `res_compmisc.ml:init_path()`:
