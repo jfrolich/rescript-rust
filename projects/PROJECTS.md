@@ -61,6 +61,16 @@ Achieve full unoptimized lambda parity between the Rust and OCaml compilers. Foc
 | [RALPH_TODO.md](./raw-lambda-parity/RALPH_TODO.md) | Agent task tracking for raw lambda parity |
 | [RALPH_SETUP.md](./raw-lambda-parity/RALPH_SETUP.md) | Build, baseline, and cache inspection instructions |
 
+### [rewatch-in-memory-build](./rewatch-in-memory-build/)
+
+Make `rewatch` run the compiler in-process and remove compiler assets from the build protocol entirely. Dependency interfaces should be published and resolved from in-memory build state, with only final JS emitted. `node_modules` packages remain source-backed; `@rescript/runtime` needs explicit in-memory bootstrap.
+
+| Document | Description |
+|----------|-------------|
+| [RALPH_PROMPT.md](./rewatch-in-memory-build/RALPH_PROMPT.md) | Agent loop instructions for the in-memory rewatch build refactor |
+| [RALPH_TODO.md](./rewatch-in-memory-build/RALPH_TODO.md) | Agent task tracking, execution order, and current architecture notes |
+| [RALPH_SETUP.md](./rewatch-in-memory-build/RALPH_SETUP.md) | Build, test, and no-compiler-assets verification commands |
+
 ### [optimized-lambda-parity](./optimized-lambda-parity/)
 
 Achieve full optimized lambda parity between the Rust and OCaml compilers. Focuses on replacing the legacy typedtree-to-lambda shortcut with the real OCaml lambda conversion and pass pipeline from `lam_compile_main.ml` and the `lam_*` pass modules. Current baseline: 657/657 files, 0 hunks.
