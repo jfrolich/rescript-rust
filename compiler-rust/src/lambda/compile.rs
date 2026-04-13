@@ -2518,15 +2518,27 @@ impl LambdaCompiler {
                 Some(ConstructorRuntimeTag::Null) => Expression::null(),
                 Some(ConstructorRuntimeTag::Undefined) => Expression::undefined(false),
                 None if tag.name != "[]" => Expression::string(tag.name.clone()),
-                None => Expression::number(Number::int(*i)),
+                None => Expression::with_comment(
+                    ExpressionDesc::Number(Number::int(*i)),
+                    tag.name.clone(),
+                ),
             },
             Constant::Int { i, comment } => {
-                let _ = comment;
-                Expression::number(Number::int(*i))
+                match pointer_info_comment_text(comment.as_ref()) {
+                    Some(comment) => {
+                        Expression::with_comment(ExpressionDesc::Number(Number::int(*i)), comment)
+                    }
+                    None => Expression::number(Number::int(*i)),
+                }
             }
             Constant::NativeInt { i, comment } => {
-                let _ = comment;
-                Expression::number(Number::float(i.to_string()))
+                match pointer_info_comment_text(comment.as_ref()) {
+                    Some(comment) => Expression::with_comment(
+                        ExpressionDesc::Number(Number::float(i.to_string())),
+                        comment,
+                    ),
+                    None => Expression::number(Number::float(i.to_string())),
+                }
             }
             Constant::Char(c) => Expression::number(Number::Int { i: *c, c: Some(*c) }),
             Constant::String { s, delim } => {
@@ -7645,6 +7657,17 @@ fn is_builtin_untagged_switch_name(name: &str) -> bool {
     )
 }
 
+fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option<String> {
+    match comment {
+        Some(PointerInfo::None) | None => None,
+        Some(PointerInfo::Constructor(tag)) => Some(tag.name.clone()),
+        Some(PointerInfo::AssertFalse) => Some("assert_false".to_string()),
+        Some(PointerInfo::Some(name)) | Some(PointerInfo::PolyVariant(name)) => {
+            Some(name.clone())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7750,7 +7773,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_constant_empty_list_keeps_numeric_zero() {
+    fn compile_constant_empty_list_keeps_numeric_zero_with_pointer_comment() {
         let compiled = LambdaCompiler::compile_constant(&Constant::Int {
             i: 0,
             comment: Some(PointerInfo::Constructor(ConstructorTag {
@@ -7765,9 +7788,11 @@ mod tests {
             compiled,
             Expression {
                 desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
-                ..
+                comment: Some(ref comment),
             }
+            if comment == "[]"
         ));
+        assert_eq!(print_expression(&compiled), "/* [] */0");
     }
 
     #[test]

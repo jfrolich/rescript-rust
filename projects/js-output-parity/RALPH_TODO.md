@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 194 / 657 JS snapshots passing, 1 compile error, 462 output diffs
+**Status:** 195 / 657 JS snapshots passing, 0 compile errors, 462 output diffs
 
 ## Goal
 
@@ -35,13 +35,53 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **194 / 657**
-- Compile errors: **1**
+- JS snapshot parity: **195 / 657**
+- Compile errors: **0**
 - Output diffs: **462**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed constant-lowering / dumper
+  metadata slice in `compiler/core/lam_compile_const.ml` and
+  `compiler/core/js_dump.ml`
+- After reading those OCaml files, the Rust backend now preserves
+  `Lam_constant.string_of_pointer_info` comments on numeric constants instead of
+  dropping them in `compiler-rust/src/lambda/compile.rs`
+- This specifically restores the `/* [] */0` empty-list marker on the JS IR
+  node for constructor-backed numeric zero, which is how OCaml keeps list-tail
+  and empty-list literals annotated all the way into `js_dump.ml`
+- The same Rust-side helper now preserves other pointer-info comments like
+  `assert_false` and named constructor/polyvariant comments when they lower to
+  numeric literals instead of strings
+- Added focused regression coverage in
+  `lambda::compile::tests::compile_constant_empty_list_keeps_numeric_zero_with_pointer_comment`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_constant_empty_list_keeps_numeric_zero_with_pointer_comment -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Import.res -o /tmp/Import.mjs`
+  - exact harness-mode AST repro for `tests/tests/src/belt_list_test.res` from
+    `tests/tests/lib/bs` using the checked-in `compiler-args`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/Import.res` now preserves `/* [] */0` in the generated JS;
+  its remaining drift is the separate statement-order / compact-array /
+  compact-record printer cluster, not missing constant comments
+- The broader list-heavy harness repro for `tests/tests/src/belt_list_test.res`
+  now also preserves `/* [] */0` throughout the emitted output
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change
+- Across cached diff artifacts, files whose diffs still contain missing
+  `/* [] */0` markers dropped from **62** to **60** in this iteration
+- The authoritative JS snapshot baseline now reports **195 / 657** passing,
+  **0** compile errors, and **462** output diffs; this is a net **+1** passing
+  snapshot and **-1** output diff from the freshly re-baselined
+  **194 / 657**, **0** compile errors, **463** output diffs that preceded this
+  fix
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   but this iteration isolated and fixed one OCaml-backed nontermination guard
