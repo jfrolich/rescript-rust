@@ -83,6 +83,20 @@ impl LambdaCompiler {
 
     /// Compile a Lambda expression into a JS IR program with module metadata.
     pub fn compile_deps_program(&mut self, lam: &Lambda) -> DepsProgram {
+        let possible_required_modules = std::collections::HashSet::new();
+        self.compile_deps_program_with_possible_required_modules(lam, &possible_required_modules)
+    }
+
+    /// Compile a Lambda expression into a JS IR program with module metadata
+    /// and additional required modules captured before later coercion/simplify
+    /// stages erase the original global-module reference.
+    pub fn compile_deps_program_with_possible_required_modules(
+        &mut self,
+        lam: &Lambda,
+        extra_possible_required_modules: &std::collections::HashSet<ModuleId>,
+    ) -> DepsProgram {
+        let mut possible_required_modules = collect_possible_required_modules(lam);
+        possible_required_modules.extend(extra_possible_required_modules.iter().cloned());
         let simplified = crate::lambda::simplify::simplify_for_js_backend(lam);
         let compiled = self.compile_expr(&simplified);
         let mut block = compiled.prelude;
@@ -99,7 +113,13 @@ impl LambdaCompiler {
                 },
             ))),
         ));
-        deps.modules = self.collect_required_modules(&deps.program.block);
+        let mut required_modules = self.collect_required_modules(&deps.program.block);
+        populate_required_modules(
+            self.module_path_resolver.as_ref(),
+            &possible_required_modules,
+            &mut required_modules,
+        );
+        deps.modules = required_modules;
         if deps.side_effect.is_none() {
             deps.side_effect = required_module_side_effect_reason(
                 self.module_path_resolver.as_ref(),
@@ -793,39 +813,30 @@ impl LambdaCompiler {
         )
     }
 
-    fn builtin_untagged_instance_test(&self, expr: Expression, case_name: &str) -> Option<Expression> {
+    fn builtin_untagged_instance_test(
+        &self,
+        expr: Expression,
+        case_name: &str,
+    ) -> Option<Expression> {
         match case_name {
             "Array" => Some(Expression::call(
-                self.static_index(Expression::var(Ident::create_persistent("Array")), "isArray"),
+                self.static_index(
+                    Expression::var(Ident::create_persistent("Array")),
+                    "isArray",
+                ),
                 vec![expr],
                 CallInfo::default(),
             )),
-            "ArrayBuffer"
-            | "BigInt64Array"
-            | "BigUint64Array"
-            | "Blob"
-            | "DataView"
-            | "Date"
-            | "File"
-            | "Float32Array"
-            | "Float64Array"
-            | "Int16Array"
-            | "Int32Array"
-            | "Int8Array"
-            | "Promise"
-            | "RegExp"
-            | "Set"
-            | "Map"
-            | "Uint16Array"
-            | "Uint32Array"
-            | "Uint8Array"
-            | "Uint8ClampedArray"
-            | "WeakSet"
-            | "WeakMap" => Some(Expression::bin(
-                BinOp::InstanceOf,
-                expr,
-                Expression::var(Ident::create_persistent(case_name)),
-            )),
+            "ArrayBuffer" | "BigInt64Array" | "BigUint64Array" | "Blob" | "DataView" | "Date"
+            | "File" | "Float32Array" | "Float64Array" | "Int16Array" | "Int32Array"
+            | "Int8Array" | "Promise" | "RegExp" | "Set" | "Map" | "Uint16Array"
+            | "Uint32Array" | "Uint8Array" | "Uint8ClampedArray" | "WeakSet" | "WeakMap" => {
+                Some(Expression::bin(
+                    BinOp::InstanceOf,
+                    expr,
+                    Expression::var(Ident::create_persistent(case_name)),
+                ))
+            }
             _ => None,
         }
     }
@@ -1659,8 +1670,8 @@ impl LambdaCompiler {
             let scrut_compiled = self.compile_expr(scrut);
             let (mut block, scrut_expr) =
                 self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
-            if let Some(dispatch) =
-                self.compile_builtin_untagged_switch_assignment_statements(result, scrut_expr, switch)
+            if let Some(dispatch) = self
+                .compile_builtin_untagged_switch_assignment_statements(result, scrut_expr, switch)
             {
                 block.extend(dispatch);
                 return block;
@@ -2868,16 +2879,13 @@ impl LambdaCompiler {
 
                 if *tagged_template {
                     match args.as_slice() {
-                        [
-                            Expression {
-                                desc: ExpressionDesc::Array(strings, _),
-                                ..
-                            },
-                            Expression {
-                                desc: ExpressionDesc::Array(values, _),
-                                ..
-                            },
-                        ] => {
+                        [Expression {
+                            desc: ExpressionDesc::Array(strings, _),
+                            ..
+                        }, Expression {
+                            desc: ExpressionDesc::Array(values, _),
+                            ..
+                        }] => {
                             return Expression::new(ExpressionDesc::TaggedTemplate(
                                 Box::new(target),
                                 strings.clone(),
@@ -3217,6 +3225,122 @@ fn module_sort_cmp(left: &ModuleId, right: &ModuleId) -> std::cmp::Ordering {
         .len()
         .cmp(&right_name.len())
         .then_with(|| left_name.cmp(right_name))
+}
+
+fn collect_possible_required_modules(lam: &Lambda) -> std::collections::HashSet<ModuleId> {
+    let mut seen = std::collections::HashSet::new();
+    collect_modules_from_lambda(lam, &mut seen);
+    seen
+}
+
+fn collect_modules_from_lambda(lam: &Lambda, seen: &mut std::collections::HashSet<ModuleId>) {
+    match lam {
+        Lambda::Lvar(_) | Lambda::Lconst(_) => {}
+        Lambda::LglobalModule(id, dynamic_import) => {
+            if !*dynamic_import {
+                seen.insert(ModuleId {
+                    id: id.clone(),
+                    kind: Kind::Ml,
+                    dynamic_import: false,
+                });
+            }
+        }
+        Lambda::Lapply(apply) => {
+            collect_modules_from_lambda(&apply.ap_func, seen);
+            for arg in &apply.ap_args {
+                collect_modules_from_lambda(arg, seen);
+            }
+        }
+        Lambda::Lfunction(func) => collect_modules_from_lambda(&func.body, seen),
+        Lambda::Llet(_, _, value, body) => {
+            collect_modules_from_lambda(value, seen);
+            collect_modules_from_lambda(body, seen);
+        }
+        Lambda::Lletrec(bindings, body) => {
+            for (_, binding) in bindings {
+                collect_modules_from_lambda(binding, seen);
+            }
+            collect_modules_from_lambda(body, seen);
+        }
+        Lambda::Lprim(info) => {
+            for arg in &info.args {
+                collect_modules_from_lambda(arg, seen);
+            }
+        }
+        Lambda::Lswitch(arg, switch) => {
+            collect_modules_from_lambda(arg, seen);
+            for (_, branch) in &switch.sw_consts {
+                collect_modules_from_lambda(branch, seen);
+            }
+            for (_, branch) in &switch.sw_blocks {
+                collect_modules_from_lambda(branch, seen);
+            }
+            if let Some(failaction) = &switch.sw_failaction {
+                collect_modules_from_lambda(failaction, seen);
+            }
+        }
+        Lambda::LstringSwitch(arg, cases, default) => {
+            collect_modules_from_lambda(arg, seen);
+            for (_, branch) in cases {
+                collect_modules_from_lambda(branch, seen);
+            }
+            if let Some(default) = default {
+                collect_modules_from_lambda(default, seen);
+            }
+        }
+        Lambda::LstaticRaise(_, args) => {
+            for arg in args {
+                collect_modules_from_lambda(arg, seen);
+            }
+        }
+        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+            collect_modules_from_lambda(body, seen);
+            collect_modules_from_lambda(handler, seen);
+        }
+        Lambda::LifThenElse(cond, then_, else_) => {
+            collect_modules_from_lambda(cond, seen);
+            collect_modules_from_lambda(then_, seen);
+            collect_modules_from_lambda(else_, seen);
+        }
+        Lambda::Lsequence(first, second) => {
+            collect_modules_from_lambda(first, seen);
+            collect_modules_from_lambda(second, seen);
+        }
+        Lambda::Lwhile(cond, body) => {
+            collect_modules_from_lambda(cond, seen);
+            collect_modules_from_lambda(body, seen);
+        }
+        Lambda::Lfor(_, start, finish, _, body) => {
+            collect_modules_from_lambda(start, seen);
+            collect_modules_from_lambda(finish, seen);
+            collect_modules_from_lambda(body, seen);
+        }
+        Lambda::Lassign(_, value) => collect_modules_from_lambda(value, seen),
+    }
+}
+
+fn populate_required_modules(
+    module_path_resolver: Option<&ModulePathResolver>,
+    extras: &std::collections::HashSet<ModuleId>,
+    modules: &mut Vec<ModuleId>,
+) {
+    let mut seen = modules
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    for module in extras {
+        if !module.dynamic_import
+            && required_module_side_effect_reason(
+                module_path_resolver,
+                std::slice::from_ref(module),
+            )
+            .is_some()
+            && seen.insert(module.clone())
+        {
+            modules.push(module.clone());
+        }
+    }
+    modules.sort_by(module_sort_cmp);
 }
 
 fn module_side_effect_reason(lam: &Lambda) -> Option<String> {
@@ -8210,11 +8334,17 @@ mod tests {
                 sw_blocks: vec![
                     (
                         0,
-                        Lambda::Lassign(array_seen.clone(), Box::new(Lambda::const_(Constant::int(1)))),
+                        Lambda::Lassign(
+                            array_seen.clone(),
+                            Box::new(Lambda::const_(Constant::int(1))),
+                        ),
                     ),
                     (
                         1,
-                        Lambda::Lassign(object_seen.clone(), Box::new(Lambda::const_(Constant::int(2)))),
+                        Lambda::Lassign(
+                            object_seen.clone(),
+                            Box::new(Lambda::const_(Constant::int(2))),
+                        ),
                     ),
                 ],
                 sw_failaction: Some(Box::new(Lambda::unit())),
@@ -9707,6 +9837,20 @@ mod tests {
     }
 
     #[test]
+    fn skips_dynamic_import_only_possible_required_modules() {
+        let mut compiler = LambdaCompiler::new();
+        let extras = std::collections::HashSet::from([ModuleId {
+            id: Ident::create_persistent("Side_effect"),
+            kind: Kind::Ml,
+            dynamic_import: true,
+        }]);
+        let deps =
+            compiler.compile_deps_program_with_possible_required_modules(&Lambda::unit(), &extras);
+
+        assert!(deps.modules.is_empty());
+    }
+
+    #[test]
     fn sorts_external_module_dependencies_by_module_name() {
         let compiler = LambdaCompiler::new();
         let block = vec![
@@ -9807,6 +9951,27 @@ mod tests {
         );
 
         assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn preserves_impure_side_effect_only_ml_dependencies_from_lambda() {
+        let resolver = resolver_with_checked_in_cmj();
+        let side_effect = Ident::create_persistent("Side_effect");
+        let include_binding = Ident::create_local("include");
+        let mut compiler = LambdaCompiler::with_module_path_resolver(Some(resolver));
+        let deps = compiler.compile_deps_program(&Lambda::let_(
+            LetKind::Alias,
+            include_binding,
+            Lambda::global_module(side_effect.clone(), false),
+            Lambda::unit(),
+        ));
+
+        assert!(deps.program.block.is_empty());
+        assert!(deps.program.exports.is_empty());
+        assert_eq!(deps.modules.len(), 1);
+        assert_eq!(deps.modules[0].id.name(), side_effect.name());
+        assert_eq!(deps.modules[0].kind, Kind::Ml);
+        assert_eq!(deps.side_effect.as_deref(), Some("Side_effect"));
     }
 
     #[test]

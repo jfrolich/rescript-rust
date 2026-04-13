@@ -44,6 +44,39 @@ reported:
 Interpretation:
 
 - Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed in the raw-lambda to deps-program
+  bridge instead of treating the extra `import * as Side_effect` line as a
+  printer bug
+- `compiler-rust/src/raw_lambda/convert.rs` now matches the OCaml dynamic
+  import path more closely when packed modules flow through coercion:
+  `apply_coercion_raw` now preserves the caller's dynamic-import scope while it
+  pre-records possible required modules, so the packed `await Side_effect`
+  path no longer records the same module once as static and once as dynamic
+- Added focused coverage for this slice in
+  `dynamic_import_pack_idents_record_only_dynamic_possible_requirements`,
+  alongside the earlier dynamic-import possible-required-module regression
+  tests
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib raw_lambda::convert::tests::dynamic_import_ -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib lambda::compile::tests::skips_dynamic_import_only_possible_required_modules -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact AST-path repro for `tests/tests/src/import_side_effect.res`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/include_side_effect.res -o /tmp/include_side_effect.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/import_side_effect.res` now matches its checked-in `.mjs`
+  snapshot exactly again; the transient extra static `Side_effect` import came
+  from raw-lambda coercion bookkeeping, not the final JS printer
+- `tests/tests/src/ExternalShadow.res` and
+  `tests/tests/src/include_side_effect.res` remain exact guard-file matches
+  after the fix
+- The authoritative JS snapshot baseline is back to the recorded
+  **146 / 657** passing, **0** compile errors, and **511** output diffs after
+  this OCaml-aligned dynamic-import required-module fix; this iteration
+  recovers the session-local regression from **145 / 657** and **512** diffs,
+  even though the topline does not exceed the checked-in project baseline yet
+
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
   from `PLAN.md`; this iteration stayed inside
   `compiler-rust/src/lambda/compile.rs` and ported another
   `compiler/core/lam_compile.ml` runtime-dispatch slice instead of treating the

@@ -16,14 +16,16 @@
 pub mod op;
 pub mod printer;
 
+use std::collections::HashMap;
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Component, Path as FsPath, PathBuf};
 
 use crate::cmi::persistent_env::PersistentEnv;
 use crate::ident::Ident;
 use crate::lambda::tag_info::TagInfo;
 pub use op::{BinOp, IdentInfo, Kind, LengthObject, MutableFlag, Number, Property, PropertyName};
-pub use printer::{JsPrinter, print_block, print_deps_program, print_expression, print_program};
+pub use printer::{print_block, print_deps_program, print_expression, print_program, JsPrinter};
 
 /// Module identifier for imports/requires
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -53,6 +55,7 @@ pub struct ModulePathResolver {
     current_source_path: Option<PathBuf>,
     runtime_path: Option<PathBuf>,
     persistent_env: Option<PersistentEnv>,
+    path_overrides: HashMap<String, String>,
 }
 
 impl ModulePathResolver {
@@ -70,11 +73,27 @@ impl ModulePathResolver {
                 .map(|path| normalize_absolute_path(FsPath::new(path))),
             runtime_path: runtime_path.map(normalize_absolute_path),
             persistent_env,
+            path_overrides: HashMap::new(),
         }
+    }
+
+    /// Override a module's emitted JS import path.
+    pub fn set_module_path_override(&mut self, module_name: &str, path: String) {
+        self.path_overrides.insert(module_name.to_string(), path);
+    }
+
+    /// Resolve a same-directory source fallback path for an ML module.
+    pub fn resolve_local_module_fallback_path(&self, module_name: &str) -> Option<String> {
+        let target_source = self.fallback_local_module_source(module_name)?;
+        self.relative_output_path(&target_source)
     }
 
     /// Resolve the emitted JavaScript import path for a lowered module id.
     pub fn resolve_module_path(&self, module: &ModuleId) -> Option<String> {
+        if let Some(path) = self.path_overrides.get(module.id.name()) {
+            return Some(path.clone());
+        }
+
         match &module.kind {
             Kind::External { name, .. } => Some(name.clone()),
             Kind::Runtime => Some(self.runtime_module_path(module.id.name())),
@@ -84,8 +103,8 @@ impl ModulePathResolver {
                 } else {
                     let target_source = self
                         .persistent_env
-                        .as_ref()?
-                        .resolve_module_source_path(module.id.name())
+                        .as_ref()
+                        .and_then(|env| env.resolve_module_source_path(module.id.name()))
                         .map(|path| normalize_absolute_path(&path))?;
                     self.relative_output_path(&target_source)
                 }
@@ -153,6 +172,41 @@ impl ModulePathResolver {
             rendered = format!("./{rendered}");
         }
         Some(rendered)
+    }
+
+    fn fallback_local_module_source(&self, module_name: &str) -> Option<PathBuf> {
+        let current_source = self.current_source_path.as_ref()?;
+        let current_dir = current_source.parent()?;
+        let entries = fs::read_dir(current_dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        let mut candidate_stems = vec![module_name.to_string()];
+        if let Some(first) = module_name.chars().next() {
+            if first.is_ascii_uppercase() {
+                candidate_stems.push(format!(
+                    "{}{}",
+                    first.to_ascii_lowercase(),
+                    &module_name[first.len_utf8()..]
+                ));
+            }
+        }
+
+        for stem in candidate_stems {
+            for ext in ["res", "ml"] {
+                let candidate_name = format!("{stem}.{ext}");
+                if let Some(path) = entries.iter().find(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.eq_ignore_ascii_case(&candidate_name))
+                }) {
+                    return Some(path.clone());
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -767,11 +821,7 @@ impl Statement {
 fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statement {
     match cond.desc {
         ExpressionDesc::Bool(value) => {
-            return Statement::new(StatementDesc::Block(if value {
-                then_
-            } else {
-                else_
-            }))
+            return Statement::new(StatementDesc::Block(if value { then_ } else { else_ }))
         }
         ExpressionDesc::JsNot(inner) if !else_.is_empty() => {
             return simplify_if_statement(*inner, else_, then_);
@@ -786,7 +836,9 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         return simplify_if_statement(negate_condition(cond), else_, vec![]);
     }
 
-    if let (Some(then_ret), Some(else_ret)) = (single_return_expr(&then_), single_return_expr(&else_)) {
+    if let (Some(then_ret), Some(else_ret)) =
+        (single_return_expr(&then_), single_return_expr(&else_))
+    {
         return Statement::return_(Expression::cond(cond, then_ret, else_ret));
     }
 
@@ -808,9 +860,10 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         return Statement::new(StatementDesc::Block(block));
     }
 
-    if let (Some((lhs_then, rhs_then)), Some((lhs_else, rhs_else))) =
-        (single_assignment_expr(&then_), single_assignment_expr(&else_))
-    {
+    if let (Some((lhs_then, rhs_then)), Some((lhs_else, rhs_else))) = (
+        single_assignment_expr(&then_),
+        single_assignment_expr(&else_),
+    ) {
         if same_assignment_target(&lhs_then, &lhs_else) {
             return Statement::exp(Expression::bin(
                 BinOp::Eq,
@@ -878,7 +931,8 @@ fn same_assignment_target(lhs: &Expression, rhs: &Expression) -> bool {
             ExpressionDesc::StringIndex(left_obj, left_index),
             ExpressionDesc::StringIndex(right_obj, right_index),
         ) => {
-            same_assignment_target(left_obj, right_obj) && same_assignment_target(left_index, right_index)
+            same_assignment_target(left_obj, right_obj)
+                && same_assignment_target(left_index, right_index)
         }
         _ => false,
     }
@@ -953,6 +1007,7 @@ pub struct DepsProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_expression_creation() {
@@ -1031,8 +1086,14 @@ mod tests {
 
         match &expr.desc {
             ExpressionDesc::Bin(BinOp::Or, left, right) => {
-                assert!(matches!(left.desc, ExpressionDesc::Bin(BinOp::NotEqEq, _, _)));
-                assert!(matches!(right.desc, ExpressionDesc::Bin(BinOp::NotEqEq, _, _)));
+                assert!(matches!(
+                    left.desc,
+                    ExpressionDesc::Bin(BinOp::NotEqEq, _, _)
+                ));
+                assert!(matches!(
+                    right.desc,
+                    ExpressionDesc::Bin(BinOp::NotEqEq, _, _)
+                ));
             }
             other => panic!("Expected De Morgan rewrite after negating &&, got {other:?}"),
         }
@@ -1045,6 +1106,37 @@ mod tests {
             StatementDesc::Break => {}
             _ => panic!("Expected Break"),
         }
+    }
+
+    #[test]
+    fn resolve_local_module_fallback_path_uses_sibling_source_file() {
+        let project = tempdir().expect("failed to create tempdir");
+        let source_dir = project.path().join("src");
+        std::fs::create_dir_all(&source_dir).expect("failed to create source dir");
+
+        let current_source = source_dir.join("include_side_effect.res");
+        let target_source = source_dir.join("side_effect.res");
+        std::fs::write(&current_source, "").expect("failed to write current source");
+        std::fs::write(&target_source, "").expect("failed to write target source");
+
+        let resolver = ModulePathResolver::from_compile_options(
+            Some(current_source.to_str().expect("utf8 current source")),
+            Some(source_dir.join("include_side_effect.mjs").as_path()),
+            None,
+            None,
+        );
+        let module = ModuleId {
+            id: Ident::create_local("Side_effect"),
+            kind: Kind::Ml,
+            dynamic_import: false,
+        };
+
+        assert_eq!(
+            resolver
+                .resolve_local_module_fallback_path(module.id.name())
+                .as_deref(),
+            Some("./side_effect.mjs")
+        );
     }
 
     #[test]
@@ -1069,7 +1161,13 @@ mod tests {
                             ExpressionDesc::Bin(BinOp::NotEqEq, _, _) => {}
                             _ => panic!("Expected a negated equality guard"),
                         }
-                        assert!(matches!(then_block.as_slice(), [Statement { desc: StatementDesc::Return(_), .. }]));
+                        assert!(matches!(
+                            then_block.as_slice(),
+                            [Statement {
+                                desc: StatementDesc::Return(_),
+                                ..
+                            }]
+                        ));
                         assert!(else_block.is_empty());
                     }
                     _ => panic!("Expected guard if"),

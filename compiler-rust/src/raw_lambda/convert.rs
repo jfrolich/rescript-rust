@@ -10,6 +10,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::context::IdGenerator;
 use crate::ident::{Ident, IdentFlags};
+use crate::js_ir::{Kind, ModuleId};
 use crate::lambda::compat::LetKind;
 use crate::lambda::constant::{
     ConstructorRuntimeTag, ConstructorTag as PointerConstructorTag, PointerInfo, StringDelim,
@@ -17,9 +18,8 @@ use crate::lambda::constant::{
 use crate::lambda::convert::LambdaConverter;
 use crate::lambda::primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-    ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
-    ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, ImportAttributes,
-    Mutable,
+    ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel,
+    ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, ImportAttributes, Mutable,
 };
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::Constant;
@@ -697,6 +697,7 @@ pub struct RawLambdaConverter<'a> {
     type_ctx: &'a TypeContext<'a>,
     env: &'a crate::types::env::Env,
     persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
+    possible_required_modules: std::collections::HashSet<ModuleId>,
     id_gen: IdGenerator,
     next_static_raise: i32,
     next_negative_raise: i32,
@@ -716,6 +717,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
+            possible_required_modules: std::collections::HashSet::new(),
             id_gen: IdGenerator::new(),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -736,6 +738,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
+            possible_required_modules: std::collections::HashSet::new(),
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -757,6 +760,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
+            possible_required_modules: std::collections::HashSet::new(),
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -776,6 +780,158 @@ impl<'a> RawLambdaConverter<'a> {
         self.id_gen
             .current_stamp()
             .max(self.lowered.current_stamp())
+    }
+
+    pub fn take_possible_required_modules(&mut self) -> std::collections::HashSet<ModuleId> {
+        std::mem::take(&mut self.possible_required_modules)
+    }
+
+    fn note_possible_required_module(&mut self, id: &Ident, dynamic_import: bool) {
+        self.possible_required_modules.insert(ModuleId {
+            id: id.clone(),
+            kind: Kind::Ml,
+            dynamic_import,
+        });
+    }
+
+    fn note_possible_required_modules_in_raw_lambda(&mut self, lam: &RawLambda) {
+        self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(lam, false);
+    }
+
+    fn note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+        &mut self,
+        lam: &RawLambda,
+        dynamic_import_scope: bool,
+    ) {
+        match lam {
+            RawLambda::Lvar(_) | RawLambda::Lconst(_) => {}
+            RawLambda::LglobalModule(id, dynamic_import) => {
+                self.note_possible_required_module(id, dynamic_import_scope || *dynamic_import);
+            }
+            RawLambda::Lapply(apply) => {
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                    &apply.ap_func,
+                    false,
+                );
+                for arg in &apply.ap_args {
+                    self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                        arg, false,
+                    );
+                }
+            }
+            RawLambda::Lfunction(func) => {
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                    &func.body, false,
+                );
+            }
+            RawLambda::Llet(_, _, value, body) => {
+                if dynamic_import_scope {
+                    if let RawLambda::LglobalModule(id, dynamic_import) = value.as_ref() {
+                        self.note_possible_required_module(
+                            id,
+                            *dynamic_import || dynamic_import_scope,
+                        );
+                        return;
+                    }
+                }
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(value, false);
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(body, false);
+            }
+            RawLambda::Lletrec(bindings, body) => {
+                for (_, value) in bindings {
+                    self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                        value, false,
+                    );
+                }
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(body, false);
+            }
+            RawLambda::Lprim(info) => {
+                let child_dynamic_import =
+                    dynamic_import_scope || matches!(info.primitive, Primitive::Pimport);
+                for arg in &info.args {
+                    self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                        arg,
+                        child_dynamic_import,
+                    );
+                }
+            }
+            RawLambda::Lswitch(scrutinee, switch, _) => {
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                    scrutinee, false,
+                );
+                for (_, branch) in &switch.sw_consts {
+                    self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                        branch, false,
+                    );
+                }
+                for (_, branch) in &switch.sw_blocks {
+                    self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                        branch, false,
+                    );
+                }
+                if let Some(failaction) = &switch.sw_failaction {
+                    self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                        failaction, false,
+                    );
+                }
+            }
+            RawLambda::LstringSwitch(scrutinee, cases, default) => {
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                    scrutinee, false,
+                );
+                for (_, branch) in cases {
+                    self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                        branch, false,
+                    );
+                }
+                if let Some(default) = default {
+                    self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                        default, false,
+                    );
+                }
+            }
+            RawLambda::LstaticRaise(_, args) => {
+                for arg in args {
+                    self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                        arg, false,
+                    );
+                }
+            }
+            RawLambda::LstaticCatch(body, _, handler) | RawLambda::LtryWith(body, _, handler) => {
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(body, false);
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                    handler, false,
+                );
+            }
+            RawLambda::LifThenElse(cond, then_, else_) => {
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(cond, false);
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(then_, false);
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(else_, false);
+            }
+            RawLambda::Lsequence(first, second) => {
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(first, false);
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                    second, false,
+                );
+            }
+            RawLambda::Lwhile(cond, body) => {
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(cond, false);
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(body, false);
+            }
+            RawLambda::Lfor(_, start, finish, _, body) => {
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(start, false);
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                    finish, false,
+                );
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(body, false);
+            }
+            RawLambda::Lassign(_, value) => {
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(value, false);
+            }
+            RawLambda::Lsend(_, obj, _) => {
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(obj, false);
+            }
+        }
     }
 
     fn sync_matching_stamps(&mut self) {
@@ -3063,7 +3219,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn translate_normal_path_raw_in_env(
-        &self,
+        &mut self,
         env: &crate::types::env::Env,
         path: &crate::types::Path,
         loc: Location,
@@ -3096,7 +3252,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn translate_normal_path_raw(&self, path: &crate::types::Path, loc: Location) -> RawLambda {
+    fn translate_normal_path_raw(&mut self, path: &crate::types::Path, loc: Location) -> RawLambda {
         self.translate_normal_path_raw_in_env(self.env, path, loc)
     }
 
@@ -3350,6 +3506,95 @@ impl<'a> RawLambdaConverter<'a> {
         self.translate_value_path_raw(path, loc)
     }
 
+    fn note_possible_required_modules_from_module_expr(
+        &mut self,
+        module_expr: &ModuleExpr,
+        dynamic_import: bool,
+    ) {
+        fn note_from_path(
+            this: &mut RawLambdaConverter<'_>,
+            env: &crate::types::env::Env,
+            path: &crate::types::Path,
+            dynamic_import: bool,
+        ) {
+            let normalized = this.normalize_module_path_in_env(env, path);
+            if let Some(alias_target) = crate::types::typecore::alias_target_for_module_path(
+                &normalized,
+                env,
+                &mut this.persistent_env,
+                this.type_ctx,
+            ) {
+                if !alias_target.same(&normalized) {
+                    note_from_path(this, env, &alias_target, dynamic_import);
+                }
+            }
+            if let Ok(md) = env.lookup_module(&normalized) {
+                if let Some(md_path) = md.md_path.as_ref() {
+                    if !md_path.same(&normalized) {
+                        note_from_path(this, env, md_path, dynamic_import);
+                    }
+                }
+            }
+
+            match normalized {
+                crate::types::Path::Pident(id) => {
+                    if id.is_global() || id.is_persistent() {
+                        this.note_possible_required_module(&id, dynamic_import);
+                    }
+                }
+                crate::types::Path::Pdot(prefix, _, _) => {
+                    note_from_path(this, env, prefix.as_ref(), dynamic_import);
+                }
+                crate::types::Path::Papply(left, right) => {
+                    note_from_path(this, env, left.as_ref(), dynamic_import);
+                    note_from_path(this, env, right.as_ref(), dynamic_import);
+                }
+            }
+        }
+
+        match &module_expr.mod_desc {
+            ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
+                self.note_possible_required_modules_from_module_expr(inner, dynamic_import);
+            }
+            ModuleExprDesc::Tmod_ident(path, _) => {
+                if let Some(env) = self.env_for_module_expr(module_expr) {
+                    note_from_path(self, env.as_ref(), path, dynamic_import);
+                } else {
+                    note_from_path(self, self.env, path, dynamic_import);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn note_possible_required_modules_from_empty_include(&mut self, module_expr: &ModuleExpr) {
+        match &module_expr.mod_desc {
+            ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
+                self.note_possible_required_modules_from_empty_include(inner);
+            }
+            ModuleExprDesc::Tmod_ident(crate::types::Path::Pident(id), _) => {
+                if let Some(env) = self.env_for_module_expr(module_expr) {
+                    if env
+                        .lookup_module(&crate::types::Path::Pident(id.clone()))
+                        .is_err()
+                    {
+                        self.note_possible_required_module(id, false);
+                        return;
+                    }
+                } else if self
+                    .env
+                    .lookup_module(&crate::types::Path::Pident(id.clone()))
+                    .is_err()
+                {
+                    self.note_possible_required_module(id, false);
+                    return;
+                }
+                self.note_possible_required_modules_from_module_expr(module_expr, false);
+            }
+            _ => self.note_possible_required_modules_from_module_expr(module_expr, false),
+        }
+    }
+
     fn env_for_expr(&self, expr: &Expression) -> Option<std::sync::Arc<crate::types::env::Env>> {
         self.type_ctx.get_typed_env(expr.exp_env)
     }
@@ -3498,6 +3743,21 @@ impl<'a> RawLambdaConverter<'a> {
         coercion: &ModuleCoercion,
         arg: RawLambda,
     ) -> RawLambda {
+        self.apply_coercion_raw_with_dynamic_import(loc, strict, coercion, arg, false)
+    }
+
+    fn apply_coercion_raw_with_dynamic_import(
+        &mut self,
+        loc: Location,
+        strict: LetKind,
+        coercion: &ModuleCoercion,
+        arg: RawLambda,
+        dynamic_import_scope: bool,
+    ) -> RawLambda {
+        self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+            &arg,
+            dynamic_import_scope,
+        );
         match coercion {
             ModuleCoercion::Tcoerce_none => arg,
             ModuleCoercion::Tcoerce_structure(positions, id_pos_list, runtime_fields) => {
@@ -3567,16 +3827,13 @@ impl<'a> RawLambdaConverter<'a> {
             }
             ModuleCoercion::Tcoerce_alias(env_ref, path, inner) => {
                 self.name_lambda_raw(strict, arg, |this, _| {
-                    this.apply_coercion_raw(
-                        loc.clone(),
-                        LetKind::Alias,
-                        inner,
-                        if let Some(env) = this.type_ctx.get_typed_env(*env_ref) {
-                            this.translate_normal_path_raw_in_env(env.as_ref(), path, loc.clone())
-                        } else {
-                            this.translate_normal_path_raw_in_env(this.env, path, loc.clone())
-                        },
-                    )
+                    let translated = if let Some(env) = this.type_ctx.get_typed_env(*env_ref) {
+                        this.translate_normal_path_raw_in_env(env.as_ref(), path, loc.clone())
+                    } else {
+                        let env = this.env;
+                        this.translate_normal_path_raw_in_env(env, path, loc.clone())
+                    };
+                    this.apply_coercion_raw(loc.clone(), LetKind::Alias, inner, translated)
                 })
             }
         }
@@ -3750,6 +4007,7 @@ impl<'a> RawLambdaConverter<'a> {
             module_expr.mod_type.mty_desc,
             ModuleTypeDesc::Tmty_alias(_, _)
         ) {
+            self.note_possible_required_modules_from_module_expr(module_expr, false);
             return self.apply_coercion_raw(
                 self.loc(module_expr.mod_loc),
                 LetKind::Alias,
@@ -3875,13 +4133,26 @@ impl<'a> RawLambdaConverter<'a> {
     /// coercion (matching OCaml). For non-alias modules, we skip the Tmty_alias
     /// check to avoid incorrectly emitting 0a.
     fn convert_module_expr_for_pack_raw(&mut self, module_expr: &ModuleExpr) -> RawLambda {
-        self.convert_module_expr_for_pack_inner(module_expr, &ModuleCoercion::Tcoerce_none)
+        self.convert_module_expr_for_pack_raw_with_dynamic_import(module_expr, false)
+    }
+
+    fn convert_module_expr_for_pack_raw_with_dynamic_import(
+        &mut self,
+        module_expr: &ModuleExpr,
+        dynamic_import: bool,
+    ) -> RawLambda {
+        self.convert_module_expr_for_pack_inner(
+            module_expr,
+            &ModuleCoercion::Tcoerce_none,
+            dynamic_import,
+        )
     }
 
     fn convert_module_expr_for_pack_inner(
         &mut self,
         module_expr: &ModuleExpr,
         cc: &ModuleCoercion,
+        dynamic_import: bool,
     ) -> RawLambda {
         match &module_expr.mod_desc {
             ModuleExprDesc::Tmod_constraint(inner, _, _, inner_cc) => {
@@ -3891,6 +4162,7 @@ impl<'a> RawLambdaConverter<'a> {
                 if matches!(composed, ModuleCoercion::Tcoerce_alias(..))
                     && matches!(inner.mod_type.mty_desc, ModuleTypeDesc::Tmty_alias(_, _))
                 {
+                    self.note_possible_required_modules_from_module_expr(inner, dynamic_import);
                     return self.apply_coercion_raw(
                         self.loc(inner.mod_loc),
                         LetKind::Alias,
@@ -3898,7 +4170,7 @@ impl<'a> RawLambdaConverter<'a> {
                         RawLambda::const_(Constant::ModuleAlias),
                     );
                 }
-                self.convert_module_expr_for_pack_inner(inner, &composed)
+                self.convert_module_expr_for_pack_inner(inner, &composed, dynamic_import)
             }
             ModuleExprDesc::Tmod_ident(path, _) => {
                 // Check if this ident is an alias with Tcoerce_alias coercion.
@@ -3908,11 +4180,16 @@ impl<'a> RawLambdaConverter<'a> {
                         ModuleTypeDesc::Tmty_alias(_, _)
                     )
                 {
-                    return self.apply_coercion_raw(
+                    self.note_possible_required_modules_from_module_expr(
+                        module_expr,
+                        dynamic_import,
+                    );
+                    return self.apply_coercion_raw_with_dynamic_import(
                         self.loc(module_expr.mod_loc),
                         LetKind::Alias,
                         cc,
                         RawLambda::const_(Constant::ModuleAlias),
+                        dynamic_import,
                     );
                 }
                 let loc = self.loc(module_expr.mod_loc);
@@ -3921,10 +4198,29 @@ impl<'a> RawLambdaConverter<'a> {
                 } else {
                     self.translate_module_path_raw(path, loc.clone())
                 };
-                self.apply_coercion_raw(loc, LetKind::Strict, cc, arg)
+                self.apply_coercion_raw_with_dynamic_import(
+                    loc,
+                    LetKind::Strict,
+                    cc,
+                    arg,
+                    dynamic_import,
+                )
             }
             // For other module expression kinds, fall back to the normal conversion
             _ => self.convert_module_expr_raw_with_coercion(module_expr, &None, cc),
+        }
+    }
+
+    fn convert_expr_raw_with_dynamic_import(
+        &mut self,
+        expr: &Expression,
+        dynamic_import: bool,
+    ) -> RawLambda {
+        match &expr.exp_desc {
+            ExpressionDesc::Texp_pack(modl) if dynamic_import => {
+                self.convert_module_expr_for_pack_raw_with_dynamic_import(modl, true)
+            }
+            _ => self.convert_expr_raw(expr),
         }
     }
 
@@ -4486,6 +4782,9 @@ impl<'a> RawLambdaConverter<'a> {
             }
             StructureItemDesc::Tstr_include(incl) => {
                 let ids = Self::include_bound_idents(&incl.incl_type);
+                if ids.is_empty() {
+                    self.note_possible_required_modules_from_empty_include(&incl.incl_mod);
+                }
                 let old_len = fields.len();
                 fields.extend(ids.iter().map(|(id, _)| id.clone()));
                 let body =
@@ -8921,16 +9220,22 @@ impl<'a> RawLambdaConverter<'a> {
                             self.transl_apply_raw(base, rest, loc, transformed_jsx, None)
                         };
                     }
+                    let primitive = self.translate_primitive_application_raw(
+                        prim,
+                        funct.exp_type,
+                        &applied_exprs,
+                        transformed_jsx,
+                    );
                     let base = RawLambda::prim(
-                        self.translate_primitive_application_raw(
-                            prim,
-                            funct.exp_type,
-                            &applied_exprs,
-                            transformed_jsx,
-                        ),
+                        primitive.clone(),
                         applied_exprs
                             .iter()
-                            .map(|expr| self.convert_expr_raw(expr))
+                            .map(|expr| {
+                                self.convert_expr_raw_with_dynamic_import(
+                                    expr,
+                                    matches!(primitive, Primitive::Pimport),
+                                )
+                            })
                             .collect(),
                         loc,
                     );
@@ -9577,26 +9882,25 @@ impl<'a> RawLambdaConverter<'a> {
             // OCaml uses Lprim(Pundefined, []), not Lconst(JsUndefined)
             return RawLambda::prim(Primitive::Pundefined, vec![], loc);
         }
-        let primitive = if let Some(primitive) =
-            self.specialize_primitive_raw_with_env(prim, ty, env)
-        {
-            primitive
-        } else {
-            Primitive::PjsCall {
-                prim_name: raw_name.to_string(),
-                arg_types: decoded_external_arg_types(
-                    &prim.prim_native_name,
-                    prim.prim_arity.max(0) as usize,
-                ),
-                ffi: self.ffi_spec_for_primitive(
-                    prim,
-                    self.applied_result_is_builtin_object(ty, prim.prim_arity.max(0) as usize),
-                    self.applied_result_is_unit(ty, prim.prim_arity.max(0) as usize),
-                ),
-                dynamic_import: false,
-                transformed_jsx: false,
-            }
-        };
+        let primitive =
+            if let Some(primitive) = self.specialize_primitive_raw_with_env(prim, ty, env) {
+                primitive
+            } else {
+                Primitive::PjsCall {
+                    prim_name: raw_name.to_string(),
+                    arg_types: decoded_external_arg_types(
+                        &prim.prim_native_name,
+                        prim.prim_arity.max(0) as usize,
+                    ),
+                    ffi: self.ffi_spec_for_primitive(
+                        prim,
+                        self.applied_result_is_builtin_object(ty, prim.prim_arity.max(0) as usize),
+                        self.applied_result_is_unit(ty, prim.prim_arity.max(0) as usize),
+                    ),
+                    dynamic_import: false,
+                    transformed_jsx: false,
+                }
+            };
 
         if prim.prim_from_constructor || prim.prim_arity == 0 {
             RawLambda::prim(primitive, vec![], loc)
@@ -9755,8 +10059,17 @@ fn ffi_marshaled_obj_params(value: &OcamlValue) -> Option<Vec<ExternalObjSpec>> 
 fn decode_params(value: &OcamlValue) -> Option<Vec<ExternalArgSpec>> {
     let (tag, fields) = value.as_block_opt()?;
     match (tag, fields) {
-        (0, [params]) => Some(params.as_list().into_iter().filter_map(decode_param).collect()),
-        (1, [arity]) => Some(vec![ExternalArgSpec::dummy(); arity.as_int().max(0) as usize]),
+        (0, [params]) => Some(
+            params
+                .as_list()
+                .into_iter()
+                .filter_map(decode_param)
+                .collect(),
+        ),
+        (1, [arity]) => Some(vec![
+            ExternalArgSpec::dummy();
+            arity.as_int().max(0) as usize
+        ]),
         _ => None,
     }
 }
@@ -9811,7 +10124,10 @@ fn decode_arg_attr(value: &OcamlValue) -> Option<ExternalArgAttr> {
                     if entry_tag != 0 || entry_fields.len() != 2 {
                         return None;
                     }
-                    Some((entry_fields[0].as_string().to_string(), entry_fields[1].as_int()))
+                    Some((
+                        entry_fields[0].as_string().to_string(),
+                        entry_fields[1].as_int(),
+                    ))
                 })
                 .collect(),
         )),
@@ -10974,6 +11290,161 @@ mod tests {
             lowered,
             RawLambda::LglobalModule(id, false) if id.same(&pkg_list)
         ));
+    }
+
+    #[test]
+    fn translate_module_path_raw_leaves_possible_required_modules_to_later_passes() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let side_effect = Ident::create_persistent("Side_effect");
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let lowered = converter.translate_module_path_raw(
+            &crate::types::Path::Pident(side_effect.clone()),
+            Location::none(),
+        );
+        let possible_required_modules = converter.take_possible_required_modules();
+
+        assert!(matches!(
+            lowered,
+            RawLambda::LglobalModule(id, false) if id.same(&side_effect)
+        ));
+        assert!(possible_required_modules.is_empty());
+    }
+
+    #[test]
+    fn empty_include_records_possible_required_modules() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let side_effect = Ident::create_persistent("Side_effect");
+        let module_expr = crate::types::typedtree::ModuleExpr {
+            mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_ident(
+                crate::types::Path::Pident(side_effect.clone()),
+                crate::parse_arena::Located::mknoloc(crate::parse_arena::LidentIdx(0)),
+            ),
+            mod_loc: crate::parse_arena::LocIdx::default(),
+            mod_type: crate::types::typedtree::ModuleType::placeholder(),
+            mod_env: EnvRef(0),
+            mod_attributes: Attributes::new(),
+        };
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        converter.note_possible_required_modules_from_empty_include(&module_expr);
+        let possible_required_modules = converter.take_possible_required_modules();
+        let expected = ModuleId {
+            id: side_effect.clone(),
+            kind: Kind::Ml,
+            dynamic_import: false,
+        };
+
+        assert!(possible_required_modules.contains(&expected));
+    }
+
+    #[test]
+    fn dynamic_import_marks_global_modules_as_dynamic_possible_requirements() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let side_effect = Ident::create_persistent("Side_effect");
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        converter.note_possible_required_modules_in_raw_lambda(&RawLambda::prim(
+            Primitive::Pimport,
+            vec![RawLambda::global_module(side_effect.clone(), false)],
+            Location::none(),
+        ));
+        let possible_required_modules = converter.take_possible_required_modules();
+
+        assert_eq!(possible_required_modules.len(), 1);
+        assert!(possible_required_modules.contains(&ModuleId {
+            id: side_effect.clone(),
+            kind: Kind::Ml,
+            dynamic_import: true,
+        }));
+        assert!(!possible_required_modules.contains(&ModuleId {
+            id: side_effect,
+            kind: Kind::Ml,
+            dynamic_import: false,
+        }));
+    }
+
+    #[test]
+    fn dynamic_import_alias_lets_mark_global_modules_as_dynamic_possible_requirements() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let module_id = Ident::create_persistent("ModuleWithAlias");
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        converter.note_possible_required_modules_in_raw_lambda(&RawLambda::prim(
+            Primitive::Pimport,
+            vec![RawLambda::let_(
+                LetKind::Strict,
+                Ident::create_local("let"),
+                RawLambda::global_module(module_id.clone(), false),
+                RawLambda::unit(),
+            )],
+            Location::none(),
+        ));
+        let possible_required_modules = converter.take_possible_required_modules();
+
+        assert_eq!(possible_required_modules.len(), 1);
+        assert!(possible_required_modules.contains(&ModuleId {
+            id: module_id.clone(),
+            kind: Kind::Ml,
+            dynamic_import: true,
+        }));
+        assert!(!possible_required_modules.contains(&ModuleId {
+            id: module_id,
+            kind: Kind::Ml,
+            dynamic_import: false,
+        }));
+    }
+
+    #[test]
+    fn dynamic_import_pack_idents_record_only_dynamic_possible_requirements() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let side_effect = Ident::create_persistent("Side_effect");
+        let module_expr = crate::types::typedtree::ModuleExpr {
+            mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_ident(
+                crate::types::Path::Pident(side_effect.clone()),
+                crate::parse_arena::Located::mknoloc(crate::parse_arena::LidentIdx(0)),
+            ),
+            mod_loc: crate::parse_arena::LocIdx::default(),
+            mod_type: crate::types::typedtree::ModuleType::placeholder(),
+            mod_env: EnvRef(0),
+            mod_attributes: Attributes::new(),
+        };
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let lowered =
+            converter.convert_module_expr_for_pack_raw_with_dynamic_import(&module_expr, true);
+        let possible_required_modules = converter.take_possible_required_modules();
+
+        assert!(matches!(
+            lowered,
+            RawLambda::LglobalModule(id, false) if id.same(&side_effect)
+        ));
+        assert_eq!(possible_required_modules.len(), 1);
+        assert!(possible_required_modules.contains(&ModuleId {
+            id: side_effect.clone(),
+            kind: Kind::Ml,
+            dynamic_import: true,
+        }));
+        assert!(!possible_required_modules.contains(&ModuleId {
+            id: side_effect,
+            kind: Kind::Ml,
+            dynamic_import: false,
+        }));
     }
 
     #[test]

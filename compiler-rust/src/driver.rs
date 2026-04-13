@@ -7,23 +7,23 @@ use std::ffi::OsString;
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 
 use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::PersistentEnv;
 use crate::context::IdGenerator;
-use crate::js_ir::{ModulePathResolver, printer::print_deps_program_with_directives};
+use crate::js_ir::{printer::print_deps_program_with_directives, Kind, ModulePathResolver};
 use crate::lambda::compile::LambdaCompiler;
 use crate::parser::ast::{
     Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature,
     SignatureItemDesc, Structure, StructureItemDesc,
 };
-use crate::parser::{Parser, jsx_ppx, module};
+use crate::parser::{jsx_ppx, module, Parser};
 use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
 };
-use crate::types::{TypeCheckContext, TypeContext, initial_env, transl_signature, type_structure};
+use crate::types::{initial_env, transl_signature, type_structure, TypeCheckContext, TypeContext};
 
 // OCaml's Predef sets `Ident.set_current_time 999`. OCaml's Parmatch.extra_pat
 // then eagerly creates Ident.create "+" consuming stamp 1000.
@@ -1259,6 +1259,7 @@ pub fn compile_source_to_js_with_options(
     }
     let raw_lambda =
         raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+    let possible_required_modules = raw_converter.take_possible_required_modules();
     let raw_lambda_current_stamp = raw_converter.current_stamp();
     if options.dump_lambda {
         if raw_trace {
@@ -1312,22 +1313,31 @@ pub fn compile_source_to_js_with_options(
     }
 
     // Lambda -> JS IR
-    let module_path_resolver = ModulePathResolver::from_compile_options(
+    let mut module_path_resolver = ModulePathResolver::from_compile_options(
         options.source_filename.as_deref(),
         options.output_path.as_deref(),
         options.runtime_path.as_deref(),
         tctx.persistent_env.clone(),
     );
+    for module in &possible_required_modules {
+        if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
+            if let Some(path) =
+                module_path_resolver.resolve_local_module_fallback_path(module.id.name())
+            {
+                module_path_resolver.set_module_path_override(module.id.name(), path);
+            }
+        }
+    }
     let mut compiler =
         LambdaCompiler::with_module_path_resolver(Some(module_path_resolver.clone()));
-    let program = compiler.compile_deps_program(&lowered_lambda);
+    let program = compiler.compile_deps_program_with_possible_required_modules(
+        &lowered_lambda,
+        &possible_required_modules,
+    );
 
     // JS IR -> JS source
-    let js = print_deps_program_with_directives(
-        &program,
-        Some(&module_path_resolver),
-        &file_directives,
-    );
+    let js =
+        print_deps_program_with_directives(&program, Some(&module_path_resolver), &file_directives);
 
     // The CLI compiler is a short-lived process. Skipping teardown for the
     // large typechecking arenas keeps snapshot runs inside the harness timeout
@@ -2004,7 +2014,7 @@ fn dump_all_tvars(
     seen: &mut ahash::AHashSet<crate::types::type_expr::TypeExprRef>,
     depth: usize,
 ) {
-    use crate::types::type_expr::{GENERIC_LEVEL, TypeDesc};
+    use crate::types::type_expr::{TypeDesc, GENERIC_LEVEL};
     let ty = ctx.repr(ty);
     if !seen.insert(ty) {
         return;
@@ -2122,7 +2132,7 @@ fn moregen_link_impl(
     debug: &mut Vec<String>,
     allow_generic_anonymous: bool,
 ) {
-    use crate::types::type_expr::{GENERIC_LEVEL, TypeDesc};
+    use crate::types::type_expr::{TypeDesc, GENERIC_LEVEL};
 
     let impl_ty = ctx.repr(impl_ty);
     let iface_ty = ctx.repr(iface_ty);
@@ -2734,8 +2744,8 @@ mod tests {
     use crate::ident::{Ident, IdentFlags};
     use crate::location::Location;
     use crate::parse_arena::{LidentIdx, LocIdx, Located};
-    use crate::parser::{Parser, module};
     use crate::parser::ast::{Attributes, RecFlag};
+    use crate::parser::{module, Parser};
     use crate::types::decl::{ModuleDeclaration, ModuleType, RecStatus, SignatureItem, ValueKind};
     use crate::types::path::Path as TypePath;
     use crate::types::typedtree::{
