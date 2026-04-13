@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 188 / 657 JS snapshots passing, 0 compile errors, 469 output diffs
+**Status:** 194 / 657 JS snapshots passing, 1 compile error, 462 output diffs
 
 ## Goal
 
@@ -35,13 +35,59 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **188 / 657**
-- Compile errors: **0**
-- Output diffs: **469**
+- JS snapshot parity: **194 / 657**
+- Compile errors: **1**
+- Output diffs: **462**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration verified one OCaml-backed alias-cleanup / JS-pass slice in
+  `compiler/core/lam_pass_lets_dce.ml` and
+  `compiler/core/js_pass_flatten_and_mark_dead.ml`
+- After reading those OCaml passes, the Rust JS backend now matches OCaml more
+  closely in two places:
+  `compiler-rust/src/lambda/simplify.rs` now inlines non-exported single-use,
+  uncaptured `Alias` lets on the JS backend path, and
+  `compiler-rust/src/lambda/compile.rs` now allocates
+  `flatten_and_mark_dead` helper bindings from a fresh `IdGenerator` seeded
+  above the program's current max stamp instead of `Ident::create_local`
+- The simplify port removes the stale `let set = match[1]; let get = match[0];`
+  shape before JS lowering for the `React.useState`/module-block cluster,
+  which is the same alias-cleanup direction OCaml takes before
+  `js_pass_flatten_and_mark_dead`
+- The JS-pass identifier fix removes stamp collisions between newly introduced
+  helper bindings like `StandardNotation_get` and pre-existing exported module
+  bindings, which was the direct cause of the wrong
+  `let StandardNotation_get = {...}; export { StandardNotation_get as StandardNotation }`
+  corruption seen during focused repro
+- Added focused regression coverage in
+  `lambda::simplify::tests::inlines_single_use_alias_field_reads_into_module_blocks`
+  and
+  `lambda::simplify::tests::does_not_inline_captured_single_use_aliases`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release inlines_single_use_alias_field_reads_into_module_blocks`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release does_not_inline_captured_single_use_aliases`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UncurriedExternals.res -o /tmp/UncurriedExternals.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/UncurriedExternals.res` now has the correct
+  `StandardNotation` module binding/export shape again; the remaining drift in
+  that file is down to the known `let <ident> = this ;` spacing detail
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same backend changes
+- The authoritative harness now reports one remaining compile-failure artifact:
+  `temp/rust-parity/diffs/js_src_a_recursive_type.res.err` records a Rust
+  stack overflow for `src/a_recursive_type.res`
+- The authoritative JS snapshot baseline now reports **194 / 657** passing,
+  **1** compile error, and **462** output diffs after this OCaml-aligned
+  alias-cleanup / JS-pass identifier fix; this is a net **+6** passing
+  snapshots over the previously recorded baseline
+- Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration verified one OCaml-backed `Pjs_fn_make`/method-function

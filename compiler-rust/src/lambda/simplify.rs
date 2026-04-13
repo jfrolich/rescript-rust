@@ -430,6 +430,12 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 }
             }
             let body = simplify_with_env(body, &body_env, exports);
+            if *kind == LetKind::Alias && !exports.contains(id) {
+                let use_info = alias_use_info(id, &body);
+                if use_info.times == 1 && !use_info.captured {
+                    return substitute_alias_use(&body, id, &value);
+                }
+            }
             if !exports.contains(id) && !free_variables(&body).contains(id) {
                 if analysis::no_side_effects(&value) {
                     body
@@ -547,6 +553,222 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
         Lambda::Lassign(id, value) => {
             Lambda::Lassign(id.clone(), Box::new(simplify_with_env(value, env, exports)))
         }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct AliasUseInfo {
+    times: usize,
+    captured: bool,
+}
+
+fn alias_use_info(target: &Ident, lam: &Lambda) -> AliasUseInfo {
+    fn collect(target: &Ident, lam: &Lambda, info: &mut AliasUseInfo) {
+        match lam {
+            Lambda::Lvar(id) => {
+                if id.same(target) {
+                    info.times += 1;
+                }
+            }
+            Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
+            Lambda::Lapply(apply) => {
+                collect(target, &apply.ap_func, info);
+                for arg in &apply.ap_args {
+                    collect(target, arg, info);
+                }
+            }
+            Lambda::Lfunction(func) => {
+                if free_variables(&func.body).contains(target) {
+                    info.captured = true;
+                }
+                collect(target, &func.body, info);
+            }
+            Lambda::Llet(_, _, value, body) => {
+                collect(target, value, info);
+                collect(target, body, info);
+            }
+            Lambda::Lletrec(bindings, body) => {
+                for (_, binding) in bindings {
+                    collect(target, binding, info);
+                }
+                collect(target, body, info);
+            }
+            Lambda::Lprim(info_) => {
+                for arg in &info_.args {
+                    collect(target, arg, info);
+                }
+            }
+            Lambda::Lswitch(scrutinee, switch) => {
+                collect(target, scrutinee, info);
+                for (_, lam) in &switch.sw_consts {
+                    collect(target, lam, info);
+                }
+                for (_, lam) in &switch.sw_blocks {
+                    collect(target, lam, info);
+                }
+                if let Some(fallback) = &switch.sw_failaction {
+                    collect(target, fallback, info);
+                }
+            }
+            Lambda::LstringSwitch(scrutinee, cases, default) => {
+                collect(target, scrutinee, info);
+                for (_, lam) in cases {
+                    collect(target, lam, info);
+                }
+                if let Some(fallback) = default {
+                    collect(target, fallback, info);
+                }
+            }
+            Lambda::LstaticRaise(_, args) => {
+                for arg in args {
+                    collect(target, arg, info);
+                }
+            }
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                collect(target, body, info);
+                collect(target, handler, info);
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                collect(target, cond, info);
+                collect(target, then_, info);
+                collect(target, else_, info);
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                collect(target, first, info);
+                collect(target, second, info);
+            }
+            Lambda::Lfor(_, from, to, _, body) => {
+                collect(target, from, info);
+                collect(target, to, info);
+                collect(target, body, info);
+            }
+            Lambda::Lassign(id, value) => {
+                if id.same(target) {
+                    info.times += 1;
+                }
+                collect(target, value, info);
+            }
+        }
+    }
+
+    let mut info = AliasUseInfo::default();
+    collect(target, lam, &mut info);
+    info
+}
+
+fn substitute_alias_use(lam: &Lambda, target: &Ident, replacement: &Lambda) -> Lambda {
+    match lam {
+        Lambda::Lvar(id) if id.same(target) => replacement.clone(),
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
+        Lambda::Lapply(apply) => Lambda::Lapply(Apply {
+            ap_func: Box::new(substitute_alias_use(&apply.ap_func, target, replacement)),
+            ap_args: apply
+                .ap_args
+                .iter()
+                .map(|arg| substitute_alias_use(arg, target, replacement))
+                .collect(),
+            ap_info: apply.ap_info.clone(),
+            ap_transformed_jsx: apply.ap_transformed_jsx,
+        }),
+        Lambda::Lfunction(func) => Lambda::function_(
+            func.arity,
+            func.params.clone(),
+            substitute_alias_use(&func.body, target, replacement),
+            func.attr.clone(),
+        ),
+        Lambda::Llet(kind, id, value, body) => Lambda::let_(
+            *kind,
+            id.clone(),
+            substitute_alias_use(value, target, replacement),
+            substitute_alias_use(body, target, replacement),
+        ),
+        Lambda::Lletrec(bindings, body) => Lambda::letrec(
+            bindings
+                .iter()
+                .map(|(id, lam)| (id.clone(), substitute_alias_use(lam, target, replacement)))
+                .collect(),
+            substitute_alias_use(body, target, replacement),
+        ),
+        Lambda::Lprim(info) => Lambda::prim(
+            info.primitive.clone(),
+            info.args
+                .iter()
+                .map(|arg| substitute_alias_use(arg, target, replacement))
+                .collect(),
+            info.loc.clone(),
+        ),
+        Lambda::Lswitch(scrutinee, switch) => Lambda::Lswitch(
+            Box::new(substitute_alias_use(scrutinee, target, replacement)),
+            LambdaSwitch {
+                sw_consts_full: switch.sw_consts_full,
+                sw_consts: switch
+                    .sw_consts
+                    .iter()
+                    .map(|(tag, lam)| (*tag, substitute_alias_use(lam, target, replacement)))
+                    .collect(),
+                sw_blocks_full: switch.sw_blocks_full,
+                sw_blocks: switch
+                    .sw_blocks
+                    .iter()
+                    .map(|(tag, lam)| (*tag, substitute_alias_use(lam, target, replacement)))
+                    .collect(),
+                sw_failaction: switch
+                    .sw_failaction
+                    .as_ref()
+                    .map(|lam| Box::new(substitute_alias_use(lam, target, replacement))),
+                sw_names: switch.sw_names.clone(),
+            },
+        ),
+        Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
+            Box::new(substitute_alias_use(scrutinee, target, replacement)),
+            cases
+                .iter()
+                .map(|(tag, lam)| (tag.clone(), substitute_alias_use(lam, target, replacement)))
+                .collect(),
+            default
+                .as_ref()
+                .map(|lam| Box::new(substitute_alias_use(lam, target, replacement))),
+        ),
+        Lambda::LstaticRaise(id, args) => Lambda::LstaticRaise(
+            *id,
+            args.iter()
+                .map(|arg| substitute_alias_use(arg, target, replacement))
+                .collect(),
+        ),
+        Lambda::LstaticCatch(body, ids, handler) => Lambda::LstaticCatch(
+            Box::new(substitute_alias_use(body, target, replacement)),
+            ids.clone(),
+            Box::new(substitute_alias_use(handler, target, replacement)),
+        ),
+        Lambda::LtryWith(body, exn, handler) => Lambda::LtryWith(
+            Box::new(substitute_alias_use(body, target, replacement)),
+            exn.clone(),
+            Box::new(substitute_alias_use(handler, target, replacement)),
+        ),
+        Lambda::LifThenElse(cond, then_, else_) => Lambda::if_(
+            substitute_alias_use(cond, target, replacement),
+            substitute_alias_use(then_, target, replacement),
+            substitute_alias_use(else_, target, replacement),
+        ),
+        Lambda::Lsequence(first, second) => Lambda::seq(
+            substitute_alias_use(first, target, replacement),
+            substitute_alias_use(second, target, replacement),
+        ),
+        Lambda::Lwhile(cond, body) => Lambda::Lwhile(
+            Box::new(substitute_alias_use(cond, target, replacement)),
+            Box::new(substitute_alias_use(body, target, replacement)),
+        ),
+        Lambda::Lfor(id, from, to, direction, body) => Lambda::Lfor(
+            id.clone(),
+            Box::new(substitute_alias_use(from, target, replacement)),
+            Box::new(substitute_alias_use(to, target, replacement)),
+            *direction,
+            Box::new(substitute_alias_use(body, target, replacement)),
+        ),
+        Lambda::Lassign(id, value) => Lambda::Lassign(
+            id.clone(),
+            Box::new(substitute_alias_use(value, target, replacement)),
+        ),
     }
 }
 
@@ -1940,6 +2162,124 @@ mod tests {
             panic!("expected the record field read to fold to a string constant");
         };
         assert_eq!(s, "a");
+    }
+
+    #[test]
+    fn inlines_single_use_alias_field_reads_into_module_blocks() {
+        let source = Ident::create_local("source");
+        let match_id = Ident::create_local("match");
+        let set = Ident::create_local("set");
+        let get = Ident::create_local("get");
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            match_id.clone(),
+            Lambda::var(source.clone()),
+            Lambda::let_(
+                LetKind::Alias,
+                set.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(1, FieldDbgInfo::Tuple),
+                    vec![Lambda::var(match_id.clone())],
+                    Location::none(),
+                ),
+                Lambda::let_(
+                    LetKind::Alias,
+                    get.clone(),
+                    Lambda::prim(
+                        Primitive::Pfield(0, FieldDbgInfo::Tuple),
+                        vec![Lambda::var(match_id.clone())],
+                        Location::none(),
+                    ),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::module(vec!["get".to_string(), "set".to_string()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(get.clone()), Lambda::var(set.clone())],
+                        Location::none(),
+                    ),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::Module(fields), _),
+            args,
+            ..
+        }) = simplified
+        else {
+            panic!("expected the alias lets to inline into the module block");
+        };
+        assert_eq!(fields, vec!["get".to_string(), "set".to_string()]);
+        assert!(matches!(
+            &args[0],
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(0, FieldDbgInfo::Tuple),
+                args,
+                ..
+            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if *id == source)
+        ));
+        assert!(matches!(
+            &args[1],
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(1, FieldDbgInfo::Tuple),
+                args,
+                ..
+            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if *id == source)
+        ));
+    }
+
+    #[test]
+    fn does_not_inline_captured_single_use_aliases() {
+        let source = Ident::create_local("source");
+        let match_id = Ident::create_local("match");
+        let projected = Ident::create_local("projected");
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            match_id.clone(),
+            Lambda::var(source.clone()),
+            Lambda::let_(
+                LetKind::Alias,
+                projected.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(0, FieldDbgInfo::Tuple),
+                    vec![Lambda::var(match_id.clone())],
+                    Location::none(),
+                ),
+                Lambda::function_(
+                    0,
+                    vec![],
+                    Lambda::var(projected.clone()),
+                    FunctionAttribute::default(),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(kind, kept_projected, projected_value, body) = simplified else {
+            panic!("expected the captured alias binding to remain");
+        };
+        assert_eq!(kind, LetKind::Alias);
+        assert_eq!(kept_projected, projected);
+        assert!(matches!(
+            *projected_value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(0, FieldDbgInfo::Tuple),
+                args,
+                ..
+            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if *id == source)
+        ));
+        let Lambda::Lfunction(func) = *body else {
+            panic!("expected the captured alias to remain referenced from a closure");
+        };
+        assert!(matches!(
+            *func.body,
+            Lambda::Lvar(id) if id == projected
+        ));
     }
 
     #[test]

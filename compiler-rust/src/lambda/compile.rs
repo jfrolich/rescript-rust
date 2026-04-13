@@ -4327,29 +4327,32 @@ fn apply_js_flatten_pass(mut deps: DepsProgram) -> DepsProgram {
 }
 
 fn apply_js_flatten_and_mark_dead_pass(mut deps: DepsProgram) -> DepsProgram {
-    deps.program = flatten_and_mark_dead_program(deps.program);
+    let id_gen = IdGenerator::with_start_stamp(max_ident_stamp_in_program(&deps.program));
+    deps.program = flatten_and_mark_dead_program(deps.program, &id_gen);
     deps
 }
 
-fn flatten_and_mark_dead_program(mut program: Program) -> Program {
+fn flatten_and_mark_dead_program(mut program: Program, id_gen: &IdGenerator) -> Program {
     let mut substitution = HashMap::new();
-    program.block = flatten_and_mark_dead_block(program.block, &mut substitution);
+    program.block = flatten_and_mark_dead_block(program.block, id_gen, &mut substitution);
     mark_dead_code(&mut program);
     program
 }
 
 fn flatten_and_mark_dead_block(
     block: Block,
+    id_gen: &IdGenerator,
     substitution: &mut HashMap<Ident, Expression>,
 ) -> Block {
     block
         .into_iter()
-        .map(|stmt| flatten_and_mark_dead_statement(stmt, substitution))
+        .map(|stmt| flatten_and_mark_dead_statement(stmt, id_gen, substitution))
         .collect()
 }
 
 fn flatten_and_mark_dead_statement(
     stmt: Statement,
+    id_gen: &IdGenerator,
     substitution: &mut HashMap<Ident, Expression>,
 ) -> Statement {
     let Statement { desc, comment } = stmt;
@@ -4393,12 +4396,9 @@ fn flatten_and_mark_dead_statement(
                                 rewritten_items.push(item);
                             } else {
                                 let rewritten =
-                                    flatten_and_mark_dead_expression(item, substitution);
-                                let temp = Ident::create_local(block_substitution_name(
-                                    &decl.ident,
-                                    &tag_info,
-                                    index,
-                                ));
+                                    flatten_and_mark_dead_expression(item, id_gen, substitution);
+                                let temp = id_gen
+                                    .create(&block_substitution_name(&decl.ident, &tag_info, index));
                                 rewritten_items.push(Expression::var(temp.clone()));
                                 bindings.push(Statement::variable(VariableDeclaration {
                                     ident: temp,
@@ -4466,7 +4466,7 @@ fn flatten_and_mark_dead_statement(
                     ident: decl.ident,
                     value: decl
                         .value
-                        .map(|value| flatten_and_mark_dead_expression(value, substitution)),
+                        .map(|value| flatten_and_mark_dead_expression(value, id_gen, substitution)),
                     property: decl.property,
                     ident_info: decl.ident_info,
                 }),
@@ -4474,91 +4474,95 @@ fn flatten_and_mark_dead_statement(
             }
         }
         StatementDesc::Block(block) => Statement {
-            desc: StatementDesc::Block(flatten_and_mark_dead_block(block, substitution)),
+            desc: StatementDesc::Block(flatten_and_mark_dead_block(block, id_gen, substitution)),
             comment,
         },
         StatementDesc::Exp(expr) => Statement {
-            desc: StatementDesc::Exp(flatten_and_mark_dead_expression(expr, substitution)),
+            desc: StatementDesc::Exp(flatten_and_mark_dead_expression(expr, id_gen, substitution)),
             comment,
         },
         StatementDesc::Return(expr) => Statement {
-            desc: StatementDesc::Return(flatten_and_mark_dead_expression(expr, substitution)),
+            desc: StatementDesc::Return(flatten_and_mark_dead_expression(expr, id_gen, substitution)),
             comment,
         },
         StatementDesc::If(cond, then_block, else_block) => Statement {
             desc: StatementDesc::If(
-                flatten_and_mark_dead_expression(cond, substitution),
-                flatten_and_mark_dead_block(then_block, substitution),
-                flatten_and_mark_dead_block(else_block, substitution),
+                flatten_and_mark_dead_expression(cond, id_gen, substitution),
+                flatten_and_mark_dead_block(then_block, id_gen, substitution),
+                flatten_and_mark_dead_block(else_block, id_gen, substitution),
             ),
             comment,
         },
         StatementDesc::While(cond, body) => Statement {
             desc: StatementDesc::While(
-                flatten_and_mark_dead_expression(cond, substitution),
-                flatten_and_mark_dead_block(body, substitution),
+                flatten_and_mark_dead_expression(cond, id_gen, substitution),
+                flatten_and_mark_dead_block(body, id_gen, substitution),
             ),
             comment,
         },
         StatementDesc::ForRange(start, finish, ident, direction, body) => Statement {
             desc: StatementDesc::ForRange(
-                start.map(|expr| flatten_and_mark_dead_expression(expr, substitution)),
-                flatten_and_mark_dead_expression(finish, substitution),
+                start.map(|expr| flatten_and_mark_dead_expression(expr, id_gen, substitution)),
+                flatten_and_mark_dead_expression(finish, id_gen, substitution),
                 ident,
                 direction,
-                flatten_and_mark_dead_block(body, substitution),
+                flatten_and_mark_dead_block(body, id_gen, substitution),
             ),
             comment,
         },
         StatementDesc::IntSwitch(test, clauses, default) => Statement {
             desc: StatementDesc::IntSwitch(
-                flatten_and_mark_dead_expression(test, substitution),
+                flatten_and_mark_dead_expression(test, id_gen, substitution),
                 clauses
                     .into_iter()
                     .map(|(tag, clause)| {
                         (
                             tag,
                             CaseClause {
-                                body: flatten_and_mark_dead_block(clause.body, substitution),
+                                body: flatten_and_mark_dead_block(clause.body, id_gen, substitution),
                                 should_break: clause.should_break,
                                 comment: clause.comment,
                             },
                         )
                     })
                     .collect(),
-                default.map(|block| flatten_and_mark_dead_block(block, substitution)),
+                default.map(|block| flatten_and_mark_dead_block(block, id_gen, substitution)),
             ),
             comment,
         },
         StatementDesc::StringSwitch(test, clauses, default) => Statement {
             desc: StatementDesc::StringSwitch(
-                flatten_and_mark_dead_expression(test, substitution),
+                flatten_and_mark_dead_expression(test, id_gen, substitution),
                 clauses
                     .into_iter()
                     .map(|clause| crate::js_ir::StringClause {
                         tag_type: clause.tag_type,
                         clause: CaseClause {
-                            body: flatten_and_mark_dead_block(clause.clause.body, substitution),
+                            body: flatten_and_mark_dead_block(
+                                clause.clause.body,
+                                id_gen,
+                                substitution,
+                            ),
                             should_break: clause.clause.should_break,
                             comment: clause.clause.comment,
                         },
                     })
                     .collect(),
-                default.map(|block| flatten_and_mark_dead_block(block, substitution)),
+                default.map(|block| flatten_and_mark_dead_block(block, id_gen, substitution)),
             ),
             comment,
         },
         StatementDesc::Throw(expr) => Statement {
-            desc: StatementDesc::Throw(flatten_and_mark_dead_expression(expr, substitution)),
+            desc: StatementDesc::Throw(flatten_and_mark_dead_expression(expr, id_gen, substitution)),
             comment,
         },
         StatementDesc::Try(body, catch, finally) => Statement {
             desc: StatementDesc::Try(
-                flatten_and_mark_dead_block(body, substitution),
+                flatten_and_mark_dead_block(body, id_gen, substitution),
                 catch.map(|(ident, block)| {
-                    (ident, flatten_and_mark_dead_block(block, substitution))
+                    (ident, flatten_and_mark_dead_block(block, id_gen, substitution))
                 }),
-                finally.map(|block| flatten_and_mark_dead_block(block, substitution)),
+                finally.map(|block| flatten_and_mark_dead_block(block, id_gen, substitution)),
             ),
             comment,
         },
@@ -4579,6 +4583,7 @@ fn flatten_and_mark_dead_statement(
 
 fn flatten_and_mark_dead_expression(
     expr: Expression,
+    id_gen: &IdGenerator,
     substitution: &mut HashMap<Ident, Expression>,
 ) -> Expression {
     if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution) {
@@ -4588,85 +4593,85 @@ fn flatten_and_mark_dead_expression(
     let Expression { desc, comment } = expr;
     let desc = match desc {
         ExpressionDesc::Length(inner, object) => ExpressionDesc::Length(
-            Box::new(flatten_and_mark_dead_expression(*inner, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*inner, id_gen, substitution)),
             object,
         ),
         ExpressionDesc::IsNullOrUndefined(inner) => ExpressionDesc::IsNullOrUndefined(Box::new(
-            flatten_and_mark_dead_expression(*inner, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
         ExpressionDesc::StringAppend(left, right) => ExpressionDesc::StringAppend(
-            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*left, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*right, id_gen, substitution)),
         ),
         ExpressionDesc::Bool(value) => ExpressionDesc::Bool(value),
         ExpressionDesc::Typeof(inner) => ExpressionDesc::Typeof(Box::new(
-            flatten_and_mark_dead_expression(*inner, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
         ExpressionDesc::In(left, right) => ExpressionDesc::In(
-            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*left, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*right, id_gen, substitution)),
         ),
         ExpressionDesc::JsNot(inner) => ExpressionDesc::JsNot(Box::new(
-            flatten_and_mark_dead_expression(*inner, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
         ExpressionDesc::JsBnot(inner) => ExpressionDesc::JsBnot(Box::new(
-            flatten_and_mark_dead_expression(*inner, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
         ExpressionDesc::Seq(left, right) => ExpressionDesc::Seq(
-            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*left, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*right, id_gen, substitution)),
         ),
         ExpressionDesc::Cond(test, consequent, alternate) => ExpressionDesc::Cond(
-            Box::new(flatten_and_mark_dead_expression(*test, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*consequent, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*alternate, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*test, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*consequent, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*alternate, id_gen, substitution)),
         ),
         ExpressionDesc::Bin(op, left, right) => ExpressionDesc::Bin(
             op,
-            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*left, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*right, id_gen, substitution)),
         ),
         ExpressionDesc::FlatCall(func, args) => ExpressionDesc::FlatCall(
-            Box::new(flatten_and_mark_dead_expression(*func, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*args, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*func, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*args, id_gen, substitution)),
         ),
         ExpressionDesc::Call(func, args, info) => ExpressionDesc::Call(
-            Box::new(flatten_and_mark_dead_expression(*func, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*func, id_gen, substitution)),
             args.into_iter()
-                .map(|arg| flatten_and_mark_dead_expression(arg, substitution))
+                .map(|arg| flatten_and_mark_dead_expression(arg, id_gen, substitution))
                 .collect(),
             info,
         ),
         ExpressionDesc::StringIndex(left, right) => ExpressionDesc::StringIndex(
-            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*left, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*right, id_gen, substitution)),
         ),
         ExpressionDesc::ArrayIndex(left, right) => ExpressionDesc::ArrayIndex(
-            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*left, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*right, id_gen, substitution)),
         ),
         ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
-            Box::new(flatten_and_mark_dead_expression(*tag, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*tag, id_gen, substitution)),
             strings
                 .into_iter()
-                .map(|value| flatten_and_mark_dead_expression(value, substitution))
+                .map(|value| flatten_and_mark_dead_expression(value, id_gen, substitution))
                 .collect(),
             values
                 .into_iter()
-                .map(|value| flatten_and_mark_dead_expression(value, substitution))
+                .map(|value| flatten_and_mark_dead_expression(value, id_gen, substitution))
                 .collect(),
         ),
         ExpressionDesc::StaticIndex(target, field, pos) => ExpressionDesc::StaticIndex(
-            Box::new(flatten_and_mark_dead_expression(*target, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*target, id_gen, substitution)),
             field,
             pos,
         ),
         ExpressionDesc::New(target, args) => ExpressionDesc::New(
-            Box::new(flatten_and_mark_dead_expression(*target, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*target, id_gen, substitution)),
             args.map(|items| {
                 items
                     .into_iter()
-                    .map(|arg| flatten_and_mark_dead_expression(arg, substitution))
+                    .map(|arg| flatten_and_mark_dead_expression(arg, id_gen, substitution))
                     .collect()
             }),
         ),
@@ -4682,7 +4687,7 @@ fn flatten_and_mark_dead_expression(
         } => ExpressionDesc::Fun {
             is_method,
             params,
-            body: flatten_and_mark_dead_block(body, substitution),
+            body: flatten_and_mark_dead_block(body, id_gen, substitution),
             env,
             return_unit,
             async_,
@@ -4693,42 +4698,44 @@ fn flatten_and_mark_dead_expression(
         ExpressionDesc::Array(items, mutable_flag) => ExpressionDesc::Array(
             items
                 .into_iter()
-                .map(|item| flatten_and_mark_dead_expression(item, substitution))
+                .map(|item| flatten_and_mark_dead_expression(item, id_gen, substitution))
                 .collect(),
             mutable_flag,
         ),
         ExpressionDesc::OptionalBlock(inner, flag) => ExpressionDesc::OptionalBlock(
-            Box::new(flatten_and_mark_dead_expression(*inner, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*inner, id_gen, substitution)),
             flag,
         ),
         ExpressionDesc::CamlBlock(items, mutable_flag, tag, tag_info) => ExpressionDesc::CamlBlock(
             items
                 .into_iter()
-                .map(|item| flatten_and_mark_dead_expression(item, substitution))
+                .map(|item| flatten_and_mark_dead_expression(item, id_gen, substitution))
                 .collect(),
             mutable_flag,
-            Box::new(flatten_and_mark_dead_expression(*tag, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*tag, id_gen, substitution)),
             tag_info,
         ),
         ExpressionDesc::CamlBlockTag(inner, tag) => ExpressionDesc::CamlBlockTag(
-            Box::new(flatten_and_mark_dead_expression(*inner, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*inner, id_gen, substitution)),
             tag,
         ),
         ExpressionDesc::Number(number) => ExpressionDesc::Number(number),
         ExpressionDesc::Object(dup, props) => ExpressionDesc::Object(
-            dup.map(|expr| Box::new(flatten_and_mark_dead_expression(*expr, substitution))),
+            dup.map(|expr| Box::new(flatten_and_mark_dead_expression(*expr, id_gen, substitution))),
             props
                 .into_iter()
-                .map(|(name, value)| (name, flatten_and_mark_dead_expression(value, substitution)))
+                .map(|(name, value)| {
+                    (name, flatten_and_mark_dead_expression(value, id_gen, substitution))
+                })
                 .collect(),
         ),
         ExpressionDesc::Undefined { is_unit } => ExpressionDesc::Undefined { is_unit },
         ExpressionDesc::Null => ExpressionDesc::Null,
         ExpressionDesc::Await(inner) => ExpressionDesc::Await(Box::new(
-            flatten_and_mark_dead_expression(*inner, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
         ExpressionDesc::Spread(inner) => ExpressionDesc::Spread(Box::new(
-            flatten_and_mark_dead_expression(*inner, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
     };
 
@@ -4806,6 +4813,15 @@ fn block_substitution_name(ident: &Ident, tag_info: &TagInfo, index: usize) -> S
         _ => index.to_string(),
     };
     format!("{}_{}", ident.name(), suffix)
+}
+
+fn max_ident_stamp_in_program(program: &Program) -> i32 {
+    program
+        .exports
+        .iter()
+        .fold(max_ident_stamp_in_block(&program.block), |max_stamp, export| {
+            max_stamp.max(export.stamp())
+        })
 }
 
 #[derive(Debug, Clone, Copy)]
