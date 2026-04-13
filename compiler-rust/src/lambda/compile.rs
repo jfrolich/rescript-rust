@@ -13,7 +13,7 @@ use crate::js_ir::op::{
     IdentInfo, ImportAttributes as JsImportAttributes, Kind, LengthObject, MutableFlag, Number,
     PropertyName, UsedStats,
 };
-use crate::js_ir::printer::is_js_keyword_or_global;
+use crate::js_ir::printer::{convert_ident_name, is_js_keyword_or_global};
 use crate::js_ir::{
     BinOp, Block, CallInfo, CaseClause, Delim, DepsProgram, Expression, ExpressionDesc,
     ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc, StringClause,
@@ -2405,8 +2405,12 @@ impl LambdaCompiler {
         target: &Expression,
     ) -> Expression {
         match info {
-            FieldDbgInfo::Module { name }
-            | FieldDbgInfo::Record { name, .. }
+            FieldDbgInfo::Module { name } => Expression::new(ExpressionDesc::StaticIndex(
+                Box::new(target.clone()),
+                convert_ident_name(name),
+                Some(idx),
+            )),
+            FieldDbgInfo::Record { name, .. }
             | FieldDbgInfo::RecordInline { name }
             | FieldDbgInfo::RecordExtension { name } => Expression::new(
                 ExpressionDesc::StaticIndex(Box::new(target.clone()), name.clone(), None),
@@ -7079,7 +7083,7 @@ fn is_builtin_untagged_switch_name(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::cmi::persistent_env::PersistentEnv;
-    use crate::js_ir::{print_block, ModulePathResolver};
+    use crate::js_ir::{print_block, print_expression, ModulePathResolver};
     use crate::lambda::constant::{Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo};
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
@@ -9840,8 +9844,7 @@ mod tests {
             ]),
         };
 
-        let attrs =
-            external_module_import_attributes(&module).expect("expected import attributes");
+        let attrs = external_module_import_attributes(&module).expect("expected import attributes");
 
         assert_eq!(
             attrs.entries,
@@ -10459,6 +10462,38 @@ mod tests {
             }
             other => panic!("expected tail access to lower to `.tl`, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lowers_module_pfield_with_ocaml_identifier_conversion() {
+        let compiler = LambdaCompiler::new();
+        let module_value = Ident::create_local("Js_promise2");
+        let expr = compiler.compile_field_access(
+            3,
+            &FieldDbgInfo::Module {
+                name: "catch".to_string(),
+            },
+            &Expression::var(module_value.clone()),
+        );
+
+        match &expr.desc {
+            ExpressionDesc::StaticIndex(target, field, Some(index)) => {
+                assert_eq!(field, "$$catch");
+                assert_eq!(*index, 3);
+                assert!(matches!(
+                    target.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&module_value)
+                ));
+            }
+            other => panic!(
+                "expected module field access to lower to converted static index, got {other:?}"
+            ),
+        }
+
+        assert_eq!(print_expression(&expr), "Js_promise2.$$catch");
     }
 
     #[test]

@@ -1338,12 +1338,32 @@ impl JsPrinter {
                 let name = self.ident_name(id);
                 self.write(&name);
             }
-            VIdent::Qualified(module, member) => {
+            VIdent::Qualified(module, None) => {
                 let mod_name = self.ident_name(&module.id);
                 self.write(&mod_name);
-                if let Some(m) = member {
-                    self.write_char('.');
-                    self.write(m);
+            }
+            VIdent::Qualified(module, Some(_))
+                if matches!(&module.kind, Kind::External { default: true, .. }) =>
+            {
+                let mod_name = self.ident_name(&module.id);
+                self.write(&mod_name);
+            }
+            VIdent::Qualified(module, Some(member)) => {
+                let mod_name = self.ident_name(&module.id);
+                self.write(&mod_name);
+                match &module.kind {
+                    Kind::Ml | Kind::Runtime => {
+                        let printed_member = if member == "default" {
+                            "default".to_string()
+                        } else {
+                            convert_ident_name(member)
+                        };
+                        self.write_char('.');
+                        self.write(&printed_member);
+                    }
+                    Kind::External { .. } => {
+                        self.print_property_access(member);
+                    }
                 }
             }
         }
@@ -1552,7 +1572,7 @@ fn record_uses_array_syntax(fields: &[(String, bool)]) -> bool {
             .all(|(i, (field_name, _))| field_name == &i.to_string())
 }
 
-fn convert_ident_name(name: &str) -> String {
+pub(crate) fn convert_ident_name(name: &str) -> String {
     if is_js_keyword_or_global(name) {
         format!("$${name}")
     } else {
@@ -2510,6 +2530,38 @@ mod tests {
         )));
 
         assert_eq!(rendered, "Es6_export.default");
+    }
+
+    #[test]
+    fn test_print_qualified_runtime_member_mangles_reserved_name() {
+        let rendered = print_expression(&Expression::qualified(
+            ModuleId {
+                id: Ident::create_persistent("Js_promise2"),
+                kind: Kind::Runtime,
+                dynamic_import: false,
+            },
+            Some("catch".to_string()),
+        ));
+
+        assert_eq!(rendered, "Js_promise2.$$catch");
+    }
+
+    #[test]
+    fn test_print_qualified_external_member_preserves_js_property_access() {
+        let rendered = print_expression(&Expression::qualified(
+            ModuleId {
+                id: Ident::create_persistent("URL"),
+                kind: Kind::External {
+                    name: "url".to_string(),
+                    default: false,
+                    import_attributes: None,
+                },
+                dynamic_import: false,
+            },
+            Some("catch".to_string()),
+        ));
+
+        assert_eq!(rendered, "URL.catch");
     }
 
     #[test]

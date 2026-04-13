@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 147 / 657 JS snapshots passing, 0 compile errors, 510 output diffs
+**Status:** 148 / 657 JS snapshots passing, 0 compile errors, 509 output diffs
 
 ## Goal
 
@@ -35,13 +35,49 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **147 / 657**
+- JS snapshot parity: **148 / 657**
 - Compile errors: **0**
-- Output diffs: **510**
+- Output diffs: **509**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed in the OCaml module-field lowering
+  path instead of treating the `SafePromises.res` drift as a printer-only
+  keyword-mangling issue
+- `compiler-rust/src/lambda/compile.rs` now matches the OCaml backend slice in
+  `compiler/core/js_exp_make.ml` more closely for module projections:
+  `FieldDbgInfo::Module` lowers through the same converted module-access path
+  as OCaml `module_access`, so module fields preserve OCaml identifier
+  conversion (`catch` -> `$$catch`) and keep the module slot index on the
+  resulting `StaticIndex`
+- `compiler-rust/src/js_ir/printer.rs` now also matches the OCaml
+  `compiler/core/js_dump.ml` `vident` split for qualified identifiers:
+  `Runtime`/`Ml` members go through identifier conversion, while `External`
+  members keep raw JS property-access semantics
+- Added focused coverage for this slice in
+  `lowers_module_pfield_with_ocaml_identifier_conversion`,
+  `test_print_qualified_runtime_member_mangles_reserved_name`, and
+  `test_print_qualified_external_member_preserves_js_property_access`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_qualified_ -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lowers_module_pfield_with_ocaml_identifier_conversion -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/SafePromises.res -o /tmp/SafePromises.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/SafePromises.res` now matches its checked-in `.mjs`
+  snapshot exactly again; the remaining `catch` drift was in OCaml module-field
+  lowering, not the final JS printer
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the change, which confirms the module-field conversion fix stayed isolated
+  from the already-stable external-shadow/import path
+- The authoritative JS snapshot baseline now reports **148 / 657** passing,
+  **0** compile errors, and **509** output diffs after this OCaml-aligned
+  module-field lowering fix; this iteration moves one more file from diff to
+  exact snapshot match
 
 - Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
   from `PLAN.md`; this iteration stayed in the external-module metadata path
