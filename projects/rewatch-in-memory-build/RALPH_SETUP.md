@@ -45,6 +45,19 @@ In-process-specific scripts should be added alongside these, not instead of them
 
 If you touch compiler/runtime bootstrap logic, rerun the full default-mode suite and the new in-process suite rather than relying only on focused scripts.
 
+## Parallelism Guard
+
+`--in-process` is a transport change, not permission to make the build single-threaded.
+
+When working in `rewatch/src/build/compile.rs`:
+
+- Preserve the current frontier scheduler shape: once a batch of modules is dependency-ready, those modules must still compile in parallel.
+- Do not accept an implementation that replaces the ready-batch `par_iter()` with a sequential `for` loop in `--in-process`.
+- Do not funnel the whole batch through one mutable `PersistentEnv` token if that forces all worker threads to serialize.
+- Keep parsed ASTs and published interfaces in build state. Keep typedtree/type-context state local to one compilation.
+
+If the implementation needs interface publication for downstream compilations, solve that without giving up parallelism.
+
 Target smoke commands once the new mode exists:
 
 ```bash
@@ -95,6 +108,7 @@ The in-process build should still succeed or fail exactly the same way after tho
 
 ```bash
 rg -n "compile_file|bs-read-cmi|lib/ocaml|bsc" rewatch/src/build/compile.rs
+rg -n "par_iter|take_persistent_env|return_persistent_env|compile_module_in_process" rewatch/src/build/compile.rs
 rg -n "read_ast|deps" rewatch/src/build/deps.rs rewatch/src/build/parse.rs
 rg -n "compile_mlmap|mlmap" rewatch/src/build/namespaces.rs rewatch/src/build/packages.rs
 rg -n "read_compile_state|compiler-info|sourcedirs" rewatch/src/build

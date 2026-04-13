@@ -23,6 +23,8 @@ Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-
 - `compiler-rust/src/cmi/persistent_env.rs` still resolves interfaces, source paths, and purity from `.cmi` / `.ast` / `.cmj`.
 - `compiler-rust/src/js_ir/mod.rs` still detects runtime modules and purity by probing compiler assets on disk.
 - `rewatch/tests/compiler-args.sh` and `scripts/test_lambda_parity.sh` still rely on the current compiler-args/file-protocol contract.
+- The in-process transport boundary should be: parsed AST in build state, published interface in build state, and full typedtree kept local to one compilation. Do not try to retain or ship typedtree/type-context state through `BuildCommandState`.
+- Current `rewatch/src/build/compile.rs` work-in-progress has an `--in-process` branch, but it compiles the ready batch sequentially and takes/returns one shared `PersistentEnv`. That is not an acceptable end state: `--in-process` must preserve parallel compilation for dependency-independent modules.
 
 ## Phase 0: Mode Model And CLI
 
@@ -58,6 +60,11 @@ Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-
 - [x] Switch `rewatch/src/build/deps.rs` to read dependencies from in-memory parse results instead of rereading `.ast` files.
   - **Done:** Changed `get_deps` to accept `&mut BuildCommandState` (was `&mut BuildState`). When `build_mode().is_in_process()`, snapshots `in_memory_deps` before the parallel iteration to avoid per-iteration mutex locking. Refactored `get_dep_modules` by extracting `read_raw_deps_from_file` (file I/O) and `resolve_dep_modules` (namespace resolution + package filtering). In `--in-process`, the parallel map calls `resolve_dep_modules` directly with the in-memory deps, bypassing all `.ast` file reads. The namespace/package filtering logic is shared between both code paths. Build passes clean (62/62 unit tests). Default-mode test failures are pre-existing (mlmap `randjbuildsystem` error).
 - [ ] Replace the `bsc` subprocess path in `rewatch/src/build/compile.rs` with direct compiler-rust calls for `--in-process`, and publish interfaces into build state rather than serializing them.
+  - Success criteria for this task:
+  - Keep parsed ASTs in `BuildCommandState::stored_asts` and published interfaces in `BuildCommandState::in_memory_interfaces`.
+  - Do not retain full typedtrees in build state.
+  - Preserve the existing compile frontier parallelism: dependency-ready modules in the same batch must still compile via `par_iter()` or equivalent parallel scheduling.
+  - Do not serialize the whole batch behind a single shared `PersistentEnv` handoff.
 - [ ] Preserve existing module semantics exactly: `M.resi` publishes the interface when present; otherwise `M.res` publishes its inferred interface.
 - [ ] Replace `last_compiled_cmi` / `last_compiled_cmt` timestamp invalidation with an in-memory interface-generation or fingerprint-based scheme for `--in-process`.
 
@@ -87,6 +94,7 @@ Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-
 - no-arg builds still use the OCaml path
 - `--rust` builds still use the Rust subprocess path
 - `--in-process` builds use the Rust compiler fully in-process
+- `--in-process` preserves parallel compilation for dependency-independent modules; do not regress to a single-thread batch loop
 - `rewatch/tests/no-compiler-assets.sh` passes for `--in-process`
 - in `--in-process`, building or watching inside `rewatch/testrepo` never creates or reads `.ast`, `.iast`, `.cmi`, `.cmj`, `.cmt`, `.cmti`, `.compiler.log`, `.sourcedirs.json`, `compiler-info.json`, `build.ninja`, `.mlmap`, `.sexp`, or copied `.res/.resi` build mirrors
 - in `--in-process`, only final JS outputs remain on disk
