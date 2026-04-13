@@ -164,6 +164,7 @@ Clean architecture target for this project:
 - [ ] Replace generation-before vs generation-after invalidation with a real "published interface changed" test. That can be a stable signature fingerprint or direct equality on the stored `DeclSignature`, but it must not mark dependents dirty when the published interface is unchanged.
 - [ ] Add registry invalidation for deleted/renamed modules and stale namespace aliases. `ModuleRegistry` must reflect the live build graph in watch/incremental mode, not just accumulate inserts forever.
 - [ ] Remove internal `PersistentEnv` construction from the in-process compiler path. The public API cleanup is done; the remaining work is to replace the internal `PersistentEnv::from_registry(...)` session with a dedicated resolver-session abstraction.
+- [ ] Replace per-file registry cloning with a borrowed in-process resolver session. The final `--in-process` path should compile against an immutable wave registry snapshot plus small per-file local memoization only; do not clone cached module interfaces, alias rewrites, module metadata, or source fallback maps into every worker.
 
 ## Acceptance Criteria
 
