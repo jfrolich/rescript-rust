@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 180 / 657 JS snapshots passing, 0 compile errors, 477 output diffs
+**Status:** 184 / 657 JS snapshots passing, 0 compile errors, 473 output diffs
 
 ## Goal
 
@@ -35,13 +35,56 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **180 / 657**
+- JS snapshot parity: **184 / 657**
 - Compile errors: **0**
-- Output diffs: **477**
+- Output diffs: **473**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  but this iteration isolated one still-missing post-lowering alias
+  simplification slice that feeds the initial JS IR before any JS pass runs
+- OCaml `-bs-diagnose` pass dumps for `tests/tests/src/ExternalScopeShadow.res`
+  showed the correct statement order already present in
+  `tests/tests/src/ExternalScopeShadow.01.initial.jsx`:
+  the trailing `let MyURL;` placeholder is introduced only after
+  `Lam_pass_remove_alias` collapses the export payload to
+  `Const_module_alias`, so this was not a `js_pass_external_shadow`,
+  `Js_shake`, or printer-ordering bug after all
+- `compiler-rust/src/lambda/simplify.rs` now matches
+  `compiler/core/lam_pass_remove_alias.ml` more closely on the Rust JS path for
+  direct `TagInfo::ModuleExport` payloads:
+  Rust now simplifies only the direct exported bindings whose current
+  substitution is `Const_module_alias`, while still preserving ordinary direct
+  export vars for the existing same-name export and trailing-effect coercion
+  behavior
+- This restores the OCaml pipeline for module-alias exports such as
+  `module MyURL = URL`:
+  the inert source-position alias payload now collapses to
+  `Const_module_alias`, later export coercion synthesizes the fresh trailing
+  export placeholder, and the final JS regains OCaml's
+  `globalThis.URL.revokeObjectURL(...); ...; let MyURL;` order
+- Added focused regression coverage in
+  `lambda::simplify::tests::simplifies_module_alias_export_payloads_before_export_coercion`
+  and reran the existing `compile_deps_program_*` export-coercion guard tests
+  to confirm the narrowed module-alias rule does not perturb the previously
+  verified same-name export cases
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release simplifies_module_alias_export_payloads_before_export_coercion -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_deps_program_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalScopeShadow.res -o /tmp/ExternalScopeShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/ExternalScopeShadow.res` now matches its checked-in `.mjs`
+  snapshot exactly again, `tests/tests/src/ExternalShadow.res` remains an exact
+  guard-file match, and the focused diff artifacts for both files are now absent
+- The authoritative JS snapshot baseline now reports **184 / 657** passing,
+  **0** compile errors, and **473** output diffs after this OCaml-aligned
+  module-alias export simplification fix; this is a net **+4** over the
+  previously recorded baseline
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration took a contained OCaml-aligned printer slice that was

@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use crate::ident::Ident;
 use crate::lambda::analysis;
 use crate::lambda::beta_reduce;
-use crate::lambda::compile_context::BoxedNullable;
 use crate::lambda::compat::{FieldDbgInfo, LetKind};
+use crate::lambda::compile_context::BoxedNullable;
 use crate::lambda::constant::Constant;
 use crate::lambda::free_variables::free_variables;
 use crate::lambda::primitive::Primitive;
@@ -189,19 +189,15 @@ fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
 
     fn flatten(acc: Vec<FlattenGroup>, lam: &Lambda) -> (Lambda, Vec<FlattenGroup>) {
         match lam {
-            Lambda::Llet(
-                kind,
-                id,
-                value,
-                body,
-            ) if matches!(
-                value.as_ref(),
-                Lambda::Lprim(crate::lambda::PrimInfo {
-                    primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
-                    args,
-                    ..
-                }) if matches!(args.as_slice(), [Lambda::Lvar(_)])
-            ) =>
+            Lambda::Llet(kind, id, value, body)
+                if matches!(
+                    value.as_ref(),
+                    Lambda::Lprim(crate::lambda::PrimInfo {
+                        primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
+                        args,
+                        ..
+                    }) if matches!(args.as_slice(), [Lambda::Lvar(_)])
+                ) =>
             {
                 let res = aux(value);
                 let mut next_acc = Vec::with_capacity(acc.len() + 1);
@@ -211,9 +207,7 @@ fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
             }
             Lambda::Llet(kind, id, value, body) => {
                 if let Lambda::Lprim(crate::lambda::PrimInfo {
-                    primitive,
-                    args,
-                    ..
+                    primitive, args, ..
                 }) = value.as_ref()
                 {
                     if matches!(
@@ -251,7 +245,11 @@ fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
                         "match" | "include" | "param",
                         LetKind::Alias | LetKind::Strict | LetKind::StrictOpt,
                         Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(_, _, crate::lambda::primitive::Mutable::Immutable),
+                            primitive: Primitive::Pmakeblock(
+                                _,
+                                _,
+                                crate::lambda::primitive::Mutable::Immutable
+                            ),
                             ..
                         })
                     )
@@ -550,7 +548,8 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
 }
 
 fn refine_let_binding(kind: LetKind, id: &Ident, value: Lambda, body: Lambda) -> Lambda {
-    let is_block_constructor = |primitive: &Primitive| matches!(primitive, Primitive::Pmakeblock(_, _, _));
+    let is_block_constructor =
+        |primitive: &Primitive| matches!(primitive, Primitive::Pmakeblock(_, _, _));
 
     match &body {
         Lambda::Lvar(bound) if bound.same(id) => value,
@@ -591,11 +590,19 @@ fn simplify_primitive(
             .iter()
             .zip(export_ids.iter())
             .map(|(arg, export_id)| match arg {
-                // Keep the direct exported binding visible to later export
-                // coercion so Rust can reuse the original declaration the way
-                // OCaml's export-group handling does, instead of synthesizing a
-                // late rebound export after subsequent definitions.
-                Lambda::Lvar(id) if id.same(export_id) => Lambda::var(id.clone()),
+                Lambda::Lvar(id) if id.same(export_id) => {
+                    match env.substitutions.get(id) {
+                        // OCaml's simplify_alias still collapses module-alias
+                        // exports to Const_module_alias, which forces later
+                        // export coercion to synthesize the trailing placeholder
+                        // instead of keeping the inert alias at its source
+                        // position.
+                        Some(Lambda::Lconst(Constant::ModuleAlias)) => {
+                            Lambda::const_(Constant::ModuleAlias)
+                        }
+                        _ => Lambda::var(id.clone()),
+                    }
+                }
                 _ => simplify_with_env(arg, env, exports),
             })
             .collect();
@@ -995,8 +1002,11 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
     if !matches!(apply.ap_func.as_ref(), Lambda::Lapply(_)) {
         if let Some(inline_func) = inlineable_direct_wrapper_function(&func) {
             if should_inline_direct_function(&inline_func, &args) {
-                let reduced =
-                    beta_reduce::no_names_beta_reduce(&inline_func.params, &inline_func.body, &args);
+                let reduced = beta_reduce::no_names_beta_reduce(
+                    &inline_func.params,
+                    &inline_func.body,
+                    &args,
+                );
                 return simplify_with_env(&reduced, env, exports);
             }
         }
@@ -1341,13 +1351,7 @@ mod tests {
 
         let simplified = simplify_for_js_backend(&lambda);
         let Lambda::Lprim(crate::lambda::PrimInfo {
-            primitive:
-                Primitive::Pfield(
-                    36,
-                    FieldDbgInfo::Module {
-                        name,
-                    },
-                ),
+            primitive: Primitive::Pfield(36, FieldDbgInfo::Module { name }),
             args,
             ..
         }) = simplified
@@ -1409,8 +1413,15 @@ mod tests {
                     Location::none(),
                 ),
                 Lambda::prim(
-                    Primitive::Pmakeblock(0, TagInfo::Tuple, crate::lambda::primitive::Mutable::Immutable),
-                    vec![Lambda::const_(Constant::int(0)), Lambda::var(projected.clone())],
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::Tuple,
+                        crate::lambda::primitive::Mutable::Immutable,
+                    ),
+                    vec![
+                        Lambda::const_(Constant::int(0)),
+                        Lambda::var(projected.clone()),
+                    ],
                     Location::none(),
                 ),
             ),
@@ -1531,6 +1542,64 @@ mod tests {
     }
 
     #[test]
+    fn simplifies_module_alias_export_payloads_before_export_coercion() {
+        let url = Ident::create_local("URL");
+        let my_url = Ident::create_local("MyURL");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![url.clone(), my_url.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(url.clone()), Lambda::var(my_url.clone())],
+            Location::none(),
+        );
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            url.clone(),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::module(vec!["revokeObjectURL".to_string()]),
+                    Mutable::Immutable,
+                ),
+                vec![],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Alias,
+                my_url.clone(),
+                Lambda::const_(Constant::ModuleAlias),
+                export_block,
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(_, kept_url, _, body) = simplified else {
+            panic!("expected the URL binding to remain");
+        };
+        assert_eq!(kept_url, url);
+        let Lambda::Llet(_, kept_alias, _, body) = *body else {
+            panic!("expected the module-alias binding to remain until export coercion");
+        };
+        assert_eq!(kept_alias, my_url);
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(export_ids), _),
+            args,
+            ..
+        }) = *body
+        else {
+            panic!("expected the export block to remain at the tail");
+        };
+        assert_eq!(export_ids, vec![url.clone(), my_url.clone()]);
+        assert!(matches!(
+            args.as_slice(),
+            [Lambda::Lvar(first), Lambda::Lconst(Constant::ModuleAlias)]
+                if *first == url
+        ));
+    }
+
+    #[test]
     fn inlines_direct_function_applications_without_named_call_profitability_gate() {
         let outer = Ident::create_local("x");
         let inner = Ident::create_local("f");
@@ -1563,7 +1632,10 @@ mod tests {
             panic!("expected the direct function application to beta-reduce");
         };
         assert_eq!(func.params, vec![inner]);
-        assert!(matches!(*func.body, Lambda::Lconst(Constant::Int { i: 0, .. })));
+        assert!(matches!(
+            *func.body,
+            Lambda::Lconst(Constant::Int { i: 0, .. })
+        ));
     }
 
     #[test]
