@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 184 / 657 JS snapshots passing, 0 compile errors, 473 output diffs
+**Status:** 187 / 657 JS snapshots passing, 0 compile errors, 470 output diffs
 
 ## Goal
 
@@ -35,13 +35,50 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **184 / 657**
+- JS snapshot parity: **187 / 657**
 - Compile errors: **0**
-- Output diffs: **473**
+- Output diffs: **470**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed on the OCaml post-lowering let
+  refinement path that feeds JS IR instead of treating the surviving dynamic
+  import temporaries as printer-only drift
+- `compiler-rust/src/lambda/simplify.rs` now matches another slice of
+  `compiler/core/lam_util.ml` `refine_let` and
+  `compiler/core/lam_pass_lets_dce.ml` more closely on the Rust JS path:
+  immediate let-bound uses now collapse before JS lowering for the OCaml-backed
+  cases `let x = e in x`, `let x = e in prim x` (excluding block constructors),
+  and `let x = e in f x` when the callee does not capture `x`
+- This specifically removes the extra Rust backend temporary around awaited
+  module field reads, so expressions like `let M3 = await Belt.List; M3.forEach`
+  can lower through the same direct member-access shape OCaml uses when the
+  binding is consumed immediately
+- Added focused regression coverage in
+  `lambda::simplify::tests::refines_immediate_module_field_reads_over_awaited_imports`
+  so this stays pinned to the OCaml `refine_let` primitive-use rewrite rather
+  than a single snapshot file
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release refines_immediate_module_field_reads_over_awaited_imports -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Import.res -o /tmp/Import.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/Import.res` now narrows materially: the Rust side now emits
+  the OCaml direct-awaited-member shape for the immediate-use cases in `f`,
+  `f1`, and `f4`, instead of first materializing a temporary module binding;
+  the remaining drift in that file has moved on to later alias naming and
+  statement/compaction shape such as `each` rebinding and the `f6` tuple helper
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change, which confirms this `refine_let` slice stays isolated from
+  the already-stable external-shadow path
+- The authoritative JS snapshot baseline now reports **187 / 657** passing,
+  **0** compile errors, and **470** output diffs after this OCaml-aligned
+  immediate-let-use refinement port; this is a net **+3** over the previous
+  recorded baseline
 
 - Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
   from `PLAN.md`; this iteration stayed on the OCaml float-exponentiation

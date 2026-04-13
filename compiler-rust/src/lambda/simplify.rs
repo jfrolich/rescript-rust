@@ -436,7 +436,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                     Lambda::seq(value, body)
                 }
             } else {
-                Lambda::let_(*kind, id.clone(), value, body)
+                refine_let_binding(*kind, id, value, body)
             }
         }
         Lambda::Lletrec(bindings, body) => {
@@ -546,6 +546,32 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
         Lambda::Lassign(id, value) => {
             Lambda::Lassign(id.clone(), Box::new(simplify_with_env(value, env, exports)))
         }
+    }
+}
+
+fn refine_let_binding(kind: LetKind, id: &Ident, value: Lambda, body: Lambda) -> Lambda {
+    let is_block_constructor = |primitive: &Primitive| matches!(primitive, Primitive::Pmakeblock(_, _, _));
+
+    match &body {
+        Lambda::Lvar(bound) if bound.same(id) => value,
+        Lambda::Lprim(info)
+            if !is_block_constructor(&info.primitive)
+                && matches!(info.args.as_slice(), [Lambda::Lvar(bound)] if bound.same(id)) =>
+        {
+            Lambda::prim(info.primitive.clone(), vec![value], info.loc.clone())
+        }
+        Lambda::Lapply(apply)
+            if matches!(apply.ap_args.as_slice(), [Lambda::Lvar(bound)] if bound.same(id))
+                && !lambda_hits_variable(id, &apply.ap_func) =>
+        {
+            Lambda::Lapply(Apply {
+                ap_func: apply.ap_func.clone(),
+                ap_args: vec![value],
+                ap_info: apply.ap_info.clone(),
+                ap_transformed_jsx: apply.ap_transformed_jsx,
+            })
+        }
+        _ => Lambda::let_(kind, id.clone(), value, body),
     }
 }
 
@@ -1258,6 +1284,73 @@ mod tests {
         assert!(matches!(
             simplified,
             Lambda::Lconst(Constant::Int { i: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn refines_immediate_module_field_reads_over_awaited_imports() {
+        let imported = Ident::create_local("M3");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            imported.clone(),
+            Lambda::prim(
+                Primitive::Pawait,
+                vec![Lambda::prim(
+                    Primitive::Pimport,
+                    vec![Lambda::global_module(
+                        Ident::create_persistent("Belt_List"),
+                        true,
+                    )],
+                    Location::none(),
+                )],
+                Location::none(),
+            ),
+            Lambda::prim(
+                Primitive::Pfield(
+                    36,
+                    FieldDbgInfo::Module {
+                        name: "forEach".to_string(),
+                    },
+                ),
+                vec![Lambda::var(imported)],
+                Location::none(),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive:
+                Primitive::Pfield(
+                    36,
+                    FieldDbgInfo::Module {
+                        name,
+                    },
+                ),
+            args,
+            ..
+        }) = simplified
+        else {
+            panic!("expected the let-bound import field read to inline into the primitive");
+        };
+
+        assert_eq!(name, "forEach");
+        assert!(matches!(
+            args.as_slice(),
+            [Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pawait,
+                args,
+                ..
+            })] if matches!(
+                args.as_slice(),
+                [Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Pimport,
+                    args,
+                    ..
+                })] if matches!(
+                    args.as_slice(),
+                    [Lambda::LglobalModule(id, true)] if id.name() == "Belt_List"
+                )
+            )
         ));
     }
 
