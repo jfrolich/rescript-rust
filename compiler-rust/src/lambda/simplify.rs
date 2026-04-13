@@ -1134,6 +1134,114 @@ fn lambda_hits_variable(target: &Ident, lam: &Lambda) -> bool {
     }
 }
 
+fn lambda_hits_variable_through_env(target: &Ident, lam: &Lambda, env: &SimplifyEnv) -> bool {
+    // OCaml's lam_pass_remove_alias avoids non-terminating re-inlining of
+    // recursive applications such as g(g). On the Rust JS-backend path, the
+    // simplifier can expose the same cycle indirectly through alias and block
+    // environments (for example g(x) where x is known to project back to g),
+    // so we need to follow those simplifier-visible expansions as part of the
+    // same guard.
+    fn hits(
+        target: &Ident,
+        lam: &Lambda,
+        env: &SimplifyEnv,
+        visiting: &mut HashSet<Ident>,
+    ) -> bool {
+        match lam {
+            Lambda::Lvar(id) => {
+                if id.same(target) {
+                    return true;
+                }
+                if !visiting.insert(id.clone()) {
+                    return false;
+                }
+                let hit = env
+                    .substitutions
+                    .get(id)
+                    .is_some_and(|substitution| hits(target, substitution, env, visiting))
+                    || env.optional_blocks.get(id).is_some_and(|optional| {
+                        hits(target, &optional.value, env, visiting)
+                    })
+                    || env.blocks.get(id).is_some_and(|block| {
+                        block
+                            .elements
+                            .iter()
+                            .filter_map(BlockElement::as_simple_form)
+                            .any(|value| hits(target, value, env, visiting))
+                    });
+                visiting.remove(id);
+                hit
+            }
+            Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            Lambda::Lapply(apply) => {
+                hits(target, &apply.ap_func, env, visiting)
+                    || apply
+                        .ap_args
+                        .iter()
+                        .any(|arg| hits(target, arg, env, visiting))
+            }
+            Lambda::Lfunction(func) => hits(target, &func.body, env, visiting),
+            Lambda::Llet(_, _, value, body) => {
+                hits(target, value, env, visiting) || hits(target, body, env, visiting)
+            }
+            Lambda::Lletrec(bindings, body) => {
+                hits(target, body, env, visiting)
+                    || bindings
+                        .iter()
+                        .any(|(_, lam)| hits(target, lam, env, visiting))
+            }
+            Lambda::Lprim(info) => info.args.iter().any(|arg| hits(target, arg, env, visiting)),
+            Lambda::Lswitch(arg, switch) => {
+                hits(target, arg, env, visiting)
+                    || switch
+                        .sw_consts
+                        .iter()
+                        .any(|(_, lam)| hits(target, lam, env, visiting))
+                    || switch
+                        .sw_blocks
+                        .iter()
+                        .any(|(_, lam)| hits(target, lam, env, visiting))
+                    || switch
+                        .sw_failaction
+                        .as_deref()
+                        .is_some_and(|lam| hits(target, lam, env, visiting))
+            }
+            Lambda::LstringSwitch(arg, cases, default) => {
+                hits(target, arg, env, visiting)
+                    || cases
+                        .iter()
+                        .any(|(_, lam)| hits(target, lam, env, visiting))
+                    || default
+                        .as_deref()
+                        .is_some_and(|lam| hits(target, lam, env, visiting))
+            }
+            Lambda::LstaticRaise(_, args) => args
+                .iter()
+                .any(|arg| hits(target, arg, env, visiting)),
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                hits(target, body, env, visiting) || hits(target, handler, env, visiting)
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                hits(target, cond, env, visiting)
+                    || hits(target, then_, env, visiting)
+                    || hits(target, else_, env, visiting)
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                hits(target, first, env, visiting) || hits(target, second, env, visiting)
+            }
+            Lambda::Lfor(_, start, end, _, body) => {
+                hits(target, start, env, visiting)
+                    || hits(target, end, env, visiting)
+                    || hits(target, body, env, visiting)
+            }
+            Lambda::Lassign(id, value) => id.same(target) || hits(target, value, env, visiting),
+        }
+    }
+
+    let mut visiting = HashSet::new();
+    hits(target, lam, env, &mut visiting)
+}
+
 fn inlineable_local_function(value: &Lambda) -> Option<LFunction> {
     match value {
         Lambda::Lfunction(func) => Some(func.clone()),
@@ -1280,7 +1388,10 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
         .collect();
 
     if let Lambda::Lvar(id) = &*apply.ap_func {
-        if !args.iter().any(|arg| lambda_hits_variable(id, arg)) {
+        if !args
+            .iter()
+            .any(|arg| lambda_hits_variable_through_env(id, arg, env))
+        {
             if let Some(func) = env.functions.get(id) {
                 if should_inline_named_function(func, &args) {
                     let reduced =
@@ -1293,7 +1404,10 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
 
     let func = simplify_with_env(&apply.ap_func, env, exports);
     if let Lambda::Lvar(id) = &func {
-        if !args.iter().any(|arg| lambda_hits_variable(id, arg)) {
+        if !args
+            .iter()
+            .any(|arg| lambda_hits_variable_through_env(id, arg, env))
+        {
             if let Some(func) = env.functions.get(id) {
                 if should_inline_named_function(func, &args) {
                     let reduced =
@@ -1606,6 +1720,85 @@ mod tests {
             panic!("expected inlined primitive");
         };
         assert!(matches!(info.primitive, Primitive::PjsObjectCreate(_)));
+    }
+
+    #[test]
+    fn does_not_reinline_named_function_through_block_aliases() {
+        let g = Ident::create_local("g");
+        let x = Ident::create_local("x");
+        let param = Ident::create_local("param");
+        let extracted = Ident::create_local("v");
+        let arg = Ident::create_local("arg");
+
+        let g_body = Lambda::let_(
+            LetKind::Alias,
+            extracted.clone(),
+            Lambda::prim(
+                Primitive::Pfield(0, FieldDbgInfo::Variant),
+                vec![Lambda::var(param.clone())],
+                Location::none(),
+            ),
+            Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::var(extracted)),
+                ap_args: vec![Lambda::var(param.clone())],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Uncurry,
+                },
+                ap_transformed_jsx: false,
+            }),
+        );
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            g.clone(),
+            Lambda::prim(
+                Primitive::PjsFnMake(1),
+                vec![Lambda::function_(
+                    1,
+                    vec![param],
+                    g_body,
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                x.clone(),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::constructor("A", 1, 0),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(g.clone())],
+                    Location::none(),
+                ),
+                Lambda::let_(
+                    LetKind::Strict,
+                    arg,
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(g.clone())),
+                        ap_args: vec![Lambda::var(x.clone())],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Uncurry,
+                        },
+                        ap_transformed_jsx: false,
+                    }),
+                    Lambda::var(x.clone()),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let rendered = crate::lambda::print::lambda_to_string(&simplified);
+        assert!(
+            rendered.contains("(apply g x)"),
+            "expected simplified lambda to keep the recursive-looking application instead of re-inlining forever: {rendered}"
+        );
     }
 
     #[test]

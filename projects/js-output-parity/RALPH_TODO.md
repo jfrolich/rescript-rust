@@ -44,6 +44,47 @@ reported:
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  but this iteration isolated and fixed one OCaml-backed nontermination guard
+  in `compiler/core/lam_pass_remove_alias.ml`
+- After reading that OCaml pass, the Rust JS-backend simplifier now follows the
+  same recursive-apply avoidance direction more closely:
+  `compiler-rust/src/lambda/simplify.rs` now refuses to re-inline a named
+  function when the argument reaches that same function through the
+  simplifier-visible alias/block environment, not just when the raw argument
+  syntax directly mentions the callee
+- This specifically fixes the hidden `g(A(g))` / `let x = A(g) in g x`
+  re-inline loop that was overflowing the Rust compiler stack during
+  `src/a_recursive_type.res`
+- Added focused regression coverage in
+  `lambda::simplify::tests::does_not_reinline_named_function_through_block_aliases`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release does_not_reinline_named_function_through_block_aliases -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/a_recursive_type.res -o /tmp/a_recursive_type.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - exact harness-mode AST repro for `tests/tests/src/Import.res` from
+    `tests/tests/lib/bs` using the checked-in `compiler-args`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/a_recursive_type.res` no longer aborts with a Rust stack
+  overflow and now emits regular JS output under timeout; its remaining drift is
+  ordinary backend parity work around recursive-record lowering and export
+  coercion (`let xx = {}; xx.xx = xx;` vs `let xx; xx = {xx: xx};`, plus extra
+  exports)
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same simplifier change
+- The authoritative wrapper numbers remain **194 / 657** passing, **1** compile
+  error, and **462** output diffs, but the lone compile-error label moved off
+  `src/a_recursive_type.res`
+- The current remaining harness artifact is
+  `temp/rust-parity/diffs/js_src_Import.res.err`; however, an exact AST-mode
+  repro for `Import.res` now exits successfully and produces a normal JS diff,
+  so the next iteration should treat `Import.res` as a downstream output-shape
+  issue or a harness/output-path classification problem rather than another
+  backend crash
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration verified one OCaml-backed alias-cleanup / JS-pass slice in
   `compiler/core/lam_pass_lets_dce.ml` and
   `compiler/core/js_pass_flatten_and_mark_dead.ml`
@@ -87,8 +128,6 @@ Interpretation:
   **1** compile error, and **462** output diffs after this OCaml-aligned
   alias-cleanup / JS-pass identifier fix; this is a net **+6** passing
   snapshots over the previously recorded baseline
-- Older iteration notes follow below
-
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration verified one OCaml-backed `Pjs_fn_make`/method-function
   slice without changing the authoritative wrapper baseline yet
