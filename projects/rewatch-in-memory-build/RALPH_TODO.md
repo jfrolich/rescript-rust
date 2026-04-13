@@ -58,6 +58,7 @@ Temporary stack policy:
 
 - Do not block this project on stack-usage optimization.
 - If the current compiler only works in-process with very large stack allowances, that is acceptable as a temporary measure.
+- If 2GB still overflows, try 10GB next rather than spending time tuning intermediate values.
 - Raising the limit aggressively, even into multi-GB territory, is within scope for this project if that is what gets the in-process path working reliably.
 - The optimization/stack-reduction work is happening elsewhere; this project should optimize for correctness and clean integration first.
 

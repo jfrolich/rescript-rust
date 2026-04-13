@@ -159,6 +159,7 @@ For `--in-process`, correctness and end-to-end functionality matter more than st
 Guidance:
 
 - raise the allowed stack size aggressively if needed rather than blocking the project on stack-depth cleanup
+- if 2GB is not enough, try 10GB rather than spending more time searching for a smaller temporary number
 - if the practical temporary fix is a very large stack reservation, even into multi-GB territory, that is acceptable for this project
 - do not treat large stack settings as a final design win; they are a stopgap until the separate optimization/stack-reduction work lands
 - do not let stack tuning pull focus away from the main goal: a correct, clean, fully working in-process build path

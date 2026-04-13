@@ -118,6 +118,7 @@ Temporary allowance:
 
 - Do not block in-process correctness on stack-efficiency work.
 - If a huge stack limit is what makes the current compiler run end-to-end, use it for now.
+- If 2GB is not enough, try 10GB next instead of iterating on smaller temporary values.
 
 Do not keep any fallback compiler-asset protocol alive inside `--in-process` for runtime bootstrap, `node_modules`, namespace handling, startup reconstruction, or stale-build detection.
 
