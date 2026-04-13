@@ -44,6 +44,42 @@ reported:
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed nested-application reduction
+  boundary in `compiler/core/lam_pass_lets_dce.ml` together with
+  `compiler/core/lam_pass_remove_alias.ml`
+- After reading those OCaml passes, which only beta-reduce direct
+  `Lapply {ap_func = Lfunction ...}` sites at the current node and do not
+  keep re-dispatching through an original `Lapply` whose callee later
+  simplifies into a function, the Rust JS-backend simplifier in
+  `compiler-rust/src/lambda/simplify.rs` now follows the same one-step rule:
+  it still beta-reduces non-`Lapply` callees after simplification, but it no
+  longer beta-reduces a second time through an original nested application
+- Updated focused regression coverage in
+  `lambda::simplify::tests::stops_after_one_beta_reduction_for_downarity_pjs_fn_make_calls`
+  and
+  `lambda::simplify::tests::stops_after_one_beta_reduction_for_returned_pjs_fn_make_wrappers`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release pjs_fn_make -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_1692_test.res -o /tmp/gpr_1692_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/gpr_1692_test.res` now matches its checked-in snapshot
+  exactly again, `tests/tests/src/ExternalShadow.res` remains an exact
+  guard-file match, and `js_src_gpr_1692_test.res.diff` no longer appears
+  under `temp/rust-parity/diffs`; however the authoritative rerun stayed flat
+  at **261 / 657** passing with **396** output diffs, which means this
+  OCaml-aligned fix was offset by a compensating regression elsewhere in the
+  same nested-application family rather than improving the total yet
+- The authoritative JS snapshot baseline still reports **261 / 657** passing,
+  **0** compile errors, and **396** output diffs; this is a net **0**
+  baseline change from the previously recorded **261 / 657**, **0** compile
+  errors, **396** output diffs even though `gpr_1692_test.res` itself is now
+  correct
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed nullable-option lowering slice
   in `compiler/core/lam_compile_primitive.ml` together with
   `compiler/core/js_of_lam_option.ml`

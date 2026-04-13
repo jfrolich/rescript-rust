@@ -1408,21 +1408,21 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
     }
 
     let func = simplify_with_env(&apply.ap_func, env, exports);
-    if let Lambda::Lvar(id) = &func {
-        if !args
-            .iter()
-            .any(|arg| lambda_hits_variable_through_env(id, arg, env))
-        {
-            if let Some(func) = env.functions.get(id) {
-                if should_inline_named_function(func, &args) {
-                    let reduced =
-                        beta_reduce::no_names_beta_reduce(&func.params, &func.body, &args);
-                    return simplify_with_env(&reduced, env, exports);
+    if !matches!(apply.ap_func.as_ref(), Lambda::Lapply(_)) {
+        if let Lambda::Lvar(id) = &func {
+            if !args
+                .iter()
+                .any(|arg| lambda_hits_variable_through_env(id, arg, env))
+            {
+                if let Some(func) = env.functions.get(id) {
+                    if should_inline_named_function(func, &args) {
+                        let reduced =
+                            beta_reduce::no_names_beta_reduce(&func.params, &func.body, &args);
+                        return simplify_with_env(&reduced, env, exports);
+                    }
                 }
             }
         }
-    }
-    if !matches!(apply.ap_func.as_ref(), Lambda::Lapply(_)) {
         if let Some(inline_func) = inlineable_direct_wrapper_function(&func) {
             if should_inline_direct_function(&inline_func, &args) {
                 let reduced = beta_reduce::no_names_beta_reduce(
@@ -1433,12 +1433,15 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
                 return simplify_with_env(&reduced, env, exports);
             }
         }
-    }
-    if let Lambda::Lfunction(inline_func) = &func {
-        if should_inline_direct_function(inline_func, &args) {
-            let reduced =
-                beta_reduce::no_names_beta_reduce(&inline_func.params, &inline_func.body, &args);
-            return simplify_with_env(&reduced, env, exports);
+        if let Lambda::Lfunction(inline_func) = &func {
+            if should_inline_direct_function(inline_func, &args) {
+                let reduced = beta_reduce::no_names_beta_reduce(
+                    &inline_func.params,
+                    &inline_func.body,
+                    &args,
+                );
+                return simplify_with_env(&reduced, env, exports);
+            }
         }
     }
 
@@ -3009,7 +3012,7 @@ mod tests {
     }
 
     #[test]
-    fn beta_reduces_downarity_pjs_fn_make_calls_before_js_lowering() {
+    fn stops_after_one_beta_reduction_for_downarity_pjs_fn_make_calls() {
         let x = Ident::create_local("x");
         let y = Ident::create_local("y");
         let z = Ident::create_local("z");
@@ -3057,36 +3060,52 @@ mod tests {
             ap_transformed_jsx: false,
         }));
 
+        let Lambda::Lapply(apply) = simplified
+        else {
+            panic!("expected the outer application to remain after one beta-reduction");
+        };
+        assert!(matches!(
+            apply.ap_args.as_slice(),
+            [
+                Lambda::Lconst(Constant::Int { i: 2, .. }),
+                Lambda::Lconst(Constant::Int { i: 3, .. })
+            ]
+        ));
+        let Lambda::Lfunction(func) = apply.ap_func.as_ref() else {
+            panic!("expected the reduced wrapper to stay as a direct function");
+        };
+        assert_eq!(func.params.len(), 2);
         let Lambda::Lprim(crate::lambda::PrimInfo {
             primitive: Primitive::Paddint,
             args,
             ..
-        }) = simplified
+        }) = func.body.as_ref()
         else {
-            panic!("expected the fully-applied wrapper call to simplify to an integer addition");
+            panic!("expected the remaining function body to stay as integer addition");
         };
-        let [left, Lambda::Lconst(Constant::Int { i: 3, .. })] = args.as_slice() else {
-            panic!("expected the final argument to remain the trailing constant");
+        let [left, Lambda::Lvar(param_z)] = args.as_slice() else {
+            panic!("expected the trailing parameter to remain in the addition body");
         };
+        assert_eq!(param_z.name(), "z");
         let Lambda::Lprim(crate::lambda::PrimInfo {
             primitive: Primitive::Paddint,
             args,
             ..
         }) = left
         else {
-            panic!("expected the remaining wrapper to disappear into the left-hand addition");
+            panic!("expected the leading addition to keep the partially applied constant");
         };
         assert!(matches!(
             args.as_slice(),
             [
                 Lambda::Lconst(Constant::Int { i: 1, .. }),
-                Lambda::Lconst(Constant::Int { i: 2, .. })
+                Lambda::Lvar(_)
             ]
-        ));
+        ) && matches!(func.params.as_slice(), [param_y, _] if param_y.name() == "y"));
     }
 
     #[test]
-    fn beta_reduces_fully_applied_returned_pjs_fn_make_wrappers() {
+    fn stops_after_one_beta_reduction_for_returned_pjs_fn_make_wrappers() {
         let h = Ident::create_local("h");
         let x = Ident::create_local("x");
         let j = Ident::create_local("j");
@@ -3122,7 +3141,7 @@ mod tests {
                             Primitive::PjsFnMake(1),
                             vec![Lambda::function_(
                                 1,
-                                vec![f],
+                                vec![f.clone()],
                                 Lambda::const_(Constant::int(0)),
                                 FunctionAttribute::default(),
                             )],
@@ -3156,7 +3175,21 @@ mod tests {
         });
 
         let simplified = simplify_for_js_backend(&lambda);
-        assert!(matches!(simplified, Lambda::Lconst(Constant::Int { i: 0, .. })));
+        let Lambda::Lapply(apply) = simplified else {
+            panic!("expected the outer application to remain after one beta-reduction");
+        };
+        assert!(matches!(
+            apply.ap_args.as_slice(),
+            [Lambda::Lconst(Constant::String { s, .. })] if s.is_empty()
+        ));
+        let Lambda::Lfunction(func) = apply.ap_func.as_ref() else {
+            panic!("expected the returned wrapper to simplify to a direct function");
+        };
+        assert!(matches!(func.params.as_slice(), [param] if param.same(&f)));
+        assert!(matches!(
+            *func.body,
+            Lambda::Lconst(Constant::Int { i: 0, .. })
+        ));
     }
 
     #[test]
