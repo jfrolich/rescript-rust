@@ -3,9 +3,12 @@ use crate::config::Config;
 use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
 use blake3::Hash;
+use rescript_compiler::cmi::persistent_env::PersistentEnv;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
+use rescript_compiler::types::Signature as DeclSignature;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{fmt::Display, ops::Deref, path::PathBuf, time::SystemTime};
 
 /// The three explicit build modes for rewatch.
@@ -32,6 +35,36 @@ impl BuildMode {
     /// Whether this mode uses in-process compilation with no disk artifacts
     pub fn is_in_process(&self) -> bool {
         matches!(self, BuildMode::InProcess)
+    }
+}
+
+/// Per-module in-memory compilation state for `--in-process` builds.
+///
+/// Stores the published interface signature and a generation number that
+/// replaces timestamp-based invalidation (`last_compiled_cmi`/`last_compiled_cmt`).
+/// When a module is recompiled and its interface changes, the generation is
+/// bumped so downstream dependents know to recompile.
+pub struct InMemoryModuleState {
+    /// The module's published interface signature.
+    /// For modules with `.resi`, this comes from typechecking the `.resi`.
+    /// For modules without `.resi`, this is the inferred signature from `.res`.
+    pub signature: DeclSignature,
+    /// Monotonically increasing generation number. Bumped each time the
+    /// module's published interface changes. Downstream dependents compare
+    /// their recorded dependency generation against this to detect staleness.
+    pub generation: u64,
+    /// Whether this module's source is pure (no side effects), used for
+    /// JS import resolution.
+    pub is_pure: bool,
+}
+
+impl std::fmt::Debug for InMemoryModuleState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InMemoryModuleState")
+            .field("generation", &self.generation)
+            .field("is_pure", &self.is_pure)
+            .field("signature", &format!("<{} items>", self.signature.len()))
+            .finish()
     }
 }
 
@@ -156,7 +189,6 @@ pub struct BuildState {
 /// - `clean` command only needs core build data, no CLI overrides
 /// - `build`/`watch` commands need both core data AND CLI overrides
 /// - This prevents the "code smell" of optional fields that are None for some commands
-#[derive(Debug)]
 pub struct BuildCommandState {
     pub build_state: BuildState,
     // Command-line --warn-error flag override (takes precedence over rescript.json config)
@@ -169,6 +201,34 @@ pub struct BuildCommandState {
     pub dump_typed_sexp: bool,
     // Stored ASTs from parse phase, keyed by "{module_name}:impl" or "{module_name}:intf"
     pub stored_asts: Mutex<AHashMap<String, StoredAst>>,
+    // In-memory published interfaces, keyed by module name. Only used in --in-process mode.
+    // Maps module_name -> InMemoryModuleState (signature + generation).
+    pub in_memory_interfaces: Mutex<AHashMap<String, InMemoryModuleState>>,
+    // Monotonically increasing generation counter for in-memory interface invalidation.
+    // Each compilation that produces a new interface bumps this counter.
+    pub interface_generation: AtomicU64,
+    // Shared PersistentEnv for --in-process mode. Holds cached module interfaces
+    // and metadata needed by the compiler for dependency resolution.
+    pub persistent_env: Mutex<Option<PersistentEnv>>,
+}
+
+impl std::fmt::Debug for BuildCommandState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuildCommandState")
+            .field("build_state", &self.build_state)
+            .field("warn_error_override", &self.warn_error_override)
+            .field("build_mode", &self.build_mode)
+            .field("subprocess", &self.subprocess)
+            .field("dump_typed_sexp", &self.dump_typed_sexp)
+            .field("stored_asts", &"<Mutex<..>>")
+            .field("in_memory_interfaces", &"<Mutex<..>>")
+            .field(
+                "interface_generation",
+                &self.interface_generation.load(Ordering::Relaxed),
+            )
+            .field("persistent_env", &"<Mutex<Option<PersistentEnv>>>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +290,9 @@ impl BuildCommandState {
             subprocess,
             dump_typed_sexp,
             stored_asts: Mutex::new(AHashMap::new()),
+            in_memory_interfaces: Mutex::new(AHashMap::new()),
+            interface_generation: AtomicU64::new(0),
+            persistent_env: Mutex::new(None),
         }
     }
 
@@ -251,6 +314,53 @@ impl BuildCommandState {
 
     pub fn dump_typed_sexp(&self) -> bool {
         self.dump_typed_sexp
+    }
+
+    /// Allocate the next interface generation number.
+    pub fn next_interface_generation(&self) -> u64 {
+        self.interface_generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Register a compiled module's interface in the in-memory registry.
+    /// Returns the generation number assigned.
+    pub fn register_in_memory_interface(
+        &self,
+        module_name: String,
+        signature: DeclSignature,
+        is_pure: bool,
+    ) -> u64 {
+        let generation = self.next_interface_generation();
+        let state = InMemoryModuleState {
+            signature,
+            generation,
+            is_pure,
+        };
+        self.in_memory_interfaces
+            .lock()
+            .unwrap()
+            .insert(module_name, state);
+        generation
+    }
+
+    /// Get the current generation number for a module's published interface.
+    /// Returns None if the module has not been compiled yet in this session.
+    pub fn get_interface_generation(&self, module_name: &str) -> Option<u64> {
+        self.in_memory_interfaces
+            .lock()
+            .unwrap()
+            .get(module_name)
+            .map(|s| s.generation)
+    }
+
+    /// Take ownership of the PersistentEnv for use during compilation.
+    /// Returns None if no PersistentEnv has been initialized or it's already taken.
+    pub fn take_persistent_env(&self) -> Option<PersistentEnv> {
+        self.persistent_env.lock().unwrap().take()
+    }
+
+    /// Return the PersistentEnv after compilation.
+    pub fn return_persistent_env(&self, env: PersistentEnv) {
+        *self.persistent_env.lock().unwrap() = Some(env);
     }
 
     pub fn module_name_package_pairs(&self) -> Vec<(String, String)> {

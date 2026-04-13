@@ -1,7 +1,7 @@
 # Ralph TODO: Rewatch In-Memory Build
 
 **Last Updated:** 2026-04-13
-**Status:** 7/16 tasks complete
+**Status:** 8/16 tasks complete
 
 ## Goal
 
@@ -49,7 +49,8 @@ Add a new `--in-process` mode to `rewatch` that runs the Rust compiler fully in-
 
 ## Phase 2: Rewatch Build State
 
-- [ ] Extend `rewatch/src/build/build_types.rs` with in-memory parsed-module state, published-interface state, and interface generations/fingerprints for each module.
+- [x] Extend `rewatch/src/build/build_types.rs` with in-memory parsed-module state, published-interface state, and interface generations/fingerprints for each module.
+  - **Done:** Added `InMemoryModuleState` struct (signature: `DeclSignature`, generation: `u64`, is_pure: `bool`) for per-module in-memory compilation state. Added to `BuildCommandState`: `in_memory_interfaces: Mutex<AHashMap<String, InMemoryModuleState>>` for the interface registry, `interface_generation: AtomicU64` for monotonic generation counter (replaces `last_compiled_cmi`/`last_compiled_cmt` timestamps in `--in-process`), and `persistent_env: Mutex<Option<PersistentEnv>>` for sharing the compiler's `PersistentEnv` across compilations. Added helper methods: `next_interface_generation()`, `register_in_memory_interface()`, `get_interface_generation()`, `take_persistent_env()`, `return_persistent_env()`. Implemented manual `Debug` for `BuildCommandState` since `PersistentEnv` doesn't derive `Debug`. Build passes clean. Default-mode test failures are pre-existing (mlmap `randjbuildsystem` error, not related to these changes).
 - [ ] Stop writing `.ast` / `.iast` in the `--in-process` parse path in `rewatch/src/build/parse.rs`; keep parse results in memory and extract deps directly from the parsed AST.
 - [ ] Make `--in-process` parsing always use the Rust parser path; do not shell out to `bsc` for parsing in that mode.
 - [ ] Switch `rewatch/src/build/deps.rs` to read dependencies from in-memory parse results instead of rereading `.ast` files.
