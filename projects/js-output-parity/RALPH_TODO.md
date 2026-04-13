@@ -43,6 +43,47 @@ reported:
 
 Interpretation:
 
+- `compiler-rust/src/js_ir/mod.rs` now matches one more slice of
+  OCaml `core/js_stmt_make.ml` on the Rust JS-output path:
+  `Statement::if_` is now a smart constructor instead of a raw `If` wrapper,
+  so it ports the OCaml guard/cleanup cases for empty branches, paired
+  `return` branches, terminal-then fallthrough, and matching assignment
+  branches
+- Added focused coverage for this slice in
+  `test_if_statement`,
+  `test_if_statement_merges_two_returns_into_a_conditional_return`, and
+  `test_if_statement_merges_matching_assignments_into_a_conditional_assignment`
+- Kept raw printer coverage for explicit `If` nodes by updating
+  `compiler-rust/src/js_ir/printer.rs` `test_print_if` to construct
+  `StatementDesc::If` directly instead of routing through the smart
+  constructor
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib test_if_statement -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib test_print_if -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/LetUnwrap.res -o /tmp/LetUnwrap.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/return_check.res -o /tmp/return_check.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/LetUnwrap.res` narrowed materially:
+  the nested `let?` result/option paths now use OCaml-style guard returns
+  instead of keeping the whole continuation under a positive `if/else`, so
+  the remaining drift there is mostly alias temps, compact object formatting,
+  and later branch-expression cleanup rather than raw control-flow shape
+- `tests/tests/src/return_check.res` also moved in the same direction:
+  throw/fallthrough cases no longer keep the redundant `else` wrapper after a
+  terminating branch, and the remaining drift there is the still-missing
+  negation simplification (`!==` / `!== null`), alias temps, and printer
+  byte-shape
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the constructor change, which confirms this control-flow cleanup stays
+  isolated from the already-stable external-shadow/import path
+- The authoritative JS snapshot baseline remains **146 / 657** passing,
+  **0** compile errors, and **511** output diffs after this OCaml-aligned
+  `Js_stmt_make.if_` port; the top-line count stays flat because the affected
+  files still carry later backend cleanup mismatches even though the
+  statement-shaping stage is now closer to OCaml
+
 - `compiler-rust/src/lambda/compile.rs` now matches another OCaml backend
   slice from `core/lam_compile.ml` and `core/lam_compile_external_call.ml`:
   `Pjs_unsafe_downgrade` no longer falls through to `undefined`, so lowered

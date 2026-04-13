@@ -2150,11 +2150,11 @@ mod tests {
 
     #[test]
     fn test_print_if() {
-        let stmt = Statement::if_(
+        let stmt = Statement::new(StatementDesc::If(
             Expression::bool(true),
             vec![Statement::return_(Expression::number(Number::int(1)))],
             vec![Statement::return_(Expression::number(Number::int(2)))],
-        );
+        ));
         let result = print_block(&vec![stmt]);
         assert!(result.contains("if (true)"));
         assert!(result.contains("return 1;"));

@@ -639,7 +639,7 @@ impl Statement {
 
     /// Create an if statement
     pub fn if_(cond: Expression, then_: Block, else_: Block) -> Self {
-        Self::new(StatementDesc::If(cond, then_, else_))
+        simplify_if_statement(cond, then_, else_)
     }
 
     /// Create a while loop
@@ -675,6 +675,151 @@ impl Statement {
     /// Create a variable declaration
     pub fn variable(decl: VariableDeclaration) -> Self {
         Self::new(StatementDesc::Variable(decl))
+    }
+}
+
+fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statement {
+    match cond.desc {
+        ExpressionDesc::Bool(value) => {
+            return Statement::new(StatementDesc::Block(if value {
+                then_
+            } else {
+                else_
+            }))
+        }
+        ExpressionDesc::JsNot(inner) if !else_.is_empty() => {
+            return simplify_if_statement(*inner, else_, then_);
+        }
+        _ => {}
+    }
+
+    if then_.is_empty() {
+        if else_.is_empty() {
+            return Statement::exp(cond);
+        }
+        return simplify_if_statement(negate_condition(cond), else_, vec![]);
+    }
+
+    if let (Some(then_ret), Some(else_ret)) = (single_return_expr(&then_), single_return_expr(&else_)) {
+        return Statement::return_(Expression::cond(cond, then_ret, else_ret));
+    }
+
+    if let Some(else_ret) = single_return_expr(&else_) {
+        let mut block = Vec::with_capacity(1 + then_.len());
+        block.push(Statement::new(StatementDesc::If(
+            negate_condition(cond),
+            vec![Statement::return_(else_ret)],
+            vec![],
+        )));
+        block.extend(then_);
+        return Statement::new(StatementDesc::Block(block));
+    }
+
+    if block_last_is_terminal(&then_) {
+        let mut block = Vec::with_capacity(1 + else_.len());
+        block.push(Statement::new(StatementDesc::If(cond, then_, vec![])));
+        block.extend(else_);
+        return Statement::new(StatementDesc::Block(block));
+    }
+
+    if let (Some((lhs_then, rhs_then)), Some((lhs_else, rhs_else))) =
+        (single_assignment_expr(&then_), single_assignment_expr(&else_))
+    {
+        if same_assignment_target(&lhs_then, &lhs_else) {
+            return Statement::exp(Expression::bin(
+                BinOp::Eq,
+                lhs_then,
+                Expression::cond(cond, rhs_then, rhs_else),
+            ));
+        }
+    }
+
+    if let (Some(then_expr), Some(else_expr)) = (single_exp_expr(&then_), single_exp_expr(&else_)) {
+        return Statement::exp(Expression::cond(cond, then_expr, else_expr));
+    }
+
+    Statement::new(StatementDesc::If(cond, then_, else_))
+}
+
+fn block_last_is_terminal(block: &Block) -> bool {
+    matches!(
+        block.last().map(|stmt| &stmt.desc),
+        Some(StatementDesc::Return(_))
+            | Some(StatementDesc::Throw(_))
+            | Some(StatementDesc::Continue)
+    )
+}
+
+fn single_return_expr(block: &Block) -> Option<Expression> {
+    let [stmt] = block.as_slice() else {
+        return None;
+    };
+    match &stmt.desc {
+        StatementDesc::Return(expr) => Some(expr.clone()),
+        _ => None,
+    }
+}
+
+fn single_assignment_expr(block: &Block) -> Option<(Expression, Expression)> {
+    let [stmt] = block.as_slice() else {
+        return None;
+    };
+    let StatementDesc::Exp(expr) = &stmt.desc else {
+        return None;
+    };
+    let ExpressionDesc::Bin(BinOp::Eq, lhs, rhs) = &expr.desc else {
+        return None;
+    };
+    Some(((*lhs.clone()), (*rhs.clone())))
+}
+
+fn same_assignment_target(lhs: &Expression, rhs: &Expression) -> bool {
+    match (&lhs.desc, &rhs.desc) {
+        (ExpressionDesc::Var(left), ExpressionDesc::Var(right)) => left == right,
+        (
+            ExpressionDesc::StaticIndex(left_obj, left_field, left_pos),
+            ExpressionDesc::StaticIndex(right_obj, right_field, right_pos),
+        ) => {
+            left_field == right_field
+                && left_pos == right_pos
+                && same_assignment_target(left_obj, right_obj)
+        }
+        (
+            ExpressionDesc::ArrayIndex(left_obj, left_index),
+            ExpressionDesc::ArrayIndex(right_obj, right_index),
+        )
+        | (
+            ExpressionDesc::StringIndex(left_obj, left_index),
+            ExpressionDesc::StringIndex(right_obj, right_index),
+        ) => {
+            same_assignment_target(left_obj, right_obj) && same_assignment_target(left_index, right_index)
+        }
+        _ => false,
+    }
+}
+
+fn single_exp_expr(block: &Block) -> Option<Expression> {
+    let [stmt] = block.as_slice() else {
+        return None;
+    };
+    let StatementDesc::Exp(expr) = &stmt.desc else {
+        return None;
+    };
+    Some(expr.clone())
+}
+
+fn negate_condition(cond: Expression) -> Expression {
+    match cond.desc {
+        ExpressionDesc::Bool(value) => Expression::bool(!value),
+        ExpressionDesc::JsNot(inner) => *inner,
+        ExpressionDesc::Bin(op, left, right) => match op {
+            BinOp::EqEqEq => Expression::bin(BinOp::NotEqEq, *left, *right),
+            BinOp::NotEqEq => Expression::bin(BinOp::EqEqEq, *left, *right),
+            other => Expression::new(ExpressionDesc::JsNot(Box::new(Expression::new(
+                ExpressionDesc::Bin(other, left, right),
+            )))),
+        },
+        other => Expression::new(ExpressionDesc::JsNot(Box::new(Expression::new(other)))),
     }
 }
 
@@ -792,17 +937,83 @@ mod tests {
 
     #[test]
     fn test_if_statement() {
-        let cond = Expression::bool(true);
-        let then_ = vec![Statement::break_()];
-        let else_ = vec![];
+        let cond = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(Ident::create_local("x")),
+            Expression::number(Number::int(1)),
+        );
+        let then_ = vec![Statement::exp(Expression::number(Number::int(10)))];
+        let else_ = vec![Statement::return_(Expression::number(Number::int(20)))];
         let stmt = Statement::if_(cond, then_, else_);
 
         match &stmt.desc {
-            StatementDesc::If(_, then_block, else_block) => {
-                assert_eq!(then_block.len(), 1);
-                assert_eq!(else_block.len(), 0);
+            StatementDesc::Block(block) => {
+                let [guard, fallthrough] = block.as_slice() else {
+                    panic!("Expected a guard if and a fallthrough statement");
+                };
+                match &guard.desc {
+                    StatementDesc::If(guard_cond, then_block, else_block) => {
+                        match &guard_cond.desc {
+                            ExpressionDesc::Bin(BinOp::NotEqEq, _, _) => {}
+                            _ => panic!("Expected a negated equality guard"),
+                        }
+                        assert!(matches!(then_block.as_slice(), [Statement { desc: StatementDesc::Return(_), .. }]));
+                        assert!(else_block.is_empty());
+                    }
+                    _ => panic!("Expected guard if"),
+                }
+                assert!(matches!(fallthrough.desc, StatementDesc::Exp(_)));
             }
-            _ => panic!("Expected If"),
+            _ => panic!("Expected simplified guard block"),
+        }
+    }
+
+    #[test]
+    fn test_if_statement_merges_two_returns_into_a_conditional_return() {
+        let stmt = Statement::if_(
+            Expression::var(Ident::create_local("cond")),
+            vec![Statement::return_(Expression::number(Number::int(1)))],
+            vec![Statement::return_(Expression::number(Number::int(2)))],
+        );
+
+        match &stmt.desc {
+            StatementDesc::Return(expr) => match &expr.desc {
+                ExpressionDesc::Cond(_, consequent, alternate) => {
+                    assert!(matches!(consequent.desc, ExpressionDesc::Number(_)));
+                    assert!(matches!(alternate.desc, ExpressionDesc::Number(_)));
+                }
+                _ => panic!("Expected a conditional return expression"),
+            },
+            _ => panic!("Expected a single return statement"),
+        }
+    }
+
+    #[test]
+    fn test_if_statement_merges_matching_assignments_into_a_conditional_assignment() {
+        let target = Ident::create_local("result");
+        let stmt = Statement::if_(
+            Expression::var(Ident::create_local("cond")),
+            vec![Statement::exp(Expression::bin(
+                BinOp::Eq,
+                Expression::var(target.clone()),
+                Expression::number(Number::int(1)),
+            ))],
+            vec![Statement::exp(Expression::bin(
+                BinOp::Eq,
+                Expression::var(target.clone()),
+                Expression::number(Number::int(2)),
+            ))],
+        );
+
+        match &stmt.desc {
+            StatementDesc::Exp(expr) => match &expr.desc {
+                ExpressionDesc::Bin(BinOp::Eq, lhs, rhs) => {
+                    assert!(matches!(lhs.desc, ExpressionDesc::Var(_)));
+                    assert!(matches!(rhs.desc, ExpressionDesc::Cond(_, _, _)));
+                }
+                _ => panic!("Expected a merged assignment"),
+            },
+            _ => panic!("Expected a single assignment expression"),
         }
     }
 
