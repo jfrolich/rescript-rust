@@ -30,6 +30,30 @@ Clean architecture, stated operationally:
 - `ModuleRegistry` is only grown/overwritten. Deleted modules, stale namespace aliases, and stale module metadata are not purged from the shared registry, so watch/incremental builds can resolve removed modules until process restart.
 - `PersistentEnv` is not removed entirely yet. The shared `BuildCommandState` token is gone, and the public in-process entrypoints no longer take or return a `PersistentEnv`, but `compiler-rust/src/driver.rs` still creates a fresh `PersistentEnv::from_registry(...)` internally for each compilation, and the typechecker / JS backend still depend on that abstraction.
 
+## Steering Update
+
+The recent portable type graph work is valid and should stay, but do not keep expanding the transitional `PersistentEnv` design.
+
+Priority order from here:
+
+1. Fix in-process correctness bugs in the current scheduler/state model:
+   - unchanged-interface invalidation
+   - stale registry entries for deleted/renamed modules
+2. Tighten the in-process resolver invariant:
+   - no disk fallback
+   - no on-demand source compilation during lookup
+   - a missing interface is a scheduler/bootstrap bug
+3. Replace internal `PersistentEnv::from_registry(...)` construction with a borrowed resolver session over a wave snapshot
+4. Only after that, do performance cleanup and cache-shape tuning
+
+Do not spend more iterations making `PersistentEnv` cloning cheaper, adding more source fallback machinery, or deepening in-process special cases inside `PersistentEnv`. Those are transition aids, not the target architecture.
+
+Test policy:
+
+- A stubbed or simplified testrepo run is useful for debugging, but it is not final acceptance.
+- Do not weaken `rewatch/tests/in-process.sh` or the project acceptance criteria by editing testrepo sources to hide unsupported compiler behavior.
+- If a reduced repro is needed, keep it in a separate diagnostic path, not in the acceptance suite.
+
 ## Current Findings
 
 - `node_modules` packages are already source-backed in `rewatch`; the special disk-backed bootstrap case is `@rescript/runtime`.

@@ -98,6 +98,21 @@ Known blockers that must be fixed before declaring completion:
 - Deleted or renamed modules must be purged from the shared in-memory registry, including stale namespace alias rewrites and module metadata.
 - Final in-process cleanup still needs to remove internal `PersistentEnv::from_registry(...)` construction from the compiler path.
 
+Steering note:
+
+- Keep the portable type graph work. It solves a real cross-wave correctness bug.
+- Do not use that as justification to keep growing the in-process `PersistentEnv` design.
+- Do not add more disk/source fallback behavior to make missing interfaces resolve. In `--in-process`, a lookup miss means the scheduler or bootstrap ordering is wrong.
+- Do not weaken acceptance by editing `rewatch/testrepo` sources or relying on stubbed package replacements in the final in-process suite. Reduced repros are allowed only as separate diagnostic tooling.
+
+Priority order from here:
+
+1. Fix unchanged-interface invalidation.
+2. Fix stale/deleted-module registry invalidation.
+3. Enforce snapshot-only resolver lookup in `--in-process`.
+4. Remove internal `PersistentEnv::from_registry(...)` construction and move to a borrowed resolver session.
+5. Only then optimize performance details of the clean design.
+
 Do not keep any fallback compiler-asset protocol alive inside `--in-process` for runtime bootstrap, `node_modules`, namespace handling, startup reconstruction, or stale-build detection.
 
 ## Important Constraints

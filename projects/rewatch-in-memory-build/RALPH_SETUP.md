@@ -127,6 +127,29 @@ Do not treat the current branch as complete. Post-implementation review found fo
 - `ModuleRegistry` currently accumulates inserts and overwrites only. Deleted modules and stale namespace aliases are not purged from the shared registry.
 - `PersistentEnv` is no longer shared through `BuildCommandState`, but it still exists inside the in-process compiler path via `PersistentEnv::from_registry(...)`. That is a transition step, not the target architecture.
 
+## Steering For The Next Iteration
+
+Recent work on portable type graphs is legitimate and should not be reverted. But it does not change the architectural direction:
+
+- stop broadening the in-process role of `PersistentEnv`
+- stop adding more source-fallback or disk-fallback behavior to make missing interfaces "work"
+- treat any in-process module lookup miss as a scheduler/bootstrap bug to be fixed at the build-state level
+
+Work in this order:
+
+1. Fix unchanged-interface invalidation.
+2. Purge deleted/renamed modules and stale namespace aliases from the shared registry.
+3. Remove in-process fallback lookup behavior so the resolver is snapshot-only.
+4. Replace internal `PersistentEnv::from_registry(...)` construction with a borrowed resolver session over the wave snapshot.
+
+Do not spend the next iteration optimizing clone cost inside the transitional design before the architectural boundary is correct.
+
+Test discipline:
+
+- A stubbed/simplified testrepo run is a debugging tool only.
+- Do not treat edits to `rewatch/testrepo` source files as acceptance for the feature.
+- Keep the acceptance suite representative of the real build graph. If you need a smaller repro, add a separate diagnostic path rather than weakening `rewatch/tests/in-process.sh`.
+
 ## Per-File `PersistentEnv`
 
 One `PersistentEnv` per file is acceptable and may be the simplest correct design.
