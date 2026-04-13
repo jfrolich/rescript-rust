@@ -66,9 +66,9 @@ Interpretation:
 - Focused outcome:
   `tests/tests/src/ExternalShadow.res` remains an exact guard-file match, the
   tailcall cluster now lowers through OCaml-style loops instead of direct
-  recursive calls on focused repros like `tests/tests/src/test_cps.res`, and
-  the cached `while (true)` motif shrank from **44** failing diff files to
-  **37**
+  recursive calls, `tests/tests/src/test_cps.res` is an exact checked-in
+  snapshot match after rebuilding the standalone Rust `bsc`, and the cached
+  `while (true)` motif shrank from **44** failing diff files to **37**
 - Resolved checked-in snapshot files for this cluster:
   `tests/tests/src/inline_regression_test.res`,
   `tests/tests/src/inline_edge_cases.res`,
@@ -79,12 +79,21 @@ Interpretation:
   **0** compile errors, and **382** output diffs; this is a net **+5**
   passing snapshots and **-5** output diffs from the previously recorded
   **270 / 657**, **0** compile errors, **387** output diffs
-- The remaining drift inside focused files such as
-  `tests/tests/src/test_cps.res`,
-  `tests/tests/src/cps_test.res`, and
-  `tests/tests/src/tailcall_inline_test.res` has moved on from missing
-  recursive-loop lowering to later byte ordering and surrounding backend
-  shaping
+- A follow-up focused diagnosis on `tests/tests/src/Coercion.res` and
+  `tests/tests/src/Import.res` using OCaml `-bs-diagnose` confirmed that the
+  next broad remaining cluster is **not** a JS-pass cleanup issue:
+  - `tests/tests/src/Coercion.lambda` shows the post-coercion OCaml grouped
+    lambda already reordered to
+    `let foo =o ...; let x = 1; let xx = 1`, which explains the checked-in JS
+    snapshot ordering
+  - `tests/tests/src/Import.lambda` likewise places late aliases such as
+    `each/4226`, `M2/4225`, and `each2/4224` at the end of the grouped lambda,
+    matching the checked-in JS snapshot order there
+  - This confirms the next root-cause cluster lives in the missing
+    OCaml-aligned post-lambda backend stages
+    (`Lam_pass_*`, `Lam_coercion.coerce_and_group_big_lambda`, grouped
+    lowering), not in ad hoc printer or export-order rewrites inside the
+    current Rust JS-pass cleanup
 - Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
