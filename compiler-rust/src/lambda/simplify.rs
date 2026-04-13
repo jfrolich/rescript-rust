@@ -5,16 +5,19 @@ use std::collections::{HashMap, HashSet};
 use crate::ident::Ident;
 use crate::lambda::analysis;
 use crate::lambda::beta_reduce;
+use crate::lambda::compile_context::BoxedNullable;
 use crate::lambda::compat::{FieldDbgInfo, LetKind};
 use crate::lambda::constant::Constant;
 use crate::lambda::free_variables::free_variables;
-use crate::lambda::primitive::{Mutable, Primitive};
+use crate::lambda::primitive::Primitive;
 use crate::lambda::{Apply, LFunction, Lambda, LambdaSwitch, TagInfo};
+use crate::location::Location;
 
 #[derive(Clone, Default)]
 struct SimplifyEnv {
     blocks: HashMap<Ident, ImmutableBlockInfo>,
     functions: HashMap<Ident, LFunction>,
+    optional_blocks: HashMap<Ident, OptionalBlockInfo>,
     substitutions: HashMap<Ident, Lambda>,
 }
 
@@ -31,6 +34,12 @@ struct ImmutableBlockInfo {
 }
 
 #[derive(Clone)]
+struct OptionalBlockInfo {
+    value: Lambda,
+    kind: BoxedNullable,
+}
+
+#[derive(Clone)]
 enum FlattenGroup {
     Single(LetKind, Ident, Lambda),
     Recursive(Vec<(Ident, Lambda)>),
@@ -42,6 +51,7 @@ impl SimplifyEnv {
         let mut next = self.clone();
         next.blocks.remove(id);
         next.functions.remove(id);
+        next.optional_blocks.remove(id);
         next.substitutions.remove(id);
         next
     }
@@ -51,6 +61,7 @@ impl SimplifyEnv {
         for id in ids {
             next.blocks.remove(id);
             next.functions.remove(id);
+            next.optional_blocks.remove(id);
             next.substitutions.remove(id);
         }
         next
@@ -174,15 +185,69 @@ fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
 
     fn flatten(acc: Vec<FlattenGroup>, lam: &Lambda) -> (Lambda, Vec<FlattenGroup>) {
         match lam {
-            Lambda::Llet(kind, id, arg, body) => {
-                let (res, accux) = flatten(acc, arg);
+            Lambda::Llet(
+                kind,
+                id,
+                value,
+                body,
+            ) if matches!(
+                value.as_ref(),
+                Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
+                    args,
+                    ..
+                }) if matches!(args.as_slice(), [Lambda::Lvar(_)])
+            ) =>
+            {
+                let res = aux(value);
+                let mut next_acc = Vec::with_capacity(acc.len() + 1);
+                next_acc.push(FlattenGroup::Single(*kind, id.clone(), res));
+                next_acc.extend(acc);
+                flatten(next_acc, body)
+            }
+            Lambda::Llet(kind, id, value, body) => {
+                if let Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive,
+                    args,
+                    ..
+                }) = value.as_ref()
+                {
+                    if matches!(
+                        primitive,
+                        Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt
+                    ) && matches!(args.as_slice(), [arg] if !matches!(arg, Lambda::Lvar(_)))
+                    {
+                        let [arg] = args.as_slice() else {
+                            unreachable!();
+                        };
+                        let new_id = Ident::create_local(id.name().to_string());
+                        let lowered = Lambda::let_(
+                            *kind,
+                            new_id.clone(),
+                            arg.clone(),
+                            Lambda::let_(
+                                LetKind::Alias,
+                                id.clone(),
+                                Lambda::prim(
+                                    primitive.clone(),
+                                    vec![Lambda::var(new_id)],
+                                    Location::none(),
+                                ),
+                                body.as_ref().clone(),
+                            ),
+                        );
+                        return flatten(acc, &lowered);
+                    }
+                }
+
+                let (res, accux) = flatten(acc, value);
                 let flatten_named_module_block = matches!(
                     (id.name(), *kind, &res),
                     (
                         "match" | "include" | "param",
                         LetKind::Alias | LetKind::Strict | LetKind::StrictOpt,
                         Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(_, _, Mutable::Immutable),
+                            primitive: Primitive::Pmakeblock(_, _, crate::lambda::primitive::Mutable::Immutable),
                             ..
                         })
                     )
@@ -346,6 +411,9 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             if let Some(block_info) = immutable_block_elements(&value) {
                 body_env.blocks.insert(id.clone(), block_info);
             }
+            if let Some(optional_info) = optional_block_info(&value) {
+                body_env.optional_blocks.insert(id.clone(), optional_info);
+            }
             if let Some(substitution) = substitution_candidate(*kind, &value) {
                 body_env.substitutions.insert(id.clone(), substitution);
             }
@@ -432,11 +500,22 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 Box::new(simplify_with_env(handler, &scoped_env, exports)),
             )
         }
-        Lambda::LifThenElse(cond, then_, else_) => Lambda::if_(
-            simplify_with_env(cond, env, exports),
-            simplify_with_env(then_, env, exports),
-            simplify_with_env(else_, env, exports),
-        ),
+        Lambda::LifThenElse(cond, then_, else_) => {
+            if let Some((optional_value, kind)) = optional_block_predicate(cond, env) {
+                let predicate = optional_is_some_predicate(optional_value, kind);
+                return Lambda::if_(
+                    predicate,
+                    simplify_with_env(then_, env, exports),
+                    simplify_with_env(else_, env, exports),
+                );
+            }
+
+            Lambda::if_(
+                simplify_with_env(cond, env, exports),
+                simplify_with_env(then_, env, exports),
+                simplify_with_env(else_, env, exports),
+            )
+        }
         Lambda::Lsequence(first, second) => {
             let first = simplify_with_env(first, env, exports);
             let second = simplify_with_env(second, env, exports);
@@ -490,6 +569,11 @@ fn simplify_primitive(
         (Primitive::Pfield(index, dbg), [arg]) => {
             simplify_field_access(*index, dbg, arg, env, &info.primitive, &info.loc)
         }
+        (Primitive::PvalFromOption | Primitive::PvalFromOptionNotNest, [Lambda::Lvar(id)]) => env
+            .optional_blocks
+            .get(id)
+            .map(|optional| optional.value.clone())
+            .unwrap_or_else(|| Lambda::prim(info.primitive.clone(), args, info.loc.clone())),
         (
             Primitive::Pstringadd,
             [
@@ -563,6 +647,58 @@ fn immutable_block_elements(value: &Lambda) -> Option<ImmutableBlockInfo> {
         }),
         _ => None,
     }
+}
+
+fn optional_block_info(value: &Lambda) -> Option<OptionalBlockInfo> {
+    match value {
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::PnullToOpt,
+            args,
+            ..
+        }) if matches!(args.as_slice(), [Lambda::Lvar(_)]) => Some(OptionalBlockInfo {
+            value: args[0].clone(),
+            kind: BoxedNullable::Null,
+        }),
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::PnullUndefinedToOpt,
+            args,
+            ..
+        }) if matches!(args.as_slice(), [Lambda::Lvar(_)]) => Some(OptionalBlockInfo {
+            value: args[0].clone(),
+            kind: BoxedNullable::NullUndefined,
+        }),
+        _ => None,
+    }
+}
+
+fn optional_block_predicate(cond: &Lambda, env: &SimplifyEnv) -> Option<(Lambda, BoxedNullable)> {
+    match cond {
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::PisNotNone,
+            args,
+            ..
+        }) => match args.as_slice() {
+            [Lambda::Lvar(id)] => env
+                .optional_blocks
+                .get(id)
+                .map(|optional| (optional.value.clone(), optional.kind)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn optional_is_some_predicate(value: Lambda, kind: BoxedNullable) -> Lambda {
+    let primitive = match kind {
+        BoxedNullable::Undefined => Primitive::PisUndefined,
+        BoxedNullable::Null => Primitive::PisNull,
+        BoxedNullable::NullUndefined => Primitive::PisNullUndefined,
+    };
+    Lambda::prim(
+        Primitive::Pnot,
+        vec![Lambda::prim(primitive, vec![value], Location::none())],
+        Location::none(),
+    )
 }
 
 fn block_element_of_lambda(value: &Lambda) -> BlockElement {
@@ -1315,6 +1451,162 @@ mod tests {
             Lambda::Lconst(Constant::String { ref s, .. }) if s == "hello world"
         ));
         assert!(matches!(*body, Lambda::Lprim(_)));
+    }
+
+    #[test]
+    fn rewrites_null_to_opt_alias_checks_to_raw_null_predicates() {
+        let source = Ident::create_local("source");
+        let optional = Ident::create_local("optional");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            source.clone(),
+            Lambda::prim(
+                Primitive::PjsCall {
+                    prim_name: "getElementById".to_string(),
+                    arg_types: vec![],
+                    ffi: crate::lambda::primitive::ExternalFfiSpec {
+                        kind: crate::lambda::primitive::ExternalFfiKind::Default,
+                        spec: None,
+                        obj_params: None,
+                        return_wrapper: crate::lambda::primitive::ExternalReturnWrapper::Identity,
+                        inline_constant: None,
+                    },
+                    dynamic_import: false,
+                    transformed_jsx: false,
+                },
+                vec![],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                optional.clone(),
+                Lambda::prim(
+                    Primitive::PnullToOpt,
+                    vec![Lambda::var(source.clone())],
+                    Location::none(),
+                ),
+                Lambda::if_(
+                    Lambda::prim(
+                        Primitive::PisNotNone,
+                        vec![Lambda::var(optional.clone())],
+                        Location::none(),
+                    ),
+                    Lambda::prim(
+                        Primitive::PvalFromOptionNotNest,
+                        vec![Lambda::var(optional)],
+                        Location::none(),
+                    ),
+                    Lambda::const_(Constant::int(1)),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(_, kept_id, _, body) = simplified else {
+            panic!("expected the source binding to remain");
+        };
+        assert_eq!(kept_id, source);
+        let Lambda::LifThenElse(cond, then_, else_) = *body else {
+            panic!("expected the optional alias binding to fold into an if");
+        };
+        assert!(matches!(
+            cond.as_ref(),
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pnot,
+                args,
+                ..
+            }) if matches!(
+                args.as_slice(),
+                [Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::PisNull,
+                    args,
+                    ..
+                })] if matches!(args.as_slice(), [Lambda::Lvar(id)] if *id == kept_id)
+            )
+        ));
+        assert!(matches!(then_.as_ref(), Lambda::Lvar(id) if *id == kept_id));
+        assert!(matches!(
+            else_.as_ref(),
+            Lambda::Lconst(Constant::Int { i: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn rewrites_nullable_alias_checks_to_raw_nullable_predicates() {
+        let source = Ident::create_local("source");
+        let optional = Ident::create_local("optional");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            source.clone(),
+            Lambda::prim(
+                Primitive::PjsCall {
+                    prim_name: "getNullable".to_string(),
+                    arg_types: vec![],
+                    ffi: crate::lambda::primitive::ExternalFfiSpec {
+                        kind: crate::lambda::primitive::ExternalFfiKind::Default,
+                        spec: None,
+                        obj_params: None,
+                        return_wrapper: crate::lambda::primitive::ExternalReturnWrapper::Identity,
+                        inline_constant: None,
+                    },
+                    dynamic_import: false,
+                    transformed_jsx: false,
+                },
+                vec![],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                optional.clone(),
+                Lambda::prim(
+                    Primitive::PnullUndefinedToOpt,
+                    vec![Lambda::var(source.clone())],
+                    Location::none(),
+                ),
+                Lambda::if_(
+                    Lambda::prim(
+                        Primitive::PisNotNone,
+                        vec![Lambda::var(optional.clone())],
+                        Location::none(),
+                    ),
+                    Lambda::prim(
+                        Primitive::PvalFromOption,
+                        vec![Lambda::var(optional)],
+                        Location::none(),
+                    ),
+                    Lambda::const_(Constant::int(0)),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(_, kept_id, _, body) = simplified else {
+            panic!("expected the source binding to remain");
+        };
+        assert_eq!(kept_id, source);
+        let Lambda::LifThenElse(cond, then_, else_) = *body else {
+            panic!("expected the nullable alias binding to fold into an if");
+        };
+        assert!(matches!(
+            cond.as_ref(),
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pnot,
+                args,
+                ..
+            }) if matches!(
+                args.as_slice(),
+                [Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::PisNullUndefined,
+                    args,
+                    ..
+                })] if matches!(args.as_slice(), [Lambda::Lvar(id)] if *id == kept_id)
+            )
+        ));
+        assert!(matches!(then_.as_ref(), Lambda::Lvar(id) if *id == kept_id));
+        assert!(matches!(
+            else_.as_ref(),
+            Lambda::Lconst(Constant::Int { i: 0, .. })
+        ));
     }
 
     #[test]

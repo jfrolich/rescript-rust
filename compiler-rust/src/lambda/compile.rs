@@ -1002,13 +1002,14 @@ impl LambdaCompiler {
                 self.optional_block(compiled_args[0].clone(), false),
             ),
             PnullUndefinedToOpt => Expression::cond(
-                Expression::new(ExpressionDesc::IsNullOrUndefined(Box::new(
-                    compiled_args[0].clone(),
-                ))),
+                self.is_null_or_undefined_expr(compiled_args[0].clone()),
                 Expression::undefined(false),
                 self.optional_block(compiled_args[0].clone(), false),
             ),
             PisNotNone => self.is_not_none_expr(compiled_args[0].clone()),
+            PisNull => self.is_null_expr(compiled_args[0].clone()),
+            PisUndefined => self.is_undefined_expr(compiled_args[0].clone()),
+            PisNullUndefined => self.is_null_or_undefined_expr(compiled_args[0].clone()),
             PvalFromOption => self.val_from_option_expr(compiled_args[0].clone()),
             PvalFromOptionNotNest => compiled_args[0].clone(),
             Psome => self.some_expr(compiled_args[0].clone()),
@@ -1376,6 +1377,14 @@ impl LambdaCompiler {
 
     fn is_null_expr(&self, expr: Expression) -> Expression {
         Expression::bin(BinOp::EqEqEq, expr, Expression::null())
+    }
+
+    fn is_undefined_expr(&self, expr: Expression) -> Expression {
+        Expression::bin(BinOp::EqEqEq, expr, Expression::undefined(false))
+    }
+
+    fn is_null_or_undefined_expr(&self, expr: Expression) -> Expression {
+        Expression::new(ExpressionDesc::IsNullOrUndefined(Box::new(expr)))
     }
 
     fn some_expr(&self, value: Expression) -> Expression {
@@ -6466,6 +6475,84 @@ mod tests {
                 ..
             }) => assert!(id.same(&value)),
             other => panic!("expected optional unwrap to lower to the inner value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_nullable_predicates_to_js_null_checks() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+
+        let null_compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PisNull,
+            vec![Lambda::var(value.clone())],
+            Location::none(),
+        ));
+        let undefined_compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PisUndefined,
+            vec![Lambda::var(value.clone())],
+            Location::none(),
+        ));
+        let nullable_compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PisNullUndefined,
+            vec![Lambda::var(value.clone())],
+            Location::none(),
+        ));
+
+        assert!(null_compiled.prelude.is_empty());
+        match &null_compiled.expr.desc {
+            ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => {
+                assert!(matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&value)
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Null,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected `value === null`, got {other:?}"),
+        }
+
+        assert!(undefined_compiled.prelude.is_empty());
+        match &undefined_compiled.expr.desc {
+            ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => {
+                assert!(matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&value)
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Undefined { .. },
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected `value === undefined`, got {other:?}"),
+        }
+
+        assert!(nullable_compiled.prelude.is_empty());
+        match &nullable_compiled.expr.desc {
+            ExpressionDesc::IsNullOrUndefined(inner) => {
+                assert!(matches!(
+                    inner.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&value)
+                ));
+            }
+            other => panic!("expected `value == null`, got {other:?}"),
         }
     }
 

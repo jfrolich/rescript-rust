@@ -43,6 +43,38 @@ reported:
 
 Interpretation:
 
+- OCaml `core/lam_pass_deep_flatten.ml` / `core/lam_pass_remove_alias.ml` /
+  `core/lam_compile_primitive.ml` nullable-option cleanup is now matched more
+  closely on the Rust JS path:
+  the JS-backend simplifier now performs the same deep-flatten split for
+  non-variable `Pnull_to_opt` / `Pnull_undefined_to_opt` lets, rewrites
+  `Pis_not_none` / `Pval_from_option(_not_nest)` alias checks back to raw
+  nullable predicates, and JS lowering now compiles the resulting
+  `Pis_null` / `Pis_undefined` / `Pis_null_undefined` primitives instead of
+  falling through to `undefined`
+- Added focused coverage for this slice in
+  `rewrites_null_to_opt_alias_checks_to_raw_null_predicates`,
+  `rewrites_nullable_alias_checks_to_raw_nullable_predicates`, and
+  `lowers_nullable_predicates_to_js_null_checks`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lowers_nullable_predicates_to_js_null_checks -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release rewrites_null_to_opt_alias_checks_to_raw_null_predicates -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release rewrites_nullable_alias_checks_to_raw_nullable_predicates -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/return_check.res -o /tmp/return_check.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/return_check.res` narrowed materially:
+  the broken `if (!undefined)` output is gone, and the nullable branches now
+  lower to real null / null-or-undefined checks; the file still fails on later
+  backend shaping (`ifres` temporaries, assert lowering, and byte-shape drift)
+  so it does not change the pass/fail count yet
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the nullable-predicate fix
+- The authoritative JS snapshot baseline remains **123 / 657** passing,
+  **0** compile errors, and **534** output diffs after this OCaml-aligned
+  nullable-predicate lowering fix
+
 - `compiler-rust/src/lambda/compile.rs` now matches one more slice of
   OCaml `core/lam_compile_main.ml` / `core/lam_module_ident.ml` /
   `ext/ext_string.ml` on the Rust JS path:
