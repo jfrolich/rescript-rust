@@ -660,17 +660,21 @@ pub fn make(
     Ok(result)
 }
 
-pub fn parse_packages(build_state: &mut BuildState) -> Result<()> {
+pub fn parse_packages(build_state: &mut BuildState, in_process: bool) -> Result<()> {
     let packages = build_state.packages.clone();
     for (package_name, package) in packages.iter() {
         debug!("Parsing package: {package_name}");
         if let Some(package_modules) = package.modules.to_owned() {
             build_state.module_names.extend(package_modules)
         }
-        let build_path_abs = package.get_build_path();
-        let bs_build_path = package.get_ocaml_build_path();
-        helpers::create_path(&build_path_abs);
-        helpers::create_path(&bs_build_path);
+        // In --in-process mode, skip creating lib/bs and lib/ocaml directories
+        // (no compiler assets are emitted, only JS output)
+        if !in_process {
+            let build_path_abs = package.get_build_path();
+            let bs_build_path = package.get_ocaml_build_path();
+            helpers::create_path(&build_path_abs);
+            helpers::create_path(&bs_build_path);
+        }
         let root_config = build_state.get_root_config();
 
         root_config.get_package_specs().iter().for_each(|spec| {
@@ -731,7 +735,14 @@ pub fn parse_packages(build_state: &mut BuildState) -> Result<()> {
                 .filter(|module_name| helpers::is_non_exotic_module_name(module_name))
                 .collect::<AHashSet<String>>();
 
-            let mlmap = namespaces::gen_mlmap(package, namespace, &depending_modules);
+            // In --in-process mode, skip writing the .mlmap file to disk
+            // (namespace signatures are synthesized in-memory by compile.rs).
+            // We still need the path for module name computation below.
+            let mlmap = if in_process {
+                package.get_build_path().join(format!("{namespace}.mlmap"))
+            } else {
+                namespaces::gen_mlmap(package, namespace, &depending_modules)
+            };
 
             // mlmap will be compiled in the AST generation step
             // compile_mlmap(&package, namespace, &project_root);

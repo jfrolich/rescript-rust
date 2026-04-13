@@ -156,7 +156,7 @@ pub fn initialize_build(
 
     let mut build_state =
         BuildCommandState::new(project_context, packages, compiler, warn_error, build_mode, subprocess, dump_typed_sexp);
-    packages::parse_packages(&mut build_state)?;
+    packages::parse_packages(&mut build_state, build_mode.is_in_process())?;
 
     let compile_assets_state = read_compile_state::read(&mut build_state)?;
 

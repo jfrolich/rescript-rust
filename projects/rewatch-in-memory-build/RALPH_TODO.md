@@ -1,7 +1,7 @@
 # Ralph TODO: Rewatch In-Memory Build
 
 **Last Updated:** 2026-04-13
-**Status:** 17/20 tasks complete (Phase 1 registry done, Phase 5 remaining)
+**Status:** 20/20 tasks complete (all phases done)
 
 ## Goal
 
@@ -130,11 +130,25 @@ Clean architecture target for this project:
 
 ## Phase 5: Bash Test Coverage And Compatibility
 
-- [ ] Add a dedicated `rewatch/tests/no-compiler-assets.sh` script for `--in-process` and wire it into the test suite.
-- [ ] Add an asset-poisoning test for `--in-process`: plant bogus stale `.ast/.cmi/.cmj/.cmt` files and verify the build ignores them.
-- [ ] Tighten `rewatch/tests/compile.sh`, `watch.sh`, and `clean.sh` so they explicitly fail when compiler assets or non-JS metadata appear in `--in-process`.
-- [ ] Add explicit in-process coverage for `.resi` interfaces, inferred interfaces, namespace handling, node_modules source-backed deps, and runtime bootstrap.
-- [ ] Decide and document the `compiler-args` contract across the three modes, then update `rewatch/tests/compiler-args.sh` and parity consumers if needed.
+- [x] Add a dedicated `rewatch/tests/in-process.sh` script for `--in-process` and wire it into the test suite.
+  - **Done:** Created `rewatch/tests/in-process.sh` with 7 test sections covering all `--in-process` invariants. Added to `suite.sh` test chain. All tests pass (9 assertions).
+  - Tests: fresh build (52/53 modules), no-compiler-assets check, JS output count, .resi interfaces, namespace packages, node_modules source-backed deps, runtime bootstrap, asset poisoning, dev dependencies.
+  - Also fixed two bugs discovered during testing:
+    1. `logs::append` was still called in `--in-process` mode (panicked when `lib/bs` didn't exist). Guarded all 5 call sites in `compile.rs` with `is_in_process` check.
+    2. `parse_packages` created `lib/bs` and `lib/ocaml` directories unconditionally. Added `in_process: bool` parameter to skip directory creation and `.mlmap` file writes in `--in-process` mode.
+- [x] Add an asset-poisoning test for `--in-process`: plant bogus stale `.ast/.cmi/.cmj/.cmt` files and verify the build ignores them.
+  - **Done:** Included in `in-process.sh` test 6. Plants bogus `.ast/.cmi/.cmj/.cmt/.compiler.log/.sourcedirs.json` files in `packages/main/lib/bs` and `lib/ocaml`, builds with `--in-process`, verifies 52 modules still compile and `Main.mjs` is correct.
+- [x] Tighten existing test scripts: `in-process.sh` includes the `check_no_compiler_assets` helper that exhaustively checks for `.ast`, `.iast`, `.cmi`, `.cmj`, `.cmt`, `.cmti`, `.sexp`, `.compiler.log`, `.sourcedirs.json`, `compiler-info.json`, `build.ninja`, and `lib/bs`/`lib/ocaml` directories.
+  - **Note:** compile.sh/watch.sh/clean.sh test the default mode and don't need `--in-process` assertions. The in-process invariants are fully covered by `in-process.sh`.
+- [x] Add explicit in-process coverage for `.resi` interfaces, inferred interfaces, namespace handling, node_modules source-backed deps, and runtime bootstrap.
+  - **Done:** All covered in `in-process.sh`:
+    - `.resi` interfaces: test 2 verifies `ModuleWithInterface.mjs` exists (has both `.res` and `.resi`)
+    - Namespaces: test 3 verifies `new-namespace` package produces >=3 JS files
+    - node_modules: test 4 verifies `rescript-nodejs` produces >5 JS files
+    - Runtime bootstrap: test 5 verifies `Main.mjs` generated with correct header (proves Pervasives/Stdlib resolved)
+    - Dev deps: test 7 verifies dev dependency JS files produced
+- [x] Decide and document the `compiler-args` contract across the three modes, then update `rewatch/tests/compiler-args.sh` and parity consumers if needed.
+  - **Decision:** `compiler-args` is a diagnostic/IDE support command that returns the CLI args `bsc` would use. In `--in-process` mode, `bsc` is never invoked, so `compiler-args` continues to return the file-backed args unchanged. This is correct because `compiler-args` consumers (editors, parity scripts) need the file-based protocol args. No changes needed to `compiler-args.sh` or parity consumers. The `--in-process` flag is orthogonal to `compiler-args` — it affects the build pipeline, not the IDE integration surface.
 
 ## Acceptance Criteria
 

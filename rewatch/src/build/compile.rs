@@ -475,20 +475,29 @@ pub fn compile(
             };
 
             // Handle logging outside the mutable borrow
+            // In --in-process mode, skip writing to .compiler.log (no lib/bs directory)
             if let Some(warning) = compile_warning {
-                logs::append(package, &warning);
+                if !is_in_process {
+                    logs::append(package, &warning);
+                }
                 compile_warnings.push_str(&warning);
             }
             if let Some(error) = compile_error {
-                logs::append(package, &error);
+                if !is_in_process {
+                    logs::append(package, &error);
+                }
                 compile_errors.push_str(&error);
             }
             if let Some(warning) = interface_warning {
-                logs::append(package, &warning);
+                if !is_in_process {
+                    logs::append(package, &warning);
+                }
                 compile_warnings.push_str(&warning);
             }
             if let Some(error) = interface_error {
-                logs::append(package, &error);
+                if !is_in_process {
+                    logs::append(package, &error);
+                }
                 compile_errors.push_str(&error);
             }
         }
@@ -517,13 +526,15 @@ pub fn compile(
 
             // Append the error to the logs of all packages involved in the cycle,
             // so editor tooling can surface it from .compiler.log
-            let mut touched_packages = AHashSet::<String>::new();
-            for module_name in cycle.iter() {
-                if let Some(module) = build_state.get_module(module_name)
-                    && touched_packages.insert(module.package_name.clone())
-                    && let Some(package) = build_state.get_package(&module.package_name)
-                {
-                    logs::append(package, &message);
+            if !is_in_process {
+                let mut touched_packages = AHashSet::<String>::new();
+                for module_name in cycle.iter() {
+                    if let Some(module) = build_state.get_module(module_name)
+                        && touched_packages.insert(module.package_name.clone())
+                        && let Some(package) = build_state.get_package(&module.package_name)
+                    {
+                        logs::append(package, &message);
+                    }
                 }
             }
 
