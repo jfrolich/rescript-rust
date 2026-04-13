@@ -418,9 +418,9 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 body_env.substitutions.insert(id.clone(), substitution);
             }
             if *kind != LetKind::Variable {
-                if let Lambda::Lfunction(func) = &value {
-                    if analysis::lfunction_can_be_inlined(func) {
-                        body_env.functions.insert(id.clone(), func.clone());
+                if let Some(func) = inlineable_local_function(&value) {
+                    if analysis::lfunction_can_be_inlined(&func) {
+                        body_env.functions.insert(id.clone(), func);
                     }
                 }
             }
@@ -565,7 +565,7 @@ fn simplify_primitive(
             func.attr.one_unit_arg = true;
             Lambda::Lfunction(func)
         }
-        (Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit, [arg]) => arg.clone(),
+        (Primitive::PjsFnMakeUnit, [arg]) => arg.clone(),
         (Primitive::Pfield(index, dbg), [arg]) => {
             simplify_field_access(*index, dbg, arg, env, &info.primitive, &info.loc)
         }
@@ -699,6 +699,35 @@ fn optional_is_some_predicate(value: Lambda, kind: BoxedNullable) -> Lambda {
         vec![Lambda::prim(primitive, vec![value], Location::none())],
         Location::none(),
     )
+}
+
+fn inlineable_local_function(value: &Lambda) -> Option<LFunction> {
+    match value {
+        Lambda::Lfunction(func) => Some(func.clone()),
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::PjsFnMake(arity),
+            args,
+            ..
+        }) => match args.as_slice() {
+            [Lambda::Lfunction(func)] if func.arity == *arity => Some(func.clone()),
+            _ => None,
+        },
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::PjsFnMakeUnit,
+            args,
+            ..
+        }) => match args.as_slice() {
+            [Lambda::Lfunction(func)] => {
+                let mut func = func.clone();
+                if matches!(func.params.as_slice(), [param] if param.name() == "param") {
+                    func.attr.one_unit_arg = true;
+                }
+                Some(func)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn block_element_of_lambda(value: &Lambda) -> BlockElement {
@@ -1769,6 +1798,100 @@ mod tests {
             ] if *id == extra)
         ));
         assert!(matches!(*body, Lambda::Lvar(id) if id == add5));
+    }
+
+    #[test]
+    fn keeps_direct_pjs_fn_make_applications_for_backend_codegen() {
+        let h = Ident::create_local("h");
+        let x = Ident::create_local("x");
+        let j = Ident::create_local("j");
+        let f = Ident::create_local("f");
+        let arg = Lambda::const_(Constant::string_with_delim(
+            "",
+            crate::lambda::constant::StringDelim::StarJ,
+        ));
+
+        let wrapped = Lambda::let_(
+            LetKind::Strict,
+            h,
+            Lambda::const_(Constant::JsTrue),
+            Lambda::prim(
+                Primitive::PjsFnMake(1),
+                vec![Lambda::function_(
+                    1,
+                    vec![x],
+                    Lambda::let_(
+                        LetKind::Strict,
+                        j,
+                        Lambda::prim(
+                            Primitive::PjsFnMake(1),
+                            vec![Lambda::function_(
+                                1,
+                                vec![f.clone()],
+                                Lambda::const_(Constant::JsTrue),
+                                FunctionAttribute::default(),
+                            )],
+                            Location::none(),
+                        ),
+                        Lambda::prim(
+                            Primitive::PjsFnMake(1),
+                            vec![Lambda::function_(
+                                1,
+                                vec![f],
+                                Lambda::const_(Constant::int(0)),
+                                FunctionAttribute::default(),
+                            )],
+                            Location::none(),
+                        ),
+                    ),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            ),
+        );
+
+        let lambda = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::Lapply(Apply {
+                ap_func: Box::new(wrapped),
+                ap_args: vec![arg.clone()],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: crate::lambda::ApplyStatus::Uncurry,
+                },
+                ap_transformed_jsx: false,
+            })),
+            ap_args: vec![arg],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: crate::lambda::ApplyStatus::Uncurry,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lapply(outer) = simplified else {
+            panic!("expected direct js-fn-make applications to remain visible to codegen");
+        };
+        assert!(matches!(
+            outer.ap_args.as_slice(),
+            [Lambda::Lconst(Constant::String { .. })]
+        ));
+        let Lambda::Lapply(inner) = outer.ap_func.as_ref() else {
+            panic!("expected the outer application to still wrap an inner application");
+        };
+        assert!(matches!(
+            inner.ap_args.as_slice(),
+            [Lambda::Lconst(Constant::String { .. })]
+        ));
+        assert!(matches!(
+            inner.ap_func.as_ref(),
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::PjsFnMake(1),
+                ..
+            })
+        ));
     }
 
     #[test]

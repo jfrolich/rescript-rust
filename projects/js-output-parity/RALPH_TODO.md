@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 130 / 657 JS snapshots passing, 0 compile errors, 527 output diffs
+**Status:** 129 / 657 JS snapshots passing, 0 compile errors, 528 output diffs
 
 ## Goal
 
@@ -35,9 +35,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **130 / 657**
+- JS snapshot parity: **129 / 657**
 - Compile errors: **0**
-- Output diffs: **527**
+- Output diffs: **528**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -505,6 +505,38 @@ Remaining internal compile errors under the measured wrapper baseline:
 - none
 
 ## Latest Session Findings
+
+- `compiler-rust/src/lambda/simplify.rs` now matches one more slice of
+  OCaml `core/lam_pass_alpha_conversion.ml` /
+  `core/lam_pass_lets_dce.ml` more closely on the Rust JS path:
+  `Pjs_fn_make` wrappers are no longer erased globally during the
+  JS-backend simplifier; instead, let-bound wrapped local functions still feed
+  the existing local beta-reduction path, while direct `Pjs_fn_make`
+  applications remain visible to later backend/codegen stages
+- Added focused coverage for this slice in
+  `unwraps_pjs_fn_make_bindings_before_beta_reducing_local_calls` and
+  `keeps_direct_pjs_fn_make_applications_for_backend_codegen`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release pjs_fn_make -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release one_unit_arg -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ../../../../compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/gpr_1692_test.ast -o /tmp/gpr_1692_test.mjs`
+  - `timeout 10 ../../../../compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/PartialApplicationNoRuntimeCurry.ast -o /tmp/PartialApplicationNoRuntimeCurry.mjs`
+  - `timeout 10 ../../../../compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/ExternalShadow.ast -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/gpr_1692_test.res` narrowed materially:
+  the old empty-module output is gone, and the remaining drift is now a single
+  extra dead wrapper application (`(x => (f => 0))("")("")`) instead of the
+  earlier full elision of the top-level call
+- `tests/tests/src/PartialApplicationNoRuntimeCurry.res` remains an exact
+  checked-in snapshot match after narrowing the `Pjs_fn_make` simplifier rule
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change
+- The authoritative JS snapshot baseline now reports **129 / 657** passing,
+  **0** compile errors, and **528** output diffs after this OCaml-aligned
+  `Pjs_fn_make` narrowing change; the local total regresses by one snapshot,
+  but the change is kept because the previous global unwrap was erasing a
+  backend-visible wrapper structure that OCaml still preserves
 
 - `compiler-rust/src/lambda/compile.rs` now matches the OCaml
   `core/lam_compile.ml` `compile_ifthenelse` `EffectCall Not_tail` path more
