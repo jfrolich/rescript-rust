@@ -430,13 +430,13 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 }
             }
             let body = simplify_with_env(body, &body_env, exports);
-            if *kind == LetKind::Alias && !exports.contains(id) {
+            if *kind == LetKind::Alias {
                 let use_info = alias_use_info(id, &body);
                 if use_info.times == 1 && !use_info.captured {
                     return substitute_alias_use(&body, id, &value);
                 }
             }
-            if !exports.contains(id) && !free_variables(&body).contains(id) {
+            if !free_variables(&body).contains(id) {
                 if analysis::no_side_effects(&value) {
                     body
                 } else {
@@ -813,23 +813,7 @@ fn simplify_primitive(
         let args = info
             .args
             .iter()
-            .zip(export_ids.iter())
-            .map(|(arg, export_id)| match arg {
-                Lambda::Lvar(id) if id.same(export_id) => {
-                    match env.substitutions.get(id) {
-                        // OCaml's simplify_alias still collapses module-alias
-                        // exports to Const_module_alias, which forces later
-                        // export coercion to synthesize the trailing placeholder
-                        // instead of keeping the inert alias at its source
-                        // position.
-                        Some(Lambda::Lconst(Constant::ModuleAlias)) => {
-                            Lambda::const_(Constant::ModuleAlias)
-                        }
-                        _ => Lambda::var(id.clone()),
-                    }
-                }
-                _ => simplify_with_env(arg, env, exports),
-            })
+            .map(|arg| simplify_with_env(arg, env, exports))
             .collect();
         return Lambda::prim(info.primitive.clone(), args, info.loc.clone());
     }
@@ -2019,7 +2003,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_exported_alias_binding_but_inlines_constant_rhs() {
+    fn simplifies_export_payloads_before_export_coercion() {
         let x = Ident::create_local("x");
         let xx = Ident::create_local("xx");
         let export_block = Lambda::prim(
@@ -2035,17 +2019,31 @@ mod tests {
             LetKind::Strict,
             x.clone(),
             Lambda::const_(Constant::int(1)),
-            Lambda::let_(LetKind::Strict, xx.clone(), Lambda::var(x), export_block),
+            Lambda::let_(
+                LetKind::Strict,
+                xx.clone(),
+                Lambda::var(x.clone()),
+                export_block,
+            ),
         );
 
         let simplified = simplify_for_js_backend(&lambda);
-        let Lambda::Llet(_, _, _, body) = simplified else {
-            panic!("expected exported x binding");
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(export_ids), _),
+            args,
+            ..
+        }) = simplified
+        else {
+            panic!("expected the export block to remain at the tail");
         };
-        let Lambda::Llet(_, _, value, _) = *body else {
-            panic!("expected exported xx binding");
-        };
-        assert!(matches!(*value, Lambda::Lconst(Constant::Int { i: 1, .. })));
+        assert_eq!(export_ids, vec![x.clone(), xx.clone()]);
+        assert!(matches!(
+            args.as_slice(),
+            [
+                Lambda::Lconst(Constant::Int { i: 1, .. }),
+                Lambda::Lconst(Constant::Int { i: 1, .. })
+            ]
+        ));
     }
 
     #[test]
@@ -2086,10 +2084,6 @@ mod tests {
             panic!("expected the URL binding to remain");
         };
         assert_eq!(kept_url, url);
-        let Lambda::Llet(_, kept_alias, _, body) = *body else {
-            panic!("expected the module-alias binding to remain until export coercion");
-        };
-        assert_eq!(kept_alias, my_url);
         let Lambda::Lprim(crate::lambda::PrimInfo {
             primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(export_ids), _),
             args,

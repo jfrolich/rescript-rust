@@ -9277,6 +9277,99 @@ mod tests {
     }
 
     #[test]
+    fn compile_deps_program_rebinds_exported_constants_after_surviving_function_bindings() {
+        let mut compiler = LambdaCompiler::new();
+        let x = Ident::create_local("x");
+        let xx = Ident::create_local("xx");
+        let foo = Ident::create_local("foo");
+        let param = Ident::create_local("x");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![x.clone(), xx.clone(), foo.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![
+                Lambda::var(x.clone()),
+                Lambda::var(xx.clone()),
+                Lambda::var(foo.clone()),
+            ],
+            Location::none(),
+        );
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            x.clone(),
+            Lambda::const_(Constant::int(1)),
+            Lambda::let_(
+                LetKind::Strict,
+                xx.clone(),
+                Lambda::var(x),
+                Lambda::let_(
+                    LetKind::Strict,
+                    foo.clone(),
+                    Lambda::prim(
+                        Primitive::PjsFnMake(1),
+                        vec![Lambda::function_(
+                            1,
+                            vec![param.clone()],
+                            Lambda::var(param),
+                            FunctionAttribute::default(),
+                        )],
+                        Location::none(),
+                    ),
+                    export_block,
+                ),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        assert_eq!(
+            deps.program
+                .exports
+                .iter()
+                .map(|ident| ident.name())
+                .collect::<Vec<_>>(),
+            vec!["x", "xx", "foo"]
+        );
+
+        let [first, second, third] = deps.program.block.as_slice() else {
+            panic!("expected function binding followed by two rebound constant exports");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Fun { .. },
+                        ..
+                    }),
+                ..
+            }) => assert!(ident.same(&foo)),
+            other => panic!("expected the surviving function binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert_eq!(ident.name(), "x");
+            }
+            other => panic!("expected the rebound x export second, got {other:?}"),
+        }
+        match &third.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert_eq!(ident.name(), "xx");
+            }
+            other => panic!("expected the rebound xx export third, got {other:?}"),
+        }
+
+        let rendered = print_deps_program(&deps, None);
+        let foo_idx = rendered.find("function foo").unwrap();
+        let x_idx = rendered.find("let x = 1;").unwrap();
+        let xx_idx = rendered.find("let xx = 1;").unwrap();
+        assert!(foo_idx < x_idx);
+        assert!(x_idx < xx_idx);
+    }
+
+    #[test]
     fn compile_deps_program_keeps_same_name_export_aliases_for_unbound_globals() {
         let mut compiler = LambdaCompiler::new();
         let global = Ident::create_persistent("parseInt");

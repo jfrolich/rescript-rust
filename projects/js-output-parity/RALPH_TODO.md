@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 275 / 657 JS snapshots passing, 0 compile errors, 382 output diffs
+**Status:** 302 / 657 JS snapshots passing, 0 compile errors, 355 output diffs
 
 ## Goal
 
@@ -35,65 +35,56 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **275 / 657**
+- JS snapshot parity: **302 / 657**
 - Compile errors: **0**
-- Output diffs: **382**
+- Output diffs: **355**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
-  and this iteration isolated the OCaml `compile_recursive_let` /
-  `compile_apply` self-tailcall slice in `compiler/core/lam_compile.ml`
-- After reading OCaml's recursive-function lowering there, the Rust backend in
-  `compiler-rust/src/lambda/compile.rs` now mirrors the same core behavior for
-  self-tail-recursive bindings: recursive `Lletrec` function bindings compile
-  through a loop-aware path, recognized self-tail calls lower to parameter
-  assignments plus `continue`, and renamed loop parameters get aliased back to
-  the original parameter ids inside the `while (true)` body
+  and this iteration isolated the OCaml exported-binding simplification
+  boundary across `compiler/core/lam_pass_lets_dce.ml` together with the later
+  export rebound behavior in `compiler/core/lam_coercion.ml`
+- After reading those OCaml stages, the Rust backend in
+  `compiler-rust/src/lambda/simplify.rs` no longer preserves exported alias or
+  constant bindings ahead of export coercion, and module-export payloads now
+  simplify through the same substitution path as ordinary lambda expressions
+- This matches the OCaml flow where `simplify_lets` can erase or inline the
+  original exported binding, then the later export-coercion step recreates any
+  required trailing export placeholders in the final grouped order
 - Added focused regression coverage in
-  `lambda::compile::tests::recursive_self_tailcalls_lower_to_looping_while_bodies`
+  `lambda::simplify::tests::simplifies_export_payloads_before_export_coercion`,
+  `lambda::simplify::tests::simplifies_module_alias_export_payloads_before_export_coercion`,
   and
-  `lambda::compile::tests::recursive_self_tailcalls_rename_params_before_loop_assignments`
+  `lambda::compile::tests::compile_deps_program_rebinds_exported_constants_after_surviving_function_bindings`
 - Verified focused guards for this slice:
-  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release recursive_self_tailcalls -- --nocapture`
-  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release recursive_function_bindings_lower_directly_without_placeholder_assignments -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release export_payloads_before_export_coercion -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_deps_program_rebinds_exported_constants_after_surviving_function_bindings -- --nocapture`
   - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
-  - `cd tests/tests && timeout 10 ../../compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/test_cps.res -o /tmp/test_cps.mjs`
-  - `cd tests/tests && timeout 10 ../../compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `cd tests/tests/lib/bs && timeout 10 ../../../../compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/Coercion.ast -o /tmp/Coercion.mjs`
+  - `cd tests/tests/lib/bs && timeout 10 ../../../../compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/Import.ast -o /tmp/Import.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
   - `timeout 1800 ./scripts/test_js_output_parity.sh`
 - Focused outcome:
-  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match, the
-  tailcall cluster now lowers through OCaml-style loops instead of direct
-  recursive calls, `tests/tests/src/test_cps.res` is an exact checked-in
-  snapshot match after rebuilding the standalone Rust `bsc`, and the cached
-  `while (true)` motif shrank from **44** failing diff files to **37**
+  `tests/tests/src/Coercion.res` and `tests/tests/src/Import.res` now match
+  their checked-in `.mjs` snapshots exactly in harness mode, and
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
 - Resolved checked-in snapshot files for this cluster:
-  `tests/tests/src/inline_regression_test.res`,
-  `tests/tests/src/inline_edge_cases.res`,
-  `tests/tests/src/gpr_3697_test.res`, and
-  `tests/tests/src/unsafe_full_apply_primitive.res` no longer appear under
+  `tests/tests/src/Coercion.res` and `tests/tests/src/Import.res` no longer appear under
   `temp/rust-parity/diffs`
-- The authoritative JS snapshot baseline now reports **275 / 657** passing,
-  **0** compile errors, and **382** output diffs; this is a net **+5**
-  passing snapshots and **-5** output diffs from the previously recorded
-  **270 / 657**, **0** compile errors, **387** output diffs
-- A follow-up focused diagnosis on `tests/tests/src/Coercion.res` and
-  `tests/tests/src/Import.res` using OCaml `-bs-diagnose` confirmed that the
-  next broad remaining cluster is **not** a JS-pass cleanup issue:
-  - `tests/tests/src/Coercion.lambda` shows the post-coercion OCaml grouped
-    lambda already reordered to
-    `let foo =o ...; let x = 1; let xx = 1`, which explains the checked-in JS
-    snapshot ordering
-  - `tests/tests/src/Import.lambda` likewise places late aliases such as
-    `each/4226`, `M2/4225`, and `each2/4224` at the end of the grouped lambda,
-    matching the checked-in JS snapshot order there
-  - This confirms the next root-cause cluster lives in the missing
-    OCaml-aligned post-lambda backend stages
-    (`Lam_pass_*`, `Lam_coercion.coerce_and_group_big_lambda`, grouped
-    lowering), not in ad hoc printer or export-order rewrites inside the
-    current Rust JS-pass cleanup
+- The authoritative JS snapshot baseline now reports **302 / 657** passing,
+  **0** compile errors, and **355** output diffs; this is a net **+22**
+  passing snapshots and **-22** output diffs from the previously recorded
+  **280 / 657**, **0** compile errors, **377** output diffs
+- The remaining nearby drift is narrower now:
+  - `tests/tests/src/DerivingAccessorsCurried.res` and
+    `tests/tests/src/DerivingAccessorsUncurried.res` still differ on late
+    rebound placement such as `_composedMyField`
+  - `tests/tests/src/RecordCoercion.res` is no longer blocked on export
+    ordering; its remaining mismatch is shared-binding naming
+    (`TestInlining_a` vs `a`) and module-record reuse shape
 - Older iteration notes follow below
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
