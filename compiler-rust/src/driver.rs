@@ -1518,7 +1518,8 @@ pub fn compile_file_to_js_with_options(
 // orchestrator owns the `PersistentEnv` and dependency interfaces live in
 // memory rather than on disk as `.cmi` files.
 
-use crate::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry, PersStruct};
+use crate::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
+use crate::cmi::portable_types::PortablePersStruct;
 use crate::types::decl::Signature as DeclSignature;
 
 /// Result of an in-process `.res` compilation.
@@ -1530,8 +1531,8 @@ pub struct InProcessCompileResult {
     pub js_output: String,
     /// The module's published signature (inferred from `.res`).
     pub signature: DeclSignature,
-    /// The finalized PersStruct for this module, ready for the registry.
-    pub pers_struct: Option<PersStruct>,
+    /// The finalized PersStruct in portable form, ready for the registry.
+    pub pers_struct: Option<PortablePersStruct>,
     /// Any new alias rewrites discovered during this compilation.
     pub new_alias_rewrites: HashMap<String, crate::types::path::Path>,
 }
@@ -1543,8 +1544,8 @@ pub struct InProcessCompileResult {
 pub struct InProcessInterfaceResult {
     /// The module's published signature (from the `.resi` file).
     pub signature: DeclSignature,
-    /// The finalized PersStruct for this module, ready for the registry.
-    pub pers_struct: Option<PersStruct>,
+    /// The finalized PersStruct in portable form, ready for the registry.
+    pub pers_struct: Option<PortablePersStruct>,
     /// Any new alias rewrites discovered during this compilation.
     pub new_alias_rewrites: HashMap<String, crate::types::path::Path>,
 }
@@ -1710,7 +1711,7 @@ pub fn compile_source_in_process(
     }
 
     let (pers_struct, new_alias_rewrites) =
-        internal_env.extract_module_update(module_name, original_alias_count);
+        internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);
 
     Ok(InProcessCompileResult {
         js_output: js,
@@ -1799,7 +1800,7 @@ pub fn typecheck_interface_in_process(
     );
 
     let (pers_struct, new_alias_rewrites) =
-        internal_env.extract_module_update(module_name, original_alias_count);
+        internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);
 
     Ok(InProcessInterfaceResult {
         signature: published_signature,

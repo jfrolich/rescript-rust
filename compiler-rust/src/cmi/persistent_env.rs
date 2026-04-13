@@ -37,6 +37,7 @@ use crate::types::typedtree::{
 use crate::types::typemod::{decl_module_type_from_typed, transl_signature, type_structure};
 
 use super::cmi_format;
+use super::portable_types::{self, PortablePersStruct};
 use super::sig_reader::SigReadContext;
 
 /// A cached persistent module structure.
@@ -72,9 +73,10 @@ pub struct InMemoryModuleInfo {
 /// Each worker creates a fresh `PersistentEnv` from this registry.
 #[derive(Clone, Default)]
 pub struct ModuleRegistry {
-    /// Cached module structures (finalized PersStructs from previous compilations).
+    /// Cached module structures in portable form (TypeExprRefs are self-contained
+    /// indices into each entry's PortableTypeGraph, not arena refs).
     /// Keyed by module name.
-    pub cached_modules: HashMap<String, PersStruct>,
+    pub cached_modules: HashMap<String, PortablePersStruct>,
     /// Module metadata (source paths, purity, runtime status).
     pub module_info: HashMap<String, InMemoryModuleInfo>,
     /// Alias prefix rewrites (flattened_name -> qualified_path).
@@ -119,23 +121,29 @@ impl ModuleRegistry {
         let module_path = Path::Pident(Ident::create_persistent(namespace_name));
         collect_alias_rewrites(&sig_items, &module_path, &mut self.alias_rewrites);
 
-        let ps = PersStruct {
+        // Namespace signatures contain only MtyAlias entries (no TypeExprRefs),
+        // so the portable type graph is empty.
+        let portable = PortablePersStruct {
             ps_name: namespace_name.to_string(),
-            ps_sig: sig_items,
             ps_filename: format!("{}.mlmap", namespace_name),
+            ps_sig: sig_items,
+            type_graph: portable_types::PortableTypeGraph {
+                entries: Vec::new(),
+            },
         };
-        self.cached_modules.insert(namespace_name.to_string(), ps);
+        self.cached_modules
+            .insert(namespace_name.to_string(), portable);
     }
 
     /// Store a compiled module's finalized PersStruct and metadata.
     pub fn register_module(
         &mut self,
         name: &str,
-        pers_struct: PersStruct,
+        portable: PortablePersStruct,
         info: InMemoryModuleInfo,
         new_alias_rewrites: HashMap<String, Path>,
     ) {
-        self.cached_modules.insert(name.to_string(), pers_struct);
+        self.cached_modules.insert(name.to_string(), portable);
         self.module_info.insert(name.to_string(), info);
         self.alias_rewrites.extend(new_alias_rewrites);
     }
@@ -176,6 +184,10 @@ pub struct PersistentEnv {
     /// Current depth of source-fallback recursion. Each `typecheck_source_signature`
     /// call increments this. Used to prevent stack overflow from deep dependency chains.
     source_fallback_depth: usize,
+    /// Portable module cache for `--in-process` builds. These contain self-contained
+    /// type graphs that are internalized into the current TypeContext on first access
+    /// via `find_pers_struct`. Populated by `from_registry()`.
+    portable_cache: HashMap<String, PortablePersStruct>,
 }
 
 impl PersistentEnv {
@@ -192,6 +204,7 @@ impl PersistentEnv {
             in_process_mode: false,
             source_fallback_paths: Arc::new(HashMap::new()),
             source_fallback_depth: 0,
+            portable_cache: HashMap::new(),
         }
     }
 
@@ -202,20 +215,12 @@ impl PersistentEnv {
     /// into the env so that `find_pers_struct` can resolve dependencies
     /// without disk I/O. The env is automatically in in-process mode.
     pub fn from_registry(registry: &ModuleRegistry) -> Self {
-        // Pre-populate the cache from registry.cached_modules.
-        // NOTE: The PersStruct signatures contain TypeExprRef indices from previous
-        // compilations' TypeContext arenas, which may not be valid in the current
-        // compilation's arena. This is a known correctness issue that requires
-        // cross-context type re-internalization to fix properly. For now, the
-        // TypeContext provides safe bounds-checked access that returns a fresh Tvar
-        // for out-of-bounds refs, preventing panics at the cost of some type accuracy.
-        let cache = registry
-            .cached_modules
-            .iter()
-            .map(|(k, v)| (k.clone(), Some(v.clone())))
-            .collect();
+        // Store portable modules for lazy internalization. They will be
+        // deserialized into the current TypeContext on first access via
+        // find_pers_struct, which has a TypeContext parameter.
+        let portable_cache = registry.cached_modules.clone();
         PersistentEnv {
-            cache,
+            cache: HashMap::new(),
             load_path: Vec::new(),
             alias_prefix_rewrites: registry.alias_rewrites.clone(),
             open_modules: Vec::new(),
@@ -225,28 +230,35 @@ impl PersistentEnv {
             in_process_mode: true,
             source_fallback_paths: Arc::new(registry.source_fallback_paths.clone()),
             source_fallback_depth: 0,
+            portable_cache,
         }
     }
 
     /// Extract the diff produced by this compilation: the newly-registered
     /// PersStruct and any new alias rewrites that weren't in the original
     /// registry. Used to update the shared ModuleRegistry after compilation.
+    /// Extract the diff produced by this compilation: the newly-registered
+    /// PersStruct (serialized to portable form) and any new alias rewrites.
+    /// Must be called while the TypeContext is still alive so the type graph
+    /// can be serialized.
     pub fn extract_module_update(
         &self,
         module_name: &str,
         original_alias_count: usize,
-    ) -> (Option<PersStruct>, HashMap<String, Path>) {
-        let ps = self
+        ctx: &TypeContext<'_>,
+    ) -> (Option<PortablePersStruct>, HashMap<String, Path>) {
+        let portable = self
             .cache
             .get(module_name)
-            .and_then(|opt| opt.clone());
+            .and_then(|opt| opt.as_ref())
+            .map(|ps| portable_types::serialize_pers_struct(ps, ctx));
         // New alias rewrites are any beyond what was in the original registry
         let new_rewrites = if self.alias_prefix_rewrites.len() > original_alias_count {
             self.alias_prefix_rewrites.clone()
         } else {
             HashMap::new()
         };
-        (ps, new_rewrites)
+        (portable, new_rewrites)
     }
 
     /// Set the load path (list of directories to search for .cmi files).
@@ -301,8 +313,35 @@ impl PersistentEnv {
         name: &str,
         ctx: &'a TypeContext<'a>,
     ) -> Option<&PersStruct> {
-        // Check cache first
+        // Check cache first (already internalized)
         if self.cache.contains_key(name) {
+            return self.cache.get(name).and_then(|opt| opt.as_ref());
+        }
+
+        // Check portable cache (from ModuleRegistry, needs internalization).
+        // The portable PersStruct was already finalized (path substitution done)
+        // before serialization. We only need to:
+        // 1. Internalize types into the current TypeContext
+        // 2. Collect alias rewrites
+        // 3. Register types by stamp (without cascading alias resolution)
+        if let Some(portable) = self.portable_cache.remove(name) {
+            let ps = portable_types::internalize_pers_struct(&portable, ctx);
+            let module_path = Path::Pident(Ident::create_persistent(name));
+            let effective_module_path = self
+                .alias_prefix_rewrites
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| module_path.clone());
+            collect_alias_rewrites(
+                &ps.ps_sig,
+                &effective_module_path,
+                &mut self.alias_prefix_rewrites,
+            );
+            register_types_by_stamp_recursive(
+                &ModuleType::MtySignature(ps.ps_sig.clone()),
+                ctx,
+            );
+            self.cache.insert(name.to_string(), Some(ps));
             return self.cache.get(name).and_then(|opt| opt.as_ref());
         }
 
@@ -486,6 +525,7 @@ impl PersistentEnv {
             in_process_mode: self.in_process_mode,
             source_fallback_paths: self.source_fallback_paths.clone(),
             source_fallback_depth: self.source_fallback_depth + 1,
+            portable_cache: self.portable_cache.clone(),
         };
         let mut env = initial_env(ctx);
         let open_modules = fallback_pers.open_modules.clone();

@@ -4,7 +4,8 @@ use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
 use blake3::Hash;
 use rescript_compiler::binary_ast::Dependencies;
-use rescript_compiler::cmi::persistent_env::{ModuleRegistry, PersStruct};
+use rescript_compiler::cmi::persistent_env::ModuleRegistry;
+use rescript_compiler::cmi::portable_types::PortablePersStruct;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
 use rescript_compiler::types::Signature as DeclSignature;
@@ -365,11 +366,11 @@ impl BuildCommandState {
         self.module_registry.lock().unwrap().clone()
     }
 
-    /// Update the module registry with a compiled module's finalized PersStruct.
+    /// Update the module registry with a compiled module's portable PersStruct.
     pub fn update_module_registry(
         &self,
         module_name: &str,
-        pers_struct: PersStruct,
+        pers_struct: PortablePersStruct,
         source_path: std::path::PathBuf,
         is_pure: bool,
         is_runtime: bool,

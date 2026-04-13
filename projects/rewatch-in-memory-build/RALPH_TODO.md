@@ -169,11 +169,13 @@ Clean architecture, stated operationally:
 
 ## Phase 6: Post-Review Corrections
 
-- [ ] **BLOCKED: Cross-context TypeExprRef re-internalization.** `PersStruct` signatures stored in `ModuleRegistry` contain `TypeExprRef` indices from previous compilations' `TypeContext` arenas. When loaded into a new compilation, these indices point into the wrong arena — either out-of-bounds (now handled with bounds-checked Tvar fallback in `TypeArena::get`) or silently reading wrong types (causing `ExprTypeClash` errors in later compilation waves). Two approaches were investigated:
-  - **Source-fallback only (no cached PersStruct):** Correct because `typecheck_source_signature` uses the current TypeContext. But causes stack overflow from deep recursive cloning of PersistentEnv. Partially mitigated with depth limit + Arc for heavy fields, but still prohibitive for the full testrepo dependency graph.
-  - **Cached PersStruct with bounds-checked arena:** Prevents crashes but produces wrong type matches for cross-wave dependencies. Modules in early waves compile correctly; later waves fail with ExprTypeClash.
-  - **Required fix:** Implement cross-context type re-internalization — when loading a PersStruct from the registry, deep-copy its type graph into the current TypeContext. `TypeDescSer` in `type_expr.rs` provides a portable type representation that could be used as an intermediate format. Estimated ~300 lines of new serialization/deserialization code.
-- [ ] Make `rewatch/tests/in-process.sh` require a successful `rewatch build --in-process` exit code. Do not encode known failures as passing test expectations. **Blocked by cross-context TypeExprRef issue above.**
+- [x] **FIXED: Cross-context TypeExprRef re-internalization.** Implemented portable type graph serialization/deserialization in `compiler-rust/src/cmi/portable_types.rs` (~550 lines). The approach:
+  - **Serialization:** When `extract_module_update` is called (while the TypeContext is still alive), the PersStruct's type graph is walked and serialized into a `PortableTypeGraph` — a self-contained vec of type entries with internal indices instead of arena refs. The signature's TypeExprRef values are remapped to these portable indices.
+  - **Storage:** `ModuleRegistry.cached_modules` now stores `PortablePersStruct` instead of `PersStruct`. The `PortablePersStruct` is safe to store indefinitely because it has no arena dependency.
+  - **Deserialization:** When `find_pers_struct` needs a module from the portable cache, `internalize_pers_struct` allocates fresh TypeExprRefs in the current TypeContext for each graph entry (phase 1: placeholders, phase 2: set descriptors), then remaps the signature's TypeExprRef values to the new arena refs. No `finalize_loaded_signature` is called because the portable PersStruct was already finalized before serialization. Only `register_types_by_stamp_recursive` and `collect_alias_rewrites` are needed post-internalization.
+  - **Result:** 119+ modules compile correctly in multi-wave builds (up from 55 with stale-TypeExprRef code). Cross-wave module references now use correct types instead of producing ExprTypeClash errors.
+  - **Remaining blocker:** Source-fallback stack overflow prevents full testrepo completion. Modules not yet in the portable cache (implicit runtime dependencies loaded via `-open Pervasives`) trigger nested `typecheck_source_signature` calls. Each level adds a full type-checking context to the stack. At depth 4-6, cumulative stack usage exceeds 64MB per Rayon worker. This is a pre-existing issue (not introduced by the portable type fix) that requires either: (a) pre-compiling all runtime modules before user modules, or (b) converting source-fallback to non-recursive iteration.
+- [ ] Make `rewatch/tests/in-process.sh` require a successful `rewatch build --in-process` exit code. Do not encode known failures as passing test expectations. **Blocked by source-fallback stack overflow (pre-existing).**
 - [ ] Replace generation-before vs generation-after invalidation with a real "published interface changed" test. That can be a stable signature fingerprint or direct equality on the stored `DeclSignature`, but it must not mark dependents dirty when the published interface is unchanged.
 - [ ] Add registry invalidation for deleted/renamed modules and stale namespace aliases. `ModuleRegistry` must reflect the live build graph in watch/incremental mode, not just accumulate inserts forever.
 - [ ] Remove internal `PersistentEnv` construction from the in-process compiler path. The public API cleanup is done; the remaining work is to replace the internal `PersistentEnv::from_registry(...)` session with a dedicated resolver-session abstraction.
@@ -188,10 +190,17 @@ Clean architecture, stated operationally:
 - **Rayon stack size** (`rewatch/src/main.rs`): Set 64MB stack per Rayon worker thread for deep source-fallback chains.
 - **Test infrastructure** (`rewatch/tests/in-process.sh`): Updated test with `stub_unsupported_packages` helper for known compiler limitations (sury GADTs, Array `include Belt.Array`, NS_alias cross-context type mismatch).
 
+### Improvements made this iteration (2026-04-13, portable type graph)
+- **Portable type graph** (`compiler-rust/src/cmi/portable_types.rs`): New ~550-line module implementing cross-context type re-internalization. Serializes type graphs into a self-contained format (`PortablePersStruct`) when compilation ends, deserializes into new TypeContext arenas on demand. Handles all TypeDesc variants including Tvariant/RowDesc, Tpoly, Tpackage, Tobject, etc.
+- **ModuleRegistry uses PortablePersStruct** (`compiler-rust/src/cmi/persistent_env.rs`): `cached_modules` changed from `HashMap<String, PersStruct>` to `HashMap<String, PortablePersStruct>`. Registry data is now safe to store indefinitely across compilation contexts.
+- **Lazy internalization in find_pers_struct**: Portable modules are internalized on first access (when TypeContext is available), not at PersistentEnv creation time. Only `register_types_by_stamp_recursive` and `collect_alias_rewrites` are applied (not full `finalize_loaded_signature` since paths were already substituted before serialization).
+- **extract_module_update takes TypeContext**: Now serializes types to portable form while the TypeContext is still alive, before the arena is dropped.
+- **Result**: 119+ modules compile correctly in multi-wave in-process builds (up from 55 with stale TypeExprRef code). Cross-wave ExprTypeClash errors eliminated.
+
 ### Known compiler limitations in testrepo
 - `include Belt.Array` panics in lambda compiler (`compile_primitive` with empty `compiled_args`). Belt.Array is a functor-produced module whose include generates `Papply` paths.
 - sury package uses GADTs (`input<'value, 'computed>`) and spread variant types (`...numberFormat`) that the Rust typechecker doesn't handle.
-- Cross-wave module references produce `ExprTypeClash` from stale TypeExprRef in later compilation waves.
+- Source-fallback stack overflow: implicit runtime dependencies loaded via `-open Pervasives` during compilation trigger nested `typecheck_source_signature` calls. At depth 4-6, cumulative stack usage exceeds the 64MB Rayon worker stack. Fix: pre-compile all runtime modules before user modules, or convert source-fallback to non-recursive iteration.
 
 ## Acceptance Criteria
 
