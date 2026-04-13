@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 130 / 657 JS snapshots passing, 0 compile errors, 527 output diffs
+**Status:** 146 / 657 JS snapshots passing, 0 compile errors, 511 output diffs
 
 ## Goal
 
@@ -35,13 +35,43 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **130 / 657**
+- JS snapshot parity: **146 / 657**
 - Compile errors: **0**
-- Output diffs: **527**
+- Output diffs: **511**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- `compiler-rust/src/lambda/compile.rs` now matches another OCaml backend
+  slice from `core/lam_compile.ml` and `core/lam_compile_external_call.ml`:
+  `Pjs_unsafe_downgrade` no longer falls through to `undefined`, so lowered
+  JS getter/setter sends produce real property access and assignment, and
+  spliced externals now follow the same `assemble_args_has_splice` /
+  `E.variadic_args` path OCaml uses for variadic external calls
+- Added focused coverage for this slice in
+  `lowers_pjs_unsafe_downgrade_getters_to_method_calls`,
+  `lowers_pjs_unsafe_downgrade_setters_to_property_assignments`, and
+  `lowers_spliced_js_calls_by_flattening_literal_variadic_arrays`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release pjs_unsafe_downgrade -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release flattening_literal_variadic_arrays -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/meth_annotation.res -o /tmp/meth_annotation.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/node_path_test.res -o /tmp/node_path_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/set_annotation.res -o /tmp/set_annotation.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/meth_annotation.res`,
+  `tests/tests/src/node_path_test.res`, and
+  `tests/tests/src/set_annotation.res` now all match their checked-in `.mjs`
+  snapshots exactly after this external-call lowering fix
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the change, which confirms the fix stays aligned with the already-stable
+  external-shadow/import path
+- The authoritative JS snapshot baseline now reports **146 / 657** passing,
+  **0** compile errors, and **511** output diffs after this OCaml-aligned
+  external-call lowering fix
 
 - `compiler-rust/src/js_ir/printer.rs` now matches one more slice of
   OCaml `core/js_dump.ml` on the Rust JS-output path:

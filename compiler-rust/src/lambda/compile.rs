@@ -2004,6 +2004,18 @@ impl LambdaCompiler {
                 Some(expr) => expr,
                 None => Expression::undefined(false),
             },
+            PjsUnsafeDowngrade { name, setter } => match (*setter, compiled_args.as_slice()) {
+                (false, [receiver]) => self.static_index(receiver.clone(), name),
+                (true, [receiver, value]) => Expression::new(ExpressionDesc::Seq(
+                    Box::new(Expression::bin(
+                        BinOp::Eq,
+                        self.static_index(receiver.clone(), name),
+                        value.clone(),
+                    )),
+                    Box::new(Expression::undefined(true)),
+                )),
+                _ => Expression::undefined(false),
+            },
             Pimport => self.compile_import(compiled_args),
             PjsCall {
                 prim_name,
@@ -2361,6 +2373,78 @@ impl LambdaCompiler {
         assembled
     }
 
+    fn assemble_external_args_with_splice(
+        &self,
+        arg_types: &[ExternalArgSpec],
+        args: Vec<Expression>,
+    ) -> Vec<Expression> {
+        let mut runtime_args = args.into_iter().peekable();
+        let mut assembled = Vec::new();
+        let mut needs_spread = false;
+
+        for arg_spec in arg_types {
+            match &arg_spec.arg_type {
+                ExternalArgAttr::ArgCst(cst) => {
+                    assembled.push(self.compile_external_arg_const(cst));
+                }
+                _ => {
+                    let arg = runtime_args
+                        .next()
+                        .unwrap_or_else(|| Expression::undefined(false));
+                    let is_last_runtime_arg = runtime_args.peek().is_none();
+
+                    if is_last_runtime_arg {
+                        match arg {
+                            Expression {
+                                desc: ExpressionDesc::Array(items, _),
+                                ..
+                            } => {
+                                assembled.extend(items);
+                            }
+                            arg => {
+                                needs_spread = true;
+                                if let Some(expr) = self.lower_external_arg_value(
+                                    arg,
+                                    arg_spec.arg_label,
+                                    &arg_spec.arg_type,
+                                ) {
+                                    assembled.push(expr);
+                                }
+                            }
+                        }
+                    } else if let Some(expr) =
+                        self.lower_external_arg_value(arg, arg_spec.arg_label, &arg_spec.arg_type)
+                    {
+                        assembled.push(expr);
+                    }
+                }
+            }
+        }
+
+        debug_assert!(runtime_args.next().is_none());
+
+        if needs_spread {
+            if let Some(last) = assembled.pop() {
+                assembled.push(Expression::new(ExpressionDesc::Spread(Box::new(last))));
+            }
+        }
+
+        assembled
+    }
+
+    fn assemble_external_args(
+        &self,
+        arg_types: &[ExternalArgSpec],
+        args: Vec<Expression>,
+        splice: bool,
+    ) -> Vec<Expression> {
+        if splice {
+            self.assemble_external_args_with_splice(arg_types, args)
+        } else {
+            self.assemble_external_args_no_splice(arg_types, args)
+        }
+    }
+
     fn compile_js_object_create(
         &self,
         obj_params: &[ExternalObjSpec],
@@ -2499,22 +2583,49 @@ impl LambdaCompiler {
             Some(ExternalSpec::JsCall {
                 name,
                 external_module_name,
+                splice,
                 scopes,
-                tagged_template: false,
-                ..
-            }) => Expression::call(
-                self.translate_scoped_module_value(
+                tagged_template,
+            }) => {
+                let target = self.translate_scoped_module_value(
                     external_module_name.as_ref(),
                     name,
                     scopes,
                     dynamic_import,
-                ),
-                self.assemble_external_args_no_splice(arg_types, args),
-                CallInfo::default(),
-            ),
+                );
+
+                if *tagged_template {
+                    match args.as_slice() {
+                        [
+                            Expression {
+                                desc: ExpressionDesc::Array(strings, _),
+                                ..
+                            },
+                            Expression {
+                                desc: ExpressionDesc::Array(values, _),
+                                ..
+                            },
+                        ] => {
+                            return Expression::new(ExpressionDesc::TaggedTemplate(
+                                Box::new(target),
+                                strings.clone(),
+                                values.clone(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+
+                Expression::call(
+                    target,
+                    self.assemble_external_args(arg_types, args, *splice),
+                    CallInfo::default(),
+                )
+            }
             Some(ExternalSpec::JsNew {
                 name,
                 external_module_name,
+                splice,
                 scopes,
                 ..
             }) => Expression::new(ExpressionDesc::New(
@@ -2524,17 +2635,19 @@ impl LambdaCompiler {
                     scopes,
                     dynamic_import,
                 )),
-                Some(self.assemble_external_args_no_splice(arg_types, args)),
+                Some(self.assemble_external_args(arg_types, args, *splice)),
             )),
             Some(ExternalSpec::JsSend {
                 name,
+                splice,
                 js_send_scopes,
                 ..
             }) => match args.split_first() {
                 Some((receiver, rest)) => {
-                    let rest_args = self.assemble_external_args_no_splice(
+                    let rest_args = self.assemble_external_args(
                         arg_types.get(1..).unwrap_or(&[]),
                         rest.to_vec(),
+                        *splice,
                     );
                     Expression::call(
                         self.static_index(
@@ -2618,10 +2731,10 @@ impl LambdaCompiler {
             }
             Some(ExternalSpec::JsModuleAsFn {
                 external_module_name,
-                ..
+                splice,
             }) => Expression::call(
                 self.external_module_binding(external_module_name, false, dynamic_import),
-                self.assemble_external_args_no_splice(arg_types, args),
+                self.assemble_external_args(arg_types, args, *splice),
                 CallInfo::default(),
             ),
             Some(ExternalSpec::JsModuleAsClass(module_name)) => {
@@ -8728,6 +8841,111 @@ mod tests {
             }
             other => panic!("expected external module call, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lowers_pjs_unsafe_downgrade_getters_to_method_calls() {
+        let mut compiler = LambdaCompiler::new();
+        let john = Ident::create_persistent("john");
+        let lam = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::prim(
+                Primitive::PjsUnsafeDowngrade {
+                    name: "say".to_string(),
+                    setter: false,
+                },
+                vec![Lambda::var(john.clone())],
+                Location::none(),
+            )),
+            ap_args: vec![
+                Lambda::const_(Constant::String {
+                    s: "hey".to_string(),
+                    delim: None,
+                }),
+                Lambda::const_(Constant::String {
+                    s: "jude".to_string(),
+                    delim: None,
+                }),
+            ],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Uncurry,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let program = compiler.compile_program(&lam);
+        let rendered = print_block(&program.block);
+        assert_eq!(rendered, "john.say(\"hey\", \"jude\");");
+    }
+
+    #[test]
+    fn lowers_pjs_unsafe_downgrade_setters_to_property_assignments() {
+        let mut compiler = LambdaCompiler::new();
+        let student = Ident::create_persistent("student1");
+        let lam = Lambda::prim(
+            Primitive::PjsUnsafeDowngrade {
+                name: "name".to_string(),
+                setter: true,
+            },
+            vec![
+                Lambda::var(student),
+                Lambda::const_(Constant::String {
+                    s: "Mary".to_string(),
+                    delim: None,
+                }),
+            ],
+            Location::none(),
+        );
+
+        let program = compiler.compile_program(&lam);
+        let rendered = print_block(&program.block);
+        assert_eq!(rendered, "student1.name = \"Mary\";");
+    }
+
+    #[test]
+    fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "join".to_string(),
+                arg_types: vec![ExternalArgSpec::dummy()],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsCall {
+                        name: "join".to_string(),
+                        external_module_name: Some(external_module("path")),
+                        splice: true,
+                        scopes: vec![],
+                        tagged_template: false,
+                    }),
+                    obj_params: None,
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![Lambda::prim(
+                Primitive::Pmakearray,
+                vec![
+                    Lambda::const_(Constant::String {
+                        s: ".".to_string(),
+                        delim: None,
+                    }),
+                    Lambda::const_(Constant::String {
+                        s: "Node_path_test".to_string(),
+                        delim: None,
+                    }),
+                ],
+                Location::none(),
+            )],
+            Location::none(),
+        );
+
+        let program = compiler.compile_program(&lam);
+        let rendered = print_block(&program.block);
+        assert_eq!(rendered, "Path.join(\".\", \"Node_path_test\");");
     }
 
     #[test]
