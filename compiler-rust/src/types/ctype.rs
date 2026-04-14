@@ -1030,7 +1030,7 @@ fn resolve_module_type_through_env_path<'a>(
                     return None;
                 }
                 let mut no_persistent_env = None;
-                crate::types::typecore::copy_resolved_module_signature_for_path(
+                crate::types::typecore::resolve_module_signature_for_path(
                     path,
                     env,
                     &mut no_persistent_env,
@@ -1081,7 +1081,7 @@ fn resolve_module_type_through_env_path<'a>(
                             parent_alias_target.as_ref().map(|target_parent_path| {
                                 Path::pdot(target_parent_path.clone(), name.to_string())
                             });
-                        crate::types::typecore::copy_resolved_module_signature_for_path(
+                        crate::types::typecore::resolve_module_signature_for_path(
                             preferred_child_path.as_ref().unwrap_or(&access_path),
                             env,
                             &mut no_persistent_env,
@@ -1089,7 +1089,7 @@ fn resolve_module_type_through_env_path<'a>(
                         )
                         .or_else(|| {
                             preferred_child_path.as_ref().and_then(|_| {
-                                crate::types::typecore::copy_resolved_module_signature_for_path(
+                                crate::types::typecore::resolve_module_signature_for_path(
                                     &access_path,
                                     env,
                                     &mut no_persistent_env,
@@ -1152,9 +1152,10 @@ fn resolve_signature_through_env_module_type<'a>(
     use super::decl::ModuleType;
 
     match mty {
-        ModuleType::MtySignature(sig) => Some(
-            crate::types::typecore::copy_lookup_signature_for_subst(sig, ctx),
-        ),
+        // The env_lazy-backed signature view is already the qualified source of
+        // truth for this access path. Reusing it preserves the same sharing
+        // shape OCaml keeps in components_of_module_maker.
+        ModuleType::MtySignature(sig) => Some(sig.clone()),
         ModuleType::MtyAlias(_, path) | ModuleType::MtyIdent(path) => {
             let mut no_persistent_env = None;
             if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
@@ -1402,7 +1403,10 @@ fn resolve_type_item_through_env<'a>(
             ctx,
         )
     {
-        let copied_decl = crate::types::typecore::copy_lookup_type_decl_for_subst(&decl, ctx);
+        // `lookup_type_in_resolved_path` already reads from the cached
+        // env_lazy-qualified module view. Keep that declaration graph shared
+        // instead of re-copying it on every lookup.
+        let resolved_decl = decl.clone();
         let module_access_origin_is_persistent = qualified_module_path.head().is_persistent();
         // For alias modules, expansion should expose the alias target path
         // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
@@ -1422,7 +1426,7 @@ fn resolve_type_item_through_env<'a>(
         };
 
         let queried_type_path = Path::pdot(qualified_module_path.clone(), type_name.to_string());
-        let self_manifest = copied_decl.type_manifest.is_some_and(|manifest| {
+        let self_manifest = resolved_decl.type_manifest.is_some_and(|manifest| {
             let manifest = ctx.repr(manifest);
             let manifest_desc = ctx.get_desc(manifest);
             matches!(
@@ -1445,10 +1449,10 @@ fn resolve_type_item_through_env<'a>(
         if let Some(target_path) = alias_target_for_strengthening.as_ref() {
             return Some((
                 id.clone(),
-                strengthen_type_decl_for_module_access_path(ctx, target_path, &id, &copied_decl),
+                strengthen_type_decl_for_module_access_path(ctx, target_path, &id, &resolved_decl),
             ));
         }
-        return Some((id, copied_decl));
+        return Some((id, resolved_decl));
     }
 
     // Fall back to CMI-based resolution if local env-based lookup didn't find

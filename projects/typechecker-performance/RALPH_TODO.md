@@ -426,6 +426,56 @@ What this means:
   residual inclusion/unpack/secondary-module-resolution costs above this child
   view cache
 
+## Session Update: Preserve EnvLazy Sharing In `ctype`
+
+Additional checkpoint from this worktree on `2026-04-14` after stopping
+`ctype` from deep-copying env_lazy-qualified signatures and type declarations
+after the qualified view has already been built:
+
+- exact `Import.res` repro after rebuild:
+  - OCaml: `0.07s` (`/usr/bin/time -lp`)
+  - Rust: first rerun `0.40s`, then warmed reruns `0.24s`, `0.22s`, `0.22s`
+  - Rust max RSS on warmed reruns: about `55.5MB`
+  - Rust peak footprint on warmed reruns: about `42.2MB`
+- canonical corpus benchmark:
+  - Files tested: `657`
+  - Comparable files: `657`
+  - Rust faster or equal: `1`
+  - Rust slower: `656`
+  - Materially slower: `217`
+  - OCaml failures: `0`
+  - Rust failures: `0`
+  - Aggregate OCaml total: `4655.8ms`
+  - Aggregate Rust total: `10144.0ms`
+  - Aggregate Rust / OCaml ratio: `2.18x`
+  - `Import.res` benchmark entry: OCaml `41.5ms`, Rust `225.2ms`, `5.43x`
+- full typedtree parity: unchanged at `232/657`, `43117` hunk mismatches
+
+What landed in this step:
+
+- `ctype::resolve_module_type_through_env_path` now reuses
+  `typecore::resolve_module_signature_for_path` for env_lazy-backed signature
+  cases instead of asking for a detached deep-copied signature first
+- `ctype::resolve_signature_through_env_module_type` now preserves the sharing
+  already present in env_lazy-qualified `MtySignature` values instead of
+  re-running `copy_lookup_signature_for_subst`
+- `ctype::resolve_type_item_through_env` now returns the env_lazy-qualified
+  declaration graph directly, only cloning the outer declaration record, rather
+  than re-running `copy_lookup_type_decl_for_subst` before self-manifest and
+  strengthening checks
+
+What this means:
+
+- the env_lazy-qualified module view now remains the source of truth one step
+  further into the hot `ctype` path instead of being immediately wrapped in a
+  second fresh copy layer
+- the exact `Import.res` repro keeps improving on warm runs while cutting peak
+  memory again, which is consistent with preserving OCaml-shaped sharing rather
+  than rebuilding equivalent type graphs
+- full parity stayed flat, so this sharing-preserving rollout did not reopen
+  the import-family stamp drift that killed the earlier broader env_lazy
+  reroute attempt
+
 ## Task List
 
 - [ ] Keep `scripts/benchmark_typechecker_performance.py` authoritative for the
