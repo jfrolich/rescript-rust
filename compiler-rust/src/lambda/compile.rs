@@ -2759,7 +2759,10 @@ impl LambdaCompiler {
 
     fn switch_case_expr(tag: &SwitchCaseTag) -> Expression {
         match tag {
-            SwitchCaseTag::String(value) => Expression::string(value.clone()),
+            SwitchCaseTag::String(value) => Expression::new(ExpressionDesc::Str {
+                delim: Delim::StarJ,
+                txt: value.clone(),
+            }),
             SwitchCaseTag::Int(value) => Expression::number(Number::int(*value)),
             SwitchCaseTag::Float(value) => Expression::number(Number::float(value.clone())),
             SwitchCaseTag::BigInt(value) => {
@@ -11576,6 +11579,23 @@ mod tests {
             } if txt == "{foo:true}"
         ));
         assert_eq!(print_expression(&compiled), "{foo:true}");
+    }
+
+    #[test]
+    fn switch_case_expr_preserves_marshaled_string_tags() {
+        let compiled = LambdaCompiler::switch_case_expr(&SwitchCaseTag::String("\\\"".to_string()));
+
+        assert!(matches!(
+            compiled,
+            Expression {
+                desc: ExpressionDesc::Str {
+                    delim: Delim::StarJ,
+                    ref txt,
+                },
+                ..
+            } if txt == "\\\""
+        ));
+        assert_eq!(print_expression(&compiled), "\"\\\"\"");
     }
 
     #[test]

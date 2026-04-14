@@ -942,7 +942,7 @@ impl JsPrinter {
 
     fn print_switch_case_tag(&mut self, tag: &SwitchCaseTag) {
         match tag {
-            SwitchCaseTag::String(value) => self.print_string(value),
+            SwitchCaseTag::String(value) => self.print_string_with_delim(value, Delim::StarJ),
             SwitchCaseTag::Int(value) => {
                 write!(self.output, "{value}").unwrap();
                 self.last_new_line = false;
@@ -4329,6 +4329,37 @@ mod tests {
         assert_eq!(
             rendered,
             "switch (tag) {\n  case \"One\" :\n    return 1;\n  case \"Two\" :\n  default:\n    return 2;\n}"
+        );
+    }
+
+    #[test]
+    fn test_print_string_switch_cases_preserve_marshaled_string_tags() {
+        let rendered = print_block(&vec![Statement::new(StatementDesc::StringSwitch(
+            Expression::var(Ident::create_local("tag")),
+            vec![
+                StringClause {
+                    tag_type: SwitchCaseTag::String("\\\"".to_string()),
+                    clause: CaseClause {
+                        body: vec![Statement::return_(Expression::number(Number::int(1)))],
+                        should_break: false,
+                        comment: None,
+                    },
+                },
+                StringClause {
+                    tag_type: SwitchCaseTag::String("\\\\".to_string()),
+                    clause: CaseClause {
+                        body: vec![Statement::return_(Expression::number(Number::int(2)))],
+                        should_break: false,
+                        comment: None,
+                    },
+                },
+            ],
+            Some(vec![Statement::return_(Expression::number(Number::int(3)))]),
+        ))]);
+
+        assert_eq!(
+            rendered,
+            "switch (tag) {\n  case \"\\\"\" :\n    return 1;\n  case \"\\\\\" :\n    return 2;\n  default:\n    return 3;\n}"
         );
     }
 

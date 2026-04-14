@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 455 / 657 JS snapshots passing, 0 compile errors, 202 output diffs
+**Status:** 456 / 657 JS snapshots passing, 0 compile errors, 201 output diffs
 
 ## Goal
 
@@ -35,11 +35,67 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **455 / 657**
+- JS snapshot parity: **456 / 657**
 - Compile errors: **0**
-- Output diffs: **202**
+- Output diffs: **201**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the OCaml string-tag emission rule for string-switch
+  cases and other `SwitchCaseTag::String` literals so the Rust backend prints
+  them through the `DStarJ` path instead of the default quoted-string path
+- Active backend focus for this slice remains **Phase 5: Byte-Exact Dumping**
+  from `PLAN.md`, but the mismatch sits on the boundary between
+  `Lam_compile` and final printing: OCaml treats string switch tags as
+  marshalled JS string literals via `E.tag_type`, while Rust was still
+  re-escaping them as ordinary strings
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, where `compile_stringswitch` maps each case
+  to `Ast_untagged_variants.String s`, and `compiler/core/js_exp_make.ml`,
+  where `tag_type (String s)` lowers to `str s ~delim:DStarJ`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so
+    `switch_case_expr(...)` lowers `SwitchCaseTag::String` to
+    `ExpressionDesc::Str { delim: Delim::StarJ, ... }` instead of the default
+    `Expression::string(...)` path
+  - updated `compiler-rust/src/js_ir/printer.rs` so
+    `print_switch_case_tag(...)` emits `SwitchCaseTag::String` through
+    `print_string_with_delim(..., Delim::StarJ)`
+  - added focused regression coverage in
+    `switch_case_expr_preserves_marshaled_string_tags` and
+    `test_print_string_switch_cases_preserve_marshaled_string_tags`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml switch_case_expr_preserves_marshaled_string_tags -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_string_switch_cases_preserve_marshaled_string_tags -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/switch_string.res`, diffing the exact
+    emitted module against the checked-in snapshot to confirm the escaped
+    compare/case drift is gone and the remaining mismatch is only statement
+    ordering around `let s`
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/switch_case_test.res` is no longer in the authoritative
+    diff set; its previously doubled switch tags now print like the OCaml
+    `DStarJ` path
+  - `tests/tests/src/switch_string.res` is smaller again; the remaining diff
+    is only the position of `let s = "😀"` relative to `function bar`
+  - `tests/tests/src/test_trywith.res` still differs, but its remaining diff
+    is now limited to control-flow and declaration ordering instead of the
+    earlier doubled string-tag escapes
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the string-tag emission change
+- Topline impact:
+  - JS snapshot parity: **455 / 657** -> **456 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **202** -> **201** (**-1**)
+- Keep this change because it ports the OCaml `compile_stringswitch` /
+  `js_exp_make.tag_type` string-literal rule instead of preserving the
+  Rust-only default-string re-escape in switch tags.
 
 Latest iteration on **2026-04-14**:
 
