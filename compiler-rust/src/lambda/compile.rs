@@ -4557,33 +4557,76 @@ fn populate_required_modules(
     modules.sort_by(module_sort_cmp);
 }
 
-fn module_side_effect_reason(lam: &Lambda) -> Option<String> {
+#[derive(Debug, Clone)]
+enum TopLevelEffectGroup {
+    Single(LetKind, Ident, Lambda),
+    Recursive(Vec<(Ident, Lambda)>),
+    Nop(Lambda),
+}
+
+fn top_level_effect_group_single(kind: LetKind, ident: Ident, body: Lambda) -> TopLevelEffectGroup {
+    match (kind, &body) {
+        (LetKind::Strict | LetKind::StrictOpt, Lambda::Lvar(_) | Lambda::Lconst(_)) => {
+            TopLevelEffectGroup::Single(LetKind::Alias, ident, body)
+        }
+        _ => TopLevelEffectGroup::Single(kind, ident, body),
+    }
+}
+
+fn push_top_level_effect_nop(lam: Lambda, groups: &mut Vec<TopLevelEffectGroup>) {
+    if !matches!(lam, Lambda::Lvar(_) | Lambda::Lconst(_) | Lambda::Lfunction(_)) {
+        groups.push(TopLevelEffectGroup::Nop(lam));
+    }
+}
+
+fn flatten_top_level_effect_groups(
+    acc: Vec<TopLevelEffectGroup>,
+    lam: &Lambda,
+) -> (Lambda, Vec<TopLevelEffectGroup>) {
     match lam {
         Lambda::Llet(kind, id, value, body) => {
-            if matches!(kind, LetKind::Strict | LetKind::Variable)
-                && !analysis::no_side_effects(value)
-            {
-                Some(id.name().to_string())
-            } else {
-                module_side_effect_reason(body)
-            }
+            let (result, groups) = flatten_top_level_effect_groups(acc, value);
+            let mut next = Vec::with_capacity(groups.len() + 1);
+            next.push(top_level_effect_group_single(*kind, id.clone(), result));
+            next.extend(groups);
+            flatten_top_level_effect_groups(next, body)
         }
-        Lambda::Lletrec(bindings, body) => bindings
-            .iter()
-            .find_map(|(id, expr)| {
-                (!analysis::no_side_effects(expr)).then(|| id.name().to_string())
-            })
-            .or_else(|| module_side_effect_reason(body)),
+        Lambda::Lletrec(bindings, body) => {
+            let mut next = Vec::with_capacity(acc.len() + 1);
+            next.push(TopLevelEffectGroup::Recursive(bindings.clone()));
+            next.extend(acc);
+            flatten_top_level_effect_groups(next, body)
+        }
         Lambda::Lsequence(first, second) => {
-            if analysis::no_side_effects(first) {
-                module_side_effect_reason(second)
-            } else {
-                Some(String::new())
-            }
+            let (result, groups) = flatten_top_level_effect_groups(acc, first);
+            let mut next = Vec::with_capacity(groups.len() + 1);
+            push_top_level_effect_nop(result, &mut next);
+            next.extend(groups);
+            flatten_top_level_effect_groups(next, second)
         }
-        _ if analysis::no_side_effects(lam) => None,
-        _ => Some(String::new()),
+        _ => (lam.clone(), acc),
     }
+}
+
+fn module_side_effect_reason(lam: &Lambda) -> Option<String> {
+    let (result, groups) = flatten_top_level_effect_groups(Vec::new(), lam);
+    groups
+        .into_iter()
+        .rev()
+        .find_map(|group| match group {
+            TopLevelEffectGroup::Single(kind, id, body) => {
+                (matches!(kind, LetKind::Strict | LetKind::Variable)
+                    && !analysis::no_side_effects(&body))
+                .then(|| id.name().to_string())
+            }
+            TopLevelEffectGroup::Recursive(bindings) => bindings
+                .into_iter()
+                .find_map(|(id, body)| (!analysis::no_side_effects(&body)).then(|| id.name().to_string())),
+            TopLevelEffectGroup::Nop(body) => {
+                (!analysis::no_side_effects(&body)).then(String::new)
+            }
+        })
+        .or_else(|| (!analysis::no_side_effects(&result)).then(String::new))
 }
 
 fn required_module_side_effect_reason(
@@ -13616,6 +13659,51 @@ mod tests {
         );
 
         assert_eq!(reason.as_deref(), Some("Test_utils"));
+    }
+
+    #[test]
+    fn module_side_effect_reason_uses_first_impure_group_in_final_order_like_ocaml() {
+        let first = Ident::create_local("first");
+        let second = Ident::create_local("second");
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            first,
+            Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
+            Lambda::let_(
+                LetKind::Strict,
+                second.clone(),
+                Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
+                Lambda::unit(),
+            ),
+        );
+
+        assert_eq!(module_side_effect_reason(&lam).as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn module_side_effect_reason_uses_binding_name_for_impure_group_bodies() {
+        let match_id = Ident::create_local("match");
+        let lam = Lambda::seq(
+            Lambda::let_(
+                LetKind::Strict,
+                match_id.clone(),
+                Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
+                Lambda::unit(),
+            ),
+            Lambda::unit(),
+        );
+
+        assert_eq!(module_side_effect_reason(&lam).as_deref(), Some("match"));
+    }
+
+    #[test]
+    fn module_side_effect_reason_keeps_empty_reason_for_impure_nops() {
+        let lam = Lambda::seq(
+            Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
+            Lambda::unit(),
+        );
+
+        assert_eq!(module_side_effect_reason(&lam).as_deref(), Some(""));
     }
 
     #[test]

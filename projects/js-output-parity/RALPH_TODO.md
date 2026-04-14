@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 351 / 657 JS snapshots passing, 0 compile errors, 306 output diffs
+**Status:** 352 / 657 JS snapshots passing, 0 compile errors, 305 output diffs
 
 ## Goal
 
@@ -35,11 +35,48 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **351 / 657**
+- JS snapshot parity: **352 / 657**
 - Compile errors: **0**
-- Output diffs: **306**
+- Output diffs: **305**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port OCaml’s grouped module side-effect reason selection in
+  `compiler-rust/src/lambda/compile.rs`
+- OCaml reference: `compiler/core/lam_coercion.ml`,
+  `compiler/core/lam_group.ml`, and `compiler/core/lam_compile_main.ml`,
+  where `flatten`, `handle_exports`, `Lam_dce.remove`, and
+  `no_side_effects` derive the final `side_effect` trailer reason from the
+  grouped lambda list instead of the raw lambda tree
+- Rust change:
+  - `module_side_effect_reason` now flattens top-level lets / letrecs /
+    sequences into OCaml-style groups before deciding the trailer reason
+  - the grouped scan now uses the final OCaml order instead of the raw
+    flatten accumulator order, so strict / variable bindings like
+    `ExternalExtension`’s `match` keep their binding name instead of falling
+    back to `Some("")`
+  - added focused regression coverage for first-impure-group ordering,
+    impure binding values, and impure `Nop` groups
+- Verified focused guards for this slice:
+  - `timeout 600 env RUSTFLAGS='-Awarnings' cargo test --manifest-path compiler-rust/Cargo.toml --release module_side_effect_reason -- --nocapture`
+  - `timeout 600 env RUSTFLAGS='-Awarnings' cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalExtension.res -o /tmp/ExternalExtension.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/ExternalExtension.res` now matches its checked-in `.mjs`
+    snapshot exactly; the trailing purity comment is back to
+    `/* match Not a pure module */`
+  - `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
+  - the authoritative diff corpus no longer contains `ExternalExtension`
+- Topline impact:
+  - JS snapshot parity: **352 / 657** (**+1**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **305** (**-1**)
+- Keep this change because it ports the OCaml grouped-module metadata rule into
+  Rust instead of papering over the emitted JS comment in the printer
 
 Latest iteration on **2026-04-14**:
 
