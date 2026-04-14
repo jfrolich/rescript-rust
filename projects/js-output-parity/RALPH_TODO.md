@@ -67,6 +67,7 @@ Latest iteration on **2026-04-14**:
   - added focused regression coverage in
     `recursive_self_referential_record_bindings_lower_to_dummy_object_updates_like_ocaml`
 - Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml --quiet recursive_self_referential_record_bindings_lower_to_dummy_object_updates_like_ocaml -- --nocapture`
   - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml recursive_function_bindings_lower_directly_without_placeholder_assignments -- --nocapture`
   - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
   - exact `compiler-args` repro for `tests/tests/src/a_recursive_type.res`
