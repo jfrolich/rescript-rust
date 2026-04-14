@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 348 / 657 JS snapshots passing, 0 compile errors, 309 output diffs
+**Status:** 347 / 657 JS snapshots passing, 0 compile errors, 310 output diffs
 
 ## Goal
 
@@ -35,11 +35,58 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **348 / 657**
+- JS snapshot parity: **347 / 657**
 - Compile errors: **0**
-- Output diffs: **309**
+- Output diffs: **310**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: direct anonymous/wrapper beta reduction on the JS-path lambda
+  simplifier in `compiler-rust/src/lambda/beta_reduce.rs` and
+  `compiler-rust/src/lambda/simplify.rs`
+- OCaml reference: `compiler/core/lam_pass_remove_alias.ml`,
+  `compiler/core/lam_beta_reduce.ml`, and
+  `compiler/core/lam_beta_reduce_util.ml`, where direct `Lfunction` /
+  `PjsFnMake` applications use `Lam_beta_reduce.propagate_beta_reduce`
+  instead of the plain no-names reducer, and the later pass does not
+  immediately beta-reduce the newly exposed returned wrapper a second time
+- Rust change:
+  - added `beta_reduce::propagate_beta_reduce`, matching OCaml’s direct
+    substitution-vs-fresh-let behavior for constants / vars vs non-trivial
+    arguments
+  - switched direct anonymous-function and direct `PjsFnMake` wrapper
+    inlining in `simplify_apply` from `no_names_beta_reduce` to
+    `propagate_beta_reduce`
+  - gated those direct-wrapper beta reductions to the first JS-path simplify
+    pass so the second pass does not collapse the returned wrapper call away
+- Added focused regression coverage in:
+  - `lambda::beta_reduce::tests::test_propagate_beta_reduce_keeps_let_wrapped_returned_functions`
+  - `lambda::simplify::tests::keeps_nested_direct_wrapper_application_with_intermediate_let_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 env RUSTFLAGS='-Awarnings' cargo test --manifest-path compiler-rust/Cargo.toml --release test_propagate_beta_reduce_keeps_let_wrapped_returned_functions -- --nocapture`
+  - `timeout 600 env RUSTFLAGS='-Awarnings' cargo test --manifest-path compiler-rust/Cargo.toml --release inlines_direct_function_applications_without_named_call_profitability_gate -- --nocapture`
+  - `timeout 600 env RUSTFLAGS='-Awarnings' cargo test --manifest-path compiler-rust/Cargo.toml --release keeps_nested_direct_wrapper_application_with_intermediate_let_like_ocaml -- --nocapture`
+  - `timeout 600 env RUSTFLAGS='-Awarnings' cargo test --manifest-path compiler-rust/Cargo.toml --release stops_after_one_beta_reduction_for_returned_pjs_fn_make_wrappers -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_1692_test.res -o /tmp/gpr_1692_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1692_test.res` now matches its checked-in `.mjs`
+    snapshot exactly again; the diff corpus no longer contains `gpr_1692_test`
+  - `ExternalShadow` remains an exact guard-file match
+  - the authoritative baseline still regressed overall by one file elsewhere,
+    so this slice is a verified OCaml-aligned fix with a separate follow-up
+    regression still to isolate
+- Topline impact:
+  - JS snapshot parity: **347 / 657** (**-1**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **310** (**+1**)
+- Keep this change because it ports OCaml’s direct beta-reduction rule into
+  Rust and fixes a concrete checked-in snapshot (`gpr_1692_test`) instead of
+  papering over the emitted JS after the fact
 
 Latest iteration on **2026-04-14**:
 

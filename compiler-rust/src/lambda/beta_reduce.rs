@@ -188,6 +188,41 @@ pub fn no_names_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) ->
     result
 }
 
+/// Perform beta reduction that matches OCaml's `Lam_beta_reduce.propagate_beta_reduce`.
+///
+/// This substitutes only constants/variables directly and introduces fresh let-bindings
+/// for other arguments so returned wrapper structure is preserved instead of being
+/// collapsed by `subst`.
+pub fn propagate_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> Lambda {
+    if let Some(result) = simple_beta_reduce(params, body, args) {
+        return result;
+    }
+
+    let id_gen = IdGenerator::with_start_stamp(max_ident_stamp(params, body, args));
+    let mut rest_bindings: Vec<(Ident, Lambda)> = Vec::new();
+    let mut substitution: Subst = HashMap::new();
+
+    for (param, arg) in params.iter().zip(args.iter()) {
+        match arg {
+            Lambda::Lconst(_) | Lambda::Lvar(_) => {
+                substitution.insert(param.clone(), arg.clone());
+            }
+            _ => {
+                let new_param = param.rename(&id_gen);
+                rest_bindings.push((new_param.clone(), arg.clone()));
+                substitution.insert(param.clone(), Lambda::var(new_param));
+            }
+        }
+    }
+
+    let new_body = subst(&substitution, body);
+    let mut result = new_body;
+    for (param, arg) in rest_bindings.into_iter().rev() {
+        result = refine_let(LetKind::Strict, param, arg, result);
+    }
+    result
+}
+
 /// Perform beta reduction with smart inlining decisions.
 ///
 /// This uses closure analysis to determine which arguments can be
@@ -272,11 +307,96 @@ fn refine_let(kind: LetKind, id: Ident, value: Lambda, body: Lambda) -> Lambda {
     Lambda::let_(kind, id, value, body)
 }
 
+fn max_ident_stamp(params: &[Ident], body: &Lambda, args: &[Lambda]) -> i32 {
+    let params_max = params.iter().fold(0, |max_stamp, param| max_stamp.max(param.stamp()));
+    let body_max = max_ident_stamp_in_lambda(body);
+    let args_max = args
+        .iter()
+        .fold(0, |max_stamp, arg| max_stamp.max(max_ident_stamp_in_lambda(arg)));
+    params_max.max(body_max).max(args_max)
+}
+
+fn max_ident_stamp_in_lambda(lam: &Lambda) -> i32 {
+    match lam {
+        Lambda::Lvar(id) | Lambda::LglobalModule(id, _) => id.stamp(),
+        Lambda::Lconst(_) => 0,
+        Lambda::Lapply(apply) => apply
+            .ap_args
+            .iter()
+            .fold(max_ident_stamp_in_lambda(&apply.ap_func), |max_stamp, arg| {
+                max_stamp.max(max_ident_stamp_in_lambda(arg))
+            }),
+        Lambda::Lfunction(func) => func
+            .params
+            .iter()
+            .fold(max_ident_stamp_in_lambda(&func.body), |max_stamp, param| {
+                max_stamp.max(param.stamp())
+            }),
+        Lambda::Llet(_, id, value, body) => id
+            .stamp()
+            .max(max_ident_stamp_in_lambda(value))
+            .max(max_ident_stamp_in_lambda(body)),
+        Lambda::Lletrec(bindings, body) => bindings.iter().fold(
+            max_ident_stamp_in_lambda(body),
+            |max_stamp, (id, lam)| max_stamp.max(id.stamp()).max(max_ident_stamp_in_lambda(lam)),
+        ),
+        Lambda::Lprim(info) => info.args.iter().fold(0, |max_stamp, arg| {
+            max_stamp.max(max_ident_stamp_in_lambda(arg))
+        }),
+        Lambda::Lswitch(scrutinee, switch) => {
+            let mut max_stamp = max_ident_stamp_in_lambda(scrutinee);
+            for (_, lam) in &switch.sw_consts {
+                max_stamp = max_stamp.max(max_ident_stamp_in_lambda(lam));
+            }
+            for (_, lam) in &switch.sw_blocks {
+                max_stamp = max_stamp.max(max_ident_stamp_in_lambda(lam));
+            }
+            if let Some(failaction) = &switch.sw_failaction {
+                max_stamp = max_stamp.max(max_ident_stamp_in_lambda(failaction));
+            }
+            max_stamp
+        }
+        Lambda::LstringSwitch(scrutinee, cases, default) => {
+            let mut max_stamp = max_ident_stamp_in_lambda(scrutinee);
+            for (_, lam) in cases {
+                max_stamp = max_stamp.max(max_ident_stamp_in_lambda(lam));
+            }
+            if let Some(default) = default {
+                max_stamp = max_stamp.max(max_ident_stamp_in_lambda(default));
+            }
+            max_stamp
+        }
+        Lambda::LstaticRaise(_, args) => args.iter().fold(0, |max_stamp, arg| {
+            max_stamp.max(max_ident_stamp_in_lambda(arg))
+        }),
+        Lambda::LstaticCatch(body, (_, ids), handler) => ids.iter().fold(
+            max_ident_stamp_in_lambda(body).max(max_ident_stamp_in_lambda(handler)),
+            |max_stamp, id| max_stamp.max(id.stamp()),
+        ),
+        Lambda::LtryWith(body, id, handler) => id
+            .stamp()
+            .max(max_ident_stamp_in_lambda(body))
+            .max(max_ident_stamp_in_lambda(handler)),
+        Lambda::LifThenElse(cond, then_, else_) => max_ident_stamp_in_lambda(cond)
+            .max(max_ident_stamp_in_lambda(then_))
+            .max(max_ident_stamp_in_lambda(else_)),
+        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+            max_ident_stamp_in_lambda(first).max(max_ident_stamp_in_lambda(second))
+        }
+        Lambda::Lfor(id, start, end, _, body) => id
+            .stamp()
+            .max(max_ident_stamp_in_lambda(start))
+            .max(max_ident_stamp_in_lambda(end))
+            .max(max_ident_stamp_in_lambda(body)),
+        Lambda::Lassign(id, value) => id.stamp().max(max_ident_stamp_in_lambda(value)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lambda::closure::VarStats;
-    use crate::lambda::{Constant, Primitive};
+    use crate::lambda::{Constant, FunctionAttribute, Primitive};
     use crate::location::Location;
 
     #[test]
@@ -387,6 +507,41 @@ mod tests {
             Lambda::Llet(_, _, _, _) => {}
             _ => panic!("Expected Llet, got {result:?}"),
         }
+    }
+
+    #[test]
+    fn test_propagate_beta_reduce_keeps_let_wrapped_returned_functions() {
+        let outer = Ident::create_local("outer");
+        let helper = Ident::create_local("helper");
+        let inner = Ident::create_local("inner");
+        let params = vec![outer];
+        let body = Lambda::let_(
+            LetKind::Strict,
+            helper.clone(),
+            Lambda::const_(Constant::int(1)),
+            Lambda::function_(
+                1,
+                vec![inner.clone()],
+                Lambda::const_(Constant::int(0)),
+                FunctionAttribute::default(),
+            ),
+        );
+        let args = vec![Lambda::const_(Constant::String {
+            s: "".to_string(),
+            delim: None,
+        })];
+
+        let reduced = propagate_beta_reduce(&params, &body, &args);
+        let Lambda::Llet(kind, id, value, body) = reduced else {
+            panic!("expected helper let-binding to remain");
+        };
+        assert_eq!(kind, LetKind::Strict);
+        assert_eq!(id, helper);
+        assert!(matches!(*value, Lambda::Lconst(Constant::Int { i, .. }) if i == 1));
+        let Lambda::Lfunction(func) = *body else {
+            panic!("expected returned function to remain wrapped by the let");
+        };
+        assert_eq!(func.params, vec![inner]);
     }
 
     #[test]

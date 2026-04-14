@@ -22,6 +22,7 @@ struct SimplifyEnv {
     functions: HashMap<Ident, LFunction>,
     optional_blocks: HashMap<Ident, OptionalBlockInfo>,
     preserved_export_bindings: HashSet<Ident>,
+    allow_direct_function_beta_reduce: bool,
     substitutions: HashMap<Ident, Lambda>,
 }
 
@@ -78,19 +79,21 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     let exports = collect_exported_idents(&flattened);
     let preserved_export_bindings =
         collect_exported_apply_bindings(&flattened, &exports);
-    let first = simplify_for_js_backend_once(&flattened, &preserved_export_bindings);
-    simplify_for_js_backend_once(&first, &preserved_export_bindings)
+    let first = simplify_for_js_backend_once(&flattened, &preserved_export_bindings, true);
+    simplify_for_js_backend_once(&first, &preserved_export_bindings, false)
 }
 
 fn simplify_for_js_backend_once(
     lam: &Lambda,
     preserved_export_bindings: &HashSet<Ident>,
+    allow_direct_function_beta_reduce: bool,
 ) -> Lambda {
     let flattened = deep_flatten_for_js_backend(lam);
     let exports = collect_exported_idents(&flattened);
     let env = SimplifyEnv {
         functions: collect_inlineable_functions(&flattened),
         preserved_export_bindings: preserved_export_bindings.clone(),
+        allow_direct_function_beta_reduce,
         ..SimplifyEnv::default()
     };
     simplify_with_env(&flattened, &env, &exports)
@@ -1475,24 +1478,26 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
                 }
             }
         }
-        if let Some(inline_func) = inlineable_direct_wrapper_function(&func) {
-            if should_inline_direct_function(&inline_func, &args) {
-                let reduced = beta_reduce::no_names_beta_reduce(
-                    &inline_func.params,
-                    &inline_func.body,
-                    &args,
-                );
-                return simplify_with_env(&reduced, env, exports);
+        if env.allow_direct_function_beta_reduce {
+            if let Some(inline_func) = inlineable_direct_wrapper_function(&func) {
+                if should_inline_direct_function(&inline_func, &args) {
+                    let reduced = beta_reduce::propagate_beta_reduce(
+                        &inline_func.params,
+                        &inline_func.body,
+                        &args,
+                    );
+                    return simplify_with_env(&reduced, env, exports);
+                }
             }
-        }
-        if let Lambda::Lfunction(inline_func) = &func {
-            if should_inline_direct_function(inline_func, &args) {
-                let reduced = beta_reduce::no_names_beta_reduce(
-                    &inline_func.params,
-                    &inline_func.body,
-                    &args,
-                );
-                return simplify_with_env(&reduced, env, exports);
+            if let Lambda::Lfunction(inline_func) = &func {
+                if should_inline_direct_function(inline_func, &args) {
+                    let reduced = beta_reduce::propagate_beta_reduce(
+                        &inline_func.params,
+                        &inline_func.body,
+                        &args,
+                    );
+                    return simplify_with_env(&reduced, env, exports);
+                }
             }
         }
     }
@@ -2357,6 +2362,86 @@ mod tests {
             panic!("expected the direct function application to beta-reduce");
         };
         assert_eq!(func.params, vec![inner]);
+        assert!(matches!(
+            *func.body,
+            Lambda::Lconst(Constant::Int { i: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn keeps_nested_direct_wrapper_application_with_intermediate_let_like_ocaml() {
+        let outer = Ident::create_local("outer");
+        let ignored = Ident::create_local("ignored");
+        let inner = Ident::create_local("inner");
+
+        let outer_func = Lambda::prim(
+            Primitive::PjsFnMake(1),
+            vec![Lambda::function_(
+                1,
+                vec![outer],
+                Lambda::let_(
+                    LetKind::Strict,
+                    Ident::create_local("helper"),
+                    Lambda::prim(
+                        Primitive::PjsFnMake(1),
+                        vec![Lambda::function_(
+                            1,
+                            vec![ignored],
+                            Lambda::const_(Constant::int(1)),
+                            FunctionAttribute::default(),
+                        )],
+                        Location::none(),
+                    ),
+                        Lambda::prim(
+                            Primitive::PjsFnMake(1),
+                            vec![Lambda::function_(
+                                1,
+                                vec![inner.clone()],
+                                Lambda::const_(Constant::int(0)),
+                                FunctionAttribute::default(),
+                            )],
+                        Location::none(),
+                    ),
+                ),
+                FunctionAttribute::default(),
+            )],
+            Location::none(),
+        );
+
+        let lambda = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::Lapply(Apply {
+                ap_func: Box::new(outer_func),
+                ap_args: vec![Lambda::const_(Constant::String {
+                    s: "".to_string(),
+                    delim: None,
+                })],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            })),
+            ap_args: vec![Lambda::const_(Constant::String {
+                s: "".to_string(),
+                delim: None,
+            })],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lapply(Apply { ap_func, .. }) = simplified else {
+            panic!("expected the second application to remain, got {simplified:?}");
+        };
+        let Lambda::Lfunction(func) = *ap_func else {
+            panic!("expected the returned wrapper to simplify to a direct function, got {ap_func:?}");
+        };
+        assert!(matches!(func.params.as_slice(), [param] if param.same(&inner)));
         assert!(matches!(
             *func.body,
             Lambda::Lconst(Constant::Int { i: 0, .. })
@@ -3459,7 +3544,7 @@ mod tests {
 
         let wrapped = Lambda::let_(
             LetKind::Strict,
-            h,
+            h.clone(),
             Lambda::const_(Constant::JsTrue),
             Lambda::prim(
                 Primitive::PjsFnMake(1),
@@ -3468,7 +3553,7 @@ mod tests {
                     vec![x],
                     Lambda::let_(
                         LetKind::Strict,
-                        j,
+                        j.clone(),
                         Lambda::prim(
                             Primitive::PjsFnMake(1),
                             vec![Lambda::function_(
