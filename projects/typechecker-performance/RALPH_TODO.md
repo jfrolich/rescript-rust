@@ -67,6 +67,60 @@ Detailed corpus baseline:
   exactly." The expectation is that removing Rust-only extra work is the real
   win.
 
+## Session Update: Package Constraints Rewrite From Shared Signatures
+
+Additional checkpoint from this worktree on `2026-04-14` after changing
+`typemod::apply_package_constraints_to_module_type` to rewrite package
+constraints directly from the resolved shared signature source instead of first
+detaching a cloned signature with `resolve_mod_type_to_sig`:
+
+- exact `Import.res` repro after rebuild:
+  - OCaml: `0.04s` (`/usr/bin/time -lp`)
+  - Rust: `0.16s` (`/usr/bin/time -lp`)
+  - Rust max RSS: about `55.9MB`
+  - Rust peak footprint: about `42.4MB`
+- canonical corpus benchmark:
+  - Files tested: `657`
+  - Comparable files: `657`
+  - Rust faster or equal: `1`
+  - Rust slower: `656`
+  - Materially slower: `213`
+  - OCaml failures: `0`
+  - Rust failures: `0`
+  - Aggregate OCaml total: `5268.2ms`
+  - Aggregate Rust total: `10672.5ms`
+  - Aggregate Rust / OCaml ratio: `2.03x`
+  - `Import.res` benchmark entry: OCaml `44.2ms`, Rust `147.5ms`, `3.34x`
+- full typedtree parity after rebuilding `compiler-rust` and `rewatch` and
+  clearing `.parity-cache/tests/*` files: unchanged at `232/657`, `43117` hunk
+  mismatches
+
+What landed in this step:
+
+- `typemod::apply_package_constraints_to_module_type` now rewrites package
+  constraints over borrowed/shared signature items when the source module type
+  is already available through the local env, persistent env, or the
+  env_lazy-backed qualified module-components cache
+- dotted package/module paths now consult
+  `typecore::with_resolved_module_components_for_path` first and only fall back
+  to the older cloned-signature resolution path when no shared qualified view
+  is available
+- nested constrained child modules are rewritten in a second pass over the new
+  signature so the current step can keep using the shared source signature
+  without taking extra mutable borrows or forcing an up-front detached copy
+
+What this means:
+
+- the unpack/package constraint path now follows the same source-of-truth rule
+  as the other env_lazy work: read from the resolved qualified view first, then
+  allocate only the final rewritten signature that this pass actually needs
+- the exact single-file repro moved only slightly, but the full 657-file corpus
+  improved in the right direction (`2.05x` -> `2.03x`, materially slower files
+  `224` -> `213`) without reopening the import-family parity drift
+- the next session should keep pushing this "shared source signature, final copy
+  only when necessary" shape into the remaining inclusion/unpack helpers rather
+  than revisiting the rejected local-`Pident` env_lazy reroutes
+
 ## Session Update: Shared Dotted Fallbacks Now Reuse env_lazy Parent Views
 
 Additional checkpoint from this worktree on `2026-04-14` after routing the

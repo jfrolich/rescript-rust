@@ -3494,47 +3494,210 @@ fn apply_package_constraints_to_module_type<'b>(
         return Some(mty.clone());
     }
 
-    // Direct port of OCaml Typemod.package_constraints.
-    let sig = resolve_mod_type_to_sig(mty, Some(env), pers_env, ctx)?;
-    let mut rewritten_sig = Vec::with_capacity(sig.len());
+    fn rewrite_package_constraints_over_sig(
+        sig: &[crate::types::decl::SignatureItem],
+        constraints: &[PackageConstraint],
+    ) -> (
+        crate::types::decl::Signature,
+        Vec<(usize, Vec<PackageConstraint>)>,
+    ) {
+        let mut rewritten_sig = Vec::with_capacity(sig.len());
+        let mut nested_modules = Vec::new();
 
-    for item in sig.iter() {
-        match item {
-            SignatureItem::SigValue(id, vd) => {
-                rewritten_sig.push(SignatureItem::SigValue(id.clone(), vd.clone()))
-            }
-            SignatureItem::SigType(id, td, rec_status) => {
-                let mut td = td.clone();
-                if td.type_params.is_empty() {
-                    if let Some((_, manifest_ty)) = constraints
-                        .iter()
-                        .find(|(path, _)| path.len() == 1 && path[0] == id.name())
-                    {
-                        td.type_manifest = Some(*manifest_ty);
-                    }
+        for item in sig {
+            match item {
+                SignatureItem::SigValue(id, vd) => {
+                    rewritten_sig.push(SignatureItem::SigValue(id.clone(), vd.clone()))
                 }
-                rewritten_sig.push(SignatureItem::SigType(id.clone(), td, *rec_status));
+                SignatureItem::SigType(id, td, rec_status) => {
+                    let mut td = td.clone();
+                    if td.type_params.is_empty() {
+                        if let Some((_, manifest_ty)) = constraints
+                            .iter()
+                            .find(|(path, _)| path.len() == 1 && path[0] == id.name())
+                        {
+                            td.type_manifest = Some(*manifest_ty);
+                        }
+                    }
+                    rewritten_sig.push(SignatureItem::SigType(id.clone(), td, *rec_status));
+                }
+                SignatureItem::SigModule(id, md, rec_status) => {
+                    let nested = nested_package_constraints(id.name(), constraints);
+                    if !nested.is_empty() {
+                        nested_modules.push((rewritten_sig.len(), nested));
+                    }
+                    rewritten_sig.push(SignatureItem::SigModule(id.clone(), md.clone(), *rec_status));
+                }
+                other => rewritten_sig.push(other.clone()),
             }
-            SignatureItem::SigModule(id, md, rec_status) => {
-                let mut md = md.clone();
-                let nested = nested_package_constraints(id.name(), constraints);
-                if !nested.is_empty() {
-                    md.md_type = apply_package_constraints_to_module_type(
+        }
+
+        (rewritten_sig, nested_modules)
+    }
+
+    fn finish_rewritten_package_sig<'b>(
+        env: &Env,
+        mut rewritten_sig: crate::types::decl::Signature,
+        nested_modules: Vec<(usize, Vec<PackageConstraint>)>,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'b crate::types::context::TypeContext<'b>,
+    ) -> Option<crate::types::decl::ModuleType> {
+        for (idx, nested) in nested_modules {
+            let Some(SignatureItem::SigModule(_, md, _)) = rewritten_sig.get_mut(idx) else {
+                continue;
+            };
+            md.md_type =
+                apply_package_constraints_to_module_type(env, &md.md_type, &nested, None, pers_env, ctx)?;
+        }
+
+        Some(crate::types::decl::ModuleType::MtySignature(rewritten_sig))
+    }
+
+    fn resolve_path_package_constraints<'b>(
+        env: &Env,
+        path: &Path,
+        constraints: &[PackageConstraint],
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'b crate::types::context::TypeContext<'b>,
+        visiting: &mut HashSet<Path>,
+    ) -> Option<crate::types::decl::ModuleType> {
+        if !visiting.insert(path.clone()) {
+            return None;
+        }
+
+        let result = match path {
+            Path::Pident(id) => {
+                let ident_path = Path::pident(id.clone());
+                if let Ok(mtd) = env.lookup_modtype(&ident_path) {
+                    if let Some(mty) = mtd.mtd_type.as_ref() {
+                        apply_package_constraints_impl(
+                            env,
+                            mty,
+                            constraints,
+                            pers_env,
+                            ctx,
+                            visiting,
+                        )
+                    } else {
+                        None
+                    }
+                } else if let Ok(md) = env.lookup_module(&ident_path) {
+                    apply_package_constraints_impl(
                         env,
                         &md.md_type,
-                        &nested,
-                        None,
+                        constraints,
                         pers_env,
                         ctx,
-                    )?;
+                        visiting,
+                    )
+                } else if let Some(ps_sig) = pers_env
+                    .as_mut()
+                    .and_then(|pers| pers.find_pers_struct(id.name(), ctx))
+                    .map(|ps| ps.ps_sig.clone())
+                {
+                    let (rewritten_sig, nested_modules) =
+                        rewrite_package_constraints_over_sig(&ps_sig, constraints);
+                    finish_rewritten_package_sig(
+                        env,
+                        rewritten_sig,
+                        nested_modules,
+                        pers_env,
+                        ctx,
+                    )
+                } else {
+                    None
                 }
-                rewritten_sig.push(SignatureItem::SigModule(id.clone(), md, *rec_status));
             }
-            other => rewritten_sig.push(other.clone()),
+            Path::Pdot(parent, name, _) => {
+                if let Some((rewritten_sig, nested_modules)) =
+                    crate::types::typecore::with_resolved_module_components_for_path(
+                        path,
+                        env,
+                        pers_env,
+                        ctx,
+                        |components| rewrite_package_constraints_over_sig(components.signature(), constraints),
+                    )
+                {
+                    finish_rewritten_package_sig(
+                        env,
+                        rewritten_sig,
+                        nested_modules,
+                        pers_env,
+                        ctx,
+                    )
+                } else if let Some((_, mtd)) = crate::types::typecore::lookup_modtype_in_resolved_path(
+                    parent,
+                    name.as_str(),
+                    env,
+                    pers_env,
+                    ctx,
+                ) {
+                    if let Some(mty) = mtd.mtd_type.as_ref() {
+                        apply_package_constraints_impl(
+                            env,
+                            mty,
+                            constraints,
+                            pers_env,
+                            ctx,
+                            visiting,
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    let sig = resolve_path_to_sig_impl(path, Some(env), pers_env, ctx, visiting)?;
+                    let (rewritten_sig, nested_modules) =
+                        rewrite_package_constraints_over_sig(&sig, constraints);
+                    finish_rewritten_package_sig(
+                        env,
+                        rewritten_sig,
+                        nested_modules,
+                        pers_env,
+                        ctx,
+                    )
+                }
+            }
+            Path::Papply(_, _) => None,
+        };
+
+        visiting.remove(path);
+        result
+    }
+
+    fn apply_package_constraints_impl<'b>(
+        env: &Env,
+        mty: &crate::types::decl::ModuleType,
+        constraints: &[PackageConstraint],
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'b crate::types::context::TypeContext<'b>,
+        visiting: &mut HashSet<Path>,
+    ) -> Option<crate::types::decl::ModuleType> {
+        use crate::types::decl::ModuleType as DeclMty;
+
+        match mty {
+            DeclMty::MtySignature(sig) => {
+                let (rewritten_sig, nested_modules) =
+                    rewrite_package_constraints_over_sig(sig, constraints);
+                finish_rewritten_package_sig(
+                    env,
+                    rewritten_sig,
+                    nested_modules,
+                    pers_env,
+                    ctx,
+                )
+            }
+            DeclMty::MtyAlias(_, path) | DeclMty::MtyIdent(path) => {
+                resolve_path_package_constraints(env, path, constraints, pers_env, ctx, visiting)
+            }
+            _ => None,
         }
     }
 
-    Some(crate::types::decl::ModuleType::MtySignature(rewritten_sig))
+    // Direct port of OCaml Typemod.package_constraints, but preserve the
+    // env_lazy/shared signature view as the source of truth instead of cloning
+    // a detached signature before doing the one-pass rewrite.
+    let mut visiting = HashSet::new();
+    apply_package_constraints_impl(env, mty, constraints, pers_env, ctx, &mut visiting)
 }
 
 /// Port of OCaml `Typemod.modtype_of_package` + `package_constraints`.
