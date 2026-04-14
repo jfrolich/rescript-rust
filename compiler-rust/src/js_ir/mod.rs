@@ -977,14 +977,18 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
     if let (Some(then_ret), Some(else_ret)) =
         (single_return_expr(&then_), single_return_expr(&else_))
     {
-        return Statement::return_(Expression::cond(cond, then_ret, else_ret));
+        return Statement::return_(Expression::cond(
+            cond,
+            then_ret.clone(),
+            else_ret.clone(),
+        ));
     }
 
     if let Some(else_ret) = single_return_expr(&else_) {
         let mut block = Vec::with_capacity(1 + then_.len());
         block.push(Statement::new(StatementDesc::If(
             negate_condition(cond),
-            vec![Statement::return_(else_ret)],
+            vec![Statement::return_(else_ret.clone())],
             vec![],
         )));
         block.extend(then_);
@@ -1002,17 +1006,17 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         single_assignment_expr(&then_),
         single_assignment_expr(&else_),
     ) {
-        if same_assignment_target(&lhs_then, &lhs_else) {
+        if same_assignment_target(lhs_then, lhs_else) {
             return Statement::exp(Expression::bin(
                 BinOp::Eq,
-                lhs_then,
-                Expression::cond(cond, rhs_then, rhs_else),
+                lhs_then.clone(),
+                Expression::cond(cond, rhs_then.clone(), rhs_else.clone()),
             ));
         }
     }
 
     if let (Some(then_expr), Some(else_expr)) = (single_exp_expr(&then_), single_exp_expr(&else_)) {
-        return Statement::exp(Expression::cond(cond, then_expr, else_expr));
+        return Statement::exp(Expression::cond(cond, then_expr.clone(), else_expr.clone()));
     }
 
     Statement::new(StatementDesc::If(cond, then_, else_))
@@ -1027,17 +1031,17 @@ fn block_last_is_terminal(block: &Block) -> bool {
     )
 }
 
-fn single_return_expr(block: &Block) -> Option<Expression> {
+fn single_return_expr(block: &Block) -> Option<&Expression> {
     let [stmt] = block.as_slice() else {
         return None;
     };
     match &stmt.desc {
-        StatementDesc::Return(expr) => Some(expr.clone()),
+        StatementDesc::Return(expr) => Some(expr),
         _ => None,
     }
 }
 
-fn single_assignment_expr(block: &Block) -> Option<(Expression, Expression)> {
+fn single_assignment_expr(block: &Block) -> Option<(&Expression, &Expression)> {
     let [stmt] = block.as_slice() else {
         return None;
     };
@@ -1047,7 +1051,7 @@ fn single_assignment_expr(block: &Block) -> Option<(Expression, Expression)> {
     let ExpressionDesc::Bin(BinOp::Eq, lhs, rhs) = &expr.desc else {
         return None;
     };
-    Some(((*lhs.clone()), (*rhs.clone())))
+    Some((lhs, rhs))
 }
 
 fn same_assignment_target(lhs: &Expression, rhs: &Expression) -> bool {
@@ -1076,14 +1080,14 @@ fn same_assignment_target(lhs: &Expression, rhs: &Expression) -> bool {
     }
 }
 
-fn single_exp_expr(block: &Block) -> Option<Expression> {
+fn single_exp_expr(block: &Block) -> Option<&Expression> {
     let [stmt] = block.as_slice() else {
         return None;
     };
     let StatementDesc::Exp(expr) = &stmt.desc else {
         return None;
     };
-    Some(expr.clone())
+    Some(expr)
 }
 
 fn negate_condition(cond: Expression) -> Expression {
