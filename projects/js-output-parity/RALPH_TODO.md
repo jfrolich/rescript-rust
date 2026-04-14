@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 416 / 657 JS snapshots passing, 0 compile errors, 241 output diffs
+**Status:** 426 / 657 JS snapshots passing, 0 compile errors, 231 output diffs
 
 ## Goal
 
@@ -35,11 +35,72 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **416 / 657**
+- JS snapshot parity: **426 / 657**
 - Compile errors: **0**
-- Output diffs: **241**
+- Output diffs: **231**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the OCaml untagged-switch `compile_switch` fast path for
+  zero explicit literal arms with equal literal/block defaults, and keep the
+  downstream `Js_stmt_make.if_` / `Js_exp_make.econd` simplifications aligned
+  so impossible nullish guards under `typeof === "boolean"` collapse instead
+  of surviving into emitted JS
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is a `Lam_compile` / JS-IR lowering fix
+  downstream of the already-green optimized lambda boundary
+- OCaml reference:
+  `compiler/core/lam_compile.ml`,
+  `compiler/core/js_exp_make.ml`, and
+  `compiler/core/js_stmt_make.ml`, where untagged `compile_switch` skips the
+  literal-vs-block dispatch when `sw_consts = []` and the const/block defaults
+  are equivalent, and later `econd` / `if_` simplifications erase impossible
+  `null` / `undefined` tests beneath boolean runtime guards
+- Rust change:
+  - added the OCaml-aligned no-literal / same-default fast path to
+    `compile_untagged_variant_switch_assignment_statements(...)`,
+    `compile_untagged_variant_switch_return_statements(...)`, and
+    `compile_untagged_variant_switch_effect_statements(...)` in
+    `compiler-rust/src/lambda/compile.rs`
+  - kept the already-started `js_ir` simplification work for
+    `Expression::cond`, `Statement::if_`, and boolean `&&` / `||` folding in
+    `compiler-rust/src/js_ir/mod.rs`, which is the OCaml-aligned place where
+    the remaining impossible nullish guards disappear after the switch shape is
+    corrected
+  - added focused regression coverage in
+    `default_only_untagged_boolean_assignment_skips_literal_dispatch_when_defaults_match`,
+    `default_only_untagged_boolean_return_skips_literal_dispatch_when_defaults_match`,
+    and the new `js_ir` conditional-folding tests
+- Verified focused guards for this slice:
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml default_only_untagged_boolean -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml complete_single_untagged_array -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml cond_merges_nested -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml if_statement_merges_nested -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml test_js_and_simplifies_boolean_typeof_nullish_guards_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/and_or_simplify.res`, diffing
+    `/tmp/and_or_simplify.mjs` against the checked-in snapshot
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/and_or_simplify.res` now matches its checked-in snapshot
+    exactly; Rust had been preserving a literal-vs-block dispatch and nested
+    impossible `null` / `undefined` guards that OCaml had already collapsed
+    away
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the untagged-switch and JS-IR simplification changes
+  - `and_or_simplify` no longer appears under `temp/rust-parity/diffs`
+- Topline impact:
+  - JS snapshot parity: **416 / 657** -> **426 / 657** (**+10**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **241** -> **231** (**-10**)
+- Keep this change because it ports OCaml’s untagged-switch no-literal
+  dispatch behavior and the associated conditional simplifications instead of
+  preserving Rust-only nullish dispatch and impossible boolean guard checks.
 
 Latest iteration on **2026-04-14**:
 

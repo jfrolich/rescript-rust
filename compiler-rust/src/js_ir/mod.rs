@@ -23,8 +23,8 @@ use std::path::{Component, Path as FsPath, PathBuf};
 
 use crate::cmi::persistent_env::{CmjExportConstant, PersistentEnv};
 use crate::ident::Ident;
-use crate::lambda::tag_info::TagInfo;
 use crate::lambda::SwitchCaseTag;
+use crate::lambda::tag_info::TagInfo;
 pub use op::{BinOp, IdentInfo, Kind, LengthObject, MutableFlag, Number, Property, PropertyName};
 pub use printer::{JsPrinter, print_block, print_deps_program, print_expression, print_program};
 
@@ -578,7 +578,11 @@ impl Expression {
         if let Some(value) = fold_strict_comparison(op, &left, &right) {
             return Expression::bool(value);
         }
-        Self::new(ExpressionDesc::Bin(op, Box::new(left), Box::new(right)))
+        match op {
+            BinOp::And => js_and_expression(left, right),
+            BinOp::Or => js_or_expression(left, right),
+            _ => raw_bin_expression(op, left, right),
+        }
     }
 
     /// Create a function call
@@ -593,9 +597,13 @@ impl Expression {
             ExpressionDesc::Seq(alternate_effect, alternate_suffix),
         ) = (&consequent.desc, &alternate.desc)
         {
-            if matches!(consequent_suffix.as_ref().desc, ExpressionDesc::Undefined { .. })
-                && matches!(alternate_suffix.as_ref().desc, ExpressionDesc::Undefined { .. })
-            {
+            if matches!(
+                consequent_suffix.as_ref().desc,
+                ExpressionDesc::Undefined { .. }
+            ) && matches!(
+                alternate_suffix.as_ref().desc,
+                ExpressionDesc::Undefined { .. }
+            ) {
                 return Self::new(ExpressionDesc::Seq(
                     Box::new(Expression::cond(
                         test,
@@ -608,8 +616,9 @@ impl Expression {
         }
 
         match &test.desc {
-            ExpressionDesc::Bool(false)
-            | ExpressionDesc::Number(Number::Int { i: 0, .. }) => return alternate,
+            ExpressionDesc::Bool(false) | ExpressionDesc::Number(Number::Int { i: 0, .. }) => {
+                return alternate;
+            }
             ExpressionDesc::Bool(true) => return consequent,
             ExpressionDesc::Number(_)
             | ExpressionDesc::Array(_, _)
@@ -628,6 +637,53 @@ impl Expression {
             return test;
         }
 
+        if ocaml_eq_expression(&consequent, &alternate) {
+            if expression_has_no_side_effects(&test) {
+                return consequent;
+            }
+
+            return Self::new(ExpressionDesc::Seq(
+                Box::new(test),
+                Box::new(consequent),
+            ));
+        }
+
+        if let ExpressionDesc::Cond(inner_test, inner_then, inner_else) = &consequent.desc {
+            if ocaml_eq_expression(inner_else, &alternate) {
+                return Self::cond(
+                    js_and_expression(test, inner_test.as_ref().clone()),
+                    inner_then.as_ref().clone(),
+                    alternate,
+                );
+            }
+
+            if ocaml_eq_expression(inner_then, &alternate) {
+                return Self::cond(
+                    js_and_expression(test, Expression::not(inner_test.as_ref().clone())),
+                    inner_else.as_ref().clone(),
+                    alternate,
+                );
+            }
+        }
+
+        if let ExpressionDesc::Cond(inner_test, inner_then, inner_else) = &alternate.desc {
+            if ocaml_eq_expression(&consequent, inner_then) {
+                return Self::cond(
+                    js_or_expression(test, inner_test.as_ref().clone()),
+                    consequent,
+                    inner_else.as_ref().clone(),
+                );
+            }
+
+            if ocaml_eq_expression(&consequent, inner_else) {
+                return Self::cond(
+                    js_or_expression(test, Expression::not(inner_test.as_ref().clone())),
+                    consequent,
+                    inner_then.as_ref().clone(),
+                );
+            }
+        }
+
         if let ExpressionDesc::JsNot(inner) = test.desc {
             if expression_branch_is_not_empty(&alternate) {
                 return Self::cond(*inner, alternate, consequent);
@@ -638,6 +694,19 @@ impl Expression {
                 Box::new(consequent),
                 Box::new(alternate),
             ));
+        }
+
+        if matches!(alternate.desc, ExpressionDesc::Bool(false)) {
+            if let Some(expr) = simplify_and_expression(&test, &consequent) {
+                return expr;
+            }
+        }
+
+        if matches!(consequent.desc, ExpressionDesc::Bool(false)) {
+            if let Some(expr) = simplify_and_expression(&Expression::not(test.clone()), &alternate)
+            {
+                return expr;
+            }
         }
 
         Self::new(ExpressionDesc::Cond(
@@ -698,11 +767,7 @@ impl Expression {
     }
 }
 
-fn fold_strict_comparison(
-    op: BinOp,
-    left: &Expression,
-    right: &Expression,
-) -> Option<bool> {
+fn fold_strict_comparison(op: BinOp, left: &Expression, right: &Expression) -> Option<bool> {
     let equality = match op {
         BinOp::EqEqEq => true,
         BinOp::NotEqEq => false,
@@ -1171,6 +1236,42 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         return Statement::exp(Expression::cond(cond, then_expr, else_expr));
     }
 
+    if let Some((nested_cond, nested_then, nested_else)) = single_if_block(&then_) {
+        if ocaml_eq_block(nested_else, &else_) {
+            return simplify_if_statement(
+                js_and_expression(cond, nested_cond.clone()),
+                nested_then.clone(),
+                nested_else.clone(),
+            );
+        }
+
+        if ocaml_eq_block(nested_then, &else_) {
+            return simplify_if_statement(
+                js_and_expression(cond, Expression::not(nested_cond.clone())),
+                nested_else.clone(),
+                nested_then.clone(),
+            );
+        }
+    }
+
+    if let Some((nested_cond, nested_then, nested_else)) = single_if_block(&else_) {
+        if ocaml_eq_block(&then_, nested_then) {
+            return simplify_if_statement(
+                js_or_expression(cond, nested_cond.clone()),
+                then_,
+                nested_else.clone(),
+            );
+        }
+
+        if ocaml_eq_block(&then_, nested_else) {
+            return simplify_if_statement(
+                js_or_expression(cond, Expression::not(nested_cond.clone())),
+                then_,
+                nested_then.clone(),
+            );
+        }
+    }
+
     Statement::new(StatementDesc::If(cond, then_, else_))
 }
 
@@ -1242,8 +1343,391 @@ fn single_exp_expr(block: &Block) -> Option<Expression> {
     Some(expr.clone())
 }
 
+fn single_if_block(block: &Block) -> Option<(&Expression, &Block, &Block)> {
+    let [stmt] = block.as_slice() else {
+        return None;
+    };
+    match &stmt.desc {
+        StatementDesc::If(cond, then_block, else_block) => Some((cond, then_block, else_block)),
+        _ => None,
+    }
+}
+
 fn negate_condition(cond: Expression) -> Expression {
     Expression::not(cond)
+}
+
+fn raw_bin_expression(op: BinOp, left: Expression, right: Expression) -> Expression {
+    Expression::new(ExpressionDesc::Bin(op, Box::new(left), Box::new(right)))
+}
+
+fn js_and_expression(left: Expression, right: Expression) -> Expression {
+    simplify_and_expression(&left, &right)
+        .unwrap_or_else(|| raw_bin_expression(BinOp::And, left, right))
+}
+
+fn js_or_expression(left: Expression, right: Expression) -> Expression {
+    simplify_or_expression(&left, &right)
+        .unwrap_or_else(|| raw_bin_expression(BinOp::Or, left, right))
+}
+
+fn simplify_and_expression(left: &Expression, right: &Expression) -> Option<Expression> {
+    match (&left.desc, &right.desc) {
+        (ExpressionDesc::Bool(false), _) | (_, ExpressionDesc::Bool(false)) => {
+            return Some(Expression::bool(false));
+        }
+        (ExpressionDesc::Bool(true), _) => return Some(right.clone()),
+        (_, ExpressionDesc::Bool(true)) => return Some(left.clone()),
+        _ => {}
+    }
+
+    if ocaml_eq_expression(left, right) {
+        return Some(left.clone());
+    }
+
+    if let Some(expr) = simplify_typeof_and_literal_and(left, right) {
+        return Some(expr);
+    }
+    if let Some(expr) = simplify_typeof_and_literal_and(right, left) {
+        return Some(expr);
+    }
+
+    if let Some(expr) = simplify_array_is_array_and_literal_and(left, right) {
+        return Some(expr);
+    }
+    if let Some(expr) = simplify_array_is_array_and_literal_and(right, left) {
+        return Some(expr);
+    }
+
+    if let Some(expr) = simplify_same_var_literal_and(left, right) {
+        return Some(expr);
+    }
+
+    None
+}
+
+fn simplify_or_expression(left: &Expression, right: &Expression) -> Option<Expression> {
+    match (&left.desc, &right.desc) {
+        (ExpressionDesc::Bool(true), _) | (_, ExpressionDesc::Bool(true)) => {
+            return Some(Expression::bool(true));
+        }
+        (ExpressionDesc::Bool(false), _) => return Some(right.clone()),
+        (_, ExpressionDesc::Bool(false)) => return Some(left.clone()),
+        _ => {}
+    }
+
+    let left_not = push_negation(left.clone())?;
+    let right_not = push_negation(right.clone())?;
+    let simplified = simplify_and_expression(&left_not, &right_not)?;
+    push_negation(simplified)
+}
+
+fn simplify_typeof_and_literal_and(typeof_expr: &Expression, other: &Expression) -> Option<Expression> {
+    let (vident, type_name) = typeof_var_type_test(typeof_expr)?;
+
+    match &other.desc {
+        ExpressionDesc::Var(other_vident) if type_name == "boolean" && same_vident(vident, other_vident) => {
+            return Some(Expression::bin(
+                BinOp::EqEqEq,
+                Expression::new(ExpressionDesc::Var(other_vident.clone())),
+                Expression::bool(true),
+            ));
+        }
+        ExpressionDesc::JsNot(inner)
+            if type_name == "boolean"
+                && matches!(&inner.desc, ExpressionDesc::Var(other_vident) if same_vident(vident, other_vident)) =>
+        {
+            let ExpressionDesc::Var(other_vident) = &inner.desc else {
+                unreachable!();
+            };
+            return Some(Expression::bin(
+                BinOp::EqEqEq,
+                Expression::new(ExpressionDesc::Var(other_vident.clone())),
+                Expression::bool(false),
+            ));
+        }
+        _ => {}
+    }
+
+    let (op, other_vident, literal) = strict_var_literal_comparison(other)?;
+    if !same_vident(vident, other_vident) {
+        return None;
+    }
+
+    if op == BinOp::EqEqEq {
+        if literal_matches_type_name(literal, type_name) {
+            return Some(other.clone());
+        }
+        if matches!(type_name, "boolean" | "string" | "number")
+            && is_scalar_nullish_literal(literal)
+        {
+            return Some(Expression::bool(false));
+        }
+        return None;
+    }
+
+    if type_name == "boolean" {
+        if let ExpressionDesc::Bool(value) = literal.desc {
+            return Some(Expression::bool(!value));
+        }
+    }
+
+    if matches!(type_name, "string" | "number") && literal_matches_type_name(literal, type_name) {
+        return None;
+    }
+
+    if type_name == "object" && matches!(literal.desc, ExpressionDesc::Null) {
+        return None;
+    }
+
+    if matches!(type_name, "boolean" | "string" | "number" | "object")
+        && is_scalar_nullish_literal(literal)
+    {
+        return Some(typeof_expr.clone());
+    }
+
+    None
+}
+
+fn simplify_array_is_array_and_literal_and(array_test: &Expression, other: &Expression) -> Option<Expression> {
+    let vident = array_is_array_var(array_test)?;
+    let (op, other_vident, literal) = strict_var_literal_comparison(other)?;
+    if !same_vident(vident, other_vident) || !is_scalar_nullish_literal(literal) {
+        return None;
+    }
+
+    match op {
+        BinOp::EqEqEq => Some(Expression::bool(false)),
+        BinOp::NotEqEq => Some(array_test.clone()),
+        _ => None,
+    }
+}
+
+fn simplify_same_var_literal_and(left: &Expression, right: &Expression) -> Option<Expression> {
+    let (left_op, left_vident, left_literal) = strict_var_literal_comparison(left)?;
+    let (right_op, right_vident, right_literal) = strict_var_literal_comparison(right)?;
+    if !same_vident(left_vident, right_vident) {
+        return None;
+    }
+
+    if left_op == right_op {
+        if ocaml_eq_expression(left_literal, right_literal) {
+            return Some(left.clone());
+        }
+        if matches!(left_op, BinOp::EqEqEq) {
+            return Some(Expression::bool(false));
+        }
+        return None;
+    }
+
+    if ocaml_eq_expression(left_literal, right_literal) {
+        return Some(Expression::bool(false));
+    }
+
+    if matches!(left_op, BinOp::EqEqEq) {
+        return Some(left.clone());
+    }
+
+    Some(right.clone())
+}
+
+fn typeof_var_type_test(expr: &Expression) -> Option<(&VIdent, &str)> {
+    let ExpressionDesc::Bin(BinOp::EqEqEq, left, right) = &expr.desc else {
+        return None;
+    };
+    let ExpressionDesc::Typeof(value) = &left.desc else {
+        return None;
+    };
+    let ExpressionDesc::Var(vident) = &value.desc else {
+        return None;
+    };
+    let ExpressionDesc::Str { txt, .. } = &right.desc else {
+        return None;
+    };
+    Some((vident, txt.as_str()))
+}
+
+fn strict_var_literal_comparison(expr: &Expression) -> Option<(BinOp, &VIdent, &Expression)> {
+    let ExpressionDesc::Bin(op @ (BinOp::EqEqEq | BinOp::NotEqEq), left, right) = &expr.desc else {
+        return None;
+    };
+    let ExpressionDesc::Var(vident) = &left.desc else {
+        return None;
+    };
+    if !is_scalar_nullish_literal(right) {
+        return None;
+    }
+    Some((*op, vident, right))
+}
+
+fn array_is_array_var(expr: &Expression) -> Option<&VIdent> {
+    let ExpressionDesc::Call(func, args, _) = &expr.desc else {
+        return None;
+    };
+    let ExpressionDesc::Str { txt, .. } = &func.desc else {
+        return None;
+    };
+    if txt != "Array.isArray" {
+        return None;
+    }
+    let [arg] = args.as_slice() else {
+        return None;
+    };
+    let ExpressionDesc::Var(vident) = &arg.desc else {
+        return None;
+    };
+    Some(vident)
+}
+
+fn literal_matches_type_name(literal: &Expression, type_name: &str) -> bool {
+    matches!(
+        (&literal.desc, type_name),
+        (ExpressionDesc::Bool(_), "boolean")
+            | (ExpressionDesc::Str { .. }, "string")
+            | (ExpressionDesc::Number(_), "number")
+    )
+}
+
+fn is_scalar_nullish_literal(expr: &Expression) -> bool {
+    matches!(
+        expr.desc,
+        ExpressionDesc::Bool(_)
+            | ExpressionDesc::Null
+            | ExpressionDesc::Undefined { .. }
+            | ExpressionDesc::Number(_)
+            | ExpressionDesc::Str { .. }
+    )
+}
+
+fn ocaml_eq_block(left: &Block, right: &Block) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left_stmt, right_stmt)| ocaml_eq_statement(left_stmt, right_stmt))
+}
+
+fn ocaml_eq_statement(left: &Statement, right: &Statement) -> bool {
+    match (&left.desc, &right.desc) {
+        (StatementDesc::Exp(left_expr), StatementDesc::Exp(right_expr))
+        | (StatementDesc::Return(left_expr), StatementDesc::Return(right_expr)) => {
+            ocaml_eq_expression(left_expr, right_expr)
+        }
+        (StatementDesc::Debugger, StatementDesc::Debugger)
+        | (StatementDesc::Break, StatementDesc::Break) => true,
+        (StatementDesc::Block(left_block), StatementDesc::Block(right_block)) => {
+            ocaml_eq_block(left_block, right_block)
+        }
+        _ => false,
+    }
+}
+
+fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool {
+    match (&left.desc, &right.desc) {
+        (ExpressionDesc::Null, ExpressionDesc::Null) => true,
+        (
+            ExpressionDesc::Undefined {
+                is_unit: left_is_unit,
+            },
+            ExpressionDesc::Undefined {
+                is_unit: right_is_unit,
+            },
+        ) => left_is_unit == right_is_unit,
+        (
+            ExpressionDesc::Number(Number::Int { i: left_int, .. }),
+            ExpressionDesc::Number(Number::Int { i: right_int, .. }),
+        ) => left_int == right_int,
+        (
+            ExpressionDesc::Number(Number::BigInt(left_bigint)),
+            ExpressionDesc::Number(Number::BigInt(right_bigint)),
+        ) => left_bigint == right_bigint,
+        (ExpressionDesc::Number(Number::Float(_)), ExpressionDesc::Number(Number::Float(_))) => false,
+        (ExpressionDesc::StringIndex(left_obj, left_index), ExpressionDesc::StringIndex(right_obj, right_index))
+        | (ExpressionDesc::ArrayIndex(left_obj, left_index), ExpressionDesc::ArrayIndex(right_obj, right_index)) => {
+            ocaml_eq_expression(left_obj, right_obj) && ocaml_eq_expression(left_index, right_index)
+        }
+        (ExpressionDesc::Call(left_fn, left_args, _), ExpressionDesc::Call(right_fn, right_args, _)) => {
+            ocaml_eq_expression(left_fn, right_fn)
+                && left_args.len() == right_args.len()
+                && left_args
+                    .iter()
+                    .zip(right_args)
+                    .all(|(left_arg, right_arg)| ocaml_eq_expression(left_arg, right_arg))
+        }
+        (ExpressionDesc::Var(left_vident), ExpressionDesc::Var(right_vident)) => {
+            same_vident(left_vident, right_vident)
+        }
+        (ExpressionDesc::Bin(left_op, left_lhs, left_rhs), ExpressionDesc::Bin(right_op, right_lhs, right_rhs)) => {
+            left_op == right_op
+                && ocaml_eq_expression(left_lhs, right_lhs)
+                && ocaml_eq_expression(left_rhs, right_rhs)
+        }
+        (
+            ExpressionDesc::Str {
+                delim: left_delim,
+                txt: left_txt,
+            },
+            ExpressionDesc::Str {
+                delim: right_delim,
+                txt: right_txt,
+            },
+        ) => left_delim == right_delim && left_txt == right_txt,
+        (
+            ExpressionDesc::StaticIndex(left_obj, left_field, left_pos),
+            ExpressionDesc::StaticIndex(right_obj, right_field, right_pos),
+        ) => {
+            left_field == right_field
+                && left_pos == right_pos
+                && ocaml_eq_expression(left_obj, right_obj)
+        }
+        (ExpressionDesc::Seq(left_first, left_second), ExpressionDesc::Seq(right_first, right_second)) => {
+            ocaml_eq_expression(left_first, right_first)
+                && ocaml_eq_expression(left_second, right_second)
+        }
+        (ExpressionDesc::Bool(left_bool), ExpressionDesc::Bool(right_bool)) => left_bool == right_bool,
+        (
+            ExpressionDesc::OptionalBlock(left_inner, left_identity),
+            ExpressionDesc::OptionalBlock(right_inner, right_identity),
+        ) => left_identity == right_identity && ocaml_eq_expression(left_inner, right_inner),
+        (
+            ExpressionDesc::CamlBlock(left_items, left_mutable, left_tag, _),
+            ExpressionDesc::CamlBlock(right_items, right_mutable, right_tag, _),
+        ) => {
+            left_mutable == right_mutable
+                && left_items.len() == right_items.len()
+                && left_items
+                    .iter()
+                    .zip(right_items)
+                    .all(|(left_item, right_item)| ocaml_eq_expression(left_item, right_item))
+                && ocaml_eq_expression(left_tag, right_tag)
+        }
+        _ => false,
+    }
+}
+
+fn same_vident(left: &VIdent, right: &VIdent) -> bool {
+    match (left, right) {
+        (VIdent::Id(left_id), VIdent::Id(right_id)) => left_id.same(right_id),
+        (
+            VIdent::Qualified(left_module, left_member),
+            VIdent::Qualified(right_module, right_member),
+        ) => {
+            left_module.id.same(&right_module.id)
+                && same_vident_kind(&left_module.kind, &right_module.kind)
+                && left_member == right_member
+        }
+        _ => false,
+    }
+}
+
+fn same_vident_kind(left: &Kind, right: &Kind) -> bool {
+    match (left, right) {
+        (Kind::Ml, Kind::Ml) | (Kind::Runtime, Kind::Runtime) => true,
+        (Kind::External { name: left_name, .. }, Kind::External { name: right_name, .. }) => {
+            left_name == right_name
+        }
+        _ => false,
+    }
 }
 
 /// Block of statements
@@ -1665,6 +2149,211 @@ mod tests {
             },
             _ => panic!("Expected a single assignment expression"),
         }
+    }
+
+    #[test]
+    fn test_if_statement_merges_nested_then_if_with_shared_else_into_and_condition() {
+        let outer = Ident::create_local("outer");
+        let inner = Ident::create_local("inner");
+        let stmt = Statement::if_(
+            Expression::var(outer.clone()),
+            vec![Statement::new(StatementDesc::If(
+                Expression::var(inner.clone()),
+                vec![Statement::exp(Expression::number(Number::int(1)))],
+                vec![Statement::exp(Expression::number(Number::int(0)))],
+            ))],
+            vec![Statement::exp(Expression::number(Number::int(0)))],
+        );
+
+        let StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Cond(test, consequent, alternate),
+            ..
+        }) = &stmt.desc
+        else {
+            panic!("expected the nested then-if to collapse into one conditional expression");
+        };
+
+        assert!(matches!(
+            test.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Bin(BinOp::And, left, right),
+                ..
+            } if matches!(
+                left.as_ref(),
+                Expression {
+                    desc: ExpressionDesc::Var(VIdent::Id(id)),
+                    ..
+                } if id.same(&outer)
+            ) && matches!(
+                right.as_ref(),
+                Expression {
+                    desc: ExpressionDesc::Var(VIdent::Id(id)),
+                    ..
+                } if id.same(&inner)
+            )
+        ));
+        assert!(matches!(
+            consequent.as_ref().desc,
+            ExpressionDesc::Number(Number::Int { i: 1, .. })
+        ));
+        assert!(matches!(
+            alternate.as_ref().desc,
+            ExpressionDesc::Number(Number::Int { i: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn test_if_statement_merges_nested_else_if_with_shared_then_into_or_condition() {
+        let outer = Ident::create_local("outer");
+        let inner = Ident::create_local("inner");
+        let stmt = Statement::if_(
+            Expression::var(outer.clone()),
+            vec![Statement::exp(Expression::number(Number::int(1)))],
+            vec![Statement::new(StatementDesc::If(
+                Expression::var(inner.clone()),
+                vec![Statement::exp(Expression::number(Number::int(1)))],
+                vec![Statement::exp(Expression::number(Number::int(0)))],
+            ))],
+        );
+
+        let StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Cond(test, consequent, alternate),
+            ..
+        }) = &stmt.desc
+        else {
+            panic!("expected the nested else-if to collapse into one conditional expression");
+        };
+
+        assert!(matches!(
+            test.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Bin(BinOp::Or, left, right),
+                ..
+            } if matches!(
+                left.as_ref(),
+                Expression {
+                    desc: ExpressionDesc::Var(VIdent::Id(id)),
+                    ..
+                } if id.same(&outer)
+            ) && matches!(
+                right.as_ref(),
+                Expression {
+                    desc: ExpressionDesc::Var(VIdent::Id(id)),
+                    ..
+                } if id.same(&inner)
+            )
+        ));
+        assert!(matches!(
+            consequent.as_ref().desc,
+            ExpressionDesc::Number(Number::Int { i: 1, .. })
+        ));
+        assert!(matches!(
+            alternate.as_ref().desc,
+            ExpressionDesc::Number(Number::Int { i: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn test_js_and_simplifies_boolean_typeof_nullish_guards_like_ocaml() {
+        let value = Ident::create_local("value");
+        let typeof_boolean = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
+                value.clone(),
+            )))),
+            Expression::string("boolean"),
+        );
+
+        let equals_null = Expression::bin(BinOp::EqEqEq, Expression::var(value.clone()), Expression::null());
+        let not_equals_null =
+            Expression::bin(BinOp::NotEqEq, Expression::var(value.clone()), Expression::null());
+        let equals_undefined = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(value.clone()),
+            Expression::undefined(false),
+        );
+        let not_equals_undefined = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::var(value.clone()),
+            Expression::undefined(false),
+        );
+
+        assert!(matches!(
+            js_and_expression(typeof_boolean.clone(), equals_null).desc,
+            ExpressionDesc::Bool(false)
+        ));
+        assert!(matches!(
+            js_and_expression(typeof_boolean.clone(), not_equals_null).desc,
+            ExpressionDesc::Bin(BinOp::EqEqEq, _, _)
+        ));
+        assert!(matches!(
+            js_and_expression(typeof_boolean.clone(), equals_undefined).desc,
+            ExpressionDesc::Bool(false)
+        ));
+        assert!(matches!(
+            js_and_expression(typeof_boolean, not_equals_undefined).desc,
+            ExpressionDesc::Bin(BinOp::EqEqEq, _, _)
+        ));
+    }
+
+    #[test]
+    fn test_cond_merges_nested_alternate_to_drop_impossible_boolean_null_checks() {
+        let value = Ident::create_local("value");
+        let typeof_boolean = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
+                value.clone(),
+            )))),
+            Expression::string("boolean"),
+        );
+        let nested = Expression::cond(
+            Expression::bin(BinOp::EqEqEq, Expression::var(value), Expression::null()),
+            Expression::number(Number::int(3)),
+            Expression::number(Number::int(4)),
+        );
+
+        let merged = Expression::cond(typeof_boolean, nested, Expression::number(Number::int(4)));
+        assert!(matches!(
+            merged.desc,
+            ExpressionDesc::Number(Number::Int { i: 4, .. })
+        ));
+    }
+
+    #[test]
+    fn test_cond_merges_nested_alternate_to_keep_only_boolean_typeof_guard() {
+        let value = Ident::create_local("value");
+        let typeof_boolean = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
+                value.clone(),
+            )))),
+            Expression::string("boolean"),
+        );
+        let nested = Expression::cond(
+            Expression::bin(BinOp::NotEqEq, Expression::var(value), Expression::null()),
+            Expression::number(Number::int(3)),
+            Expression::number(Number::int(4)),
+        );
+
+        let merged = Expression::cond(typeof_boolean, nested, Expression::number(Number::int(4)));
+        assert!(
+            matches!(
+                &merged,
+                Expression {
+                    desc: ExpressionDesc::Cond(_, consequent, alternate),
+                    ..
+                } if !matches!(consequent.as_ref().desc, ExpressionDesc::Cond(_, _, _))
+                    && matches!(
+                        consequent.as_ref().desc,
+                        ExpressionDesc::Number(Number::Int { i: 3, .. })
+                    )
+                    && matches!(
+                        alternate.as_ref().desc,
+                        ExpressionDesc::Number(Number::Int { i: 4, .. })
+                    )
+            ),
+            "expected the nested conditional to collapse to a single outer guard, got {merged:?}"
+        );
     }
 
     #[test]

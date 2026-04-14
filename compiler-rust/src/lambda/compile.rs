@@ -102,6 +102,20 @@ impl Default for LambdaCompiler {
 }
 
 impl LambdaCompiler {
+    fn grouped_switch_default<'a>(
+        &self,
+        saturated: bool,
+        failaction: Option<&'a Lambda>,
+    ) -> GroupedSwitchDefault<'a> {
+        if saturated {
+            GroupedSwitchDefault::Complete
+        } else if let Some(fallback) = failaction {
+            GroupedSwitchDefault::Default(fallback)
+        } else {
+            GroupedSwitchDefault::NonComplete
+        }
+    }
+
     fn grouped_switch_cases<'a, T: Clone, F>(
         &self,
         cases: &'a [(T, Lambda)],
@@ -1826,6 +1840,20 @@ impl LambdaCompiler {
         switch.sw_blocks_full || switch.sw_failaction.is_none()
     }
 
+    fn untagged_literal_and_block_defaults_match(&self, switch: &LambdaSwitch) -> bool {
+        let failaction = switch.sw_failaction.as_deref();
+        let const_default = self.grouped_switch_default(switch.sw_consts_full, failaction);
+        let block_default = self.grouped_switch_default(switch.sw_blocks_full, failaction);
+        match (const_default, block_default) {
+            (GroupedSwitchDefault::Complete, GroupedSwitchDefault::Complete)
+            | (GroupedSwitchDefault::NonComplete, GroupedSwitchDefault::NonComplete) => true,
+            (GroupedSwitchDefault::Default(lhs), GroupedSwitchDefault::Default(rhs)) => {
+                super::lambda_eq_approx(lhs, rhs)
+            }
+            _ => false,
+        }
+    }
+
     fn variant_tag_name(&self, switch: &LambdaSwitch) -> String {
         switch
             .sw_names
@@ -2238,6 +2266,18 @@ impl LambdaCompiler {
         scrut_expr: Expression,
         switch: &LambdaSwitch,
     ) -> Block {
+        if switch.sw_consts.is_empty() && self.untagged_literal_and_block_defaults_match(switch) {
+            let has_null_case = self
+                .literal_cases(switch)
+                .is_some_and(|cases| cases.iter().any(|tag| matches!(tag, SwitchCaseTag::Null)));
+            return self.compile_untagged_block_switch_assignment_statements(
+                result,
+                scrut_expr,
+                switch,
+                has_null_case,
+            );
+        }
+
         if switch.sw_consts_full && switch.sw_consts.is_empty() {
             let has_null_case = self
                 .literal_cases(switch)
@@ -2300,6 +2340,17 @@ impl LambdaCompiler {
         scrut_expr: Expression,
         switch: &LambdaSwitch,
     ) -> Block {
+        if switch.sw_consts.is_empty() && self.untagged_literal_and_block_defaults_match(switch) {
+            let has_null_case = self
+                .literal_cases(switch)
+                .is_some_and(|cases| cases.iter().any(|tag| matches!(tag, SwitchCaseTag::Null)));
+            return self.compile_untagged_block_switch_return_statements(
+                scrut_expr,
+                switch,
+                has_null_case,
+            );
+        }
+
         if switch.sw_consts_full && switch.sw_consts.is_empty() {
             let has_null_case = self
                 .literal_cases(switch)
@@ -2359,6 +2410,17 @@ impl LambdaCompiler {
         scrut_expr: Expression,
         switch: &LambdaSwitch,
     ) -> Block {
+        if switch.sw_consts.is_empty() && self.untagged_literal_and_block_defaults_match(switch) {
+            let has_null_case = self
+                .literal_cases(switch)
+                .is_some_and(|cases| cases.iter().any(|tag| matches!(tag, SwitchCaseTag::Null)));
+            return self.compile_untagged_block_switch_effect_statements(
+                scrut_expr,
+                switch,
+                has_null_case,
+            );
+        }
+
         if switch.sw_consts_full && switch.sw_consts.is_empty() {
             let has_null_case = self
                 .literal_cases(switch)
@@ -10524,6 +10586,13 @@ fn is_builtin_untagged_switch_name(name: &str) -> bool {
     )
 }
 
+#[derive(Clone, Copy)]
+enum GroupedSwitchDefault<'a> {
+    Complete,
+    NonComplete,
+    Default(&'a Lambda),
+}
+
 fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option<String> {
     match comment {
         Some(PointerInfo::None) | None => None,
@@ -13525,6 +13594,48 @@ mod tests {
         }
     }
 
+    fn default_only_untagged_boolean_switch(
+        boolean_body: Lambda,
+        default_body: Lambda,
+    ) -> LambdaSwitch {
+        LambdaSwitch {
+            sw_consts_full: false,
+            sw_consts: vec![],
+            sw_blocks_full: false,
+            sw_blocks: vec![(0, boolean_body)],
+            sw_failaction: Some(Box::new(default_body)),
+            sw_names: Some(SwitchNames {
+                consts: vec![
+                    crate::lambda::SwitchTag {
+                        name: "Null".to_string(),
+                        tag_type: Some(crate::lambda::SwitchCaseTag::Null),
+                    },
+                    crate::lambda::SwitchTag {
+                        name: "Undefined".to_string(),
+                        tag_type: Some(crate::lambda::SwitchCaseTag::Undefined),
+                    },
+                ],
+                blocks: vec![
+                    crate::lambda::SwitchBlock {
+                        tag: crate::lambda::SwitchTag::named("B"),
+                        tag_name: None,
+                        block_type: Some(crate::lambda::SwitchBlockType::Boolean),
+                    },
+                    crate::lambda::SwitchBlock {
+                        tag: crate::lambda::SwitchTag::named("S"),
+                        tag_name: None,
+                        block_type: Some(crate::lambda::SwitchBlockType::String),
+                    },
+                    crate::lambda::SwitchBlock {
+                        tag: crate::lambda::SwitchTag::named("I"),
+                        tag_name: None,
+                        block_type: Some(crate::lambda::SwitchBlockType::Int),
+                    },
+                ],
+            }),
+        }
+    }
+
     #[test]
     fn complete_single_untagged_array_value_branch_skips_redundant_instance_guard() {
         let mut compiler = LambdaCompiler::new();
@@ -13624,6 +13735,72 @@ mod tests {
         assert_is_undefined_equality_check(cond, &value);
         assert_assignment_to_int(then_expr, &empty_seen, 0);
         assert_assignment_to_int(else_expr, &cons_seen, 1);
+    }
+
+    #[test]
+    fn default_only_untagged_boolean_assignment_skips_literal_dispatch_when_defaults_match() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let result = Ident::create_local("result");
+        let block = compiler.compile_untagged_variant_switch_assignment_statements(
+            &result,
+            Expression::var(value.clone()),
+            &default_only_untagged_boolean_switch(
+                Lambda::const_(Constant::int(1)),
+                Lambda::const_(Constant::int(0)),
+            ),
+        );
+
+        let [assign] = block.as_slice() else {
+            panic!("expected a single direct switch assignment");
+        };
+        let StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Bin(BinOp::Eq, left, right),
+            ..
+        }) = &assign.desc
+        else {
+            panic!("expected the switch assignment");
+        };
+        assert!(matches!(
+            left.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&result)
+        ));
+        let ExpressionDesc::Cond(cond, then_expr, else_expr) = &right.as_ref().desc else {
+            panic!("expected the assignment RHS to be a conditional expression");
+        };
+        assert_typeof_check(cond, &value, "boolean", BinOp::EqEqEq);
+        assert_int_expr(then_expr, 1);
+        assert_int_expr(else_expr, 0);
+    }
+
+    #[test]
+    fn default_only_untagged_boolean_return_skips_literal_dispatch_when_defaults_match() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let block = compiler.compile_untagged_variant_switch_return_statements(
+            Expression::var(value.clone()),
+            &default_only_untagged_boolean_switch(
+                Lambda::const_(Constant::int(1)),
+                Lambda::const_(Constant::int(0)),
+            ),
+        );
+
+        let [dispatch] = block.as_slice() else {
+            panic!("expected a single direct switch return");
+        };
+        let StatementDesc::Return(Expression {
+            desc: ExpressionDesc::Cond(cond, then_expr, else_expr),
+            ..
+        }) = &dispatch.desc
+        else {
+            panic!("expected the switch return to be a conditional expression");
+        };
+        assert_typeof_check(cond, &value, "boolean", BinOp::EqEqEq);
+        assert_int_expr(then_expr, 1);
+        assert_int_expr(else_expr, 0);
     }
 
     fn assert_switch_case_assigns_int_result(block: &Block, result: &Ident, expected: i32) {
@@ -13778,12 +13955,7 @@ mod tests {
         assert_switch_case_returns_int_result(block, expected);
     }
 
-    fn assert_typeof_object_check(expr: &Expression, ident: &Ident, expect_object: bool) {
-        let expected_op = if expect_object {
-            BinOp::EqEqEq
-        } else {
-            BinOp::NotEqEq
-        };
+    fn assert_typeof_check(expr: &Expression, ident: &Ident, expected_type: &str, expected_op: BinOp) {
         match &expr.desc {
             ExpressionDesc::Bin(op, left, right) if *op == expected_op => {
                 assert!(matches!(
@@ -13804,11 +13976,16 @@ mod tests {
                     Expression {
                         desc: ExpressionDesc::Str { txt, .. },
                         ..
-                    } if txt == "object"
+                    } if txt == expected_type
                 ));
             }
-            other => panic!("expected a typeof-object check, got {other:?}"),
+            other => panic!("expected a typeof check, got {other:?}"),
         }
+    }
+
+    fn assert_typeof_object_check(expr: &Expression, ident: &Ident, expect_object: bool) {
+        let expected_op = if expect_object { BinOp::EqEqEq } else { BinOp::NotEqEq };
+        assert_typeof_check(expr, ident, "object", expected_op);
     }
 
     fn assert_array_is_array_call(expr: &Expression, ident: &Ident) {
