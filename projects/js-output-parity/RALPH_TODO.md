@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 450 / 657 JS snapshots passing, 0 compile errors, 207 output diffs
+**Status:** 455 / 657 JS snapshots passing, 0 compile errors, 202 output diffs
 
 ## Goal
 
@@ -35,11 +35,68 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **450 / 657**
+- JS snapshot parity: **455 / 657**
 - Compile errors: **0**
-- Output diffs: **207**
+- Output diffs: **202**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the OCaml `lam_compile_const` delimiter-preservation
+  rule for lambda string constants so `DStarJ` and `DNoQuotes` survive into
+  JS IR instead of being collapsed to ordinary quoted strings on the Rust
+  backend path
+- Active backend focus for this slice remains **Phase 5: Byte-Exact Dumping**
+  from `PLAN.md`, but the actual bug was one stage earlier in
+  `Lam_compile_const` / `J.Str` construction: Rust was discarding the OCaml
+  delimiter metadata before final printing
+- OCaml reference:
+  `compiler/core/lam_compile_const.ml`, where
+  `Const_string {s; delim = None | Some DNoQuotes} -> E.str s` and
+  `Const_string {s; delim = Some delim} -> E.str ~delim s`, preserving
+  `DStarJ`, `DNoQuotes`, and `DBackQuotes` into JS IR instead of flattening
+  them all to the default quoted-string path
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so
+    `LambdaCompiler::compile_constant(...)` maps
+    `StringDelim::StarJ -> Delim::StarJ`,
+    `StringDelim::NoQuotes -> Delim::NoQuotes`,
+    `StringDelim::Backtick -> Delim::BackQuotes`, and keeps only
+    `StringDelim::Plain` / `None` on the ordinary `Delim::None` path
+  - added focused regression coverage in
+    `compile_constant_preserves_marshaled_starj_strings` and
+    `compile_constant_preserves_marshaled_noquote_strings`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_constant_preserves_marshaled -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/switch_string.res`, diffing the exact
+    emitted module against the checked-in snapshot to confirm the remaining
+    drift shrank from both case tags and return literals down to the switch
+    discriminant/case-tag side only
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/js_string_test.res` is no longer in the authoritative
+    diff set; the doubly escaped `\"` HTML-fragment expectations now match the
+    checked-in snapshot
+  - `tests/tests/src/stdlib/Test.res` is no longer in the authoritative diff
+    set; the `"\n  "` replacement literal now stays on the OCaml
+    `DStarJ`-preserving path instead of becoming `"\\n  "`
+  - `tests/tests/src/switch_string.res` is smaller but still failing because
+    string-switch keys are still arriving in escaped form before this
+    `compile_constant` stage
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the delimiter-preservation change
+- Topline impact:
+  - JS snapshot parity: **450 / 657** -> **455 / 657** (**+5**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **207** -> **202** (**-5**)
+- Keep this change because it ports the OCaml `lam_compile_const` string
+  delimiter rule instead of preserving the Rust-only behavior that dropped
+  marshalled-string metadata before JS dumping.
 
 Latest iteration on **2026-04-14**:
 

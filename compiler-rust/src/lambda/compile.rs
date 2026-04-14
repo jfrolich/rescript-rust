@@ -4469,11 +4469,10 @@ impl LambdaCompiler {
             Constant::Char(c) => Expression::number(Number::Int { i: *c, c: Some(*c) }),
             Constant::String { s, delim } => {
                 let delim = match delim {
+                    Some(StringDelim::StarJ) => Delim::StarJ,
+                    Some(StringDelim::NoQuotes) => Delim::NoQuotes,
                     Some(StringDelim::Backtick) => Delim::BackQuotes,
-                    Some(StringDelim::Plain)
-                    | Some(StringDelim::StarJ)
-                    | Some(StringDelim::NoQuotes)
-                    | None => Delim::None,
+                    Some(StringDelim::Plain) | None => Delim::None,
                 };
                 Expression::new(ExpressionDesc::Str {
                     delim,
@@ -11537,6 +11536,46 @@ mod tests {
             print_expression(&compiled),
             "Primitive_option.some(undefined)"
         );
+    }
+
+    #[test]
+    fn compile_constant_preserves_marshaled_starj_strings() {
+        let compiled = LambdaCompiler::compile_constant(&Constant::String {
+            s: "\\\"".to_string(),
+            delim: Some(StringDelim::StarJ),
+        });
+
+        assert!(matches!(
+            compiled,
+            Expression {
+                desc: ExpressionDesc::Str {
+                    delim: Delim::StarJ,
+                    ref txt,
+                },
+                ..
+            } if txt == "\\\""
+        ));
+        assert_eq!(print_expression(&compiled), "\"\\\"\"");
+    }
+
+    #[test]
+    fn compile_constant_preserves_marshaled_noquote_strings() {
+        let compiled = LambdaCompiler::compile_constant(&Constant::String {
+            s: "{foo:true}".to_string(),
+            delim: Some(StringDelim::NoQuotes),
+        });
+
+        assert!(matches!(
+            compiled,
+            Expression {
+                desc: ExpressionDesc::Str {
+                    delim: Delim::NoQuotes,
+                    ref txt,
+                },
+                ..
+            } if txt == "{foo:true}"
+        ));
+        assert_eq!(print_expression(&compiled), "{foo:true}");
     }
 
     #[test]
