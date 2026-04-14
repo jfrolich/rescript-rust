@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 472 / 657 JS snapshots passing, 0 compile errors, 185 output diffs
+**Status:** 476 / 657 JS snapshots passing, 0 compile errors, 181 output diffs
 
 ## Goal
 
@@ -35,11 +35,70 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **472 / 657**
+- JS snapshot parity: **476 / 657**
 - Compile errors: **0**
-- Output diffs: **185**
+- Output diffs: **181**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port OCaml's `Js_exp_make.string_append` folding so
+  `Pstringadd` collapses empty strings and same-delimiter literal chains during
+  JS IR construction instead of always leaving raw `StringAppend` nodes
+- Active backend focus for this slice is **Phase 3: Port JS IR Lowering And
+  Metadata** from `PLAN.md`, because the mismatch lived in the JS-expression
+  construction helpers used by `lam_compile_primitive.ml`, not in the final
+  printer: OCaml already lowers `Pstringadd` through `E.string_append`, while
+  Rust was still constructing unfused `StringAppend` IR for cases OCaml folds
+  immediately
+- OCaml reference:
+  `compiler/core/lam_compile_primitive.ml`, especially the `Pstringadd` branch
+  calling `E.string_append`; and `compiler/core/js_exp_make.ml`, especially
+  `string_append`
+- Rust change:
+  - added `Expression::string_append(...)` in
+    `compiler-rust/src/js_ir/mod.rs` to mirror OCaml's empty-string elision and
+    adjacent-literal folding for `StringAppend`
+  - updated `compiler-rust/src/lambda/compile.rs` so `Pstringadd` now lowers
+    through that helper instead of emitting a raw `ExpressionDesc::StringAppend`
+  - added focused regression coverage in
+    `test_string_append_folds_adjacent_same_delim_literals` and
+    `test_string_append_merges_literal_prefix_into_nested_append`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml test_string_append_ -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_duprecord_lowers_to_object_spread_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - authoritative `tests/tests/lib/bs` repro for `tests/tests/src/alias_test.res`
+    using `rescript.exe compiler-args`, diffing `/tmp/alias_test.mjs` against
+    the checked-in snapshot
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/inline_const.res` using `rescript.exe compiler-args`,
+    diffing `/tmp/inline_const.mjs` against the checked-in snapshot
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/unified_ops_test.res` using `rescript.exe compiler-args`,
+    diffing `/tmp/unified_ops_test.mjs` against the checked-in snapshot
+  - direct guard repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    broader guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/alias_test.res` is no longer in the authoritative diff set
+  - `tests/tests/src/inline_const.res` is no longer in the authoritative diff
+    set
+  - `tests/tests/src/unified_ops_test.res` still differs, but only in the
+    separate integer-power constant-folding cluster around `pow1` /
+    `pow_overflow`; the earlier string-concatenation drift is gone
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the `string_append` port
+- Topline impact:
+  - JS snapshot parity: **472 / 657** -> **476 / 657** (**+4**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **185** -> **181** (**-4**)
+- Keep this change because it ports the real OCaml backend behavior from
+  `lam_compile_primitive.ml` / `js_exp_make.ml`; the wrapper gain comes from
+  matching OCaml's JS-expression construction rules rather than from any
+  printer-only rewrite.
 
 Latest iteration on **2026-04-14**:
 

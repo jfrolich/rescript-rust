@@ -4382,10 +4382,9 @@ impl LambdaCompiler {
                 }
                 _ => Expression::undefined(false),
             },
-            Pstringadd => Expression::new(ExpressionDesc::StringAppend(
-                Box::new(compiled_args[0].clone()),
-                Box::new(compiled_args[1].clone()),
-            )),
+            Pstringadd => {
+                Expression::string_append(compiled_args[0].clone(), compiled_args[1].clone())
+            }
             PnullToOpt => self.null_to_opt_expr(compiled_args[0].clone()),
             PnullUndefinedToOpt => self.null_undefined_to_opt_expr(compiled_args[0].clone()),
             PisNotNone => self.is_not_none_expr(compiled_args[0].clone()),

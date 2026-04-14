@@ -550,6 +550,113 @@ impl Expression {
         })
     }
 
+    /// Create a string append expression, mirroring OCaml's
+    /// `Js_exp_make.string_append` folding behavior.
+    pub fn string_append(left: Expression, right: Expression) -> Self {
+        fn concat(expr: &Expression, left: &str, right: &str, delim: Delim) -> Expression {
+            let mut merged = expr.clone();
+            merged.desc = ExpressionDesc::Str {
+                txt: format!("{left}{right}"),
+                delim,
+            };
+            merged
+        }
+
+        match (&left.desc, &right.desc) {
+            (ExpressionDesc::Str { txt, .. }, _) if txt.is_empty() => return right,
+            (_, ExpressionDesc::Str { txt, .. }) if txt.is_empty() => return left,
+            (
+                ExpressionDesc::Str {
+                    txt: left_txt,
+                    delim: left_delim,
+                },
+                ExpressionDesc::StringAppend(prefix, tail),
+            ) => {
+                if let ExpressionDesc::Str {
+                    txt: prefix_txt,
+                    delim: prefix_delim,
+                } = &prefix.desc
+                {
+                    if left_delim == prefix_delim {
+                        return Self::string_append(
+                            concat(&left, left_txt, prefix_txt, *left_delim),
+                            tail.as_ref().clone(),
+                        );
+                    }
+                }
+            }
+            (
+                ExpressionDesc::StringAppend(head, suffix),
+                ExpressionDesc::Str {
+                    txt: right_txt,
+                    delim: right_delim,
+                },
+            ) => {
+                if let ExpressionDesc::Str {
+                    txt: suffix_txt,
+                    delim: suffix_delim,
+                } = &suffix.desc
+                {
+                    if suffix_delim == right_delim {
+                        return Self::string_append(
+                            head.as_ref().clone(),
+                            concat(&left, suffix_txt, right_txt, *suffix_delim),
+                        );
+                    }
+                }
+            }
+            (
+                ExpressionDesc::StringAppend(head, left_suffix),
+                ExpressionDesc::StringAppend(right_prefix, tail),
+            ) => {
+                if let (
+                    ExpressionDesc::Str {
+                        txt: left_suffix_txt,
+                        delim: left_suffix_delim,
+                    },
+                    ExpressionDesc::Str {
+                        txt: right_prefix_txt,
+                        delim: right_prefix_delim,
+                    },
+                ) = (&left_suffix.desc, &right_prefix.desc)
+                {
+                    if left_suffix_delim == right_prefix_delim {
+                        return Self::string_append(
+                            Self::string_append(
+                                head.as_ref().clone(),
+                                concat(
+                                    &left,
+                                    left_suffix_txt,
+                                    right_prefix_txt,
+                                    *left_suffix_delim,
+                                ),
+                            ),
+                            tail.as_ref().clone(),
+                        );
+                    }
+                }
+            }
+            (
+                ExpressionDesc::Str {
+                    txt: left_txt,
+                    delim: left_delim,
+                },
+                ExpressionDesc::Str {
+                    txt: right_txt,
+                    delim: right_delim,
+                },
+            ) if left_delim == right_delim => {
+                return concat(&left, left_txt, right_txt, *left_delim);
+            }
+            _ => {}
+        }
+
+        Self {
+            desc: ExpressionDesc::StringAppend(Box::new(left), Box::new(right)),
+            comment: None,
+        }
+    }
+
     /// Create an undefined expression
     pub fn undefined(is_unit: bool) -> Self {
         Self::new(ExpressionDesc::Undefined { is_unit })
@@ -1934,6 +2041,59 @@ mod tests {
         match &expr.desc {
             ExpressionDesc::Bin(BinOp::Plus, _, _) => {}
             _ => panic!("Expected Bin(Plus)"),
+        }
+    }
+
+    #[test]
+    fn test_string_append_folds_adjacent_same_delim_literals() {
+        let left = Expression::new(ExpressionDesc::Str {
+            txt: "hello ".to_string(),
+            delim: Delim::StarJ,
+        });
+        let right = Expression::new(ExpressionDesc::Str {
+            txt: "world".to_string(),
+            delim: Delim::StarJ,
+        });
+        let expr = Expression::string_append(left, right);
+
+        match &expr.desc {
+            ExpressionDesc::Str { txt, delim } => {
+                assert_eq!(txt, "hello world");
+                assert_eq!(*delim, Delim::StarJ);
+            }
+            other => panic!("Expected folded string literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_string_append_merges_literal_prefix_into_nested_append() {
+        let nested = Expression::string_append(
+            Expression::new(ExpressionDesc::Str {
+                txt: "beta".to_string(),
+                delim: Delim::StarJ,
+            }),
+            Expression::var(Ident::create_local("tail")),
+        );
+        let expr = Expression::string_append(
+            Expression::new(ExpressionDesc::Str {
+                txt: "alpha".to_string(),
+                delim: Delim::StarJ,
+            }),
+            nested,
+        );
+
+        match &expr.desc {
+            ExpressionDesc::StringAppend(left, right) => {
+                match &left.desc {
+                    ExpressionDesc::Str { txt, delim } => {
+                        assert_eq!(txt, "alphabeta");
+                        assert_eq!(*delim, Delim::StarJ);
+                    }
+                    other => panic!("Expected merged left string literal, got {other:?}"),
+                }
+                assert!(matches!(right.as_ref().desc, ExpressionDesc::Var(_)));
+            }
+            other => panic!("Expected nested string append, got {other:?}"),
         }
     }
 
