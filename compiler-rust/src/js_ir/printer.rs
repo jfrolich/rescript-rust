@@ -1505,7 +1505,7 @@ impl JsPrinter {
                     }
                     TagInfo::Constructor {
                         name,
-                        num_nonconst,
+                        num_nonconst: _,
                         attrs,
                         ..
                     } => {
@@ -1535,7 +1535,7 @@ impl JsPrinter {
                                 let tag_name = tag_info_tag_name(attrs).unwrap_or("TAG");
                                 let tag_value = tag_info_runtime_tag(attrs)
                                     .unwrap_or_else(|| SwitchCaseTag::String(name.clone()));
-                                let include_tag = !untagged && *num_nonconst != 1;
+                                let include_tag = !untagged;
                                 self.print_object_literal(
                                     level,
                                     None,

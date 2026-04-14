@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 353 / 657 JS snapshots passing, 0 compile errors, 304 output diffs
+**Status:** 357 / 657 JS snapshots passing, 0 compile errors, 300 output diffs
 
 ## Goal
 
@@ -35,11 +35,57 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **353 / 657**
+- JS snapshot parity: **357 / 657**
 - Compile errors: **0**
-- Output diffs: **304**
+- Output diffs: **300**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: restore OCaml's `TAG` field emission for ordinary
+  single-payload constructor blocks in `compiler-rust/src/js_ir/printer.rs`
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this slice fixes a small constructor-object drift now exposed on the final
+  JS-output path without reopening earlier lambda stages
+- OCaml reference: `compiler/core/js_dump.ml`, where
+  `Caml_block (el, _, tag, Blk_constructor p)` omits `TAG` only for untagged
+  constructors and the list-cons special case, not for normal non-cons
+  constructors that happen to carry one payload
+- Rust change:
+  - changed `TagInfo::Constructor` printing to keep `TAG` for every
+    non-untagged non-cons constructor regardless of payload count
+  - left the dedicated list-cons `hd` / `tl` object branch unchanged
+  - tightened the constructor destructuring in the printer branch so the
+    restored OCaml behavior does not introduce a fresh unused binding
+- Added focused regression coverage in:
+  - `js_ir::printer::tests::test_print_non_cons_constructor_keeps_tag_object_shape`
+  - `js_ir::printer::tests::test_print_cons_constructor_as_hd_tl_object`
+  - `js_ir::printer::tests::test_print_arrow_function_parenthesizes_constructor_block_body`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml constructor -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_3546_test.res -o /tmp/gpr_3546_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_3697_test.res -o /tmp/gpr_3697_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_3546_test.res`,
+    `tests/tests/src/gpr_3697_test.res`,
+    `tests/tests/src/gpr_4407_test.res`, and
+    `tests/tests/src/mutual_non_recursive_type.res` all dropped out of the
+    authoritative diff corpus after the constructor-tag fix
+  - `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
+  - `tests/tests/src/ast_abstract_test.res` is still present in the nearby
+    small-diff cluster, which confirms the next signal there is later lowering
+    rather than missing constructor-tag printing
+- Topline impact:
+  - JS snapshot parity: **357 / 657** (**+4**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **300** (**-4**)
+- Keep this change because it directly matches OCaml's constructor-object dump
+  rule in `js_dump.ml` instead of hiding the drift with snapshot-specific
+  rewrites
 
 Latest iteration on **2026-04-14**:
 
