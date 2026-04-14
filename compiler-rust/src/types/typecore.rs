@@ -13668,12 +13668,16 @@ fn type_pack(
         }
     }
 
-    // Match OCaml typemod.ml type_package: build package args from the packed
-    // module path (`mkpath mp name`) when the packed module expression provides
-    // an identifiable module path (Tmod_ident or implicit Tmod_constraint over it).
-    // Fallback to expected args for non-identifiable module expressions.
+    // Match OCaml typemod.ml type_package:
+    // - use the packed module path directly for Tmod_ident / implicit
+    //   Tmod_constraint-over-ident
+    // - otherwise allocate a fresh temporary `%M` module ident before building
+    //   package args, even when the package has no constrained items
     let packed_module_path = packed_module_path_from_expr(&typed_module);
-    let pack_args = if let Some(pack_module_path) = packed_module_path.as_ref() {
+    let pack_arg_base_path = packed_module_path
+        .clone()
+        .or_else(|| Some(Path::pident(ctx.create_ident("%M"))));
+    let pack_args = if let Some(pack_module_path) = pack_arg_base_path.as_ref() {
         let mut rebuilt_args = Vec::with_capacity(pack_lids.len());
         let mut can_rebuild = true;
         for lid in &pack_lids {
@@ -19053,13 +19057,24 @@ pub(crate) fn qualify_resolved_signature_for_access_path<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> crate::types::decl::Signature {
+    let (should_rebind_direct_type_family, allow_inferred_rebind_paths) =
+        direct_sig_type_family_rebind_options(mty, access_path);
+    let qualification_is_identity = resolved_name.is_none()
+        && !matches!(mty, crate::types::decl::ModuleType::MtyAlias(..))
+        && !should_rebind_direct_type_family
+        && !Env::signature_has_package_self_manifests(resolved_sig, ctx)
+        && resolved_sig.iter().all(|item| {
+            matches!(item, crate::types::decl::SignatureItem::SigValue(_, _))
+        });
+    if qualification_is_identity {
+        return resolved_sig.clone();
+    }
+
     let mut sig = copy_lookup_signature_for_subst(resolved_sig, ctx);
     let skip_self_manifest_subst = Env::signature_has_package_self_manifests(&sig, ctx);
     if matches!(mty, crate::types::decl::ModuleType::MtyAlias(..)) {
         sig = strengthen_signature_for_module_access_path(ctx, access_path, &sig);
     }
-    let (should_rebind_direct_type_family, allow_inferred_rebind_paths) =
-        direct_sig_type_family_rebind_options(mty, access_path);
     if should_rebind_direct_type_family {
         rebind_direct_sig_type_family_to_access_path(
             ctx,

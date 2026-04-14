@@ -2811,6 +2811,37 @@ fn unify_types<'a>(
                         let p2_changed = !norm2.same(path2);
                         let p1_persistent = path1.head().is_persistent();
                         let p2_persistent = path2.head().is_persistent();
+                        // When a local target path normalizes through a current
+                        // letmodule alias (e.g. Int32Array.t -> Array.t), keep
+                        // the unchanged alias path as the representative so the
+                        // typedtree matches OCaml's local-alias spelling.
+                        if p1_changed
+                            && !p2_changed
+                            && !p1_persistent
+                            && !p2_persistent
+                            && norm1.same(path2)
+                        {
+                            drop(desc1);
+                            drop(desc2);
+                            link_type(ctx, t1, t2);
+                            for (a, b) in pairs {
+                                unify(ctx, state, a, b)?;
+                            }
+                            return Ok(());
+                        } else if p2_changed
+                            && !p1_changed
+                            && !p1_persistent
+                            && !p2_persistent
+                            && norm2.same(path1)
+                        {
+                            drop(desc1);
+                            drop(desc2);
+                            link_type(ctx, t2, t1);
+                            for (a, b) in pairs {
+                                unify(ctx, state, a, b)?;
+                            }
+                            return Ok(());
+                        }
                         if p1_changed && !p2_changed && !p1_persistent && p2_persistent {
                             drop(desc1);
                             drop(desc2);
