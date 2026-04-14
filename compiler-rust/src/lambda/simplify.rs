@@ -441,7 +441,8 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
         }
         Lambda::Llet(kind, id, value, body) => {
             let original_value = value.as_ref();
-            let value = simplify_with_env(value, env, exports);
+            let mut kind = *kind;
+            let mut value = simplify_with_env(value, env, exports);
             let mut body_env = env.without_ident(id);
             let binding_is_exported = lambda_exports_ident(body, id);
             let mut body_exports = None;
@@ -456,7 +457,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             if let Some(string_value) = plain_string_constant(&value) {
                 body_env.plain_strings.insert(id.clone(), string_value);
             }
-            if let Some(substitution) = substitution_candidate(*kind, original_value, &value) {
+            if let Some(substitution) = substitution_candidate(kind, original_value, &value) {
                 if binding_is_exported {
                     if let Some(export_target) = exported_alias_target(&substitution) {
                         let propagated = body_exports.get_or_insert_with(|| exports.clone());
@@ -467,7 +468,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                     body_env.substitutions.insert(id.clone(), substitution);
                 }
             }
-            if *kind != LetKind::Variable {
+            if kind != LetKind::Variable {
                 if let Some(func) = inlineable_local_function(&value) {
                     body_env.known_functions.insert(id.clone(), func.clone());
                     if analysis::lfunction_can_be_inlined(&func) {
@@ -475,8 +476,17 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                     }
                 }
             }
-            let body = simplify_with_env(body, &body_env, body_exports.as_ref().unwrap_or(exports));
-            if *kind == LetKind::Alias && !preserve_exported_eta_alias {
+            let mut body = simplify_with_env(body, &body_env, body_exports.as_ref().unwrap_or(exports));
+            if matches!(kind, LetKind::Strict | LetKind::StrictOpt) {
+                if let Some(init) = mutable_ref_init(&value) {
+                    if let Ok(eliminated_body) = eliminate_non_escaping_ref_binding(id, &body) {
+                        kind = LetKind::Variable;
+                        value = init;
+                        body = eliminated_body;
+                    }
+                }
+            }
+            if kind == LetKind::Alias && !preserve_exported_eta_alias {
                 let use_info = alias_use_info(id, &body);
                 if use_info.times == 1
                     && (!use_info.captured || matches!(value, Lambda::Lconst(_) | Lambda::Lvar(_)))
@@ -491,7 +501,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                     Lambda::seq(value, body)
                 }
             } else {
-                refine_let_binding(*kind, id, value, body)
+                refine_let_binding(kind, id, value, body)
             }
         }
         Lambda::Lletrec(bindings, body) => {
@@ -826,6 +836,179 @@ fn substitute_alias_use(lam: &Lambda, target: &Ident, replacement: &Lambda) -> L
             id.clone(),
             Box::new(substitute_alias_use(value, target, replacement)),
         ),
+    }
+}
+
+fn mutable_ref_init(lam: &Lambda) -> Option<Lambda> {
+    match lam {
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(0, _, crate::lambda::primitive::Mutable::Mutable),
+            args,
+            ..
+        }) => match args.as_slice() {
+            [init] => Some(init.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn eliminate_non_escaping_ref_binding(id: &Ident, lam: &Lambda) -> Result<Lambda, ()> {
+    match lam {
+        Lambda::Lvar(v) => {
+            if v.same(id) {
+                Err(())
+            } else {
+                Ok(lam.clone())
+            }
+        }
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pfield(0, _),
+            args,
+            ..
+        }) if matches!(args.as_slice(), [Lambda::Lvar(v)] if v.same(id)) => {
+            Ok(Lambda::var(id.clone()))
+        }
+        Lambda::Lfunction(func) => {
+            if lambda_hits_variable(id, &func.body) {
+                Err(())
+            } else {
+                Ok(lam.clone())
+            }
+        }
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Psetfield(0, _),
+            args,
+            ..
+        }) if matches!(args.as_slice(), [Lambda::Lvar(v), _] if v.same(id)) => {
+            let [_, value] = args.as_slice() else {
+                unreachable!();
+            };
+            Ok(Lambda::assign(
+                id.clone(),
+                eliminate_non_escaping_ref_binding(id, value)?,
+            ))
+        }
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Poffsetref(delta),
+            args,
+            loc,
+        }) if matches!(args.as_slice(), [Lambda::Lvar(v)] if v.same(id)) => Ok(Lambda::assign(
+            id.clone(),
+            Lambda::prim(
+                Primitive::Poffsetint(*delta),
+                vec![Lambda::var(id.clone())],
+                loc.clone(),
+            ),
+        )),
+        Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => Ok(lam.clone()),
+        Lambda::Lapply(apply) => Ok(Lambda::Lapply(Apply {
+            ap_func: Box::new(eliminate_non_escaping_ref_binding(id, &apply.ap_func)?),
+            ap_args: apply
+                .ap_args
+                .iter()
+                .map(|arg| eliminate_non_escaping_ref_binding(id, arg))
+                .collect::<Result<Vec<_>, _>>()?,
+            ap_info: apply.ap_info.clone(),
+            ap_transformed_jsx: apply.ap_transformed_jsx,
+        })),
+        Lambda::Llet(kind, ident, value, body) => Ok(Lambda::let_(
+            *kind,
+            ident.clone(),
+            eliminate_non_escaping_ref_binding(id, value)?,
+            eliminate_non_escaping_ref_binding(id, body)?,
+        )),
+        Lambda::Lletrec(bindings, body) => Ok(Lambda::letrec(
+            bindings
+                .iter()
+                .map(|(ident, lam)| {
+                    Ok((ident.clone(), eliminate_non_escaping_ref_binding(id, lam)?))
+                })
+                .collect::<Result<Vec<_>, ()>>()?,
+            eliminate_non_escaping_ref_binding(id, body)?,
+        )),
+        Lambda::Lprim(info) => Ok(Lambda::prim(
+            info.primitive.clone(),
+            info.args
+                .iter()
+                .map(|arg| eliminate_non_escaping_ref_binding(id, arg))
+                .collect::<Result<Vec<_>, _>>()?,
+            info.loc.clone(),
+        )),
+        Lambda::Lswitch(scrutinee, switch) => Ok(Lambda::Lswitch(
+            Box::new(eliminate_non_escaping_ref_binding(id, scrutinee)?),
+            LambdaSwitch {
+                sw_consts_full: switch.sw_consts_full,
+                sw_consts: switch
+                    .sw_consts
+                    .iter()
+                    .map(|(tag, lam)| Ok((*tag, eliminate_non_escaping_ref_binding(id, lam)?)))
+                    .collect::<Result<Vec<_>, ()>>()?,
+                sw_blocks_full: switch.sw_blocks_full,
+                sw_blocks: switch
+                    .sw_blocks
+                    .iter()
+                    .map(|(tag, lam)| Ok((*tag, eliminate_non_escaping_ref_binding(id, lam)?)))
+                    .collect::<Result<Vec<_>, ()>>()?,
+                sw_failaction: switch
+                    .sw_failaction
+                    .as_ref()
+                    .map(|lam| eliminate_non_escaping_ref_binding(id, lam).map(Box::new))
+                    .transpose()?,
+                sw_names: switch.sw_names.clone(),
+            },
+        )),
+        Lambda::LstringSwitch(scrutinee, cases, default) => Ok(Lambda::LstringSwitch(
+            Box::new(eliminate_non_escaping_ref_binding(id, scrutinee)?),
+            cases
+                .iter()
+                .map(|(tag, lam)| Ok((tag.clone(), eliminate_non_escaping_ref_binding(id, lam)?)))
+                .collect::<Result<Vec<_>, ()>>()?,
+            default
+                .as_ref()
+                .map(|lam| eliminate_non_escaping_ref_binding(id, lam).map(Box::new))
+                .transpose()?,
+        )),
+        Lambda::LstaticRaise(tag, args) => Ok(Lambda::LstaticRaise(
+            *tag,
+            args.iter()
+                .map(|arg| eliminate_non_escaping_ref_binding(id, arg))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Lambda::LstaticCatch(body, handler, rescue) => Ok(Lambda::LstaticCatch(
+            Box::new(eliminate_non_escaping_ref_binding(id, body)?),
+            handler.clone(),
+            Box::new(eliminate_non_escaping_ref_binding(id, rescue)?),
+        )),
+        Lambda::LtryWith(body, exn, handler) => Ok(Lambda::LtryWith(
+            Box::new(eliminate_non_escaping_ref_binding(id, body)?),
+            exn.clone(),
+            Box::new(eliminate_non_escaping_ref_binding(id, handler)?),
+        )),
+        Lambda::LifThenElse(cond, then_, else_) => Ok(Lambda::if_(
+            eliminate_non_escaping_ref_binding(id, cond)?,
+            eliminate_non_escaping_ref_binding(id, then_)?,
+            eliminate_non_escaping_ref_binding(id, else_)?,
+        )),
+        Lambda::Lsequence(first, second) => Ok(Lambda::seq(
+            eliminate_non_escaping_ref_binding(id, first)?,
+            eliminate_non_escaping_ref_binding(id, second)?,
+        )),
+        Lambda::Lwhile(cond, body) => Ok(Lambda::while_(
+            eliminate_non_escaping_ref_binding(id, cond)?,
+            eliminate_non_escaping_ref_binding(id, body)?,
+        )),
+        Lambda::Lfor(loop_var, from, to, direction, body) => Ok(Lambda::for_(
+            loop_var.clone(),
+            eliminate_non_escaping_ref_binding(id, from)?,
+            eliminate_non_escaping_ref_binding(id, to)?,
+            *direction,
+            eliminate_non_escaping_ref_binding(id, body)?,
+        )),
+        Lambda::Lassign(ident, value) => Ok(Lambda::assign(
+            ident.clone(),
+            eliminate_non_escaping_ref_binding(id, value)?,
+        )),
     }
 }
 
@@ -2198,7 +2381,7 @@ fn exported_eta_wrapper_binding(value: &Lambda) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::ident::Ident;
-    use crate::lambda::compat::{FieldDbgInfo, LetKind};
+    use crate::lambda::compat::{FieldDbgInfo, LetKind, SetFieldDbgInfo};
     use crate::lambda::constant::Constant;
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalObjLabel, ExternalObjSpec, Mutable, Primitive,
@@ -2355,6 +2538,150 @@ mod tests {
             }
             Lambda::Lassign(_, value) => contains_apply_to(target, value),
         }
+    }
+
+    #[test]
+    fn eliminates_non_captured_ref_cells_to_mutable_variables() {
+        let cell = Ident::create_local("cell");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            cell.clone(),
+            Lambda::prim(
+                Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Mutable),
+                vec![Lambda::const_(Constant::int(-1))],
+                Location::none(),
+            ),
+            Lambda::seq(
+                Lambda::prim(
+                    Primitive::Psetfield(0, SetFieldDbgInfo::RecordSet("contents".to_string())),
+                    vec![Lambda::var(cell.clone()), Lambda::const_(Constant::int(3))],
+                    Location::none(),
+                ),
+                Lambda::prim(
+                    Primitive::Pfield(0, FieldDbgInfo::Tuple),
+                    vec![Lambda::var(cell.clone())],
+                    Location::none(),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(kind, binding, value, body) = &simplified else {
+            panic!("expected mutable variable binding, got {simplified:?}");
+        };
+        assert_eq!(*kind, LetKind::Variable);
+        assert!(binding.same(&cell));
+        assert!(matches!(
+            value.as_ref(),
+            Lambda::Lconst(Constant::Int { i: -1, .. })
+        ));
+        let Lambda::Lsequence(assign, read) = body.as_ref() else {
+            panic!("expected assignment/read sequence, got {body:?}");
+        };
+        assert!(matches!(
+            assign.as_ref(),
+            Lambda::Lassign(id, value)
+                if id.same(&cell)
+                    && matches!(value.as_ref(), Lambda::Lconst(Constant::Int { i: 3, .. }))
+        ));
+        assert!(matches!(read.as_ref(), Lambda::Lvar(id) if id.same(&cell)));
+    }
+
+    #[test]
+    fn eliminates_offsetref_updates_on_non_captured_ref_cells() {
+        let cell = Ident::create_local("cell");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            cell.clone(),
+            Lambda::prim(
+                Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Mutable),
+                vec![Lambda::const_(Constant::int(0))],
+                Location::none(),
+            ),
+            Lambda::seq(
+                Lambda::prim(
+                    Primitive::Poffsetref(1),
+                    vec![Lambda::var(cell.clone())],
+                    Location::none(),
+                ),
+                Lambda::prim(
+                    Primitive::Pfield(0, FieldDbgInfo::Tuple),
+                    vec![Lambda::var(cell.clone())],
+                    Location::none(),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(kind, binding, value, body) = &simplified else {
+            panic!("expected mutable variable binding, got {simplified:?}");
+        };
+        assert_eq!(*kind, LetKind::Variable);
+        assert!(binding.same(&cell));
+        assert!(matches!(
+            value.as_ref(),
+            Lambda::Lconst(Constant::Int { i: 0, .. })
+        ));
+        let Lambda::Lsequence(assign, read) = body.as_ref() else {
+            panic!("expected assignment/read sequence, got {body:?}");
+        };
+        assert!(matches!(
+            assign.as_ref(),
+            Lambda::Lassign(id, value)
+                if id.same(&cell)
+                    && matches!(
+                        value.as_ref(),
+                        Lambda::Lprim(crate::lambda::PrimInfo {
+                            primitive: Primitive::Poffsetint(1),
+                            args,
+                            ..
+                        }) if matches!(args.as_slice(), [Lambda::Lvar(var)] if var.same(&cell))
+                    )
+        ));
+        assert!(matches!(read.as_ref(), Lambda::Lvar(id) if id.same(&cell)));
+    }
+
+    #[test]
+    fn keeps_closure_captured_ref_cells_boxed() {
+        let cell = Ident::create_local("cell");
+        let reader = Ident::create_local("reader");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            cell.clone(),
+            Lambda::prim(
+                Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Mutable),
+                vec![Lambda::const_(Constant::int(0))],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                reader.clone(),
+                Lambda::function_(
+                    0,
+                    vec![],
+                    Lambda::prim(
+                        Primitive::Pfield(0, FieldDbgInfo::Tuple),
+                        vec![Lambda::var(cell.clone())],
+                        Location::none(),
+                    ),
+                    FunctionAttribute::default(),
+                ),
+                Lambda::var(reader),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Some(binding) = find_binding_value(&simplified, &cell) else {
+            panic!("expected ref binding to remain");
+        };
+        assert!(matches!(
+            binding,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pmakeblock(0, _, Mutable::Mutable),
+                args,
+                ..
+            }) if matches!(args.as_slice(), [Lambda::Lconst(Constant::Int { i: 0, .. })])
+        ));
     }
 
     #[test]

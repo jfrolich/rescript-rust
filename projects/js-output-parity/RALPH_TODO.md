@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 384 / 657 JS snapshots passing, 0 compile errors, 273 output diffs
+**Status:** 396 / 657 JS snapshots passing, 0 compile errors, 261 output diffs
 
 ## Goal
 
@@ -35,11 +35,63 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **384 / 657**
+- JS snapshot parity: **396 / 657**
 - Compile errors: **0**
-- Output diffs: **273**
+- Output diffs: **261**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port OCaml's `lam_pass_eliminate_ref.ml` into
+  `compiler-rust/src/lambda/simplify.rs` so non-escaping mutable `ref` cells
+  are rewritten to mutable locals instead of always surviving into JS as
+  boxed `{ contents: ... }` records
+- Active backend focus is **Phase 2: Port Post-Lowering Lambda Backend
+  Stages** from `PLAN.md`; this slice lands one of the missing OCaml
+  `lam_pass_*` simplifications on the JS codegen path without reopening
+  typedtree or lambda parity work
+- OCaml reference:
+  `compiler/core/lam_pass_eliminate_ref.ml`, where `eliminate_ref`
+  rewrites `Pfield(0, [Lvar id])` to `Lvar id`, `Psetfield(0, [Lvar id; e])`
+  to `Lassign(id, e)`, and `Poffsetref delta` to `Lassign(id, Poffsetint
+  delta [id])`, but aborts when the binding escapes as a real reference
+- Rust change:
+  - detect simplified `let` bindings whose value is
+    `Pmakeblock(0, _, Mutable)` and try the OCaml `eliminate_ref` rewrite on
+    the body before final let refinement
+  - convert successful rewrites from `LetKind::Strict` / `StrictOpt` ref-cell
+    bindings into `LetKind::Variable` locals so downstream JS lowering emits
+    plain mutable variables instead of `.contents` boxes
+  - added focused regression coverage in
+    `eliminates_non_captured_ref_cells_to_mutable_variables`,
+    `eliminates_offsetref_updates_on_non_captured_ref_cells`, and
+    `keeps_closure_captured_ref_cells_boxed`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml ref_cells -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - exact `compiler-args` repro for `tests/tests/src/for_loop_test.res` from
+    `tests/tests/lib/bs`, diffing `/tmp/for_loop_test.mjs` against the
+    checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/for_loop_test.res` now matches the OCaml non-escaping
+    ref-cell shape around `inspect_3`; the remaining diff in that file is on
+    the already-known loop-header and temp-binding naming drift, not on boxed
+    ref lowering
+  - `tests/tests/src/test_simple_ref.res` no longer differs on boxed-ref
+    handling; the remaining diff there is only the top-level binding order for
+    `not_real_escape`
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the simplify pass
+- Topline impact:
+  - JS snapshot parity: **384 / 657** -> **396 / 657** (**+12**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **273** -> **261** (**-12**)
+- Keep this change because it ports OCaml's `lam_pass_eliminate_ref.ml`
+  behavior directly into the Rust JS path instead of preserving Rust-only
+  boxed ref cells for bindings that do not escape.
 
 Latest iteration on **2026-04-14**:
 
