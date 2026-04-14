@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 458 / 657 JS snapshots passing, 0 compile errors, 199 output diffs
+**Status:** 461 / 657 JS snapshots passing, 0 compile errors, 196 output diffs
 
 ## Goal
 
@@ -35,11 +35,79 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **458 / 657**
+- JS snapshot parity: **461 / 657**
 - Compile errors: **0**
-- Output diffs: **199**
+- Output diffs: **196**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the OCaml continuation-sensitive `trywith` lowering path
+  so Rust compiles try bodies and handlers with the same `Declare` / `Assign` /
+  `NeedValue` / `EffectCall` continuation split instead of forcing every
+  `LtryWith` through the generic effect-block path
+- Active backend focus for this slice is **Phase 3: Port JS IR Lowering And
+  Metadata** from `PLAN.md`, because the mismatch lived in
+  `compiler/core/lam_compile.ml` rather than in JS dumping: Rust's
+  `compile_expr(LtryWith)` was erasing the OCaml continuation shape and
+  generating effect-only try bodies even in return and value positions
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `change_tail_type_in_try` and
+  `compile_trywith`, where OCaml lowers `trywith` differently for
+  `Declare`, `Assign`, `NeedValue`, and `EffectCall` continuations and keeps
+  the try body in return position when the surrounding continuation is a
+  tail-return
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so `LtryWith` now lowers
+    through a shared `try_statement(...)` helper in all continuation-shaped
+    paths:
+    `compile_expr(...)`, `compile_let_binding(...)`,
+    `compile_assign_to_target_block(...)`, `compile_effect_block(...)`,
+    `compile_effect_output(...)`, and `compile_return_block(...)`
+  - `compile_expr(LtryWith)` now mirrors OCaml's `NeedValue` case by
+    allocating a temporary result variable and compiling both try body and
+    handler as assignments into that variable
+  - `compile_return_block(LtryWith)` now preserves return-position try bodies
+    and handlers, matching OCaml's tail-in-try behavior instead of emitting
+    effect-only `g(x);` blocks
+  - added focused regression coverage in
+    `compile_return_block_lowers_trywith_in_return_position`, while keeping
+    the earlier terminal-output guards
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_return_block_lowers_trywith_in_return_position -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_return_block_skips_unreachable_sequence_after_throw -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml block_finishes_output_ignores_switch_case_breaks -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/test_trywith.res`, diffing the emitted
+    module against the checked-in snapshot to confirm the tail-try control-flow
+    drift is gone and only the top-level binding-order drift remains
+  - direct repro for `tests/tests/src/bb.res`, diffing the emitted module
+    against the checked-in snapshot as a switch-break guard
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1245_test.res` is no longer in the authoritative
+    diff set after the continuation-sensitive `trywith` lowering fix
+  - `tests/tests/src/test_exception_escape.res` is no longer in the
+    authoritative diff set; its local exception handler now lowers through the
+    OCaml-style value/return path instead of the old effect-only try block
+  - `tests/tests/src/test_match_exception.res` is no longer in the
+    authoritative diff set for the same reason
+  - `tests/tests/src/test_trywith.res` is materially smaller; the remaining
+    drift is only the top-level `u1` / `v` binding order, not the tail-try
+    control flow
+  - `tests/tests/src/bb.res` and `tests/tests/src/ExternalShadow.res` remain
+    exact snapshot matches after the `trywith` port
+- Topline impact:
+  - JS snapshot parity: **458 / 657** -> **461 / 657** (**+3**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **199** -> **196** (**-3**)
+- Keep this change because it ports OCaml's `compile_trywith` continuation
+  model instead of preserving the Rust-only shortcut that flattened all
+  `trywith` expressions into effect-only try/catch blocks.
 
 Latest iteration on **2026-04-14**:
 

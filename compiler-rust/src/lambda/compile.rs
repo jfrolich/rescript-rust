@@ -411,6 +411,14 @@ impl LambdaCompiler {
         }
     }
 
+    fn try_statement(&self, body: Block, exn: &Ident, handler: Block) -> Statement {
+        Statement::new(StatementDesc::Try(
+            body,
+            Some((exn.clone(), handler)),
+            None,
+        ))
+    }
+
     fn compile_expr(&mut self, lam: &Lambda) -> Compiled {
         match lam {
             Lambda::Lvar(id) => Compiled {
@@ -522,16 +530,19 @@ impl LambdaCompiler {
                 self.with_static_handler(*label, bindings, handler, |this| this.compile_expr(body))
             }
             Lambda::LtryWith(body, exn, handler) => {
-                let body_block = self.compile_block(body);
-                let handler_block = self.compile_block(handler);
-                let try_stmt = Statement::new(StatementDesc::Try(
-                    body_block,
-                    Some((exn.clone(), handler_block)),
-                    None,
-                ));
+                let result = self.fresh_ident("tryres");
+                let mut prelude = vec![Statement::variable(VariableDeclaration {
+                    ident: result.clone(),
+                    value: None,
+                    property: LetKind::Variable,
+                    ident_info: IdentInfo::default(),
+                })];
+                let body_block = self.compile_assign_to_target_block(&result, body);
+                let handler_block = self.compile_assign_to_target_block(&result, handler);
+                prelude.push(self.try_statement(body_block, exn, handler_block));
                 Compiled {
-                    prelude: vec![try_stmt],
-                    expr: Expression::undefined(false),
+                    prelude,
+                    expr: Expression::var(result),
                 }
             }
             Lambda::LifThenElse(cond, then_, else_) => {
@@ -842,6 +853,19 @@ impl LambdaCompiler {
             Lambda::LifThenElse(cond, then_, else_) => {
                 self.compile_if_binding_block(kind, id, cond, then_, else_)
             }
+            Lambda::LtryWith(body, exn, handler) => {
+                let body_block = self.compile_assign_to_target_block(id, body);
+                let handler_block = self.compile_assign_to_target_block(id, handler);
+                vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: id.clone(),
+                        value: None,
+                        property: kind,
+                        ident_info: IdentInfo::default(),
+                    }),
+                    self.try_statement(body_block, exn, handler_block),
+                ]
+            }
             Lambda::Lswitch(scrut, switch) => {
                 let mut block = vec![Statement::variable(VariableDeclaration {
                     ident: id.clone(),
@@ -909,6 +933,11 @@ impl LambdaCompiler {
                 self.with_static_handler(*label, bindings, handler, |this| {
                     this.compile_effect_block(body)
                 })
+            }
+            Lambda::LtryWith(body, exn, handler) => {
+                let body_block = self.compile_effect_block(body);
+                let handler_block = self.compile_effect_block(handler);
+                vec![self.try_statement(body_block, exn, handler_block)]
             }
             Lambda::Lswitch(scrut, switch) => self.compile_switch_effect_block(scrut, switch),
             Lambda::LstringSwitch(scrut, cases, default) => {
@@ -1084,6 +1113,11 @@ impl LambdaCompiler {
                 self.with_static_handler(*label, bindings, handler, |this| {
                     this.compile_return_block(body)
                 })
+            }
+            Lambda::LtryWith(body, exn, handler) => {
+                let body_block = self.compile_return_block(body);
+                let handler_block = self.compile_return_block(handler);
+                vec![self.try_statement(body_block, exn, handler_block)]
             }
             Lambda::Lswitch(scrut, switch) => self.compile_switch_return_block(scrut, switch),
             Lambda::LstringSwitch(scrut, cases, default) => {
@@ -1564,6 +1598,11 @@ impl LambdaCompiler {
                 let first = self.compile_effect_output(first);
                 let second = self.compile_effect_output(second);
                 self.append_effect_output(first, second)
+            }
+            Lambda::LtryWith(body, exn, handler) => {
+                let body_block = self.compile_effect_block(body);
+                let handler_block = self.compile_effect_block(handler);
+                compiled_from_effect_block(vec![self.try_statement(body_block, exn, handler_block)])
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 self.with_static_handler(*label, bindings, handler, |this| {
@@ -3477,6 +3516,11 @@ impl LambdaCompiler {
                 self.with_static_handler(*label, bindings, handler, |this| {
                     this.compile_assign_to_target_block(result, body)
                 })
+            }
+            Lambda::LtryWith(body, exn, handler) => {
+                let body_block = self.compile_assign_to_target_block(result, body);
+                let handler_block = self.compile_assign_to_target_block(result, handler);
+                vec![self.try_statement(body_block, exn, handler_block)]
             }
             Lambda::LifThenElse(cond, then_, else_) => {
                 self.compile_if_assignment_block(result, cond, then_, else_)
@@ -12895,6 +12939,53 @@ mod tests {
                 }),
                 ..
             } if txt == "boom"
+        ));
+    }
+
+    #[test]
+    fn compile_return_block_lowers_trywith_in_return_position() {
+        let mut compiler = LambdaCompiler::new();
+        let callee = Ident::create_local("g");
+        let exn = Ident::create_local("exn");
+        let block = compiler.compile_return_block(&Lambda::LtryWith(
+            Box::new(Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::var(callee)),
+                ap_args: vec![],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            })),
+            exn.clone(),
+            Box::new(Lambda::const_(Constant::int(0))),
+        ));
+
+        let [stmt] = block.as_slice() else {
+            panic!("expected a single try statement, got {:?}", block);
+        };
+        let StatementDesc::Try(body, Some((caught, handler)), None) = &stmt.desc else {
+            panic!("expected a try statement, got {:?}", stmt);
+        };
+
+        assert!(caught.same(&exn));
+        assert!(matches!(
+            body.as_slice(),
+            [Statement {
+                desc: StatementDesc::Return(_),
+                ..
+            }]
+        ));
+        assert!(matches!(
+            handler.as_slice(),
+            [Statement {
+                desc: StatementDesc::Return(Expression {
+                    desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
+                    ..
+                }),
+                ..
+            }]
         ));
     }
 
