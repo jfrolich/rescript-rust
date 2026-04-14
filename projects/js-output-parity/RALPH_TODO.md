@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 431 / 657 JS snapshots passing, 0 compile errors, 226 output diffs
+**Status:** 432 / 657 JS snapshots passing, 0 compile errors, 225 output diffs
 
 ## Goal
 
@@ -35,11 +35,64 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **431 / 657**
+- JS snapshot parity: **432 / 657**
 - Compile errors: **0**
-- Output diffs: **226**
+- Output diffs: **225**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the remaining OCaml lets-dce-style cleanup for
+  let-wrapped direct applications exposed by the repeated backend alias passes
+  so `let ... in function ...` values do not survive as Rust-only temporary
+  call bindings in emitted JS
+- Active backend focus for this slice remains **Phase 2: Port Post-Lowering
+  Lambda Backend Stages** from `PLAN.md`; this is still a backend lambda-pass
+  parity fix downstream of the already-green optimized lambda boundary
+- OCaml reference:
+  `compiler/core/lam_compile_main.ml`, where the backend reruns
+  `Lam_pass_remove_alias.simplify_alias` before `Lam_pass_lets_dce.simplify_lets`,
+  plus `compiler/core/lam_pass_lets_dce.ml`, where the later direct-`Lfunction`
+  reduction cleans up newly exposed outer applies
+- Rust change:
+  - added let-wrapper rebuilding and
+    `reduce_direct_function_application_like_lets_dce(...)` in
+    `compiler-rust/src/lambda/simplify.rs` so the final lets-dce-style pass can
+    peel `Llet` wrappers around direct functions / direct wrappers, beta-reduce
+    the outer application, and then restore the preserved let bindings
+  - updated `simplify_direct_function_applications_like_lets_dce(...)` to use
+    that helper instead of stopping when the callee is no longer a bare
+    `Lfunction`
+  - added focused regression coverage in
+    `beta_reduces_let_wrapped_returned_functions_across_backend_alias_passes`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml beta_reduces_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/ari_regress_test.res`, diffing the exact
+    test-harness AST compile output against the checked-in snapshot
+  - direct repro for `tests/tests/src/alias_test.res`, diffing the exact
+    test-harness AST compile output against the checked-in snapshot as an
+    unchanged string-alias guard
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/ari_regress_test.res` now matches its checked-in snapshot
+    exactly; the Rust-only `call = (z => u + z | 0)(6)` temporary and the
+    `/* x Not a pure module */` comment drift are gone
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the lets-dce cleanup change
+  - `tests/tests/src/alias_test.res` is unchanged, which keeps the remaining
+    string-alias / string-append drift isolated from this direct-call slice
+- Topline impact:
+  - JS snapshot parity: **431 / 657** -> **432 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **226** -> **225** (**-1**)
+- Keep this change because it ports the OCaml lets-dce-style cleanup for
+  let-wrapped direct applications instead of preserving the Rust-only temporary
+  call binding shape in emitted JS.
 
 Latest iteration on **2026-04-14**:
 

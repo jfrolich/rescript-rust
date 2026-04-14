@@ -12,8 +12,8 @@ use crate::lambda::constant::Constant;
 use crate::lambda::free_variables::free_variables;
 use crate::lambda::primitive::{Mutable, Primitive};
 use crate::lambda::{
-    Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda, LambdaSwitch,
-    TagInfo,
+    ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda,
+    LambdaSwitch, TagInfo,
 };
 use crate::location::Location;
 
@@ -420,6 +420,62 @@ fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
     aux(lam)
 }
 
+fn rebuild_let_wrapped_lambda(
+    bindings: Vec<(LetKind, Ident, Lambda)>,
+    lam: Lambda,
+) -> Lambda {
+    bindings
+        .into_iter()
+        .rev()
+        .fold(lam, |acc, (kind, id, value)| {
+            Lambda::let_(kind, id, value, acc)
+        })
+}
+
+fn reduce_direct_function_application_like_lets_dce(
+    func: Lambda,
+    args: Vec<Lambda>,
+    ap_info: &ApInfo,
+    ap_transformed_jsx: bool,
+) -> Lambda {
+    let mut bindings = Vec::new();
+    let mut direct_func = func;
+
+    while let Lambda::Llet(kind, id, value, body) = direct_func {
+        bindings.push((kind, id, *value));
+        direct_func = *body;
+    }
+
+    let reduced = match &direct_func {
+        Lambda::Lfunction(func)
+            if func.params.len() == args.len() && analysis::lfunction_can_be_inlined(func) =>
+        {
+            Some(beta_reduce::no_names_beta_reduce(
+                &func.params,
+                &func.body,
+                &args,
+            ))
+        }
+        _ => inlineable_direct_wrapper_function(&direct_func)
+            .filter(|func| {
+                func.params.len() == args.len() && analysis::lfunction_can_be_inlined(func)
+            })
+            .map(|func| beta_reduce::no_names_beta_reduce(&func.params, &func.body, &args)),
+    };
+
+    let lam = match reduced {
+        Some(reduced) => simplify_direct_function_applications_like_lets_dce(&reduced),
+        None => Lambda::Lapply(Apply {
+            ap_func: Box::new(direct_func),
+            ap_args: args,
+            ap_info: ap_info.clone(),
+            ap_transformed_jsx,
+        }),
+    };
+
+    rebuild_let_wrapped_lambda(bindings, lam)
+}
+
 fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
     match lam {
         Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
@@ -431,22 +487,12 @@ fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
                 .map(simplify_direct_function_applications_like_lets_dce)
                 .collect();
 
-            match &func {
-                Lambda::Lfunction(func)
-                    if func.params.len() == args.len()
-                        && analysis::lfunction_can_be_inlined(func) =>
-                {
-                    simplify_direct_function_applications_like_lets_dce(
-                        &beta_reduce::no_names_beta_reduce(&func.params, &func.body, &args),
-                    )
-                }
-                _ => Lambda::Lapply(Apply {
-                    ap_func: Box::new(func),
-                    ap_args: args,
-                    ap_info: apply.ap_info.clone(),
-                    ap_transformed_jsx: apply.ap_transformed_jsx,
-                }),
-            }
+            reduce_direct_function_application_like_lets_dce(
+                func,
+                args,
+                &apply.ap_info,
+                apply.ap_transformed_jsx,
+            )
         }
         Lambda::Lfunction(func) => Lambda::function_(
             func.arity,
@@ -5764,6 +5810,67 @@ mod tests {
             ) && !matches!(simplified, Lambda::Lapply(_)),
             "expected the outer apply to disappear after the repeated alias and lets-dce passes, got {simplified:?}"
         );
+    }
+
+    #[test]
+    fn beta_reduces_let_wrapped_returned_functions_across_backend_alias_passes() {
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let u = Ident::create_local("u");
+        let z = Ident::create_local("z");
+
+        let lambda = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::function_(
+                    2,
+                    vec![x.clone(), y.clone()],
+                    Lambda::let_(
+                        LetKind::Strict,
+                        u.clone(),
+                        Lambda::prim(
+                            Primitive::Paddint,
+                            vec![Lambda::var(x), Lambda::var(y)],
+                            Location::none(),
+                        ),
+                        Lambda::function_(
+                            1,
+                            vec![z.clone()],
+                            Lambda::prim(
+                                Primitive::Paddint,
+                                vec![Lambda::var(u.clone()), Lambda::var(z.clone())],
+                                Location::none(),
+                            ),
+                            FunctionAttribute::default(),
+                        ),
+                    ),
+                    FunctionAttribute::default(),
+                )),
+                ap_args: vec![Lambda::const_(Constant::int(3)), Lambda::const_(Constant::int(5))],
+                ap_info: crate::lambda::ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Uncurry,
+                },
+                ap_transformed_jsx: false,
+            })),
+            ap_args: vec![Lambda::const_(Constant::int(6))],
+            ap_info: crate::lambda::ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Uncurry,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(kind, bound, value, body) = simplified else {
+            panic!("expected a let-wrapped direct call to stay wrapped by the inner let");
+        };
+
+        assert_eq!(kind, LetKind::Strict);
+        assert!(bound.same(&u));
+        assert!(!matches!(*value, Lambda::Lapply(_)));
+        assert!(!matches!(*body, Lambda::Lapply(_)));
     }
 
     #[test]
