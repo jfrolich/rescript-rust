@@ -657,12 +657,16 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             if let Some(optional_info) = optional_block_info(&value) {
                 body_env.optional_blocks.insert(id.clone(), optional_info);
             }
-            if let Some(string_value) = plain_string_constant(&value) {
-                // Match lam_pass_lets_dce: strict plain strings become aliases so later
-                // string folding and single-use inlining can see them.
-                if matches!(kind, LetKind::Strict | LetKind::StrictOpt) {
-                    kind = LetKind::Alias;
+            if matches!(kind, LetKind::Strict | LetKind::StrictOpt) && is_safe_to_alias(&value) {
+                kind = LetKind::Alias;
+            } else if kind == LetKind::Strict {
+                if matches!(value, Lambda::Lfunction(_)) {
+                    kind = LetKind::StrictOpt;
+                } else if analysis::no_side_effects(&value) {
+                    kind = LetKind::StrictOpt;
                 }
+            }
+            if let Some(string_value) = plain_string_constant(&value) {
                 body_env.plain_strings.insert(id.clone(), string_value);
             }
             if let Some(substitution) = substitution_candidate(kind, original_value, &value) {
@@ -1541,6 +1545,26 @@ fn refine_let_binding(kind: LetKind, id: &Ident, value: Lambda, body: Lambda) ->
             })
         }
         _ => Lambda::let_(kind, id.clone(), value, body),
+    }
+}
+
+fn is_safe_to_alias(lam: &Lambda) -> bool {
+    match lam {
+        Lambda::Lvar(_) | Lambda::Lconst(_) => true,
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
+            args,
+            ..
+        }) => matches!(
+            args.as_slice(),
+            [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]
+        ),
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::PsomeNotNest,
+            args,
+            ..
+        }) => matches!(args.as_slice(), [inner] if is_safe_to_alias(inner)),
+        _ => false,
     }
 }
 
@@ -3607,6 +3631,54 @@ mod tests {
                 Lambda::Lconst(Constant::Int { i: 1, .. })
             ]
         ));
+    }
+
+    #[test]
+    fn simplifies_exported_marshaled_string_payloads_before_export_coercion() {
+        let exported = Ident::create_local("s");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![exported.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(exported.clone())],
+            Location::none(),
+        );
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            exported.clone(),
+            Lambda::const_(Constant::String {
+                s: "😀".to_string(),
+                delim: Some(crate::lambda::constant::StringDelim::StarJ),
+            }),
+            export_block,
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(exports), _),
+            args,
+            ..
+        }) = &simplified
+        else {
+            panic!("expected the export block after marshaled-string alias cleanup");
+        };
+        assert_eq!(exports, &vec![exported.clone()]);
+        assert!(matches!(
+            args.as_slice(),
+            [Lambda::Lconst(Constant::String { s, delim })]
+                if s == "😀"
+                    && matches!(delim, Some(crate::lambda::constant::StringDelim::StarJ))
+        ));
+        assert!(
+            find_binding_value(&lambda, &exported).is_some(),
+            "expected the original binding to exist before simplification",
+        );
+        assert!(
+            find_binding_value(&simplified, &exported).is_none(),
+            "expected the single-use exported plain string binding to inline",
+        );
     }
 
     #[test]

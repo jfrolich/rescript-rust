@@ -12652,6 +12652,84 @@ mod tests {
     }
 
     #[test]
+    fn compile_deps_program_rebinds_marshaled_string_exports_after_surviving_function_bindings() {
+        let mut compiler = LambdaCompiler::new();
+        let foo = Ident::create_local("foo");
+        let s = Ident::create_local("s");
+        let bar = Ident::create_local("bar");
+        let foo_param = Ident::create_local("x");
+        let bar_param = Ident::create_local("x");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![foo.clone(), s.clone(), bar.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![
+                Lambda::var(foo.clone()),
+                Lambda::var(s.clone()),
+                Lambda::var(bar.clone()),
+            ],
+            Location::none(),
+        );
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            foo.clone(),
+            Lambda::prim(
+                Primitive::PjsFnMake(1),
+                vec![Lambda::function_(
+                    1,
+                    vec![foo_param.clone()],
+                    Lambda::var(foo_param),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                s.clone(),
+                Lambda::const_(Constant::String {
+                    s: "😀".to_string(),
+                    delim: Some(StringDelim::StarJ),
+                }),
+                Lambda::let_(
+                    LetKind::Strict,
+                    bar.clone(),
+                    Lambda::prim(
+                        Primitive::PjsFnMake(1),
+                        vec![Lambda::function_(
+                            1,
+                            vec![bar_param.clone()],
+                            Lambda::var(bar_param),
+                            FunctionAttribute::default(),
+                        )],
+                        Location::none(),
+                    ),
+                    export_block,
+                ),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        assert_eq!(
+            deps.program
+                .exports
+                .iter()
+                .map(|ident| ident.name())
+                .collect::<Vec<_>>(),
+            vec!["foo", "s", "bar"]
+        );
+
+        let rendered = print_deps_program(&deps, None);
+        let foo_idx = rendered.find("function foo").unwrap();
+        let bar_idx = rendered.find("function bar").unwrap();
+        let s_idx = rendered.find("let s = \"😀\";").unwrap();
+        assert!(foo_idx < bar_idx);
+        assert!(bar_idx < s_idx);
+    }
+
+    #[test]
     fn compile_deps_program_keeps_same_name_export_aliases_for_unbound_globals() {
         let mut compiler = LambdaCompiler::new();
         let global = Ident::create_persistent("parseInt");

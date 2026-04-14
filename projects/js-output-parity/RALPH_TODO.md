@@ -43,6 +43,71 @@ reported:
 
 Latest iteration on **2026-04-14**:
 
+- Active slice: port the OCaml `Lam_util.refine_let` safe-alias rewrite so
+  strict bindings that are already safe to duplicate reach `Lam_coercion` as
+  direct constants or aliases instead of surviving as same-name exports
+- Active backend focus for this slice is **Phase 2: Port Post-Lowering Lambda
+  Backend Stages** from `PLAN.md`, because the remaining mismatch lived before
+  JS printing: Rust was preserving strict bindings for exported constants where
+  OCaml reclassifies them to `Alias` / `StrictOpt` during the late lambda
+  cleanup pipeline
+- OCaml reference:
+  `compiler/core/lam_util.ml`, especially `refine_let` and its
+  `is_safe_to_alias` predicate; also `compiler/core/lam_coercion.ml` to verify
+  that once the exported payload stops being `Lvar same_name`, OCaml rebinds the
+  export through a fresh identifier and emits the surviving function
+  declarations first
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so
+    `simplify_with_env(...)` mirrors OCaml's `refine_let` rules:
+    `Strict` / `StrictOpt` bindings become `Alias` when the RHS is safe to
+    duplicate, and `Strict` bindings downgrade to `StrictOpt` for functions and
+    other side-effect-free expressions
+  - added a Rust-side `is_safe_to_alias(...)` helper matching the OCaml cases
+    used here:
+    `Lvar`, `Lconst`, module-field reads over a module/global binding, and
+    recursive `PsomeNotNest`
+  - kept the focused export-order regression coverage in
+    `compiler-rust/src/lambda/simplify.rs` and
+    `compiler-rust/src/lambda/compile.rs`, now using the real marshalled-string
+    payload shape that reproduces `switch_string.res`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml simplifies_exported_marshaled_string_payloads_before_export_coercion -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_deps_program_rebinds_marshaled_string_exports_after_surviving_function_bindings -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_deps_program_rebinds_exported_constants_after_surviving_function_bindings -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/switch_string.res`, diffing the emitted
+    module against the checked-in snapshot to confirm the exported marshalled
+    string is rebound after the surviving functions like OCaml
+  - direct repro for `tests/tests/src/test_trywith.res`, diffing the emitted
+    module against the checked-in snapshot to confirm the remaining top-level
+    `u1` / `v` export-order drift is gone
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/switch_string.res` is no longer in the authoritative diff
+    set; the exported string payload now reaches export coercion as a direct
+    constant, so the emitted JS order matches OCaml's `function foo`, `function
+    bar`, `let s = ...` sequence
+  - `tests/tests/src/test_trywith.res` is no longer in the authoritative diff
+    set; after the earlier continuation-sensitive `trywith` fix, the last
+    remaining drift was the same exported-constant aliasing issue, and this
+    slice removes it
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the alias cleanup port
+- Topline impact:
+  - JS snapshot parity: **461 / 657** -> **461 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **196** -> **196** (**no change**)
+- Keep this change because it ports OCaml's late lambda alias classification
+  from `Lam_util.refine_let`; the wrapper count stayed flat, but the targeted
+  export-order files now match exactly and any offsetting drift belongs to a
+  different backend cluster.
+
+Latest iteration on **2026-04-14**:
+
 - Active slice: port the OCaml continuation-sensitive `trywith` lowering path
   so Rust compiles try bodies and handlers with the same `Declare` / `Assign` /
   `NeedValue` / `EffectCall` continuation split instead of forcing every
