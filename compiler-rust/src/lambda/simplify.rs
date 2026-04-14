@@ -455,6 +455,11 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 body_env.optional_blocks.insert(id.clone(), optional_info);
             }
             if let Some(string_value) = plain_string_constant(&value) {
+                // Match lam_pass_lets_dce: strict plain strings become aliases so later
+                // string folding and single-use inlining can see them.
+                if matches!(kind, LetKind::Strict | LetKind::StrictOpt) {
+                    kind = LetKind::Alias;
+                }
                 body_env.plain_strings.insert(id.clone(), string_value);
             }
             if let Some(substitution) = substitution_candidate(kind, original_value, &value) {
@@ -3895,15 +3900,23 @@ mod tests {
         );
 
         let simplified = simplify_for_js_backend(&lambda);
-        let Lambda::Llet(_, id, value, body) = simplified else {
-            panic!("expected exported binding after alias cleanup");
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(exports), _),
+            args,
+            ..
+        }) = &simplified
+        else {
+            panic!("expected the export block after alias cleanup");
         };
-        assert_eq!(id, exported);
         assert!(matches!(
-            *value,
-            Lambda::Lconst(Constant::String { ref s, .. }) if s == "hello world"
+            exports.as_slice(),
+            [id] if *id == exported
         ));
-        assert!(matches!(*body, Lambda::Lprim(_)));
+        assert!(matches!(
+            args.as_slice(),
+            [Lambda::Lconst(Constant::String { s, .. })] if s == "hello world"
+        ));
+        assert!(find_binding_value(&simplified, &exported).is_none());
     }
 
     #[test]
@@ -3931,7 +3944,7 @@ mod tests {
         let Lambda::Llet(kind, kept_id, kept_value, body) = simplified else {
             panic!("expected the shared plain-string binding to remain");
         };
-        assert_eq!(kind, LetKind::Strict);
+        assert_eq!(kind, LetKind::Alias);
         assert_eq!(kept_id, shared);
         assert!(matches!(
             *kept_value,
@@ -3971,6 +3984,93 @@ mod tests {
         assert!(matches!(
             *func.body,
             Lambda::Lconst(Constant::String { ref s, delim: None }) if s == "hello"
+        ));
+    }
+
+    #[test]
+    fn inlines_single_use_strict_plain_string_field_reads_into_module_blocks_like_ocaml() {
+        let shared = Ident::create_local("shared");
+        let projected = Ident::create_local("projected");
+        let exported = Ident::create_local("exported");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![exported.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(exported.clone())],
+            Location::none(),
+        );
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            exported.clone(),
+            Lambda::let_(
+                LetKind::Strict,
+                shared.clone(),
+                Lambda::const_(Constant::Block {
+                    tag: 0,
+                    tag_info: TagInfo::record(
+                        vec![("number".to_string(), false), ("name".to_string(), false)],
+                        crate::parser::ast::MutableFlag::Immutable,
+                    ),
+                    elements: vec![Constant::int(42), Constant::string("a")],
+                }),
+                Lambda::let_(
+                    LetKind::Strict,
+                    projected.clone(),
+                    Lambda::prim(
+                        Primitive::Pfield(
+                            0,
+                            crate::lambda::compat::FieldDbgInfo::Record {
+                                name: "name".to_string(),
+                                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                            },
+                        ),
+                        vec![Lambda::var(shared.clone())],
+                        Location::none(),
+                    ),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::module(vec!["a".to_string(), "name".to_string()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(shared.clone()), Lambda::var(projected.clone())],
+                        Location::none(),
+                    ),
+                ),
+            ),
+            export_block,
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Some(shared_value) = find_binding_value(&simplified, &shared) else {
+            panic!("expected shared allocating constant binding to remain");
+        };
+        assert!(matches!(
+            shared_value,
+            Lambda::Lconst(Constant::Block { .. })
+        ));
+        assert!(
+            find_binding_value(&simplified, &projected).is_none(),
+            "expected the single-use projected plain-string binding to inline",
+        );
+        let Some(exported_value) = find_binding_value(&simplified, &exported) else {
+            panic!("expected exported binding to remain");
+        };
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::Module(fields), _),
+            args,
+            ..
+        }) = exported_value
+        else {
+            panic!("expected module block");
+        };
+        assert_eq!(fields, &vec!["a".to_string(), "name".to_string()]);
+        assert!(matches!(&args[0], Lambda::Lvar(id) if *id == shared));
+        assert!(matches!(
+            &args[1],
+            Lambda::Lconst(Constant::String { s, delim: None }) if s == "a"
         ));
     }
 

@@ -43,6 +43,57 @@ reported:
 
 Latest iteration on **2026-04-14**:
 
+- Active slice: port the strict-plain-string `let` reclassification from
+  OCaml's `lam_pass_lets_dce` into `compiler-rust/src/lambda/simplify.rs` so
+  the JS-backend simplify pass treats `Strict` / `StrictOpt` plain-string
+  bindings as `Alias` lets before later string folding and alias cleanup
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this is a correctness-aligned follow-up in the
+  post-lowering simplify pass that the current JS-lowering path still depends
+  on, without reopening typedtree or lambda parity work
+- OCaml reference:
+  `compiler/core/lam_pass_lets_dce.ml`, where both the `StrictOpt` branch
+  after simplifying `l1` and the `Strict` branch re-emit plain-string
+  bindings as `Lam.let_ Alias v l1 (simplif lbody)` / `Lam.let_ Alias v l1
+  (simplif l2)` after recording the string in `string_table`
+- Rust change:
+  - reclassify simplified plain-string `LetKind::Strict` /
+    `LetKind::StrictOpt` bindings to `LetKind::Alias` before recording them in
+    `plain_strings`
+  - updated the existing string-alias regression expectations and added
+    focused coverage in
+    `inlines_single_use_strict_plain_string_field_reads_into_module_blocks_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml plain_string -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml folds_string_alias_chains -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact `compiler-args` repro for `tests/tests/src/alias_test.res` from
+    `tests/tests/lib/bs`, comparing the generated `/tmp/alias_test.mjs` to the
+    checked-in snapshot and to the pre-change harness-path output
+  - exact `compiler-args` repro for `tests/tests/src/RecordCoercion.res` from
+    `tests/tests/lib/bs`, comparing the generated
+    `/tmp/RecordCoercion.mjs` to the checked-in snapshot and to the pre-change
+    harness-path output
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - on the authoritative `tests/tests/lib/bs` compile path, the current
+    snapshot diffs for `tests/tests/src/alias_test.res` and
+    `tests/tests/src/RecordCoercion.res` remain unchanged by this slice; the
+    noisier standalone `-bs-module-type esmodule` repro overstated the effect
+    and is not authoritative for these project-owned files
+  - the authoritative diff corpus still has no `ExternalShadow.res` entry
+    after the same simplify change
+- Topline impact:
+  - JS snapshot parity: **398 / 657** -> **398 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **259** -> **259** (**no change**)
+- Keep this change because it matches the OCaml `lam_pass_lets_dce.ml`
+  `Strict` / `StrictOpt` plain-string-to-`Alias` transition exactly; the
+  current harness baseline is unchanged, but this removes another backend-path
+  semantic mismatch and adds regression coverage for the missing OCaml branch.
+
+Latest iteration on **2026-04-14**:
+
 - Active slice: match OCaml's `ocaml_to_js_eff` / `add_eff` composition in
   `compiler-rust/src/lambda/compile.rs` so ignored and unit-elided external
   arguments keep the whole compiled arg expression as the effect payload and
