@@ -8,7 +8,6 @@ use crate::lambda::beta_reduce;
 use crate::lambda::compat::{FieldDbgInfo, LetKind};
 use crate::lambda::compile_context::BoxedNullable;
 use crate::lambda::constant::Constant;
-use crate::lambda::free_variables::free_variables;
 use crate::lambda::primitive::Primitive;
 use crate::lambda::{
     Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda, LambdaSwitch,
@@ -16,12 +15,20 @@ use crate::lambda::{
 };
 use crate::location::Location;
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct SimplifyEnv {
     blocks: HashMap<Ident, ImmutableBlockInfo>,
     functions: HashMap<Ident, LFunction>,
     optional_blocks: HashMap<Ident, OptionalBlockInfo>,
     substitutions: HashMap<Ident, Lambda>,
+}
+
+#[derive(Default)]
+struct SavedEnvEntry {
+    block: Option<ImmutableBlockInfo>,
+    function: Option<LFunction>,
+    optional_block: Option<OptionalBlockInfo>,
+    substitution: Option<Lambda>,
 }
 
 #[derive(Clone)]
@@ -50,24 +57,71 @@ enum FlattenGroup {
 }
 
 impl SimplifyEnv {
-    fn without_ident(&self, id: &Ident) -> Self {
-        let mut next = self.clone();
-        next.blocks.remove(id);
-        next.functions.remove(id);
-        next.optional_blocks.remove(id);
-        next.substitutions.remove(id);
-        next
+    fn shadow_ident(&mut self, id: &Ident) -> SavedEnvEntry {
+        SavedEnvEntry {
+            block: self.blocks.remove(id),
+            function: self.functions.remove(id),
+            optional_block: self.optional_blocks.remove(id),
+            substitution: self.substitutions.remove(id),
+        }
     }
 
-    fn without_idents<'a>(&self, ids: impl IntoIterator<Item = &'a Ident>) -> Self {
-        let mut next = self.clone();
-        for id in ids {
-            next.blocks.remove(id);
-            next.functions.remove(id);
-            next.optional_blocks.remove(id);
-            next.substitutions.remove(id);
+    fn restore_ident(&mut self, id: Ident, saved: SavedEnvEntry) {
+        match saved.block {
+            Some(block) => {
+                self.blocks.insert(id.clone(), block);
+            }
+            None => {
+                self.blocks.remove(&id);
+            }
         }
-        next
+        match saved.function {
+            Some(function) => {
+                self.functions.insert(id.clone(), function);
+            }
+            None => {
+                self.functions.remove(&id);
+            }
+        }
+        match saved.optional_block {
+            Some(optional_block) => {
+                self.optional_blocks.insert(id.clone(), optional_block);
+            }
+            None => {
+                self.optional_blocks.remove(&id);
+            }
+        }
+        match saved.substitution {
+            Some(substitution) => {
+                self.substitutions.insert(id, substitution);
+            }
+            None => {
+                self.substitutions.remove(&id);
+            }
+        }
+    }
+
+    fn with_shadowed_ident<R>(&mut self, id: &Ident, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.shadow_ident(id);
+        let result = f(self);
+        self.restore_ident(id.clone(), saved);
+        result
+    }
+
+    fn with_shadowed_idents<'a, R>(
+        &mut self,
+        ids: impl IntoIterator<Item = &'a Ident>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved = ids
+            .into_iter()
+            .map(|id| (id.clone(), self.shadow_ident(id)))
+            .collect::<Vec<_>>();
+        let result = f(self);
+        for (id, saved_entry) in saved.into_iter().rev() {
+            self.restore_ident(id, saved_entry);
+        }
+        result
     }
 }
 
@@ -75,11 +129,11 @@ impl SimplifyEnv {
 pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     let flattened = deep_flatten_for_js_backend(lam);
     let exports = collect_exported_idents(&flattened);
-    let env = SimplifyEnv {
+    let mut env = SimplifyEnv {
         functions: collect_inlineable_functions(&flattened),
         ..SimplifyEnv::default()
     };
-    simplify_with_env(&flattened, &env, &exports)
+    simplify_with_env(&flattened, &mut env, &exports)
 }
 
 fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
@@ -392,7 +446,7 @@ fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
     aux(lam)
 }
 
-fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) -> Lambda {
+fn simplify_with_env(lam: &Lambda, env: &mut SimplifyEnv, exports: &HashSet<Ident>) -> Lambda {
     match lam {
         Lambda::Lvar(id) => env
             .substitutions
@@ -402,41 +456,44 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
         Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
         Lambda::Lapply(apply) => simplify_apply(apply, env, exports),
         Lambda::Lfunction(func) => {
-            let body_env = env.without_idents(func.params.iter());
+            let body = env.with_shadowed_idents(func.params.iter(), |body_env| {
+                simplify_with_env(&func.body, body_env, exports)
+            });
             Lambda::function_(
                 func.arity,
                 func.params.clone(),
-                simplify_with_env(&func.body, &body_env, exports),
+                body,
                 func.attr.clone(),
             )
         }
-        Lambda::Llet(kind, id, value, body) => {
+        Lambda::Llet(kind, id, value, body_expr) => {
             let value = simplify_with_env(value, env, exports);
-            let mut body_env = env.without_ident(id);
-            if let Some(block_info) = immutable_block_elements(&value) {
-                body_env.blocks.insert(id.clone(), block_info);
-            }
-            if let Some(optional_info) = optional_block_info(&value) {
-                body_env.optional_blocks.insert(id.clone(), optional_info);
-            }
-            if let Some(substitution) = substitution_candidate(*kind, &value) {
-                body_env.substitutions.insert(id.clone(), substitution);
-            }
-            if *kind != LetKind::Variable {
-                if let Some(func) = inlineable_local_function(&value) {
-                    if analysis::lfunction_can_be_inlined(&func) {
-                        body_env.functions.insert(id.clone(), func);
+            let body = env.with_shadowed_ident(id, |body_env| {
+                if let Some(block_info) = immutable_block_elements(&value) {
+                    body_env.blocks.insert(id.clone(), block_info);
+                }
+                if let Some(optional_info) = optional_block_info(&value) {
+                    body_env.optional_blocks.insert(id.clone(), optional_info);
+                }
+                if let Some(substitution) = substitution_candidate(*kind, &value) {
+                    body_env.substitutions.insert(id.clone(), substitution);
+                }
+                if *kind != LetKind::Variable {
+                    if let Some(func) = inlineable_local_function(&value) {
+                        if analysis::lfunction_can_be_inlined(&func) {
+                            body_env.functions.insert(id.clone(), func);
+                        }
                     }
                 }
-            }
-            let body = simplify_with_env(body, &body_env, exports);
+                simplify_with_env(body_expr, body_env, exports)
+            });
             if *kind == LetKind::Alias && !exports.contains(id) {
                 let use_info = alias_use_info(id, &body);
                 if use_info.times == 1 && !use_info.captured {
                     return substitute_alias_use(&body, id, &value);
                 }
             }
-            if !exports.contains(id) && !free_variables(&body).contains(id) {
+            if !exports.contains(id) && !lambda_hits_variable(id, &body) {
                 if analysis::no_side_effects(&value) {
                     body
                 } else {
@@ -446,14 +503,16 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 refine_let_binding(*kind, id, value, body)
             }
         }
-        Lambda::Lletrec(bindings, body) => {
-            let bound_ids = bindings.iter().map(|(id, _)| id);
-            let scoped_env = env.without_idents(bound_ids);
-            let bindings = bindings
-                .iter()
-                .map(|(id, expr)| (id.clone(), simplify_with_env(expr, &scoped_env, exports)))
-                .collect();
-            let body = simplify_with_env(body, &scoped_env, exports);
+        Lambda::Lletrec(bindings, body_expr) => {
+            let (bindings, body) =
+                env.with_shadowed_idents(bindings.iter().map(|(id, _)| id), |scoped_env| {
+                    let bindings = bindings
+                        .iter()
+                        .map(|(id, expr)| (id.clone(), simplify_with_env(expr, scoped_env, exports)))
+                        .collect();
+                    let body = simplify_with_env(body_expr, scoped_env, exports);
+                    (bindings, body)
+                });
             Lambda::letrec(bindings, body)
         }
         Lambda::Lprim(info) => simplify_primitive(info, env, exports),
@@ -496,19 +555,23 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 .collect(),
         ),
         Lambda::LstaticCatch(body, (id, vars), handler) => {
-            let scoped_env = env.without_idents(vars.iter());
+            let handler = env.with_shadowed_idents(vars.iter(), |scoped_env| {
+                simplify_with_env(handler, scoped_env, exports)
+            });
             Lambda::LstaticCatch(
                 Box::new(simplify_with_env(body, env, exports)),
                 (*id, vars.clone()),
-                Box::new(simplify_with_env(handler, &scoped_env, exports)),
+                Box::new(handler),
             )
         }
         Lambda::LtryWith(body, exn, handler) => {
-            let scoped_env = env.without_ident(exn);
+            let handler = env.with_shadowed_ident(exn, |scoped_env| {
+                simplify_with_env(handler, scoped_env, exports)
+            });
             Lambda::LtryWith(
                 Box::new(simplify_with_env(body, env, exports)),
                 exn.clone(),
-                Box::new(simplify_with_env(handler, &scoped_env, exports)),
+                Box::new(handler),
             )
         }
         Lambda::LifThenElse(cond, then_, else_) => {
@@ -541,13 +604,15 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             Box::new(simplify_with_env(body, env, exports)),
         ),
         Lambda::Lfor(id, from, to, direction, body) => {
-            let scoped_env = env.without_ident(id);
+            let body = env.with_shadowed_ident(id, |scoped_env| {
+                simplify_with_env(body, scoped_env, exports)
+            });
             Lambda::Lfor(
                 id.clone(),
                 Box::new(simplify_with_env(from, env, exports)),
                 Box::new(simplify_with_env(to, env, exports)),
                 *direction,
-                Box::new(simplify_with_env(body, &scoped_env, exports)),
+                Box::new(body),
             )
         }
         Lambda::Lassign(id, value) => {
@@ -563,96 +628,95 @@ struct AliasUseInfo {
 }
 
 fn alias_use_info(target: &Ident, lam: &Lambda) -> AliasUseInfo {
-    fn collect(target: &Ident, lam: &Lambda, info: &mut AliasUseInfo) {
+    fn collect(target: &Ident, lam: &Lambda, info: &mut AliasUseInfo, captured: bool) {
         match lam {
             Lambda::Lvar(id) => {
                 if id.same(target) {
                     info.times += 1;
+                    info.captured |= captured;
                 }
             }
             Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
             Lambda::Lapply(apply) => {
-                collect(target, &apply.ap_func, info);
+                collect(target, &apply.ap_func, info, captured);
                 for arg in &apply.ap_args {
-                    collect(target, arg, info);
+                    collect(target, arg, info, captured);
                 }
             }
             Lambda::Lfunction(func) => {
-                if free_variables(&func.body).contains(target) {
-                    info.captured = true;
-                }
-                collect(target, &func.body, info);
+                collect(target, &func.body, info, true);
             }
             Lambda::Llet(_, _, value, body) => {
-                collect(target, value, info);
-                collect(target, body, info);
+                collect(target, value, info, captured);
+                collect(target, body, info, captured);
             }
             Lambda::Lletrec(bindings, body) => {
                 for (_, binding) in bindings {
-                    collect(target, binding, info);
+                    collect(target, binding, info, captured);
                 }
-                collect(target, body, info);
+                collect(target, body, info, captured);
             }
             Lambda::Lprim(info_) => {
                 for arg in &info_.args {
-                    collect(target, arg, info);
+                    collect(target, arg, info, captured);
                 }
             }
             Lambda::Lswitch(scrutinee, switch) => {
-                collect(target, scrutinee, info);
+                collect(target, scrutinee, info, captured);
                 for (_, lam) in &switch.sw_consts {
-                    collect(target, lam, info);
+                    collect(target, lam, info, captured);
                 }
                 for (_, lam) in &switch.sw_blocks {
-                    collect(target, lam, info);
+                    collect(target, lam, info, captured);
                 }
                 if let Some(fallback) = &switch.sw_failaction {
-                    collect(target, fallback, info);
+                    collect(target, fallback, info, captured);
                 }
             }
             Lambda::LstringSwitch(scrutinee, cases, default) => {
-                collect(target, scrutinee, info);
+                collect(target, scrutinee, info, captured);
                 for (_, lam) in cases {
-                    collect(target, lam, info);
+                    collect(target, lam, info, captured);
                 }
                 if let Some(fallback) = default {
-                    collect(target, fallback, info);
+                    collect(target, fallback, info, captured);
                 }
             }
             Lambda::LstaticRaise(_, args) => {
                 for arg in args {
-                    collect(target, arg, info);
+                    collect(target, arg, info, captured);
                 }
             }
             Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
-                collect(target, body, info);
-                collect(target, handler, info);
+                collect(target, body, info, captured);
+                collect(target, handler, info, captured);
             }
             Lambda::LifThenElse(cond, then_, else_) => {
-                collect(target, cond, info);
-                collect(target, then_, info);
-                collect(target, else_, info);
+                collect(target, cond, info, captured);
+                collect(target, then_, info, captured);
+                collect(target, else_, info, captured);
             }
             Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
-                collect(target, first, info);
-                collect(target, second, info);
+                collect(target, first, info, captured);
+                collect(target, second, info, captured);
             }
             Lambda::Lfor(_, from, to, _, body) => {
-                collect(target, from, info);
-                collect(target, to, info);
-                collect(target, body, info);
+                collect(target, from, info, captured);
+                collect(target, to, info, captured);
+                collect(target, body, info, captured);
             }
             Lambda::Lassign(id, value) => {
                 if id.same(target) {
                     info.times += 1;
+                    info.captured |= captured;
                 }
-                collect(target, value, info);
+                collect(target, value, info, captured);
             }
         }
     }
 
     let mut info = AliasUseInfo::default();
-    collect(target, lam, &mut info);
+    collect(target, lam, &mut info, false);
     info
 }
 
@@ -801,7 +865,7 @@ fn refine_let_binding(kind: LetKind, id: &Ident, value: Lambda, body: Lambda) ->
 
 fn simplify_primitive(
     info: &crate::lambda::PrimInfo,
-    env: &SimplifyEnv,
+    env: &mut SimplifyEnv,
     exports: &HashSet<Ident>,
 ) -> Lambda {
     if let Primitive::Pmakeblock(_, TagInfo::ModuleExport(export_ids), _) = &info.primitive {
@@ -1385,7 +1449,7 @@ fn block_field<'a>(
     }
 }
 
-fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) -> Lambda {
+fn simplify_apply(apply: &Apply, env: &mut SimplifyEnv, exports: &HashSet<Ident>) -> Lambda {
     let args: Vec<_> = apply
         .ap_args
         .iter()
