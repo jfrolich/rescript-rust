@@ -43,6 +43,72 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: rerun the regular backend alias/let cleanup once more after the
+  lets-DCE-style direct-function sweep, so the result of that direct beta
+  reduction goes back through the same non-direct cleanup OCaml applies after
+  `Lam_beta_reduce.no_names_beta_reduce`
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`, because the mismatch stayed in the final
+  post-lowering lambda cleanup boundary before JS IR lowering:
+  `lam_pass_lets_dce.ml` beta-reduces a direct function call and then runs the
+  resulting lambda back through `simplif`, while Rust's final
+  `simplify_direct_function_applications_like_lets_dce(...)` sweep stopped
+  after the direct reduction and left OCaml-cleaned lets/aliases behind
+- OCaml reference:
+  `compiler/core/lam_pass_lets_dce.ml`, especially the
+  `Lam_beta_reduce.no_names_beta_reduce` + `simplif` flow;
+  `compiler/core/lam_compile_main.ml`; and
+  `compiler/core/lam_compile.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so
+    `simplify_for_js_backend(...)` now runs one more
+    `simplify_for_js_backend_once(..., allow_direct = false)` pass after the
+    lets-DCE-style direct beta-reduction sweep
+  - added focused regression coverage in
+    `reruns_backend_cleanup_after_lets_dce_beta_reduces_uncurried_pjs_fn_make_calls`
+    for the `arity_deopt`-style nested `Pjs_fn_make` uncurry chain that OCaml
+    cleans further after the direct reduction
+  - updated
+    `beta_reduces_downarity_pjs_fn_make_calls_past_the_outer_apply` to assert
+    the cleaner OCaml-aligned surviving callee shape after the extra cleanup
+    rerun
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml reruns_backend_cleanup_after_lets_dce_beta_reduces_uncurried_pjs_fn_make_calls -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml beta_reduces_downarity_pjs_fn_make_calls_past_the_outer_apply -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml simplifies_named_nested_pjs_fn_make_application_chain_from_ari_regress_shape -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml compile_effectful_underscore_binding_from_nested_js_function_calls_survives_shake -- --nocapture`
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/arity_deopt.res`, diffing `/tmp/arity_deopt.mjs` against
+    the checked-in snapshot
+  - authoritative guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/ari_regress_test.res`, diffing `/tmp/ari_regress_test.mjs`
+    against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/arity_deopt.res` is now an exact snapshot match again;
+    the lets introduced by the direct `Pjs_fn_make` reduction are cleaned up
+    before JS lowering, matching OCaml's final backend simplification flow
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - `tests/tests/src/ari_regress_test.res` is unchanged and still differs in
+    the same remaining arity cluster, so its root cause is elsewhere in the
+    backend
+  - the authoritative wrapper baseline is unchanged overall, which means this
+    OCaml-aligned fix removed at least one concrete snapshot diff but another
+    failure replaced it elsewhere in the 657-file set
+- Topline impact:
+  - JS snapshot parity: **485 / 657** -> **485 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **172** -> **172** (**no change**)
+- Keep this change because it matches OCaml's lets-DCE cleanup boundary more
+  closely and fixes `arity_deopt.res` without adding any printer-only rewrite;
+  the unchanged topline means the next slice should identify the offsetting
+  backend regression instead of reverting this verified simplifier alignment.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: remove Rust's remaining second-chance direct beta reduction in
   `simplify_apply(...)` so the JS backend only beta-reduces direct calls when
   the original callee is syntactically a function, instead of simplifying a

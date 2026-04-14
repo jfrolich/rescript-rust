@@ -90,7 +90,8 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     let preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
     let first = simplify_for_js_backend_once(&flattened, &preserved_export_bindings, true);
     let second = simplify_for_js_backend_once(&first, &preserved_export_bindings, false);
-    simplify_direct_function_applications_like_lets_dce(&second)
+    let lets_dce_style = simplify_direct_function_applications_like_lets_dce(&second);
+    simplify_for_js_backend_once(&lets_dce_style, &preserved_export_bindings, false)
 }
 
 fn simplify_for_js_backend_once(
@@ -4115,6 +4116,144 @@ mod tests {
     }
 
     #[test]
+    fn reruns_backend_cleanup_after_lets_dce_beta_reduces_uncurried_pjs_fn_make_calls() {
+        fn contains_let(lam: &Lambda) -> bool {
+            match lam {
+                Lambda::Llet(_, _, _, _) | Lambda::Lletrec(_, _) => true,
+                Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+                Lambda::Lapply(apply) => {
+                    contains_let(&apply.ap_func) || apply.ap_args.iter().any(contains_let)
+                }
+                Lambda::Lfunction(func) => contains_let(&func.body),
+                Lambda::Lprim(info) => info.args.iter().any(contains_let),
+                Lambda::Lswitch(scrutinee, switch) => {
+                    contains_let(scrutinee)
+                        || switch.sw_consts.iter().any(|(_, lam)| contains_let(lam))
+                        || switch.sw_blocks.iter().any(|(_, lam)| contains_let(lam))
+                        || switch
+                            .sw_failaction
+                            .as_deref()
+                            .is_some_and(contains_let)
+                }
+                Lambda::LstringSwitch(scrutinee, cases, default) => {
+                    contains_let(scrutinee)
+                        || cases.iter().any(|(_, lam)| contains_let(lam))
+                        || default.as_deref().is_some_and(contains_let)
+                }
+                Lambda::LstaticRaise(_, args) => args.iter().any(contains_let),
+                Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                    contains_let(body) || contains_let(handler)
+                }
+                Lambda::LifThenElse(cond, then_, else_) => {
+                    contains_let(cond) || contains_let(then_) || contains_let(else_)
+                }
+                Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                    contains_let(first) || contains_let(second)
+                }
+                Lambda::Lfor(_, start, end, _, body) => {
+                    contains_let(start) || contains_let(end) || contains_let(body)
+                }
+                Lambda::Lassign(_, value) => contains_let(value),
+            }
+        }
+
+        let f1 = Ident::create_local("f1");
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let z = Ident::create_local("z");
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            f1.clone(),
+            Lambda::prim(
+                Primitive::PjsFnMake(1),
+                vec![Lambda::function_(
+                    1,
+                    vec![x.clone()],
+                    Lambda::prim(
+                        Primitive::PjsFnMake(2),
+                        vec![Lambda::function_(
+                            2,
+                            vec![y.clone(), z.clone()],
+                            Lambda::prim(
+                                Primitive::Paddint,
+                                vec![
+                                    Lambda::prim(
+                                        Primitive::Paddint,
+                                        vec![Lambda::var(x), Lambda::var(y)],
+                                        Location::none(),
+                                    ),
+                                    Lambda::var(z),
+                                ],
+                                Location::none(),
+                            ),
+                            FunctionAttribute::default(),
+                        )],
+                        Location::none(),
+                    ),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            ),
+            Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::Lapply(Apply {
+                    ap_func: Box::new(Lambda::var(f1)),
+                    ap_args: vec![Lambda::const_(Constant::int(1))],
+                    ap_info: ApInfo {
+                        loc: Location::none(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Uncurry,
+                    },
+                    ap_transformed_jsx: false,
+                })),
+                ap_args: vec![
+                    Lambda::const_(Constant::int(2)),
+                    Lambda::const_(Constant::int(3)),
+                ],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Uncurry,
+                },
+                ap_transformed_jsx: false,
+            }),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        assert!(
+            !contains_let(&simplified),
+            "expected the final backend cleanup pass to remove beta-reduction lets, got {simplified:?}"
+        );
+        assert!(
+            matches!(
+                simplified,
+                Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Paddint,
+                    ref args,
+                    ..
+                }) if matches!(
+                    args.as_slice(),
+                    [
+                        Lambda::Lprim(crate::lambda::PrimInfo {
+                            primitive: Primitive::Paddint,
+                            args: inner_args,
+                            ..
+                        }),
+                        Lambda::Lconst(Constant::Int { i: 3, .. }),
+                    ] if matches!(
+                        inner_args.as_slice(),
+                        [
+                            Lambda::Lconst(Constant::Int { i: 1, .. }),
+                            Lambda::Lconst(Constant::Int { i: 2, .. }),
+                        ]
+                    )
+                )
+            ),
+            "expected the arity_deopt-style uncurry chain to collapse to nested integer adds, got {simplified:?}"
+        );
+    }
+
+    #[test]
     fn removes_unused_pure_sequences() {
         let lambda = Lambda::seq(
             Lambda::const_(Constant::int(1)),
@@ -6031,10 +6170,10 @@ mod tests {
                             vec![
                                 Lambda::prim(
                                     Primitive::Paddint,
-                                    vec![Lambda::var(x.clone()), Lambda::var(y)],
+                                    vec![Lambda::var(x.clone()), Lambda::var(y.clone())],
                                     Location::none(),
                                 ),
-                                Lambda::var(z),
+                                Lambda::var(z.clone()),
                             ],
                             Location::none(),
                         ),
@@ -6063,19 +6202,42 @@ mod tests {
         }));
 
         let Lambda::Lapply(apply) = simplified else {
-            panic!("expected the outer apply to remain after one backend beta-reduction sweep");
+            panic!("expected the outer uncurry apply to survive the final backend cleanup");
         };
-        let Lambda::Llet(kind, bound, value, body) = apply.ap_func.as_ref() else {
-            panic!("expected the surviving callee to stay let-wrapped, got {apply:?}");
+        let Lambda::Lfunction(func) = apply.ap_func.as_ref() else {
+            panic!("expected the final cleanup pass to unwrap the surviving callee to a direct function, got {apply:?}");
         };
 
-        assert_eq!(*kind, LetKind::Strict);
-        assert!(bound.same(&x));
+        assert_eq!(func.params.len(), 2);
         assert!(matches!(
-            value.as_ref(),
-            Lambda::Lconst(Constant::Int { i: 1, .. })
+            func.params.as_slice(),
+            [first, second] if first.same(&y) && second.same(&z)
         ));
-        assert!(matches!(body.as_ref(), Lambda::Lfunction(_)));
+        assert!(matches!(
+            func.body.as_ref(),
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Paddint,
+                args,
+                ..
+            }) if matches!(
+                args.as_slice(),
+                [
+                    Lambda::Lprim(crate::lambda::PrimInfo {
+                        primitive: Primitive::Paddint,
+                        args: inner_args,
+                        ..
+                    }),
+                    Lambda::Lvar(last),
+                ] if last.same(&z)
+                    && matches!(
+                        inner_args.as_slice(),
+                        [
+                            Lambda::Lconst(Constant::Int { i: 1, .. }),
+                            Lambda::Lvar(middle),
+                        ] if middle.same(&y)
+                    )
+            )
+        ));
         assert_eq!(apply.ap_args.len(), 2);
     }
 
