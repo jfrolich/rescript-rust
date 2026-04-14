@@ -6,13 +6,14 @@ use std::{io::Write, path::Path};
 use rescript::{build, cli, cmd, format, lock, watcher};
 
 fn main() -> Result<()> {
-    // Set a larger stack size for Rayon worker threads. The --in-process mode
-    // compiles modules with deep type-checker recursion, so a larger base
-    // stack reduces the chance of worker-thread stack overflow.
+    // Temporary workaround: the in-process path still hits very deep compiler
+    // recursion in some dependency graphs. Give Rayon workers a huge reserved
+    // stack so the build can progress while the recursion/stack-shape issues
+    // are fixed elsewhere.
     rayon::ThreadPoolBuilder::new()
-        .stack_size(64 * 1024 * 1024)
+        .stack_size(10 * 1024 * 1024 * 1024)
         .build_global()
-        .ok();
+        .expect("failed to initialize Rayon thread pool");
 
     let cli = cli::parse_with_default().unwrap_or_else(|err| err.exit());
 

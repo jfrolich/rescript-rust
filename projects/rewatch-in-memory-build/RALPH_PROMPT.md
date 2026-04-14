@@ -104,6 +104,7 @@ Steering note:
 - Do not use that as justification to keep growing the in-process `PersistentEnv` design.
 - Do not add more disk/source fallback behavior to make missing interfaces resolve. In `--in-process`, a lookup miss means the scheduler or bootstrap ordering is wrong.
 - Do not weaken acceptance by editing `rewatch/testrepo` sources or relying on stubbed package replacements in the final in-process suite. Reduced repros are allowed only as separate diagnostic tooling.
+- If the current acceptance repo itself contains third-party packages whose checked-in `.res` files are stubs while only prebuilt compiler assets contain usable interfaces, call that out explicitly as an acceptance blocker. Do not quietly reintroduce asset reads and do not silently pretend the sources are complete.
 - This project is not responsible for stack-usage optimization. If the temporary practical fix is to raise allowed stack sizes very aggressively, even into multi-GB territory, that is acceptable while the separate optimization work happens elsewhere.
 
 Priority order from here:

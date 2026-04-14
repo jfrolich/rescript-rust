@@ -149,6 +149,7 @@ Test discipline:
 - A stubbed/simplified testrepo run is a debugging tool only.
 - Do not treat edits to `rewatch/testrepo` source files as acceptance for the feature.
 - Keep the acceptance suite representative of the real build graph. If you need a smaller repro, add a separate diagnostic path rather than weakening `rewatch/tests/in-process.sh`.
+- Be aware that the current `rewatch/testrepo` already contains some third-party packages with stub checked-in `.res` sources and only prebuilt compiler assets in `lib/bs` / `lib/ocaml`. If the project keeps the strict rule that `--in-process` may not read those assets, the acceptance repo itself must eventually be updated to contain real sources for those packages.
 
 ## Temporary Stack Policy
 

@@ -442,7 +442,7 @@ impl<'a, 'b> TypeGraphSerializer<'a, 'b> {
             row_fields: rd
                 .row_fields
                 .iter()
-                .map(|(label, field)| (label.clone(), self.serialize_row_field(field)))
+                .map(|(label, field)| (label.to_string(), self.serialize_row_field(field)))
                 .collect(),
             row_more: self.serialize_type(rd.row_more),
             row_closed: rd.row_closed,
@@ -702,7 +702,7 @@ fn internalize_row_desc(
         row_fields: prd
             .row_fields
             .iter()
-            .map(|(label, field)| (label.clone(), internalize_row_field(field, remap, ctx)))
+            .map(|(label, field)| (label.as_str().into(), internalize_row_field(field, remap, ctx)))
             .collect(),
         row_more: remap[prd.row_more],
         row_closed: prd.row_closed,
