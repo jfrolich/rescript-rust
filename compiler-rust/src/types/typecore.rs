@@ -10884,6 +10884,27 @@ fn type_record(
             .map(|expr| expr.exp_type)
             .unwrap_or(record_ty)
     });
+    let disambiguation_labels_by_name = build_record_label_descriptions(
+        disambiguation_ty,
+        env,
+        &mut tctx.persistent_env,
+        ctx,
+    )
+    .map(|labels| {
+        labels
+            .into_iter()
+            .map(|label| (label.lbl_name.clone(), label))
+            .collect::<HashMap<_, _>>()
+    });
+    let expected_labels_by_name =
+        build_record_label_descriptions(expected_ty, env, &mut tctx.persistent_env, ctx).map(
+            |labels| {
+                labels
+                    .into_iter()
+                    .map(|label| (label.lbl_name.clone(), label))
+                    .collect::<HashMap<_, _>>()
+            },
+        );
 
     // OCaml builds record definitions by label position over the full label set.
     // Keep explicit overrides keyed by lbl_pos so we can reconstruct full fields.
@@ -10934,6 +10955,11 @@ fn type_record(
                 Some(disambiguation_ty),
             )
             .or_else(|| {
+                disambiguation_labels_by_name
+                    .as_ref()
+                    .and_then(|labels| labels.get(&field_name).cloned())
+            })
+            .or_else(|| {
                 disambiguate_label(
                     &field_name,
                     disambiguation_ty,
@@ -10973,13 +10999,19 @@ fn type_record(
 
         // Build label description (prefer env-disambiguated metadata).
         let (mut label_desc, field_input_ty, poly_vars) = if let Some(env_label) = disambiguated {
-            let env_label = lookup_label_by_expected_type(
-                &field_name,
-                expected_ty,
-                env,
-                &mut tctx.persistent_env,
-                ctx,
-            )
+            let expected_label = expected_labels_by_name
+                .as_ref()
+                .and_then(|labels| labels.get(&field_name).cloned());
+            let env_label = expected_label
+            .or_else(|| {
+                lookup_label_by_expected_type(
+                    &field_name,
+                    expected_ty,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                )
+            })
             .filter(|expected_label| {
                 if prefer_expected_closed_record_label
                     && should_force_expected_closed_record_label(
@@ -11137,7 +11169,7 @@ fn type_record(
         }
     }
     if all_labels.is_none() {
-        if let Some(lbl) = first_disambiguated_label {
+        if let Some(ref lbl) = first_disambiguated_label {
             all_labels = get_record_labels(ctx, env, &mut tctx.persistent_env, lbl.lbl_res);
         }
     }
@@ -11146,6 +11178,39 @@ fn type_record(
         .is_some_and(|labels| labels.iter().any(|ld| ld.ld_id.name() == "..."))
     {
         all_labels = None;
+    }
+    let mut all_label_descriptions = if has_dotdotdot_field {
+        None
+    } else {
+        build_record_label_descriptions(record_ty, env, &mut tctx.persistent_env, ctx).or_else(
+            || build_record_label_descriptions(disambiguation_ty, env, &mut tctx.persistent_env, ctx),
+        )
+    };
+    if all_label_descriptions.is_none() {
+        if let Some(base_expr) = typed_base.as_ref() {
+            all_label_descriptions = build_record_label_descriptions(
+                base_expr.exp_type,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            );
+        }
+    }
+    if all_label_descriptions.is_none() {
+        if let Some(lbl) = first_disambiguated_label.as_ref() {
+            all_label_descriptions = build_record_label_descriptions(
+                lbl.lbl_res,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            );
+        }
+    }
+    if all_label_descriptions
+        .as_ref()
+        .is_some_and(|labels| labels.iter().any(|ld| ld.lbl_name == "..."))
+    {
+        all_label_descriptions = None;
     }
     let mut typed_fields = Vec::new();
 
@@ -11199,35 +11264,32 @@ fn type_record(
                 continue;
             }
 
-            // For missing fields, try to get label desc without instance_label
-            // OCaml uses label_descriptions (lbl_all) directly — no fresh instance
-            let disambiguated = disambiguate_label(
-                &label_name,
-                disambiguation_ty,
-                env,
-                &mut tctx.persistent_env,
-                ctx,
-            );
+            // OCaml uses the record family's label descriptions directly for
+            // omitted fields rather than re-disambiguating each label name.
+            let raw_label_desc = all_label_descriptions
+                .as_ref()
+                .and_then(|labels| labels.get(lbl_idx).cloned())
+                .filter(|label| label.lbl_name == label_name);
 
             // For kept fields (base expression), we still need instance_label
             // for type resolution. For optional None fields, use lbl_arg directly.
             if typed_base.is_some() {
-                let label_desc = if let Some(env_label) = disambiguated {
+                let label_desc = if let Some(raw_label_desc) = raw_label_desc.as_ref() {
                     let (_poly_vars, ty_arg, ty_res) =
-                        crate::types::ctype::instance_label(ctx, false, &env_label);
+                        crate::types::ctype::instance_label(ctx, false, raw_label_desc);
                     let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
                     crate::types::LabelDescription {
-                        lbl_name: env_label.lbl_name.clone(),
+                        lbl_name: raw_label_desc.lbl_name.clone(),
                         lbl_res: record_ty,
                         lbl_arg: ty_arg,
-                        lbl_mut: env_label.lbl_mut.clone(),
-                        lbl_optional: env_label.lbl_optional,
-                        lbl_pos: env_label.lbl_pos,
-                        lbl_all: env_label.lbl_all,
-                        lbl_repres: env_label.lbl_repres.clone(),
-                        lbl_private: env_label.lbl_private.clone(),
-                        lbl_loc: env_label.lbl_loc.clone(),
-                        lbl_attributes: env_label.lbl_attributes.clone(),
+                        lbl_mut: raw_label_desc.lbl_mut.clone(),
+                        lbl_optional: raw_label_desc.lbl_optional,
+                        lbl_pos: raw_label_desc.lbl_pos,
+                        lbl_all: raw_label_desc.lbl_all,
+                        lbl_repres: raw_label_desc.lbl_repres.clone(),
+                        lbl_private: raw_label_desc.lbl_private.clone(),
+                        lbl_loc: raw_label_desc.lbl_loc.clone(),
+                        lbl_attributes: raw_label_desc.lbl_attributes.clone(),
                     }
                 } else {
                     crate::types::LabelDescription {
@@ -11255,12 +11317,12 @@ fn type_record(
 
             // For missing optional fields: use lbl_arg directly (no instance_label),
             // matching OCaml's option_none(lbl.lbl_arg, loc) pattern
-            let is_optional = disambiguated
+            let is_optional = raw_label_desc
                 .as_ref()
                 .map_or(label_decl.ld_optional, |l| l.lbl_optional);
             if is_optional {
                 // Get the option type from the raw label, not from instance_label
-                let option_ty = disambiguated
+                let option_ty = raw_label_desc
                     .as_ref()
                     .map_or_else(|| label_decl.ld_type, |l| l.lbl_arg);
                 let none_cstr = make_none_constructor(ctx);
@@ -11276,8 +11338,11 @@ fn type_record(
                     Attributes::new(),
                 );
                 // Build label desc using the raw label's lbl_arg (not instanced)
-                let label_desc = if let Some(env_label) = disambiguated {
-                    env_label.clone()
+                let label_desc = if let Some(raw_label_desc) = raw_label_desc {
+                    crate::types::LabelDescription {
+                        lbl_res: record_ty,
+                        ..raw_label_desc
+                    }
                 } else {
                     crate::types::LabelDescription {
                         lbl_name: label_name.clone(),
@@ -17581,6 +17646,35 @@ fn lookup_label_by_expected_type<'a>(
 ) -> Option<crate::types::LabelDescription> {
     let visible_path =
         extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx)?;
+
+    for env_label in env.find_all_labels(label_name).iter().rev() {
+        let label_res = ctx.repr(env_label.lbl_res);
+        let (label_path, label_args) = {
+            let label_desc = ctx.get_desc(label_res);
+            match &*label_desc {
+                TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
+                _ => continue,
+            }
+        };
+
+        if label_path.same(&visible_path)
+            || compare_type_paths_for_disambiguation(
+                &label_path,
+                &visible_path,
+                env,
+                pers_env,
+                ctx,
+            )
+        {
+            let mut selected = (*env_label).clone();
+            if !label_path.same(&visible_path) {
+                selected.lbl_res = ctx.new_generic_constr(visible_path.clone(), label_args);
+            }
+            qualify_label_description_paths(&mut selected, env, pers_env, ctx);
+            return Some(selected);
+        }
+    }
+
     let (_concrete_path, _actual_args, type_decl) =
         extract_concrete_record_type_info(record_ty, env, pers_env, ctx)?;
     let (labels, repr) = match &type_decl.type_kind {
