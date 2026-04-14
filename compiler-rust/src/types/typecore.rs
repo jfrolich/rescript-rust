@@ -13701,7 +13701,6 @@ fn type_pack(
             ));
         }
     };
-
     let typed_module = crate::types::typemod::type_module_expr_with_alias_mode(
         tctx,
         env,
@@ -18960,11 +18959,17 @@ fn scope_local_module_cache_key(base_key: &str, module_path: &Path, env: &Env) -
     }
 }
 
-fn module_components_cache_key(module_path: &Path, env: &Env) -> Option<String> {
-    path_cache_key(module_path).map(|key| {
-        let base_key = format!("module-components::{key}");
-        scope_local_module_cache_key(&base_key, module_path, env)
-    })
+fn module_components_cache_key(
+    module_path: &Path,
+    env: &Env,
+) -> Option<crate::types::context::QualifiedModuleComponentsCacheKey> {
+    if matches!(module_path, Path::Papply(_, _)) {
+        return None;
+    }
+    Some(crate::types::context::QualifiedModuleComponentsCacheKey::new(
+        module_path.clone(),
+        module_path_requires_env_scoped_cache(env, module_path).then_some(env.id()),
+    ))
 }
 
 fn build_module_components_from_parent_path<'a>(
@@ -19026,7 +19031,7 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     }
 
     let module_key = module_components_cache_key(module_path, env);
-    if let Some(module_key) = module_key.as_deref() {
+    if let Some(module_key) = module_key.as_ref() {
         if let Some(result) = ctx.with_qualified_module_components(module_key, |components| {
             (f.take()
                 .expect("qualified module components callback reused"))(components)
@@ -19047,7 +19052,7 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     let result = (f
         .take()
         .expect("qualified module components callback reused"))(&components);
-    if let Some(module_key) = module_key.as_deref() {
+    if let Some(module_key) = module_key {
         ctx.register_qualified_module_components(module_key, components);
     }
     Some(result)
