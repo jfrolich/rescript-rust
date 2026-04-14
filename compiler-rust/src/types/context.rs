@@ -190,6 +190,17 @@ pub struct TypeContext<'a> {
     qualified_module_components_cache:
         RefCell<ahash::AHashMap<String, super::env_lazy::QualifiedModuleComponents>>,
 
+    /// Cached dotted value lookups keyed by resolved module access path.
+    resolved_module_value_cache:
+        RefCell<ahash::AHashMap<(Path, String), (Path, super::decl::ValueDescription)>>,
+
+    /// Cached dotted type lookups keyed by resolved module access path.
+    resolved_module_type_cache:
+        RefCell<ahash::AHashMap<(Path, String), (Path, Ident, super::decl::TypeDeclaration)>>,
+
+    /// Cached child-module access paths keyed by resolved parent access path.
+    resolved_child_module_path_cache: RefCell<ahash::AHashMap<(Path, String), Path>>,
+
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
 
@@ -300,6 +311,9 @@ impl<'a> TypeContext<'a> {
             resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
+            resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
+            resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
+            resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Vec::new()),
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
@@ -463,6 +477,83 @@ impl<'a> TypeContext<'a> {
         let cache = self.qualified_module_components_cache.borrow();
         let components = cache.get(path)?;
         Some(f(components))
+    }
+
+    /// Cache a dotted value lookup for a resolved module access path.
+    pub(crate) fn register_resolved_module_value(
+        &self,
+        module_path: &Path,
+        value_name: &str,
+        path: Path,
+        desc: super::decl::ValueDescription,
+    ) {
+        self.resolved_module_value_cache.borrow_mut().insert(
+            (module_path.clone(), value_name.to_string()),
+            (path, desc),
+        );
+    }
+
+    /// Look up a cached dotted value lookup for a resolved module access path.
+    pub(crate) fn find_resolved_module_value(
+        &self,
+        module_path: &Path,
+        value_name: &str,
+    ) -> Option<(Path, super::decl::ValueDescription)> {
+        self.resolved_module_value_cache
+            .borrow()
+            .get(&(module_path.clone(), value_name.to_string()))
+            .cloned()
+    }
+
+    /// Cache a dotted type lookup for a resolved module access path.
+    pub(crate) fn register_resolved_module_type(
+        &self,
+        module_path: &Path,
+        type_name: &str,
+        access_path: Path,
+        id: Ident,
+        decl: super::decl::TypeDeclaration,
+    ) {
+        self.resolved_module_type_cache.borrow_mut().insert(
+            (module_path.clone(), type_name.to_string()),
+            (access_path, id, decl),
+        );
+    }
+
+    /// Look up a cached dotted type lookup for a resolved module access path.
+    pub(crate) fn find_resolved_module_type(
+        &self,
+        module_path: &Path,
+        type_name: &str,
+    ) -> Option<(Path, Ident, super::decl::TypeDeclaration)> {
+        self.resolved_module_type_cache
+            .borrow()
+            .get(&(module_path.clone(), type_name.to_string()))
+            .cloned()
+    }
+
+    /// Cache a resolved child-module access path.
+    pub(crate) fn register_resolved_child_module_path(
+        &self,
+        parent_path: &Path,
+        child_name: &str,
+        child_path: Path,
+    ) {
+        self.resolved_child_module_path_cache
+            .borrow_mut()
+            .insert((parent_path.clone(), child_name.to_string()), child_path);
+    }
+
+    /// Look up a cached resolved child-module access path.
+    pub(crate) fn find_resolved_child_module_path(
+        &self,
+        parent_path: &Path,
+        child_name: &str,
+    ) -> Option<Path> {
+        self.resolved_child_module_path_cache
+            .borrow()
+            .get(&(parent_path.clone(), child_name.to_string()))
+            .cloned()
     }
 
     /// Set load paths for resolving CMI files.

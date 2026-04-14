@@ -155,6 +155,9 @@ impl UnifyState {
 
     /// Set the environment snapshot for type alias expansion.
     pub fn set_env(&mut self, env: &Env) {
+        if self.env.as_ref().is_some_and(|current| current.id() == env.id()) {
+            return;
+        }
         self.env = Some(env.clone_preserve_id());
     }
 

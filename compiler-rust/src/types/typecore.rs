@@ -6014,6 +6014,7 @@ fn type_application(
                 let saved_unify_env = tctx
                     .unify_state
                     .env()
+                    .filter(|saved_env| saved_env.id() != env.id())
                     .map(crate::types::env::Env::clone_preserve_id);
                 let typed_arg_result = type_expect(
                     tctx,
@@ -15310,6 +15311,11 @@ impl Env {
                 if let Some(module_path) =
                     self.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)
                 {
+                    if let Some(cached) =
+                        ctx.find_resolved_module_value(&module_path, value_name)
+                    {
+                        return Ok(cached);
+                    }
                     if let Some(Some((mod_path, pos, vd))) =
                         with_resolved_module_components_for_path(
                             &module_path,
@@ -15325,7 +15331,14 @@ impl Env {
                     {
                         let path =
                             Path::Pdot(Box::new(mod_path), value_name.to_string(), pos as i32);
-                        return Ok((path, vd));
+                        let result = (path, vd);
+                        ctx.register_resolved_module_value(
+                            &module_path,
+                            value_name,
+                            result.0.clone(),
+                            result.1.clone(),
+                        );
+                        return Ok(result);
                     }
                     return Err(TypeCoreError::UndefinedMethod {
                         ty: TypeExprRef(0),
@@ -15454,7 +15467,12 @@ impl Env {
                 let parent_path =
                     self.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)?;
                 let submod_name = arena.get_string(*submod_idx).to_string();
-                with_resolved_module_components_for_path(
+                if let Some(cached) =
+                    ctx.find_resolved_child_module_path(&parent_path, submod_name.as_str())
+                {
+                    return Some(cached);
+                }
+                let result = with_resolved_module_components_for_path(
                     &parent_path,
                     self,
                     pers_env,
@@ -15479,7 +15497,13 @@ impl Env {
                             })
                     },
                 )
-                .flatten()
+                .flatten()?;
+                ctx.register_resolved_child_module_path(
+                    &parent_path,
+                    submod_name.as_str(),
+                    result.clone(),
+                );
+                Some(result)
             }
             Longident::Lapply(_, _) => None,
         }
@@ -19120,10 +19144,24 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<(Path, Ident, crate::types::decl::TypeDeclaration)> {
+    if let Some(cached) = ctx.find_resolved_module_type(parent_module_path, type_name) {
+        return Some(cached);
+    }
+
     with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
         components
             .lookup_type(type_name)
-            .map(|(id, decl)| (components.access_path().clone(), id.clone(), decl.clone()))
+            .map(|(id, decl)| {
+                let result = (components.access_path().clone(), id.clone(), decl.clone());
+                ctx.register_resolved_module_type(
+                    parent_module_path,
+                    type_name,
+                    result.0.clone(),
+                    result.1.clone(),
+                    result.2.clone(),
+                );
+                result
+            })
     })
     .flatten()
 }
