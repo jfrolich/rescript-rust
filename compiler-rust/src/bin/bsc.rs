@@ -73,6 +73,7 @@ fn default_runtime_path() -> Option<PathBuf> {
 #[derive(Default, Debug)]
 struct Options {
     bs_ast: bool,
+    debug: bool,
     dump_lambda: bool,
     dump_parsetree_sexp_locs: bool,
     dump_typed_sexp: bool,
@@ -126,6 +127,7 @@ fn run() -> Result<()> {
         if arg.starts_with('-') {
             match arg.as_str() {
                 "-bs-ast" => opts.bs_ast = true,
+                "-bs-g" => opts.debug = true,
                 "-drawlambda" => opts.dump_lambda = true,
                 "-dparsetree-sexp-locs" => opts.dump_parsetree_sexp_locs = true,
                 "-dtyped-sexp" => opts.dump_typed_sexp = true,
@@ -237,6 +239,7 @@ fn run() -> Result<()> {
         source_filename: Some(source_path.to_string_lossy().into_owned()),
         output_path: opts.output.clone(),
         jsx_version: opts.jsx_version,
+        debug: opts.debug,
     };
 
     if is_interface {

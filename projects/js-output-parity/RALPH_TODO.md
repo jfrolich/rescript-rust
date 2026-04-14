@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 441 / 657 JS snapshots passing, 0 compile errors, 216 output diffs
+**Status:** 442 / 657 JS snapshots passing, 0 compile errors, 215 output diffs
 
 ## Goal
 
@@ -37,9 +37,60 @@ reported:
 
 - JS snapshot parity: **441 / 657**
 - Compile errors: **0**
-- Output diffs: **216**
+- Output diffs: **215**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the OCaml debug-mode constructor metadata path so
+  `-bs-g` emits `[Symbol.for("name")]` on payload constructors during JS dump
+  instead of silently dropping the debug-only property on the Rust path
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is backend metadata/dump behavior gated
+  by compiler config, not a content-based snapshot rewrite
+- OCaml reference:
+  `compiler/core/js_dump.ml`, where `Caml_block (_, _, _, Blk_constructor p)`
+  appends `name_symbol` when `!Js_config.debug && (not untagged) && not_is_cons`,
+  plus `compiler/core/js_dump_property.ml`, where `Symbol_name` prints as
+  `[Symbol.for("name")]`
+- Rust change:
+  - extended `compiler-rust/src/driver.rs` with
+    `debug_for_structure(...)` so file-level `@@config({flags: ["-bs-g"]})`
+    participates in JS emission decisions the same way OCaml's
+    `Js_config.debug` does
+  - threaded a `debug` flag through `CompilerOptions`, the `bsc` CLI parser,
+    and `compiler-rust/src/js_ir/printer.rs`
+  - updated constructor `CamlBlock` printing so non-cons, non-untagged
+    payload constructors append `[Symbol.for("name")]: "<Ctor>"` only in debug
+    mode, preserving the existing non-debug object shape
+  - added focused regression coverage in
+    `test_print_non_cons_constructor_adds_debug_name_symbol_in_debug_mode`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_non_cons_constructor_adds_debug_name_symbol_in_debug_mode -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_non_cons_constructor_keeps_tag_object_shape -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/debug_mode_value.res`, diffing the exact
+    emitted module against the checked-in snapshot
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/debug_mode_value.res` now matches its checked-in snapshot
+    exactly; Rust had been ignoring the OCaml debug-mode constructor-name
+    metadata and dropped `[Symbol.for("name")]`
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the debug-mode metadata change
+  - the authoritative wrapper improved by one snapshot and one fewer diff file,
+    with no compile-error regression
+- Topline impact:
+  - JS snapshot parity: **441 / 657** -> **442 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **216** -> **215** (**-1**)
+- Keep this change because it ports the OCaml `Js_config.debug` /
+  `js_dump` constructor metadata rule instead of preserving the Rust-only
+  “ignore `-bs-g` during JS dump” behavior.
 
 Latest iteration on **2026-04-14**:
 

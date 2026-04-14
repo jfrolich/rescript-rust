@@ -7,23 +7,23 @@ use std::ffi::OsString;
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::PersistentEnv;
 use crate::context::IdGenerator;
-use crate::js_ir::{printer::print_deps_program_with_directives, Kind, ModulePathResolver};
+use crate::js_ir::{Kind, ModulePathResolver, printer::print_deps_program_with_directives};
 use crate::lambda::compile::LambdaCompiler;
 use crate::parser::ast::{
     Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature,
     SignatureItemDesc, Structure, StructureItemDesc,
 };
-use crate::parser::{jsx_ppx, module, Parser};
+use crate::parser::{Parser, jsx_ppx, module};
 use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
 };
-use crate::types::{initial_env, transl_signature, type_structure, TypeCheckContext, TypeContext};
+use crate::types::{TypeCheckContext, TypeContext, initial_env, transl_signature, type_structure};
 
 // OCaml's Predef sets `Ident.set_current_time 999`. OCaml's Parmatch.extra_pat
 // then eagerly creates Ident.create "+" consuming stamp 1000.
@@ -1105,6 +1105,8 @@ pub struct CompilerOptions {
     pub output_path: Option<PathBuf>,
     /// JSX version from CLI `-bs-jsx` (e.g. 4). When set, enables JSX PPX rewrite.
     pub jsx_version: Option<i32>,
+    /// Enable debug-mode JS emission (like OCaml's -bs-g / Js_config.debug).
+    pub debug: bool,
 }
 
 pub(crate) fn jsx_version_for_structure(
@@ -1115,6 +1117,14 @@ pub(crate) fn jsx_version_for_structure(
     options
         .jsx_version
         .or_else(|| structure_has_config_string(structure, "-bs-jsx", arena).then_some(4))
+}
+
+pub(crate) fn debug_for_structure(
+    structure: &Structure,
+    options: &CompilerOptions,
+    arena: &crate::parse_arena::ParseArena,
+) -> bool {
+    options.debug || structure_has_config_string(structure, "-bs-g", arena)
 }
 
 /// Compile ReScript source to JavaScript.
@@ -1138,6 +1148,7 @@ pub fn compile_source_to_js_with_options(
         ));
     }
     let file_directives = extract_file_directives_from_structure(&structure, parser.arena())?;
+    let debug = debug_for_structure(&structure, options, parser.arena());
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
@@ -1336,8 +1347,12 @@ pub fn compile_source_to_js_with_options(
     );
 
     // JS IR -> JS source
-    let js =
-        print_deps_program_with_directives(&program, Some(&module_path_resolver), &file_directives);
+    let js = print_deps_program_with_directives(
+        &program,
+        Some(&module_path_resolver),
+        &file_directives,
+        debug,
+    );
 
     // The CLI compiler is a short-lived process. Skipping teardown for the
     // large typechecking arenas keeps snapshot runs inside the harness timeout
@@ -2014,7 +2029,7 @@ fn dump_all_tvars(
     seen: &mut ahash::AHashSet<crate::types::type_expr::TypeExprRef>,
     depth: usize,
 ) {
-    use crate::types::type_expr::{TypeDesc, GENERIC_LEVEL};
+    use crate::types::type_expr::{GENERIC_LEVEL, TypeDesc};
     let ty = ctx.repr(ty);
     if !seen.insert(ty) {
         return;
@@ -2132,7 +2147,7 @@ fn moregen_link_impl(
     debug: &mut Vec<String>,
     allow_generic_anonymous: bool,
 ) {
-    use crate::types::type_expr::{TypeDesc, GENERIC_LEVEL};
+    use crate::types::type_expr::{GENERIC_LEVEL, TypeDesc};
 
     let impl_ty = ctx.repr(impl_ty);
     let iface_ty = ctx.repr(iface_ty);
@@ -2745,7 +2760,7 @@ mod tests {
     use crate::location::Location;
     use crate::parse_arena::{LidentIdx, LocIdx, Located};
     use crate::parser::ast::{Attributes, RecFlag};
-    use crate::parser::{module, Parser};
+    use crate::parser::{Parser, module};
     use crate::types::decl::{ModuleDeclaration, ModuleType, RecStatus, SignatureItem, ValueKind};
     use crate::types::path::Path as TypePath;
     use crate::types::typedtree::{

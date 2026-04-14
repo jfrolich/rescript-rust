@@ -35,6 +35,8 @@ pub struct JsPrinter {
     name_scopes: Vec<NameScope>,
     /// Module-path resolver used for printing import declarations.
     module_path_resolver: Option<ModulePathResolver>,
+    /// Matches OCaml's `!Js_config.debug` toggle in the dumper.
+    debug: bool,
 }
 
 impl Default for JsPrinter {
@@ -53,13 +55,23 @@ impl JsPrinter {
             indent_str: "  ",
             name_scopes: vec![NameScope::default()],
             module_path_resolver: None,
+            debug: false,
         }
     }
 
     /// Create a new printer with module import resolution context.
     pub fn with_module_path_resolver(module_path_resolver: Option<&ModulePathResolver>) -> Self {
+        Self::with_module_path_resolver_and_debug(module_path_resolver, false)
+    }
+
+    /// Create a new printer with module import resolution context and debug mode.
+    pub fn with_module_path_resolver_and_debug(
+        module_path_resolver: Option<&ModulePathResolver>,
+        debug: bool,
+    ) -> Self {
         let mut printer = Self::new();
         printer.module_path_resolver = module_path_resolver.cloned();
+        printer.debug = debug;
         printer
     }
 
@@ -87,6 +99,7 @@ impl JsPrinter {
             indent_str: self.indent_str,
             name_scopes: self.name_scopes.clone(),
             module_path_resolver: self.module_path_resolver.clone(),
+            debug: self.debug,
         };
         printer.print_expression(expr, level);
         printer.output
@@ -413,7 +426,9 @@ impl JsPrinter {
 
     fn statement_desc_prints_anything(&self, desc: &StatementDesc, _top_level: bool) -> bool {
         match desc {
-            StatementDesc::Block(stmts) => stmts.iter().any(|stmt| self.statement_prints_anything(stmt, false)),
+            StatementDesc::Block(stmts) => stmts
+                .iter()
+                .any(|stmt| self.statement_prints_anything(stmt, false)),
             StatementDesc::Variable(decl) => match decl.ident_info.used_stats {
                 UsedStats::DeadPure => false,
                 UsedStats::DeadNonPure => decl
@@ -1122,8 +1137,7 @@ impl JsPrinter {
                 let (out, lft, rght) = op_precedence(*op);
                 // OCaml keeps shift operators parenthesized even in low-precedence
                 // contexts to preserve the backend's conservative JS byte shape.
-                let needs_paren =
-                    level > out || matches!(op, BinOp::Lsl | BinOp::Lsr | BinOp::Asr);
+                let needs_paren = level > out || matches!(op, BinOp::Lsl | BinOp::Lsr | BinOp::Asr);
                 if needs_paren {
                     self.write_char('(');
                 }
@@ -1507,9 +1521,7 @@ impl JsPrinter {
                         fields,
                         attrs,
                         ..
-                    }
-                        if fields.len() == elements.len() =>
-                    {
+                    } if fields.len() == elements.len() => {
                         let untagged = tag_info_has_untagged(attrs);
                         let tag_name = tag_info_tag_name(attrs).unwrap_or("TAG");
                         let tag_value = tag_info_runtime_tag(attrs)
@@ -1523,15 +1535,17 @@ impl JsPrinter {
                                 vec![(None, None)]
                             })
                             .into_iter()
-                            .chain(elements.iter().zip(fields.iter()).filter_map(
-                                |(elem, (field_name, optional))| {
-                                    if *optional && is_undefined_literal(elem) {
-                                        None
-                                    } else {
-                                        Some((Some(field_name.as_str()), Some(elem)))
-                                    }
-                                },
-                            )),
+                            .chain(
+                                elements.iter().zip(fields.iter()).filter_map(
+                                    |(elem, (field_name, optional))| {
+                                        if *optional && is_undefined_literal(elem) {
+                                            None
+                                        } else {
+                                            Some((Some(field_name.as_str()), Some(elem)))
+                                        }
+                                    },
+                                ),
+                            ),
                             |this, prop| match prop {
                                 (None, None) => {
                                     this.print_literal_property_name(tag_name);
@@ -1593,6 +1607,8 @@ impl JsPrinter {
                                 let tag_value = tag_info_runtime_tag(attrs)
                                     .unwrap_or_else(|| SwitchCaseTag::String(name.clone()));
                                 let include_tag = !untagged;
+                                let include_debug_name =
+                                    self.debug && !untagged && name.as_str() != "::";
                                 self.print_object_literal(
                                     level,
                                     None,
@@ -1607,6 +1623,11 @@ impl JsPrinter {
                                             .iter()
                                             .enumerate()
                                             .map(|(i, elem)| (Some(i), Some(elem))),
+                                    )
+                                    .chain(
+                                        include_debug_name
+                                            .then_some((Some(usize::MAX), None))
+                                            .into_iter(),
                                     ),
                                     |this, prop| match prop {
                                         (None, None) => {
@@ -1619,6 +1640,11 @@ impl JsPrinter {
                                             this.write(&i.to_string());
                                             this.write(": ");
                                             this.print_expression(elem, 1);
+                                        }
+                                        (Some(i), None) if i == usize::MAX => {
+                                            this.print_property_name(&PropertyName::Symbol);
+                                            this.write(": ");
+                                            this.print_string(name);
                                         }
                                         _ => unreachable!(
                                             "constructor literal properties stay aligned"
@@ -2046,9 +2072,7 @@ fn tag_info_tag_name(attrs: &[crate::lambda::tag_info::Attribute]) -> Option<&st
     })
 }
 
-fn tag_info_runtime_tag(
-    attrs: &[crate::lambda::tag_info::Attribute],
-) -> Option<SwitchCaseTag> {
+fn tag_info_runtime_tag(attrs: &[crate::lambda::tag_info::Attribute]) -> Option<SwitchCaseTag> {
     attrs.iter().find_map(|attr| {
         if attr.name != "as" {
             return None;
@@ -2494,7 +2518,10 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
 }
 
 fn for_range_finish_needs_binding(expr: &Expression) -> bool {
-    !matches!(expr.desc, ExpressionDesc::Number(_) | ExpressionDesc::Var(_))
+    !matches!(
+        expr.desc,
+        ExpressionDesc::Number(_) | ExpressionDesc::Var(_)
+    )
 }
 
 /// Get operator precedence (output_level, left_level, right_level)
@@ -2698,15 +2725,16 @@ pub fn print_deps_program(
     program: &DepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,
 ) -> String {
-    print_deps_program_with_directives(program, module_path_resolver, &[])
+    print_deps_program_with_directives(program, module_path_resolver, &[], false)
 }
 
 pub fn print_deps_program_with_directives(
     program: &DepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,
     directives: &[String],
+    debug: bool,
 ) -> String {
-    let mut printer = JsPrinter::with_module_path_resolver(module_path_resolver);
+    let mut printer = JsPrinter::with_module_path_resolver_and_debug(module_path_resolver, debug);
     printer.print_deps_program_with_directives(program, directives);
     printer.into_output()
 }
@@ -2721,6 +2749,13 @@ pub fn print_expression(expr: &Expression) -> String {
 fn print_expression_with_level(expr: &Expression, level: u8) -> String {
     let mut printer = JsPrinter::new();
     printer.print_expression(expr, level);
+    printer.into_output()
+}
+
+#[cfg(test)]
+fn print_expression_with_debug(expr: &Expression, debug: bool) -> String {
+    let mut printer = JsPrinter::with_module_path_resolver_and_debug(None, debug);
+    printer.print_expression(expr, 0);
     printer.into_output()
 }
 
@@ -3006,10 +3041,7 @@ mod tests {
                 Expression::number(Number::int(2)),
             ),
         );
-        assert_eq!(
-            print_expression(&outer),
-            "x ? 0 : (\n    y ? 1 : 2\n  )"
-        );
+        assert_eq!(print_expression(&outer), "x ? 0 : (\n    y ? 1 : 2\n  )");
     }
 
     #[test]
@@ -3378,7 +3410,10 @@ mod tests {
             params: vec![],
             body: vec![Statement::return_(Expression::new(ExpressionDesc::Object(
                 None,
-                vec![(PropertyName::lit("default"), Expression::number(Number::int(1)))],
+                vec![(
+                    PropertyName::lit("default"),
+                    Expression::number(Number::int(1)),
+                )],
             )))],
             env: Default::default(),
             return_unit: false,
@@ -3394,12 +3429,14 @@ mod tests {
         let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
             is_method: false,
             params: vec![],
-            body: vec![Statement::return_(Expression::new(ExpressionDesc::CamlBlock(
-                vec![Expression::number(Number::int(1))],
-                MutableFlag::Immutable,
-                Box::new(Expression::number(Number::int(0))),
-                TagInfo::constructor("Some", 1, 0),
-            )))],
+            body: vec![Statement::return_(Expression::new(
+                ExpressionDesc::CamlBlock(
+                    vec![Expression::number(Number::int(1))],
+                    MutableFlag::Immutable,
+                    Box::new(Expression::number(Number::int(0))),
+                    TagInfo::constructor("Some", 1, 0),
+                ),
+            ))],
             env: Default::default(),
             return_unit: false,
             async_: false,
@@ -3594,6 +3631,7 @@ mod tests {
                 "first directive;".to_string(),
                 "second directive;".to_string(),
             ],
+            false,
         );
 
         assert!(rendered.starts_with(
@@ -3711,9 +3749,7 @@ mod tests {
             Some(&resolver),
         );
 
-        assert!(rendered.contains(
-            "import * as List from \"@rescript/runtime/lib/es6/List.js\";"
-        ));
+        assert!(rendered.contains("import * as List from \"@rescript/runtime/lib/es6/List.js\";"));
         assert!(rendered.contains("import * as List$1 from \"reactV\";"));
         assert!(rendered.contains("import * as List$2 from \"reactX\";"));
         assert!(rendered.contains("let runtimeMember = List.map;"));
@@ -4010,6 +4046,28 @@ mod tests {
         ));
 
         assert_eq!(print_expression(&expr), "{\n  TAG: \"Some\",\n  _0: 1\n}");
+    }
+
+    #[test]
+    fn test_print_non_cons_constructor_adds_debug_name_symbol_in_debug_mode() {
+        let expr = Expression::new(ExpressionDesc::CamlBlock(
+            vec![
+                Expression::number(Number::int(1)),
+                Expression::number(Number::int(2)),
+            ],
+            MutableFlag::Immutable,
+            Box::new(Expression::number(Number::int(0))),
+            TagInfo::constructor("A", 2, 0),
+        ));
+
+        assert_eq!(
+            print_expression_with_debug(&expr, true),
+            "{\n  TAG: \"A\",\n  _0: 1,\n  _1: 2,\n  [Symbol.for(\"name\")]: \"A\"\n}"
+        );
+        assert_eq!(
+            print_expression_with_debug(&expr, false),
+            "{\n  TAG: \"A\",\n  _0: 1,\n  _1: 2\n}"
+        );
     }
 
     #[test]
