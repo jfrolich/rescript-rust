@@ -1,7 +1,7 @@
 # Ralph TODO: Typechecker Performance
 
 **Last Updated:** 2026-04-14
-**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, dotted shared module-signature scraping now consults env_lazy-backed qualified views first, lazy child module/modtype qualification now comes from cached parent qualified views, the env_lazy cache-key path now uses env-owned cached local-alias metadata instead of rebuilding it on every lookup, a broader `typemod`/`typecore` env_lazy rollout was attempted and reverted because it regressed import-family parity, and the broader env_lazy rollout is still incomplete
+**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, dotted shared module-signature scraping now consults env_lazy-backed qualified views first, lazy child module/modtype qualification now comes from cached parent qualified views, dotted alias/modtype expansion inside `typecore`'s shared `Env::resolve_module_type` helper now consults those cached child views before raw recursive signature scans, the env_lazy cache-key path now uses env-owned cached local-alias metadata instead of rebuilding it on every lookup, a broader `typemod`/`typecore` env_lazy rollout was attempted and reverted because it regressed import-family parity, and the broader env_lazy rollout is still incomplete
 
 ## Goal
 
@@ -138,6 +138,64 @@ What this means:
 - the next session should push the same source-of-truth approach into the
   remaining whole-signature copy hotspots, then re-profile `mario_game`,
   JSX-heavy files, `gpr_1150`, and the `ticker.res` stack overflow
+
+## Session Update: Dotted Shared Resolution Through `env_lazy` In `typecore`
+
+Additional checkpoint from this worktree on `2026-04-14` after routing the
+remaining dotted module/modtype expansion inside `typecore`'s shared
+`Env::resolve_module_type` helper through `lookup_module_in_resolved_path` /
+`lookup_modtype_in_resolved_path`, and removing two lingering parent-signature
+clones in `typecore`:
+
+- exact `Import.res` repro after rebuild:
+  - OCaml: `0.08s` (`/usr/bin/time -lp`)
+  - Rust: `0.32s` (`/usr/bin/time -lp`)
+  - Rust max RSS: about `56.9MB`
+  - Rust peak footprint: about `41.3MB`
+- focused import parity: unchanged at `1/4`, `283` hunk mismatches
+- full typedtree parity: unchanged at `232/657`, `43117` hunk mismatches
+- canonical corpus benchmark, confirming rerun:
+  - Files tested: `657`
+  - Comparable files: `657`
+  - Rust faster or equal: `0`
+  - Rust slower: `657`
+  - Materially slower: `220`
+  - OCaml failures: `0`
+  - Rust failures: `0`
+  - Aggregate OCaml total: `4483.6ms`
+  - Aggregate Rust total: `9900.6ms`
+  - Aggregate Rust / OCaml ratio: `2.21x`
+  - `Import.res` benchmark entry: OCaml `41.2ms`, Rust `156.6ms`, `3.80x`
+
+Before/after against the same-session pre-change benchmark command:
+
+- before: aggregate Rust total `11472.3ms`, materially slower `225`,
+  `Import.res` `168.5ms`
+- after: aggregate Rust total `9900.6ms`, materially slower `220`,
+  `Import.res` `156.6ms`
+
+What landed in this step:
+
+- `typecore::Env::resolve_module_type` now treats dotted child module/modtype
+  expansion the same way OCaml `Env.find_module` / `find_modtype` do: it asks
+  the cached env_lazy-qualified parent view for the child declaration first
+  instead of recursively rebuilding and scanning the parent signature
+- `typecore::resolve_type_item_identity` now reads dotted child types through
+  `lookup_type_in_resolved_path` instead of cloning the whole parent signature
+- `typecore::build_module_signature_for_path` now borrows the parent signature
+  from `with_resolved_module_components_for_path` for flattened-alias child
+  prefix rewriting instead of cloning it via `resolve_module_signature_for_path`
+
+What this means:
+
+- the shared typecore module-resolution helper now matches the OCaml-shaped
+  env_lazy/components path more closely for dotted child lookups, instead of
+  leaving that helper on a raw recursive signature-scan path
+- the import-family parity checkpoint stayed flat, so this dotted env_lazy
+  rollout did not reintroduce the rejected `Pident` forcing-order regression
+- the broader corpus still needs more work, but Rust's aggregate total and the
+  materially-slower count both improved on the canonical benchmark even though
+  the OCaml side sped up enough on the rerun that the ratio remained noisy
 
 ## Session Update: `ctype` Dotted Module-Type Path
 

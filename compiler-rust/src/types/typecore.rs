@@ -15963,6 +15963,22 @@ impl Env {
                 return None;
             }
 
+            if let Path::Pdot(parent, modtype_name, _) = path {
+                if let Some((_, mtd)) = lookup_modtype_in_resolved_path(
+                    parent,
+                    modtype_name.as_str(),
+                    env,
+                    pers_env,
+                    ctx,
+                ) {
+                    let result = mtd.mtd_type.as_ref().and_then(|mty| {
+                        resolve_module_type_inner(env, mty, pers_env, ctx, visiting)
+                    });
+                    visiting.remove(path);
+                    return result;
+                }
+            }
+
             let result = match path {
                 Path::Pident(id) => {
                     let modtype_name = id.name();
@@ -16010,6 +16026,40 @@ impl Env {
             use crate::types::decl::SignatureItem;
             if !visiting.insert(path.clone()) {
                 return None;
+            }
+
+            if let Path::Pdot(parent, submod_name, _) = path {
+                if let Some((_, access_path, sub_md)) = lookup_module_in_resolved_path(
+                    parent,
+                    submod_name.as_str(),
+                    env,
+                    pers_env,
+                    ctx,
+                ) {
+                    let result =
+                        resolve_module_type_inner(env, &sub_md.md_type, pers_env, ctx, visiting);
+                    let result = if module_type_has_hidden_unpack_ident(&sub_md.md_type) {
+                        result.map(|(sig, resolved_name)| {
+                            let sig = copy_lookup_signature_for_subst(&sig, ctx);
+                            rebind_direct_sig_type_family_to_access_path(
+                                ctx,
+                                &access_path,
+                                &sig,
+                                true,
+                            );
+                            crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                                &sig,
+                                &access_path,
+                                ctx,
+                            );
+                            (sig, resolved_name)
+                        })
+                    } else {
+                        result
+                    };
+                    visiting.remove(path);
+                    return result;
+                }
             }
 
             match path {
@@ -16693,17 +16743,20 @@ fn resolve_type_item_identity<'a>(
             };
             Some((id.stamp(), arity))
         }
-        Path::Pdot(parent, type_name, _) => {
-            let (_, parent_sig) = resolve_module_signature_for_path(parent, env, pers_env, ctx)?;
-            for item in &parent_sig {
-                if let crate::types::decl::SignatureItem::SigType(id, decl, _) = item {
-                    if id.name() == type_name.as_str() && id.stamp() != 0 {
-                        return Some((id.stamp(), decl.type_params.len()));
-                    }
-                }
+        Path::Pdot(parent, type_name, _) => lookup_type_in_resolved_path(
+            parent,
+            type_name.as_str(),
+            env,
+            pers_env,
+            ctx,
+        )
+        .and_then(|(_, id, decl)| {
+            if id.stamp() == 0 {
+                None
+            } else {
+                Some((id.stamp(), decl.type_params.len()))
             }
-            None
-        }
+        }),
         Path::Papply(_, _) => None,
     }
 }
@@ -19203,21 +19256,22 @@ fn build_module_signature_for_path<'a>(
                 .map(|pers| pers.flattened_alias_heads_for_path(&resolved_parent_path))
                 .unwrap_or_default();
             if !flattened_heads.is_empty() {
-                let (_, parent_sig) =
-                    resolve_module_signature_for_path(parent, env, pers_env, ctx)?;
-                for flat_head in flattened_heads {
-                    let flattened_parent = Path::pident(Ident::create_persistent(&flat_head));
-                    if !flattened_parent.same(&resolved_parent_path) {
-                        rewrite_child_module_prefixes_from_sig(
-                            &sig,
-                            &parent_sig,
-                            &resolved_parent_path,
-                            &flattened_parent,
-                            Some(submodule_name.as_str()),
-                            ctx,
-                        );
+                with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
+                    let parent_sig = components.signature();
+                    for flat_head in &flattened_heads {
+                        let flattened_parent = Path::pident(Ident::create_persistent(flat_head));
+                        if !flattened_parent.same(&resolved_parent_path) {
+                            rewrite_child_module_prefixes_from_sig(
+                                &sig,
+                                parent_sig,
+                                &resolved_parent_path,
+                                &flattened_parent,
+                                Some(submodule_name.as_str()),
+                                ctx,
+                            );
+                        }
                     }
-                }
+                })?;
             }
             Some((access_path, sig))
         }
