@@ -4307,6 +4307,12 @@ impl LambdaCompiler {
                 }
                 _ => Expression::undefined(false),
             },
+            Pduprecord => match compiled_args.as_slice() {
+                [source] => {
+                    Expression::new(ExpressionDesc::Object(Some(Box::new(source.clone())), vec![]))
+                }
+                _ => Expression::undefined(false),
+            },
             Pstringadd => Expression::new(ExpressionDesc::StringAppend(
                 Box::new(compiled_args[0].clone()),
                 Box::new(compiled_args[1].clone()),
@@ -12261,6 +12267,20 @@ mod tests {
 
         assert!(compiled.prelude.is_empty());
         assert_eq!(print_expression(&compiled.expr), "9n < 1n ? 9n : 1n");
+    }
+
+    #[test]
+    fn compile_duprecord_lowers_to_object_spread_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let source = Ident::create_local("source");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pduprecord,
+            vec![Lambda::var(source)],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "{...source}");
     }
 
     #[test]

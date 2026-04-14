@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 461 / 657 JS snapshots passing, 0 compile errors, 196 output diffs
+**Status:** 464 / 657 JS snapshots passing, 0 compile errors, 193 output diffs
 
 ## Goal
 
@@ -35,11 +35,77 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **461 / 657**
+- JS snapshot parity: **464 / 657**
 - Compile errors: **0**
-- Output diffs: **196**
+- Output diffs: **193**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the missing OCaml `Pduprecord` backend primitive and the
+  paired spread-only object dump shape so record/object duplication stops
+  lowering to `undefined` and prints as inline `{...base}` like OCaml
+- Active backend focus for this slice stays primarily **Phase 3: Port JS IR
+  Lowering And Metadata** from `PLAN.md`, because the root cause lived in
+  `compiler/core/lam_compile_primitive.ml`: Rust never handled `Pduprecord` on
+  the JS path and therefore compiled record duplication to `undefined`; the
+  final printer tweak is the small follow-up needed to match OCaml's
+  `Object (Some e, [])` dump shape exactly once the IR is correct
+- OCaml reference:
+  `compiler/core/lam_compile_primitive.ml`, especially the `Pduprecord` branch
+  lowering to `E.obj ~dup:e1 []`; and `compiler/core/js_dump.ml`, especially
+  `Object (dup, lst)` where `lst = []` uses `P.brace` so spread-only object
+  literals print inline as `{...expr}`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so `compile_primitive(...)`
+    now lowers `Primitive::Pduprecord` to `ExpressionDesc::Object(Some(...),
+    vec![])` instead of falling through to `undefined`
+  - updated `compiler-rust/src/js_ir/printer.rs` so spread-only object
+    literals use the OCaml inline `{...expr}` shape instead of the multiline
+    grouped object-literal formatting path
+  - added focused regression coverage in
+    `compile_duprecord_lowers_to_object_spread_like_ocaml` and
+    `test_print_spread_only_object_literal_inline_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_duprecord_lowers_to_object_spread_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_spread_only_object_literal_inline_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/res_debug.res`, diffing the emitted
+    module against the checked-in snapshot to confirm `let newrecord = {...v0};`
+    is exact again
+  - direct repro for
+    `tests/tests/src/stdlib/intl/Stdlib_Intl_DateTimeFormatTest.res`, diffing
+    the emitted module against the checked-in snapshot to confirm all duplicated
+    `options` records now print inline and match exactly
+  - direct repro for `tests/tests/src/record_regression.res`, diffing the
+    emitted module against the checked-in snapshot to confirm the earlier
+    `let newrecord;` bug is gone and the remaining drift is in a later
+    inlined-record/pattern-match cluster
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/res_debug.res` is no longer in the authoritative diff set
+  - `tests/tests/src/stdlib/intl/Stdlib_Intl_DateTimeFormatTest.res` is no
+    longer in the authoritative diff set
+  - `tests/tests/src/large_record_duplication_test.res` is no longer in the
+    authoritative diff set
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the `Pduprecord` + printer port
+  - `tests/tests/src/record_regression.res` and
+    `tests/tests/src/jsx_preserve_test.res` still differ, but no longer because
+    of the missing duplicated-object base; their remaining drift is in later
+    JSX / inlined-record lowering rather than in record duplication itself
+- Topline impact:
+  - JS snapshot parity: **461 / 657** -> **464 / 657** (**+3**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **196** -> **193** (**-3**)
+- Keep this change because it ports the missing OCaml backend behavior directly:
+  `Pduprecord` was a real lowering hole on the Rust JS path, and once that IR
+  shape exists the dumper must follow OCaml's inline spread-only object format
+  for exact snapshot parity.
 
 Latest iteration on **2026-04-14**:
 

@@ -1813,7 +1813,10 @@ impl JsPrinter {
 
         self.write_char('{');
         let mut props = props.into_iter().peekable();
-        if dup.is_some() || props.peek().is_some() {
+        if let (Some(spread), None) = (dup, props.peek()) {
+            self.write("...");
+            self.print_expression(spread, 1);
+        } else if dup.is_some() || props.peek().is_some() {
             self.indent();
 
             if let Some(spread) = dup {
@@ -4052,6 +4055,16 @@ mod tests {
         )));
 
         assert_eq!(rendered, "{\n  catch: 1,\n  default: 2\n}");
+    }
+
+    #[test]
+    fn test_print_spread_only_object_literal_inline_like_ocaml() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Object(
+            Some(Box::new(Expression::var(Ident::create_local("source")))),
+            vec![],
+        )));
+
+        assert_eq!(rendered, "{...source}");
     }
 
     #[test]
