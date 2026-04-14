@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 437 / 657 JS snapshots passing, 0 compile errors, 220 output diffs
+**Status:** 441 / 657 JS snapshots passing, 0 compile errors, 216 output diffs
 
 ## Goal
 
@@ -35,11 +35,65 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **437 / 657**
+- JS snapshot parity: **441 / 657**
 - Compile errors: **0**
-- Output diffs: **220**
+- Output diffs: **216**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the missing OCaml external-call polyvariant marshalling so
+  `@string`, `@int`, and payload polyvariant externals go through the
+  `Js_of_lam_variant.eval*` argument-rewrite path instead of forwarding the raw
+  OCaml-side representation directly to JavaScript calls
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is still backend call-lowering work in
+  the current JS path, not a printer fix
+- OCaml reference:
+  `compiler/core/lam_compile_external_call.ml`, where `ocaml_to_js_eff`
+  returns `Splice0` / `Splice1` / `Splice2` and rewrites
+  `Poly_var_string`, `Poly_var`, `Int`, and `Unwrap` through
+  `compiler/core/js_of_lam_variant.ml`
+- Rust change:
+  - extended `compiler-rust/src/lambda/compile.rs` external arg assembly to
+    support multi-value expansion for externals, matching the OCaml
+    `Splice0` / `Splice1` / `Splice2` contract instead of assuming every
+    runtime arg lowers to at most one JS arg
+  - added OCaml-aligned helpers for optional-to-undefined conversion,
+    polyvariant string/int dispatch, payload expansion, and polyvariant unwrap
+    on the JS-call argument assembly path
+  - updated `assemble_external_args_no_splice(...)` and
+    `assemble_external_args_with_splice(...)` to extend the output arg list
+    with the rewritten values rather than pushing a single forwarded arg
+  - added focused regression coverage in
+    `lowers_external_polyvar_string_and_int_args_like_ocaml` and
+    `lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_external_polyvar -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/poly_variant_test.res` no longer has the incorrect
+    `hey_string("in_")` / `hey_int("on_open")` style external-marshalling
+    drift; its remaining diff is now limited to separate constant-folding and
+    UTF-8 string-emission issues
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the external-call marshalling change
+  - the remaining polyvariant-shaped failing diff set is unchanged in file
+    names (`big_polyvar_test`, `bs_poly_map_test`, `poly_variant_test`), but
+    `poly_variant_test` is materially smaller and the overall wrapper baseline
+    improved by four
+- Topline impact:
+  - JS snapshot parity: **437 / 657** -> **441 / 657** (**+4**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **220** -> **216** (**-4**)
+- Keep this change because it ports the OCaml
+  `lam_compile_external_call` / `js_of_lam_variant` argument rewriting instead
+  of preserving the Rust-only “forward the raw external arg unchanged” shortcut.
 
 Latest iteration on **2026-04-14**:
 

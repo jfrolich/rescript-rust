@@ -4554,6 +4554,135 @@ impl LambdaCompiler {
         )
     }
 
+    fn external_optional_to_undefined_expr(&self, arg: Expression) -> Expression {
+        match arg.desc {
+            ExpressionDesc::Undefined { .. } => Expression::undefined(false),
+            ExpressionDesc::OptionalBlock(inner, _) => *inner,
+            _ if expression_has_no_side_effects(&arg) => Expression::cond(
+                self.is_not_none_expr(arg.clone()),
+                self.val_from_option_expr(arg),
+                Expression::undefined(false),
+            ),
+            _ => self.runtime_call_expr("Primitive_option", "toUndefined", vec![arg]),
+        }
+    }
+
+    fn external_option_unwrap_expr(&self, arg: Expression) -> Expression {
+        match arg.desc {
+            ExpressionDesc::Undefined { .. } => Expression::undefined(false),
+            ExpressionDesc::OptionalBlock(inner, _) => self.external_polyvar_unwrap_expr(*inner),
+            _ => self.runtime_call_expr("Primitive_option", "unwrapPolyVar", vec![arg]),
+        }
+    }
+
+    fn external_polyvar_string_expr(
+        &self,
+        arg: Expression,
+        dispatches: &[(String, String)],
+    ) -> Expression {
+        match &arg.desc {
+            ExpressionDesc::Undefined { .. } => Expression::undefined(false),
+            ExpressionDesc::Str { txt, .. } => {
+                Expression::string(external_polyvar_string_dispatch(dispatches, txt))
+            }
+            _ => string_switch_iife(
+                arg,
+                dispatches
+                    .iter()
+                    .map(|(source, target)| (source.clone(), Expression::string(target.clone())))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn external_polyvar_event_exprs(
+        &self,
+        arg: Expression,
+        dispatches: Option<&[(String, String)]>,
+    ) -> Vec<Expression> {
+        match &arg.desc {
+            ExpressionDesc::CamlBlock(items, _, _, TagInfo::PolyVar(_))
+                if matches!(
+                    items.as_slice(),
+                    [
+                        Expression {
+                            desc: ExpressionDesc::Str { .. },
+                            ..
+                        },
+                        value,
+                    ] if expression_has_no_side_effects(value)
+                ) =>
+            {
+                let [
+                    Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    },
+                    value,
+                ] = items.as_slice()
+                else {
+                    unreachable!();
+                };
+                let tag = match dispatches {
+                    Some(dispatches) => {
+                        Expression::string(external_polyvar_string_dispatch(dispatches, txt))
+                    }
+                    None => Expression::string(txt.clone()),
+                };
+                vec![tag, value.clone()]
+            }
+            _ => {
+                let tag = match dispatches {
+                    Some(dispatches) => {
+                        self.external_polyvar_string_expr(poly_var_tag_access(&arg), dispatches)
+                    }
+                    None => poly_var_tag_access(&arg),
+                };
+                vec![tag, poly_var_value_access(&arg)]
+            }
+        }
+    }
+
+    fn external_polyvar_int_expr(
+        &self,
+        arg: Expression,
+        dispatches: &[(String, i64)],
+    ) -> Expression {
+        match &arg.desc {
+            ExpressionDesc::Undefined { .. } => Expression::undefined(false),
+            ExpressionDesc::Str { txt, .. } => {
+                int_expr(external_polyvar_int_dispatch(dispatches, txt) as i32)
+            }
+            _ => string_switch_iife(
+                arg,
+                dispatches
+                    .iter()
+                    .map(|(source, target)| (source.clone(), int_expr(*target as i32)))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn external_polyvar_unwrap_expr(&self, arg: Expression) -> Expression {
+        match &arg.desc {
+            ExpressionDesc::CamlBlock(items, _, _, _)
+                if matches!(
+                    items.as_slice(),
+                    [
+                        Expression {
+                            desc: ExpressionDesc::Number(_),
+                            ..
+                        },
+                        _,
+                    ]
+                ) =>
+            {
+                items[1].clone()
+            }
+            _ => poly_var_value_access(&arg),
+        }
+    }
+
     fn pure_runtime_call_expr(
         &self,
         module_name: &str,
@@ -5063,6 +5192,51 @@ impl LambdaCompiler {
         }
     }
 
+    fn lower_external_arg_values_and_effect(
+        &self,
+        raw_arg: Expression,
+        arg_label: ExternalArgLabel,
+        arg_type: &ExternalArgAttr,
+    ) -> (Vec<Expression>, Option<Expression>) {
+        let arg = match arg_label {
+            ExternalArgLabel::Optional => self.external_optional_to_undefined_expr(raw_arg.clone()),
+            ExternalArgLabel::Label | ExternalArgLabel::Empty => raw_arg.clone(),
+        };
+
+        match arg_type {
+            ExternalArgAttr::ArgCst(_) => (Vec::new(), None),
+            ExternalArgAttr::ExternUnit => {
+                let effect = self.external_arg_effect(&arg);
+                let values = if matches!(arg_label, ExternalArgLabel::Empty) {
+                    Vec::new()
+                } else {
+                    vec![Expression::undefined(true)]
+                };
+                (values, effect)
+            }
+            ExternalArgAttr::Ignore => (Vec::new(), self.external_arg_effect(&arg)),
+            ExternalArgAttr::PolyVarString { descr } => {
+                (vec![self.external_polyvar_string_expr(arg, descr)], None)
+            }
+            ExternalArgAttr::PolyVar { descr } => {
+                (self.external_polyvar_event_exprs(arg, descr.as_deref()), None)
+            }
+            ExternalArgAttr::Int(dispatches) => {
+                (vec![self.external_polyvar_int_expr(arg, dispatches)], None)
+            }
+            ExternalArgAttr::Unwrap => {
+                let value = match arg_label {
+                    ExternalArgLabel::Optional => self.external_option_unwrap_expr(raw_arg),
+                    ExternalArgLabel::Label | ExternalArgLabel::Empty => {
+                        self.external_polyvar_unwrap_expr(arg)
+                    }
+                };
+                (vec![value], None)
+            }
+            ExternalArgAttr::Nothing => (vec![arg], None),
+        }
+    }
+
     fn assemble_external_args_no_splice(
         &self,
         arg_types: &[ExternalArgSpec],
@@ -5081,7 +5255,7 @@ impl LambdaCompiler {
                     let arg = runtime_args
                         .next()
                         .unwrap_or_else(|| Expression::undefined(false));
-                    let (value, effect) = self.lower_external_arg_value_and_effect(
+                    let (values, effect) = self.lower_external_arg_values_and_effect(
                         arg,
                         arg_spec.arg_label,
                         &arg_spec.arg_type,
@@ -5089,9 +5263,7 @@ impl LambdaCompiler {
                     if let Some(effect) = effect {
                         effects.push(effect);
                     }
-                    if let Some(expr) = value {
-                        assembled.push(expr);
-                    }
+                    assembled.extend(values);
                 }
             }
         }
@@ -5156,7 +5328,7 @@ impl LambdaCompiler {
                             }
                             arg => {
                                 needs_spread = true;
-                                let (value, effect) = self.lower_external_arg_value_and_effect(
+                                let (values, effect) = self.lower_external_arg_values_and_effect(
                                     arg,
                                     arg_spec.arg_label,
                                     &arg_spec.arg_type,
@@ -5164,13 +5336,11 @@ impl LambdaCompiler {
                                 if let Some(effect) = effect {
                                     effects.push(effect);
                                 }
-                                if let Some(expr) = value {
-                                    assembled.push(expr);
-                                }
+                                assembled.extend(values);
                             }
                         }
                     } else {
-                        let (value, effect) = self.lower_external_arg_value_and_effect(
+                        let (values, effect) = self.lower_external_arg_values_and_effect(
                             arg,
                             arg_spec.arg_label,
                             &arg_spec.arg_type,
@@ -5178,9 +5348,7 @@ impl LambdaCompiler {
                         if let Some(effect) = effect {
                             effects.push(effect);
                         }
-                        if let Some(expr) = value {
-                            assembled.push(expr);
-                        }
+                        assembled.extend(values);
                     }
                 }
             }
@@ -7312,6 +7480,51 @@ fn poly_var_value_access(target: &Expression) -> Expression {
             Some(1),
         )),
     }
+}
+
+fn external_polyvar_string_dispatch(dispatches: &[(String, String)], txt: &str) -> String {
+    dispatches
+        .iter()
+        .find(|(source, _)| source == txt)
+        .map(|(_, target)| target.clone())
+        .unwrap_or_else(|| panic!("missing polyvariant string dispatch for {txt}"))
+}
+
+fn external_polyvar_int_dispatch(dispatches: &[(String, i64)], txt: &str) -> i64 {
+    dispatches
+        .iter()
+        .find(|(source, _)| source == txt)
+        .map(|(_, target)| *target)
+        .unwrap_or_else(|| panic!("missing polyvariant int dispatch for {txt}"))
+}
+
+fn string_switch_iife(scrutinee: Expression, cases: Vec<(String, Expression)>) -> Expression {
+    let clauses = cases
+        .into_iter()
+        .map(|(tag, value)| StringClause {
+            tag_type: SwitchCaseTag::String(tag),
+            clause: CaseClause {
+                body: vec![Statement::return_(value)],
+                should_break: false,
+                comment: None,
+            },
+        })
+        .collect();
+    Expression::call(
+        Expression::new(ExpressionDesc::Fun {
+            is_method: false,
+            params: vec![],
+            body: vec![Statement::new(StatementDesc::StringSwitch(
+                scrutinee, clauses, None,
+            ))],
+            env: Default::default(),
+            return_unit: false,
+            async_: false,
+            directive: None,
+        }),
+        vec![],
+        CallInfo::default(),
+    )
 }
 
 fn is_type_object_expr(expr: Expression) -> Expression {
@@ -16275,6 +16488,99 @@ mod tests {
 
         let rendered = print_block(&compiler.compile_program(&lam).block);
         assert_eq!(rendered, "new RegExp(\"ab+c\");");
+    }
+
+    #[test]
+    fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "consume".to_string(),
+                arg_types: vec![
+                    ExternalArgSpec {
+                        arg_type: ExternalArgAttr::PolyVarString {
+                            descr: vec![
+                                ("on_closed".to_string(), "on_closed".to_string()),
+                                ("on_open".to_string(), "on_open".to_string()),
+                                ("in_".to_string(), "in".to_string()),
+                            ],
+                        },
+                        arg_label: ExternalArgLabel::Empty,
+                    },
+                    ExternalArgSpec {
+                        arg_type: ExternalArgAttr::Int(vec![
+                            ("on_closed".to_string(), 0),
+                            ("on_open".to_string(), 3),
+                            ("in_".to_string(), 4),
+                        ]),
+                        arg_label: ExternalArgLabel::Empty,
+                    },
+                ],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsCall {
+                        name: "consume".to_string(),
+                        external_module_name: None,
+                        splice: false,
+                        scopes: vec![],
+                        tagged_template: false,
+                    }),
+                    obj_params: None,
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![
+                Lambda::const_(Constant::Pointer("in_".to_string())),
+                Lambda::const_(Constant::Pointer("on_open".to_string())),
+            ],
+            Location::none(),
+        );
+
+        let rendered = print_block(&compiler.compile_program(&lam).block);
+        assert_eq!(rendered, "consume(\"in\", 3);");
+    }
+
+    #[test]
+    fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "handle".to_string(),
+                arg_types: vec![ExternalArgSpec {
+                    arg_type: ExternalArgAttr::PolyVar {
+                        descr: Some(vec![("b".to_string(), "renamed".to_string())]),
+                    },
+                    arg_label: ExternalArgLabel::Empty,
+                }],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsCall {
+                        name: "handle".to_string(),
+                        external_module_name: None,
+                        splice: false,
+                        scopes: vec![],
+                        tagged_template: false,
+                    }),
+                    obj_params: None,
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![Lambda::const_(Constant::Block {
+                tag: 0,
+                tag_info: TagInfo::PolyVar("b".to_string()),
+                elements: vec![Constant::Pointer("b".to_string()), Constant::int(2)],
+            })],
+            Location::none(),
+        );
+
+        let rendered = print_block(&compiler.compile_program(&lam).block);
+        assert_eq!(rendered, "handle(\"renamed\", 2);");
     }
 
     #[test]
