@@ -755,7 +755,7 @@ impl JsPrinter {
                 self.newline();
                 self.write("let ");
                 self.write(this_binding);
-                self.write(" = this");
+                self.write(" = this ");
                 self.semi();
             }
             if directive.is_some() || body_prints_any {
@@ -3534,7 +3534,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "function (amount) {\n  let me = this;\n  return me;\n}"
+            "function (amount) {\n  let me = this ;\n  return me;\n}"
         );
     }
 
@@ -3560,7 +3560,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "function methodWithThis(value) {\n  let self = this;\n  return self;\n}"
+            "function methodWithThis(value) {\n  let self = this ;\n  return self;\n}"
         );
     }
 

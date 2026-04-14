@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 341 / 657 JS snapshots passing, 0 compile errors, 316 output diffs
+**Status:** 343 / 657 JS snapshots passing, 0 compile errors, 314 output diffs
 
 ## Goal
 
@@ -35,13 +35,44 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **341 / 657**
+- JS snapshot parity: **343 / 657**
 - Compile errors: **0**
-- Output diffs: **316**
+- Output diffs: **314**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed printer rule in
+  `compiler/core/js_dump.ml`, specifically `pp_var_assign_this`
+  emitting the synthetic method-body capture as `let <id> = this ;`
+  rather than `let <id> = this;`
+- After rereading that OCaml printer path, the Rust JS printer in
+  `compiler-rust/src/js_ir/printer.rs` now matches it more closely:
+  - synthetic `this` captures inserted for method lowering now keep the
+    OCaml trailing space before the semicolon
+  - the dedicated printer expectations for method expressions and named
+    method declarations now assert the OCaml layout directly
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_method_function_expression_omits_the_this_parameter`
+  and
+  `js_ir::printer::tests::test_print_top_level_method_function_as_named_declaration`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_method_function_expression_omits_the_this_parameter -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_top_level_method_function_as_named_declaration -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_bs_this.res -o /tmp/test_bs_this.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UncurriedExternals.res -o /tmp/UncurriedExternals.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `test_bs_this` and `UncurriedExternals` are now out of the diff corpus, and
+  `ExternalShadow` remains an exact guard-file match
+- The authoritative JS snapshot baseline now reports **343 / 657** passing,
+  **0** compile errors, and **314** output diffs; this is a net **+2**
+  passing snapshots and **-2** output diffs from the previously recorded
+  **341 / 657**, **0** compile errors, **316** output diffs
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed primitive-lowering gap in
