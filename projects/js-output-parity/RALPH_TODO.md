@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 401 / 657 JS snapshots passing, 0 compile errors, 256 output diffs
+**Status:** 407 / 657 JS snapshots passing, 0 compile errors, 250 output diffs
 
 ## Goal
 
@@ -35,13 +35,65 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **405 / 657**
+- JS snapshot parity: **407 / 657**
 - Compile errors: **0**
-- Output diffs: **252**
+- Output diffs: **250**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Latest iteration on **2026-04-14**:
+
+- Active slice: port the OCaml `compile_recursive_let` recursive
+  `Pmakeblock` self/captured-value branch from `compiler/core/lam_compile.ml`
+  into `compiler-rust/src/lambda/compile.rs` so self-recursive records lower
+  through a dummy object plus field updates like `let xx = {}; xx.xx = xx;`
+  instead of Rust's placeholder declaration plus whole-object reassignment
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice fixes recursive-value lowering on the JS backend
+  path without reopening typedtree or lambda parity work
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, where `compile_recursive_let` special-cases
+  recursive `Pmakeblock` values whose fields are only `Lvar` self/captured
+  references or constants, emits `S.define_variable ~kind:Variable id
+  (E.dummy_obj tag_info)`, and then mutates the dummy with
+  `Js_of_lam_block.set_field ...`
+- Rust change:
+  - factored `Lletrec` lowering through `compile_recursive_bindings(...)` and
+    added the matching recursive `Pmakeblock` self/captured branch in
+    `compile_recursive_self_binding_makeblock(...)`
+  - added the dummy-object and field-info helpers needed to emit the OCaml
+    `let xx = {}; xx.xx = xx;` shape for recursive records and one-field
+    constructors
+  - added focused regression coverage in
+    `recursive_self_referential_record_bindings_lower_to_dummy_object_updates_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml recursive_function_bindings_lower_directly_without_placeholder_assignments -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact `compiler-args` repro for `tests/tests/src/a_recursive_type.res`
+    from `tests/tests/lib/bs`, diffing
+    `tests/tests/lib/bs/src/a_recursive_type.mjs` against the checked-in
+    snapshot
+  - exact `compiler-args` repro for `tests/tests/src/ExternalShadow.res`
+    from `tests/tests/lib/bs`, diffing
+    `tests/tests/lib/bs/src/ExternalShadow.mjs` against the checked-in
+    snapshot as an unchanged backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/a_recursive_type.res` now matches its checked-in snapshot
+    exactly; Rust now emits the same dummy-object initialization plus field
+    update shape as OCaml for `let rec xx = {xx: xx}`
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the recursive-value lowering change
+  - the authoritative baseline improved by two passing snapshots, indicating
+    the missing recursive `Pmakeblock` lowering was affecting more than the
+    single minimal repro
+- Topline impact:
+  - JS snapshot parity: **405 / 657** -> **407 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **252** -> **250** (**-2**)
+- Keep this change because it ports the OCaml `compile_recursive_let`
+  dummy-object branch for recursive `Pmakeblock` values instead of preserving
+  the Rust-only placeholder declaration plus whole-object reassignment.
 
 - Active slice: match OCaml's constant `Psubint` folding in
   `compiler/core/lam.ml` inside

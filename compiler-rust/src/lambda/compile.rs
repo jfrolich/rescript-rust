@@ -21,7 +21,7 @@ use crate::js_ir::{
     StatementDesc, StringClause, VIdent, VariableDeclaration,
 };
 use crate::lambda::analysis;
-use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
+use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::constant::{Constant, ConstructorRuntimeTag, PointerInfo, StringDelim};
 use crate::lambda::primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
@@ -420,39 +420,7 @@ impl LambdaCompiler {
                 }
             }
             Lambda::Lletrec(bindings, body) => {
-                let mut prelude = vec![];
-                let mut deferred = Vec::new();
-                for (id, expr) in bindings {
-                    match expr {
-                        // OCaml's recursive-let path emits function bindings through the same
-                        // declared-binding route used by non-rec lets, which lets the printer
-                        // recover `function name(...)` at the top level.
-                        Lambda::Lfunction(func) => {
-                            prelude.push(Statement::variable(VariableDeclaration {
-                                ident: id.clone(),
-                                value: Some(self.compile_recursive_function_expr(id, func)),
-                                property: LetKind::Alias,
-                                ident_info: IdentInfo::default(),
-                            }));
-                        }
-                        _ => {
-                            prelude.push(Statement::variable(VariableDeclaration {
-                                ident: id.clone(),
-                                value: None,
-                                property: LetKind::Strict,
-                                ident_info: IdentInfo::default(),
-                            }));
-                            deferred.push((id, expr));
-                        }
-                    }
-                }
-                for (id, expr) in deferred {
-                    let compiled = self.compile_expr(expr);
-                    prelude.extend(compiled.prelude);
-                    let assign =
-                        Expression::bin(BinOp::Eq, Expression::var(id.clone()), compiled.expr);
-                    prelude.push(Statement::exp(assign));
-                }
+                let mut prelude = self.compile_recursive_bindings(bindings);
                 let body_compiled = self.compile_expr(body);
                 prelude.extend(body_compiled.prelude);
                 Compiled {
@@ -572,6 +540,212 @@ impl LambdaCompiler {
 
     fn compile_block(&mut self, lam: &Lambda) -> Block {
         self.compile_effect_block(lam)
+    }
+
+    fn compile_recursive_bindings(&mut self, bindings: &[(Ident, Lambda)]) -> Block {
+        let mut declarations = vec![];
+        let mut effects = vec![];
+
+        for (id, expr) in bindings {
+            let (binding_decls, binding_effects) =
+                self.compile_recursive_binding(id, expr, bindings);
+            declarations.extend(binding_decls);
+            effects.extend(binding_effects);
+        }
+
+        declarations.extend(effects);
+        declarations
+    }
+
+    fn compile_recursive_binding(
+        &mut self,
+        id: &Ident,
+        expr: &Lambda,
+        all_bindings: &[(Ident, Lambda)],
+    ) -> (Block, Block) {
+        match expr {
+            // OCaml's recursive-let path emits function bindings through the same
+            // declared-binding route used by non-rec lets, which lets the printer
+            // recover `function name(...)` at the top level.
+            Lambda::Lfunction(func) => (
+                vec![],
+                vec![Statement::variable(VariableDeclaration {
+                    ident: id.clone(),
+                    value: Some(self.compile_recursive_function_expr(id, func)),
+                    property: LetKind::Alias,
+                    ident_info: IdentInfo::default(),
+                })],
+            ),
+            Lambda::Lprim(info)
+                if matches!(info.primitive, Primitive::Pmakeblock(_, _, _))
+                    && info.args.iter().all(|arg| {
+                        matches!(arg, Lambda::Lfunction(_) | Lambda::Lconst(_))
+                    }) =>
+            {
+                let compiled = self.compile_expr(expr);
+                let mut effects = compiled.prelude;
+                if !block_terminates(&effects) {
+                    effects.push(Statement::variable(VariableDeclaration {
+                        ident: id.clone(),
+                        value: Some(compiled.expr),
+                        property: LetKind::Alias,
+                        ident_info: IdentInfo::default(),
+                    }));
+                }
+                (vec![], effects)
+            }
+            Lambda::Lprim(info)
+                if matches!(info.primitive, Primitive::Pmakeblock(_, _, _)) =>
+            {
+                if let Some(effects) =
+                    self.compile_recursive_self_binding_makeblock(id, info, all_bindings)
+                {
+                    return (vec![], effects);
+                }
+
+                let compiled = self.compile_expr(expr);
+                let mut effects = compiled.prelude;
+                if !block_terminates(&effects) {
+                    effects.push(Statement::exp(Expression::bin(
+                        BinOp::Eq,
+                        Expression::var(id.clone()),
+                        compiled.expr,
+                    )));
+                }
+                (
+                    vec![Statement::variable(VariableDeclaration {
+                        ident: id.clone(),
+                        value: None,
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    })],
+                    effects,
+                )
+            }
+            _ => {
+                let compiled = self.compile_expr(expr);
+                let mut effects = compiled.prelude;
+                if !block_terminates(&effects) {
+                    effects.push(Statement::exp(Expression::bin(
+                        BinOp::Eq,
+                        Expression::var(id.clone()),
+                        compiled.expr,
+                    )));
+                }
+                (
+                    vec![Statement::variable(VariableDeclaration {
+                        ident: id.clone(),
+                        value: None,
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    })],
+                    effects,
+                )
+            }
+        }
+    }
+
+    fn compile_recursive_self_binding_makeblock(
+        &self,
+        id: &Ident,
+        info: &crate::lambda::PrimInfo,
+        all_bindings: &[(Ident, Lambda)],
+    ) -> Option<Block> {
+        let tag_info = match &info.primitive {
+            Primitive::Pmakeblock(_, tag_info, _) => tag_info,
+            _ => return None,
+        };
+
+        if !matches!(
+            tag_info,
+            TagInfo::Record { .. }
+                | TagInfo::Constructor { num_nonconst: 1, .. }
+                | TagInfo::RecordInlined { num_nonconst: 1, .. }
+        ) {
+            return None;
+        }
+
+        let only_self_or_captured = info.args.iter().all(|arg| match arg {
+            Lambda::Lvar(binding) => {
+                binding.same(id)
+                    || !all_bindings
+                        .iter()
+                        .any(|(other, _)| other.same(binding) && !other.same(id))
+            }
+            Lambda::Lconst(_) => true,
+            _ => false,
+        });
+        if !only_self_or_captured {
+            return None;
+        }
+
+        let mut block = vec![Statement::variable(VariableDeclaration {
+            ident: id.clone(),
+            value: Some(Self::recursive_dummy_object_expr(tag_info)),
+            property: LetKind::Variable,
+            ident_info: IdentInfo::default(),
+        })];
+
+        for (index, arg) in info.args.iter().enumerate() {
+            let field_info = Self::recursive_self_binding_field_info(tag_info, index)?;
+            let value = match arg {
+                Lambda::Lvar(binding) => Expression::var(binding.clone()),
+                Lambda::Lconst(constant) => Self::compile_constant(constant),
+                _ => return None,
+            };
+            block.push(Statement::exp(self.compile_set_field(
+                index as i32,
+                &field_info,
+                &Expression::var(id.clone()),
+                &value,
+            )));
+        }
+
+        Some(block)
+    }
+
+    fn recursive_dummy_object_expr(tag_info: &TagInfo) -> Expression {
+        match tag_info {
+            TagInfo::Record { .. }
+            | TagInfo::Module(_)
+            | TagInfo::Constructor { .. }
+            | TagInfo::RecordInlined { .. }
+            | TagInfo::PolyVar(_)
+            | TagInfo::Extension
+            | TagInfo::RecordExt { .. } => Expression::new(ExpressionDesc::Object(None, vec![])),
+            TagInfo::Tuple | TagInfo::ModuleExport(_) => {
+                Expression::array(vec![], MutableFlag::Mutable)
+            }
+            TagInfo::Some | TagInfo::SomeNotNested => {
+                panic!("unexpected option block in recursive dummy-object lowering")
+            }
+        }
+    }
+
+    fn recursive_self_binding_field_info(
+        tag_info: &TagInfo,
+        index: usize,
+    ) -> Option<SetFieldDbgInfo> {
+        match tag_info {
+            TagInfo::Record { fields, .. } => fields
+                .get(index)
+                .map(|(name, _)| SetFieldDbgInfo::RecordSet(name.clone())),
+            TagInfo::RecordInlined { fields, .. } => fields
+                .get(index)
+                .map(|(name, _)| SetFieldDbgInfo::RecordInlineSet(name.clone())),
+            TagInfo::Constructor { name, .. } => Some(SetFieldDbgInfo::RecordInlineSet(
+                if name == "::" {
+                    match index {
+                        0 => "hd".to_string(),
+                        1 => "tl".to_string(),
+                        _ => format!("_{}", index),
+                    }
+                } else {
+                    format!("_{}", index)
+                },
+            )),
+            _ => None,
+        }
     }
 
     fn compile_let_binding(&mut self, kind: LetKind, id: &Ident, value: &Lambda) -> Block {
@@ -17000,6 +17174,80 @@ mod tests {
             !rendered.contains("let even;") && !rendered.contains("let odd;"),
             "unexpected recursive placeholders remained:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn recursive_self_referential_record_bindings_lower_to_dummy_object_updates_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let xx = Ident::create_local("xx");
+        let lam = Lambda::letrec(
+            vec![(
+                xx.clone(),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::record(
+                            vec![("xx".to_string(), false)],
+                            crate::parser::ast::MutableFlag::Immutable,
+                        ),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(xx.clone())],
+                    Location::none(),
+                ),
+            )],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let [declare, assign] = compiled.prelude.as_slice() else {
+            panic!("expected a dummy-object declaration followed by a field update");
+        };
+
+        let StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::Object(None, props),
+                    ..
+                }),
+            property: LetKind::Variable,
+            ..
+        }) = &declare.desc
+        else {
+            panic!("expected an initialized dummy-object declaration");
+        };
+        assert!(ident.same(&xx));
+        assert!(props.is_empty(), "expected an empty dummy object");
+
+        let StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Bin(BinOp::Eq, left, right),
+            ..
+        }) = &assign.desc
+        else {
+            panic!("expected the recursive record field assignment");
+        };
+        assert!(matches!(
+            left.as_ref(),
+            Expression {
+                desc: ExpressionDesc::StaticIndex(target, field, None),
+                ..
+            } if field == "xx"
+                && matches!(
+                    target.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(id)),
+                        ..
+                    } if id.same(&xx)
+                )
+        ));
+        assert!(matches!(
+            right.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(VIdent::Id(id)),
+                ..
+            } if id.same(&xx)
+        ));
     }
 
     #[test]
