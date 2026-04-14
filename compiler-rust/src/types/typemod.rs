@@ -8292,7 +8292,7 @@ pub fn type_structure<'a>(
 
     let mut typed_items = Vec::new();
     let mut sig_items = Vec::new();
-    let mut current_env = env.clone();
+    let mut current_env = env.clone_preserve_id();
 
     for item in items {
         let ctx = tctx.type_ctx;
@@ -8326,7 +8326,7 @@ fn type_structure_no_export<'a>(
     // Type check all items normally first
     let mut typed_items = Vec::new();
     let mut sig_items = Vec::new();
-    let mut current_env = env.clone();
+    let mut current_env = env.clone_preserve_id();
 
     for item in items {
         let ctx = tctx.type_ctx;
@@ -11322,7 +11322,7 @@ fn type_structure_item<'a>(
                     str_env: EnvRef(0),
                 },
                 vec![],
-                env.clone(),
+                env.clone_preserve_id(),
             ))
         }
     }
