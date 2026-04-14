@@ -4535,7 +4535,29 @@ impl LambdaCompiler {
         }
 
         debug_assert!(runtime_args.next().is_none());
-        assembled
+        self.keep_non_undefined_external_args(arg_types, assembled)
+    }
+
+    fn keep_non_undefined_external_args(
+        &self,
+        arg_types: &[ExternalArgSpec],
+        mut args: Vec<Expression>,
+    ) -> Vec<Expression> {
+        let trailing_optional_undefined_count = arg_types
+            .iter()
+            .rev()
+            .zip(args.iter().rev())
+            .take_while(|(arg_spec, arg)| {
+                matches!(arg_spec.arg_label, ExternalArgLabel::Optional)
+                    && matches!(arg.desc, ExpressionDesc::Undefined { is_unit: false })
+            })
+            .count();
+
+        if trailing_optional_undefined_count > 0 {
+            args.truncate(args.len() - trailing_optional_undefined_count);
+        }
+
+        args
     }
 
     fn assemble_external_args_with_splice(
@@ -14622,6 +14644,141 @@ mod tests {
             }
             other => panic!("expected a new expression, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let date = Ident::create_local("date");
+        let lam = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "formatDate".to_string(),
+                arg_types: vec![
+                    ExternalArgSpec {
+                        arg_type: ExternalArgAttr::Nothing,
+                        arg_label: ExternalArgLabel::Empty,
+                    },
+                    ExternalArgSpec {
+                        arg_type: ExternalArgAttr::Nothing,
+                        arg_label: ExternalArgLabel::Optional,
+                    },
+                    ExternalArgSpec {
+                        arg_type: ExternalArgAttr::Nothing,
+                        arg_label: ExternalArgLabel::Optional,
+                    },
+                ],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsCall {
+                        name: "formatDate".to_string(),
+                        external_module_name: Some(external_module("SomeModule")),
+                        splice: false,
+                        scopes: vec![],
+                        tagged_template: false,
+                    }),
+                    obj_params: None,
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![
+                Lambda::var(date.clone()),
+                Lambda::const_(Constant::JsUndefined { is_unit: false }),
+                Lambda::const_(Constant::JsUndefined { is_unit: false }),
+            ],
+            Location::none(),
+        );
+
+        let rendered = print_block(&compiler.compile_program(&lam).block);
+        assert_eq!(rendered, "SomeModule.formatDate(date);");
+    }
+
+    #[test]
+    fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "toString".to_string(),
+                arg_types: vec![
+                    ExternalArgSpec {
+                        arg_type: ExternalArgAttr::Nothing,
+                        arg_label: ExternalArgLabel::Empty,
+                    },
+                    ExternalArgSpec {
+                        arg_type: ExternalArgAttr::Nothing,
+                        arg_label: ExternalArgLabel::Optional,
+                    },
+                ],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsSend {
+                        name: "toString".to_string(),
+                        splice: false,
+                        js_send_scopes: vec![],
+                    }),
+                    obj_params: None,
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![
+                Lambda::const_(Constant::Float("42.".to_string())),
+                Lambda::const_(Constant::JsUndefined { is_unit: false }),
+            ],
+            Location::none(),
+        );
+
+        let rendered = print_block(&compiler.compile_program(&lam).block);
+        assert_eq!(rendered, "(42).toString();");
+    }
+
+    #[test]
+    fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "RegExp".to_string(),
+                arg_types: vec![
+                    ExternalArgSpec {
+                        arg_type: ExternalArgAttr::Nothing,
+                        arg_label: ExternalArgLabel::Empty,
+                    },
+                    ExternalArgSpec {
+                        arg_type: ExternalArgAttr::Nothing,
+                        arg_label: ExternalArgLabel::Optional,
+                    },
+                ],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsNew {
+                        name: "RegExp".to_string(),
+                        external_module_name: None,
+                        splice: false,
+                        scopes: vec![],
+                    }),
+                    obj_params: None,
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![
+                Lambda::const_(Constant::String {
+                    s: "ab+c".to_string(),
+                    delim: None,
+                }),
+                Lambda::const_(Constant::JsUndefined { is_unit: false }),
+            ],
+            Location::none(),
+        );
+
+        let rendered = print_block(&compiler.compile_program(&lam).block);
+        assert_eq!(rendered, "new RegExp(\"ab+c\");");
     }
 
     #[test]

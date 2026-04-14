@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 377 / 657 JS snapshots passing, 0 compile errors, 280 output diffs
+**Status:** 384 / 657 JS snapshots passing, 0 compile errors, 273 output diffs
 
 ## Goal
 
@@ -35,11 +35,70 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **377 / 657**
+- JS snapshot parity: **384 / 657**
 - Compile errors: **0**
-- Output diffs: **280**
+- Output diffs: **273**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: match OCaml's `keep_non_undefined_args` behavior in
+  `compiler-rust/src/lambda/compile.rs` so JS externals omit only trailing
+  optional `undefined` arguments on the non-splice path instead of preserving
+  Rust-only `(..., undefined)` tails in emitted JS
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this slice fixes backend external-call shaping at the OCaml
+  `lam_compile_external_call.ml` boundary without reopening typedtree or
+  lambda parity work
+- OCaml reference:
+  `compiler/core/lam_compile_external_call.ml`, where
+  `keep_non_undefined_args` trims only a trailing suffix of
+  `Arg_optional` + `Undefined {is_unit = false}` pairs after
+  `assemble_args_no_splice`, while preserving non-trailing `undefined`
+  placeholders and leaving splice calls alone
+- Rust change:
+  - added `keep_non_undefined_external_args(...)` and routed
+    `assemble_external_args_no_splice(...)` through it so final JS externals
+    follow OCaml's trailing-optional-undefined trimming rule
+  - left the splice path unchanged to match OCaml's
+    `assemble_args_has_splice` behavior
+  - added focused lowering coverage in
+    `lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml`,
+    `lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml`, and
+    `lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml trailing_optional_undefined_args_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/omit_trailing_undefined_in_external_calls.res -o /tmp/omit_trailing_undefined_in_external_calls.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/stdlib/intl/Stdlib_Intl_LocaleTest.res -o /tmp/Stdlib_Intl_LocaleTest.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/omit_trailing_undefined_in_external_calls.res` now
+    matches its checked-in `.mjs` snapshot exactly; the Rust-only trailing
+    `undefined` arguments on `formatDate`, `toString`, and `new RegExp(...)`
+    are gone
+  - the same OCaml rule now drops the diff files for
+    `tests/tests/src/stdlib/intl/Stdlib_Intl_LocaleTest.res`,
+    `Stdlib_Intl_ListFormatTest.res`,
+    `Stdlib_Intl_NumberFormatTest.res`,
+    `Stdlib_Intl_PluralRulesTest.res`,
+    `Stdlib_Intl_RelativeTimeFormatTest.res`, and
+    `Stdlib_Intl_SegmenterTest.res`
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the external-call change
+  - nearby files such as
+    `tests/tests/src/stdlib/intl/Stdlib_Intl_CollatorTest.res` and
+    `Stdlib_Intl_DateTimeFormatTest.res` still differ, but now only on the
+    remaining sequence/object-lowering drift inside option-record builders
+- Topline impact:
+  - JS snapshot parity: **384 / 657** (**+7**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **273** (**-7**)
+- Keep this change because it ports OCaml's
+  `lam_compile_external_call.ml` external-argument trimming rule directly
+  instead of preserving Rust-only `undefined` tails in emitted JS
 
 Latest iteration on **2026-04-14**:
 
