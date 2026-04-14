@@ -4260,6 +4260,14 @@ impl LambdaCompiler {
             return Expression::bool(compare_int_literals(cmp, lhs, rhs));
         }
 
+        // OCaml's Js_exp_make.int_comp strips Runtime.compare(..., ...) when
+        // the RHS is the integer literal 0, so compare(x, y) > 0 lowers to x > y.
+        if int_literal(&right) == Some(0) {
+            if let Some((compare_left, compare_right)) = runtime_compare_call_args(&left) {
+                return self.compile_int_comparison(cmp, compare_left.clone(), compare_right.clone());
+            }
+        }
+
         match cmp {
             Comparison::Eq => {
                 if ((is_optional_block(&left)
@@ -6396,6 +6404,23 @@ fn compile_int_equality(left: Expression, right: Expression) -> Expression {
             ExpressionDesc::Number(Number::Float(right_float)),
         ) if left_float.f == right_float.f => Expression::bool(true),
         _ => compile_raw_comparison(Comparison::Eq, left, right),
+    }
+}
+
+fn runtime_compare_call_args(expr: &Expression) -> Option<(&Expression, &Expression)> {
+    let ExpressionDesc::Call(func, args, _) = &expr.desc else {
+        return None;
+    };
+    let ExpressionDesc::Var(VIdent::Qualified(module, Some(member))) = &func.desc else {
+        return None;
+    };
+    if !matches!(module.kind, Kind::Runtime) || member != "compare" {
+        return None;
+    }
+
+    match args.as_slice() {
+        [left, right] => Some((left, right)),
+        _ => None,
     }
 }
 
@@ -10736,6 +10761,57 @@ mod tests {
 
         assert!(compiled.prelude.is_empty());
         assert_eq!(print_expression(&compiled.expr), "Primitive_float.compare");
+    }
+
+    #[test]
+    fn compile_compare_against_zero_elides_runtime_compare_call_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("x");
+        let right = Ident::create_local("y");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pintcomp(Comparison::Gt),
+            vec![
+                Lambda::prim(
+                    Primitive::Pfloatorder,
+                    vec![Lambda::var(left.clone()), Lambda::var(right.clone())],
+                    Location::none(),
+                ),
+                Lambda::const_(Constant::int(0)),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "x > y");
+    }
+
+    #[test]
+    fn compile_bigint_compare_against_zero_elides_runtime_compare_call_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pintcomp(Comparison::Lt),
+            vec![
+                Lambda::prim(
+                    Primitive::Pfloatorder,
+                    vec![
+                        Lambda::const_(Constant::BigInt {
+                            negative: false,
+                            value: "123".to_string(),
+                        }),
+                        Lambda::const_(Constant::BigInt {
+                            negative: false,
+                            value: "555555".to_string(),
+                        }),
+                    ],
+                    Location::none(),
+                ),
+                Lambda::const_(Constant::int(0)),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "123n < 555555n");
     }
 
     #[test]

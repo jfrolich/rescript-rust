@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 398 / 657 JS snapshots passing, 0 compile errors, 259 output diffs
+**Status:** 399 / 657 JS snapshots passing, 0 compile errors, 258 output diffs
 
 ## Goal
 
@@ -35,11 +35,64 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **398 / 657**
+- JS snapshot parity: **399 / 657**
 - Compile errors: **0**
-- Output diffs: **259**
+- Output diffs: **258**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port OCaml's `Js_exp_make.int_comp` runtime-compare-to-zero
+  rewrite into `compiler-rust/src/lambda/compile.rs` so downstream JS lowering
+  strips `Runtime.compare(x, y)` when comparing the result against integer
+  zero, emitting direct relational operators like `x > y` instead of keeping
+  `Primitive_float.compare(x, y) > 0`
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice fixes post-lambda JS-expression lowering in the
+  OCaml `lam_compile_primitive.ml` -> `js_exp_make.ml` path without reopening
+  typedtree or lambda parity work
+- OCaml reference:
+  `compiler/core/js_exp_make.ml`, where `int_comp` matches
+  `Call(Var(Qualified({kind = Runtime}, Some "compare")), [l; r], _)` against
+  `Number(Int 0l)` and recursively re-emits `int_comp cmp l r`
+- Rust change:
+  - added `runtime_compare_call_args(...)` and the matching
+    `int_literal(&right) == Some(0)` branch in `compile_int_comparison(...)`
+    so runtime compare calls collapse to direct comparisons exactly like OCaml
+  - added focused unit coverage in
+    `compile_compare_against_zero_elides_runtime_compare_call_like_ocaml` and
+    `compile_bigint_compare_against_zero_elides_runtime_compare_call_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml compare_against_zero -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact `compiler-args` repro for `tests/tests/src/caml_compare_bigint_test.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/caml_compare_bigint_test.mjs`
+    against the checked-in snapshot
+  - exact `compiler-args` repro for `tests/tests/src/ExternalShadow.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/ExternalShadow.mjs` against the
+    checked-in snapshot
+  - exact `compiler-args` repro for `tests/tests/src/compare_test.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/compare_test.mjs` against the
+    checked-in snapshot as an unchanged broader guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/caml_compare_bigint_test.res` now matches its checked-in
+    snapshot exactly; the first two assertions lower to direct bigint
+    relational operators instead of the Rust-only
+    `Primitive_float.compare(... ) > 0` / `< 0` shape
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the compare-to-zero rewrite
+  - `tests/tests/src/compare_test.res` still differs only on the existing
+    switch-case ordering drift, confirming this slice stayed scoped to the
+    OCaml `int_comp` backend rule
+- Topline impact:
+  - JS snapshot parity: **398 / 657** -> **399 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **259** -> **258** (**-1**)
+- Keep this change because it ports the exact OCaml
+  `js_exp_make.ml` `int_comp` compare-to-zero simplification instead of
+  preserving the Rust-only runtime compare call in final JS.
 
 Latest iteration on **2026-04-14**:
 
