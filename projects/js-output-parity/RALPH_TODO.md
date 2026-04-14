@@ -35,13 +35,68 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **401 / 657**
+- JS snapshot parity: **405 / 657**
 - Compile errors: **0**
-- Output diffs: **256**
+- Output diffs: **252**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Latest iteration on **2026-04-14**:
+
+- Active slice: match OCaml's constant `Psubint` folding in
+  `compiler/core/lam.ml` inside
+  `compiler-rust/src/lambda/simplify.rs` so the JS-path simplifier collapses
+  constant loop finishes like `n - 1` before
+  `compiler/core/lam_compile.ml` decides whether to emit `Up` or `Upto`,
+  matching the checked-in loop headers instead of over-emitting `< N`
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice fixes post-lowering lambda cleanup on the JS
+  backend path without reopening typedtree or lambda parity work
+- OCaml reference:
+  `compiler/core/lam.ml`, where `Lam.prim` folds `Psubint` over two
+  `Const_int` arguments to `Lift.int (Int32.sub aa bb)`; after alias
+  simplification, OCaml reaches `lam_compile.ml` with constant loop finishes
+  like `9` instead of preserving `Psubint(10, 1)`
+- Rust change:
+  - added a backend-local `Psubint` constant fold in
+    `simplify_primitive(...)` so `simplify_for_js_backend(...)` rebuilds
+    constant loop bounds the same way OCaml's `Lam.prim` does
+  - added focused regression coverage in
+    `folds_constant_subint_loop_finish_before_for_range_lowering_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml folds_constant_subint_ -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml lowers_upto_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact `compiler-args` repro for `tests/tests/src/test_closure.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/test_closure.mjs` against the
+    checked-in snapshot
+  - exact `compiler-args` repro for `tests/tests/src/string_set_test.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/string_set_test.mjs` against the
+    checked-in snapshot
+  - exact `compiler-args` repro for `tests/tests/src/ExternalShadow.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/ExternalShadow.mjs` against the
+    checked-in snapshot as an unchanged backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_closure.res`,
+    `tests/tests/src/string_set_test.res`,
+    `tests/tests/src/tailcall_inline_test.res`, and
+    `tests/tests/src/cps_test.res` now match their checked-in snapshots;
+    Rust had been carrying constant loop finishes as `Psubint(const, 1)`
+    until `compile.rs`, which triggered the OCaml `Up` rewrite and emitted
+    `< N` instead of the snapshot's `<= N - 1` headers
+  - `tests/tests/src/for_loop_test.res` no longer differs on its constant
+    loop bounds; the remaining diff in that file is later variable naming and
+    formatting inside `for_9`
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match
+- Topline impact:
+  - JS snapshot parity: **401 / 657** -> **405 / 657** (**+4**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **256** -> **252** (**-4**)
+- Keep this change because it ports the exact OCaml `Lam.prim` constant
+  `Psubint` fold on the JS-path simplifier before `lam_compile.ml`
+  loop-direction lowering, instead of preserving the Rust-only `< N` headers
+  for constant `n - 1` loops
 
 - Active slice: port the missing OCaml `Phash` / `Phash_mixint` /
   `Phash_mixstring` / `Phash_finalmix` lowering from

@@ -1128,7 +1128,21 @@ fn simplify_primitive(
             }),
             _ => Lambda::prim(info.primitive.clone(), args, info.loc.clone()),
         },
-        _ => Lambda::prim(info.primitive.clone(), args, info.loc.clone()),
+        _ => fold_ocaml_backend_int_primitive(&info.primitive, &args)
+            .unwrap_or_else(|| Lambda::prim(info.primitive.clone(), args, info.loc.clone())),
+    }
+}
+
+fn fold_ocaml_backend_int_primitive(primitive: &Primitive, args: &[Lambda]) -> Option<Lambda> {
+    match (primitive, args) {
+        (
+            Primitive::Psubint,
+            [
+                Lambda::Lconst(Constant::Int { i: left, .. }),
+                Lambda::Lconst(Constant::Int { i: right, .. }),
+            ],
+        ) => Some(Lambda::const_(Constant::int(left.wrapping_sub(*right)))),
+        _ => None,
     }
 }
 
@@ -2422,7 +2436,8 @@ mod tests {
         ExternalArgAttr, ExternalObjLabel, ExternalObjSpec, Mutable, Primitive,
     };
     use crate::lambda::{
-        ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, Lambda, TagInfo,
+        ApInfo, Apply, ApplyStatus, DirectionFlag, FunctionAttribute, InlineAttribute, Lambda,
+        TagInfo,
     };
     use crate::location::Location;
 
@@ -5598,5 +5613,44 @@ mod tests {
         };
         assert_eq!(fields, vec!["sheep".to_string()]);
         assert!(matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&kept_sheep)));
+    }
+
+    #[test]
+    fn folds_constant_subint_loop_finish_before_for_range_lowering_like_ocaml() {
+        let loop_var = Ident::create_local("i");
+        let limit = Ident::create_local("limit");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            limit.clone(),
+            Lambda::const_(Constant::int(10)),
+            Lambda::for_(
+                loop_var.clone(),
+                Lambda::const_(Constant::int(0)),
+                Lambda::prim(
+                    Primitive::Psubint,
+                    vec![Lambda::var(limit), Lambda::const_(Constant::int(1))],
+                    Location::none(),
+                ),
+                DirectionFlag::Upto,
+                Lambda::unit(),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lfor(loop_ident, start, finish, direction, body) = simplified else {
+            panic!("expected simplified for-loop, got {simplified:?}");
+        };
+
+        assert!(loop_ident.same(&loop_var));
+        assert_eq!(direction, DirectionFlag::Upto);
+        assert!(matches!(
+            start.as_ref(),
+            Lambda::Lconst(Constant::Int { i: 0, .. })
+        ));
+        assert!(matches!(
+            finish.as_ref(),
+            Lambda::Lconst(Constant::Int { i: 9, .. })
+        ));
+        assert!(matches!(body.as_ref(), Lambda::Lconst(Constant::JsUndefined { .. })));
     }
 }
