@@ -3310,6 +3310,15 @@ impl LambdaCompiler {
                     }
                     Expression::qualified(module.clone(), Some(name.clone()))
                 }
+                ExpressionDesc::CamlBlock(items, _, _, _) if js_expr_no_side_effects(target) => {
+                    items.get(idx as usize).cloned().unwrap_or_else(|| {
+                        Expression::new(ExpressionDesc::StaticIndex(
+                            Box::new(target.clone()),
+                            convert_ident_name(name),
+                            Some(idx),
+                        ))
+                    })
+                }
                 _ => Expression::new(ExpressionDesc::StaticIndex(
                     Box::new(target.clone()),
                     convert_ident_name(name),
@@ -5529,9 +5538,8 @@ fn flatten_and_mark_dead_statement(
                     }
 
                     return Statement {
-                        desc: StatementDesc::Variable(VariableDeclaration {
-                            ident: decl.ident,
-                            value: Some(Expression {
+                        desc: {
+                            let rewritten_value = Expression {
                                 desc: ExpressionDesc::CamlBlock(
                                     items,
                                     MutableFlag::Immutable,
@@ -5539,10 +5547,15 @@ fn flatten_and_mark_dead_statement(
                                     tag_info,
                                 ),
                                 comment: value_comment,
-                            }),
-                            property: decl.property,
-                            ident_info: decl.ident_info,
-                        }),
+                            };
+                            substitution.insert(decl.ident.clone(), rewritten_value.clone());
+                            StatementDesc::Variable(VariableDeclaration {
+                                ident: decl.ident,
+                                value: Some(rewritten_value),
+                                property: decl.property,
+                                ident_info: decl.ident_info,
+                            })
+                        },
                         comment,
                     };
                 }
@@ -12649,6 +12662,81 @@ mod tests {
     }
 
     #[test]
+    fn js_flatten_and_mark_dead_substitutes_single_field_module_reads() {
+        let module = Ident::create_local("M");
+        let eq = Ident::create_local("Eq");
+        let projected = Ident::create_local("EQ");
+        let deps = apply_js_flatten_and_mark_dead_pass(DepsProgram {
+            program: Program::new(
+                vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: module.clone(),
+                        value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                            vec![Expression::var(eq.clone())],
+                            MutableFlag::Immutable,
+                            Box::new(Expression::number(Number::int(0))),
+                            TagInfo::Module(vec!["Eq".to_string()]),
+                        ))),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }),
+                    Statement::variable(VariableDeclaration {
+                        ident: projected,
+                        value: Some(Expression::new(ExpressionDesc::StaticIndex(
+                            Box::new(Expression::var(module.clone())),
+                            "Eq".to_string(),
+                            Some(0),
+                        ))),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }),
+                ],
+                vec![],
+            ),
+            modules: vec![],
+            side_effect: None,
+        });
+
+        let [module_stmt, projected_stmt] = deps.program.block.as_slice() else {
+            panic!("expected the module binding and the rewritten projection");
+        };
+        match &module_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&module));
+                assert!(matches!(
+                    items.as_slice(),
+                    [Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    }] if id.same(&eq)
+                ));
+            }
+            other => panic!("expected the single-field module binding to remain intact, got {other:?}"),
+        }
+        match &projected_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    }),
+                ..
+            }) if id.same(&eq) => {}
+            other => panic!(
+                "expected the single-field module projection to inline to the field value, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
     fn js_flatten_and_mark_dead_marks_unused_nested_pure_bindings() {
         let run = Ident::create_local("run");
         let unused = Ident::create_local("unused");
@@ -14224,6 +14312,33 @@ mod tests {
         }
 
         assert_eq!(print_expression(&expr), "Js_promise2.$$catch");
+    }
+
+    #[test]
+    fn lowers_module_pfield_from_pure_caml_block_directly_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let eq = Ident::create_local("Eq");
+        let expr = compiler.compile_field_access(
+            0,
+            &FieldDbgInfo::Module {
+                name: "Eq".to_string(),
+            },
+            &Expression::new(ExpressionDesc::CamlBlock(
+                vec![Expression::var(eq.clone())],
+                MutableFlag::Immutable,
+                Box::new(Expression::number(Number::int(0))),
+                TagInfo::Module(vec!["Eq".to_string()]),
+            )),
+        );
+
+        assert!(matches!(
+            &expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&eq)
+        ));
+        assert_eq!(print_expression(&expr), "Eq");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 348 / 657 JS snapshots passing, 0 compile errors, 309 output diffs
+**Status:** 349 / 657 JS snapshots passing, 0 compile errors, 308 output diffs
 
 ## Goal
 
@@ -35,11 +35,52 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **348 / 657**
+- JS snapshot parity: **349 / 657**
 - Compile errors: **0**
-- Output diffs: **309**
+- Output diffs: **308**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: bound single-field module projections in the JS lowering and
+  flatten-and-mark-dead passes in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference: `compiler/core/js_of_lam_block.ml`,
+  `compiler/core/js_exp_make.ml`, and
+  `compiler/core/js_pass_flatten_and_mark_dead.ml`, where module fields lower
+  through `E.module_access` and immutable module-block projections are later
+  substituted through the block-substitution map
+- Rust change:
+  - `compile_field_access` now matches `E.module_access` by returning the
+    selected field directly when the module target is a no-side-effect
+    `CamlBlock`
+  - `flatten_and_mark_dead_statement` now records single-field immutable
+    module blocks in the substitution map as well, so later
+    `StaticIndex(..., Some idx)` reads can collapse to the field value
+- Added focused regression coverage in
+  `lambda::compile::tests::lowers_module_pfield_from_pure_caml_block_directly_like_ocaml`
+  and
+  `lambda::compile::tests::js_flatten_and_mark_dead_substitutes_single_field_module_reads`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lowers_module_pfield_from_pure_caml_block_directly_like_ocaml`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_flatten_and_mark_dead_substitutes_single_field_module_reads`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/functors_one_arg_at_a_time.res -o /tmp/functors_one_arg_at_a_time.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `functors_one_arg_at_a_time` now matches its checked-in `.mjs` snapshot
+    exactly
+  - the previously active functor/module-alias cluster is now fully absent
+    from the authoritative diff corpus
+  - `ExternalShadow` remains an exact guard-file match
+- Topline impact:
+  - JS snapshot parity: **349 / 657** (**+1**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **308** (**-1**)
+- Keep this change because it ports the OCaml module-field lowering and
+  substitution behavior instead of adding a printer-only rewrite, and it
+  clears the last remaining file in the active functor cluster
 
 Latest iteration on **2026-04-14**:
 
