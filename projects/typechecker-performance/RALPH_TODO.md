@@ -67,6 +67,44 @@ Detailed corpus baseline:
   exactly." The expectation is that removing Rust-only extra work is the real
   win.
 
+## Session Update: Back Out Local `Pident` Shortcut And Save Recovery Plan
+
+Additional checkpoint from this worktree on `2026-04-14` after removing the
+new local-`Pident` env-lazy shortcut from `Env` /
+`with_resolved_module_components_for_path` and backing out the matching
+`typemod::resolve_path_to_sig_impl` pre-check:
+
+- saved the detailed repair plan to
+  [LOCAL_PIDENT_FORCING_RECOVERY_PLAN.md](./LOCAL_PIDENT_FORCING_RECOVERY_PLAN.md)
+- focused import-family typedtree parity:
+  - `./scripts/test_typedtree_parity.sh Import`
+  - back to `1/4` files matching, `283` hunk mismatches
+- full canonical typedtree parity:
+  - `./scripts/test_typedtree_parity.sh`
+  - back to `232/657`, `43117` hunk mismatches
+- focused `Import.res` benchmark:
+  - `python3 scripts/benchmark_typechecker_performance.py Import.res`
+  - OCaml `46.8ms`, Rust `42.8ms`, Rust/OCaml `0.92x`
+
+What landed in this step:
+
+- removed the local `Env::module_components` storage and lookup path that
+  memoized local `Pident` module components from a cloned seed env
+- removed the local-first `with_resolved_module_components_for_path` shortcut
+  that forced those memoized components before the older path-based logic
+- removed the local `Pident` `typemod::resolve_path_to_sig_impl` pre-check that
+  routed additional local identifiers through `resolve_module_signature_for_path`
+- saved a separate implementation plan for rebuilding the local path in an
+  OCaml-shaped way instead of reintroducing the same shortcut
+
+What this means:
+
+- the new local `Pident` shortcut was the parity-dangerous part of the dirty
+  worktree; backing it out restores the prior canonical parity checkpoint
+- this is only a recovery/base-state change, not the final fix
+- the next implementation step is to replace that shortcut with a real
+  OCaml-shaped local `components_of_module_maker` analogue
+
 ## Session Update: Persistent `Pident` Shared Helpers Now Use `env_lazy`
 
 Additional checkpoint from this worktree on `2026-04-14` after routing the
