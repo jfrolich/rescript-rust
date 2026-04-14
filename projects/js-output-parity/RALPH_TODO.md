@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 373 / 657 JS snapshots passing, 0 compile errors, 284 output diffs
+**Status:** 372 / 657 JS snapshots passing, 0 compile errors, 285 output diffs
 
 ## Goal
 
@@ -35,11 +35,65 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **373 / 657**
+- JS snapshot parity: **372 / 657**
 - Compile errors: **0**
-- Output diffs: **284**
+- Output diffs: **285**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: match OCaml's plain-string handling in
+  `compiler-rust/src/lambda/simplify.rs` instead of treating every
+  non-allocating string constant as an unconditional JS-path substitution
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this slice ports another `lam_pass_lets_dce` rule on the JS backend path
+  without reopening typedtree or lambda parity work
+- OCaml reference:
+  `compiler/core/lam_pass_lets_dce.ml`, where plain
+  `Const_string {delim = None}` bindings are recorded in `string_table` for
+  later `Pstringadd` folding but are not unconditionally substituted the way
+  ints/floats/bools are, and captured single-use alias constants/vars still
+  inline through the alias case
+- Rust change:
+  - added an OCaml-style plain-string side table to the JS-path lambda
+    simplifier so `Pstringadd` can still fold through preserved string
+    bindings
+  - stopped unconditional substitution for string constants /
+    immutable-string constants while keeping the existing non-string constant
+    substitution behavior
+  - aligned single-use alias substitution with OCaml for captured constant/var
+    aliases
+  - added focused regression coverage in
+    `keeps_multi_use_plain_string_bindings_like_ocaml` and
+    `inlines_captured_single_use_plain_string_aliases_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml keeps_multi_use_plain_string_bindings_like_ocaml -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml inlines_captured_single_use_plain_string_aliases_like_ocaml -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml folds_string_alias_chains -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/VariantCoercion.res -o /tmp/VariantCoercion.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/async_inline.res -o /tmp/async_inline.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/VariantCoercion.res` no longer differs on the
+    plain-string sharing slice; the file is down to one remaining later
+    control-flow hunk in `f1`
+  - `tests/tests/src/ExternalShadow.res` and
+    `tests/tests/src/async_inline.res` remain exact snapshot matches after the
+    same simplify change
+  - the authoritative wrapper still reports **0 compile errors**, so this
+    remains a pure backend-shaping slice rather than a compile-failure
+    regression
+- Topline impact:
+  - JS snapshot parity: **372 / 657** (**-1**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **285** (**+1**)
+- Keep this change because it matches OCaml's `lam_pass_lets_dce`
+  plain-string-sharing rule instead of preserving accidental parity from
+  over-aggressive Rust substitution; the new regression is a separate follow-up
+  to isolate
 
 Latest iteration on **2026-04-14**:
 
