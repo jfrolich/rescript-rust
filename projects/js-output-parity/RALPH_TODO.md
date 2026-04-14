@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 456 / 657 JS snapshots passing, 0 compile errors, 201 output diffs
+**Status:** 458 / 657 JS snapshots passing, 0 compile errors, 199 output diffs
 
 ## Goal
 
@@ -35,11 +35,65 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **456 / 657**
+- JS snapshot parity: **458 / 657**
 - Compile errors: **0**
-- Output diffs: **201**
+- Output diffs: **199**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the OCaml exotic-uppercase identifier unwrapping rule for
+  property keys and property access so JS dump uses the underlying identifier
+  text instead of re-emitting the encoded `\\\"...\"` form
+- Active backend focus for this slice remains **Phase 5: Byte-Exact Dumping**
+  from `PLAN.md`, but the mismatch was still driven by OCaml backend metadata
+  rules in `Js_dump_property` and `Ext_ident`: the Rust printer was deciding
+  between dot access and quoted property syntax on the encoded name instead of
+  the unwrapped identifier that OCaml prints
+- OCaml reference:
+  `compiler/core/js_dump_property.ml`, where both `property_access` and
+  `property_key` call `Ext_ident.unwrap_uppercase_exotic`, and
+  `compiler/ext/ext_ident.ml`, where `unwrap_uppercase_exotic` strips the
+  leading `\\\"` and trailing `\"` wrapper before keyword/global handling and
+  identifier mangling
+- Rust change:
+  - updated `compiler-rust/src/js_ir/printer.rs` so
+    `convert_ident_name(...)`, `print_literal_property_name(...)`,
+    `print_property_access(...)`, and `property_access_uses_dot(...)` all
+    unwrap uppercase-exotic names before choosing identifier vs quoted output
+  - added focused regression coverage in
+    `test_print_property_access_unwraps_uppercase_exotic_keys` and
+    `test_print_object_literal_unwraps_uppercase_exotic_keys`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_property_access_unwraps_uppercase_exotic_keys -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_object_literal_unwraps_uppercase_exotic_keys -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/exotic_labels_test.res`, diffing the
+    exact emitted module against the checked-in snapshot
+  - direct repro for `tests/tests/src/gpr_7431_test.res`, diffing the exact
+    emitted module against the checked-in snapshot
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/exotic_labels_test.res` is no longer in the authoritative
+    diff set; OCaml-style unwrapping now prints `KEY` as a plain property key
+    instead of `"\\\"KEY\""`
+  - `tests/tests/src/gpr_7431_test.res` is no longer in the authoritative diff
+    set; both object keys and property access now print `MyWeirdProp` instead
+    of preserving the encoded wrapper in the final JS output
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the property-name unwrapping change
+- Topline impact:
+  - JS snapshot parity: **456 / 657** -> **458 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **201** -> **199** (**-2**)
+- Keep this change because it ports the OCaml `Js_dump_property` /
+  `Ext_ident.unwrap_uppercase_exotic` rule instead of preserving the Rust-only
+  behavior that treated encoded uppercase-exotic property names as literal
+  quoted strings at JS dump time.
 
 Latest iteration on **2026-04-14**:
 

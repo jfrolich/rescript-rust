@@ -1865,6 +1865,7 @@ impl JsPrinter {
     }
 
     fn print_literal_property_name(&mut self, name: &str) {
+        let name = unwrap_uppercase_exotic(name);
         if property_access_uses_dot(name) {
             self.write(name);
         } else {
@@ -1884,6 +1885,7 @@ impl JsPrinter {
 
     /// Print property access
     fn print_property_access(&mut self, name: &str) {
+        let name = unwrap_uppercase_exotic(name);
         if property_access_uses_dot(name) {
             self.write_char('.');
             self.write(name);
@@ -2274,7 +2276,17 @@ fn record_uses_array_syntax(fields: &[(String, bool)]) -> bool {
             .all(|(i, (field_name, _))| field_name == &i.to_string())
 }
 
+fn unwrap_uppercase_exotic(name: &str) -> &str {
+    let bytes = name.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'\\' && bytes[1] == b'"' && bytes[bytes.len() - 1] == b'"' {
+        &name[2..name.len() - 1]
+    } else {
+        name
+    }
+}
+
 pub(crate) fn convert_ident_name(name: &str) -> String {
+    let name = unwrap_uppercase_exotic(name);
     if is_js_keyword_or_global(name) {
         format!("$${name}")
     } else {
@@ -2595,6 +2607,7 @@ fn is_valid_js_ident(s: &str) -> bool {
 }
 
 fn property_access_uses_dot(s: &str) -> bool {
+    let s = unwrap_uppercase_exotic(s);
     if s.is_empty() {
         return false;
     }
@@ -3964,6 +3977,30 @@ mod tests {
         )));
 
         assert_eq!(rendered, "Es6_export.default");
+    }
+
+    #[test]
+    fn test_print_property_access_unwraps_uppercase_exotic_keys() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(Expression::var(Ident::create_local("x"))),
+            "\\\"MyWeirdProp\"".to_string(),
+            None,
+        )));
+
+        assert_eq!(rendered, "x.MyWeirdProp");
+    }
+
+    #[test]
+    fn test_print_object_literal_unwraps_uppercase_exotic_keys() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Object(
+            None,
+            vec![(
+                PropertyName::Lit("\\\"MyWeirdProp\"".to_string()),
+                Expression::number(Number::int(1)),
+            )],
+        )));
+
+        assert_eq!(rendered, "{\n  MyWeirdProp: 1\n}");
     }
 
     #[test]
