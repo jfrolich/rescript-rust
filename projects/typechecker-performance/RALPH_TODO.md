@@ -476,6 +476,58 @@ What this means:
   the import-family stamp drift that killed the earlier broader env_lazy
   reroute attempt
 
+## Session Update: Avoid Local Modtype Clone In `includemod`
+
+Additional checkpoint from this worktree on `2026-04-14` after teaching
+`includemod::modtypes_inner` to recurse through non-persistent local `Pident`
+module/modtype paths by reference instead of cloning the expanded local module
+type on every comparison:
+
+- direct `-dtyped-sexp` inspection of `Import.res` shows the unpack/package
+  path in the hot repro is the local modtype `BeltList`, not a dotted module
+  path
+- exact `Import.res` repro after rebuild:
+  - OCaml: `0.07s` (`/usr/bin/time -lp`)
+  - Rust: `0.26s`, then `0.26s` on the immediate warmed rerun
+  - Rust max RSS: about `56.6MB` to `56.8MB`
+  - Rust peak footprint: about `42.4MB` to `43.5MB`
+- focused `Import.res` benchmark:
+  - before this change: OCaml `48.0ms`, Rust `254.4ms`, `5.30x`
+  - after this change: OCaml `47.8ms`, Rust `245.0ms`, `5.13x`
+- full typedtree parity: unchanged at `232/657`, `43117` hunk mismatches
+- canonical corpus benchmark:
+  - Files tested: `657`
+  - Comparable files: `657`
+  - Rust faster or equal: `0`
+  - Rust slower: `657`
+  - Materially slower: `233`
+  - OCaml failures: `0`
+  - Rust failures: `0`
+  - Aggregate OCaml total: `4946.8ms`
+  - Aggregate Rust total: `11235.8ms`
+  - Aggregate Rust / OCaml ratio: `2.27x`
+  - `Import.res` benchmark entry: OCaml `59.0ms`, Rust `263.8ms`, `4.47x`
+
+What landed in this step:
+
+- `includemod::modtypes_inner` now has a narrow fast path for local
+  non-persistent `Pident` module/modtype expansion: when the environment
+  already holds the expanded `MtySignature`/`mtd_type`, it reuses that module
+  type by reference and only falls back to the older owned expansion path for
+  dotted/persistent/alias cases
+- added `types::includemod::tests::test_local_modtype_ident_matches_signature`
+  to lock the local module-type identifier inclusion case
+
+What this means:
+
+- the hot `Import.res` unpack comparison path is still paying for repeated
+  local modtype signature cloning, and this narrow sharing-preserving shortcut
+  trims that cost without changing typedtree parity
+- this is not the main env_lazy breakthrough: the broader 657-file corpus is
+  still far slower than OCaml, so the next session still needs to push the
+  OCaml-shaped lazy/shared module-type path deeper into inclusion/unpack work
+  rather than stop at this local cleanup
+
 ## Task List
 
 - [ ] Keep `scripts/benchmark_typechecker_performance.py` authoritative for the

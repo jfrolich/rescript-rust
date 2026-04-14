@@ -74,6 +74,53 @@ thread_local! {
     static MODTYPES_DEPTH: Cell<usize> = Cell::new(0);
 }
 
+fn with_local_pident_module_type<R>(
+    env: &Env,
+    path: &Path,
+    f: impl FnOnce(&ModuleType) -> R,
+) -> Option<R> {
+    let mut current = path;
+    let mut visiting = HashSet::new();
+    let f = f;
+
+    loop {
+        let Path::Pident(id) = current else {
+            return None;
+        };
+
+        if id.is_persistent() || id.stamp() == 0 || !visiting.insert(current.clone()) {
+            return None;
+        }
+
+        if let Ok(md) = env.lookup_module(&Path::pident(id.clone())) {
+            match &md.md_type {
+                ModuleType::MtyIdent(alias_path) | ModuleType::MtyAlias(_, alias_path)
+                    if !alias_path.same(current) =>
+                {
+                    current = alias_path;
+                    continue;
+                }
+                _ => return Some(f(&md.md_type)),
+            }
+        }
+
+        if let Ok(mtd) = env.lookup_modtype(&Path::pident(id.clone())) {
+            let mty = mtd.mtd_type.as_ref()?;
+            match mty {
+                ModuleType::MtyIdent(alias_path) | ModuleType::MtyAlias(_, alias_path)
+                    if !alias_path.same(current) =>
+                {
+                    current = alias_path;
+                    continue;
+                }
+                _ => return Some(f(mty)),
+            }
+        }
+
+        return None;
+    }
+}
+
 pub fn modtypes<'a>(
     type_ctx: &'a TypeContext<'a>,
     env: &Env,
@@ -239,14 +286,25 @@ fn modtypes_inner<'a>(
 
         (ModuleType::MtyAlias(pres_impl, impl_path), mty_sig) => {
             let impl_path = normalized_alias_path(env, impl_path);
-            let expanded = expand_module_type_in_env(type_ctx, env, &impl_path)
-                .map(|mty| {
-                    ctype::strengthen_module_type_for_inclusion_path(
-                        type_ctx, env, &impl_path, &mty,
-                    )
+            let coercion = if let Some(coercion) =
+                with_local_pident_module_type(env, &impl_path, |expanded| {
+                    let expanded = ctype::strengthen_module_type_for_inclusion_path(
+                        type_ctx, env, &impl_path, expanded,
+                    );
+                    modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)
                 })
-                .unwrap_or_else(|| ModuleType::MtyAlias(pres_impl.clone(), impl_path.clone()));
-            let coercion = modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)?;
+            {
+                coercion?
+            } else {
+                let expanded = expand_module_type_in_env(type_ctx, env, &impl_path)
+                    .map(|mty| {
+                        ctype::strengthen_module_type_for_inclusion_path(
+                            type_ctx, env, &impl_path, &mty,
+                        )
+                    })
+                    .unwrap_or_else(|| ModuleType::MtyAlias(pres_impl.clone(), impl_path.clone()));
+                modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)?
+            };
             match pres_impl {
                 crate::types::decl::AliasPresence::MtaPresent => Ok(coercion),
                 crate::types::decl::AliasPresence::MtaAbsent => Ok(ModuleCoercion::Tcoerce_alias(
@@ -264,6 +322,11 @@ fn modtypes_inner<'a>(
 
         // Alias on the signature side - expand and check
         (mty_impl, ModuleType::MtyAlias(_, path)) => {
+            if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
+                modtypes_inner(type_ctx, env, mty_impl, expanded, aliasable)
+            }) {
+                return result;
+            }
             if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
                 modtypes_inner(type_ctx, env, mty_impl, &expanded, aliasable)
             } else {
@@ -323,6 +386,11 @@ fn modtypes_inner<'a>(
 
         // Signature implementation matches identifier signature
         (ModuleType::MtySignature(sig_impl), ModuleType::MtyIdent(path)) => {
+            if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
+                modtypes_inner(type_ctx, env, mty_impl, expanded, aliasable)
+            }) {
+                return result;
+            }
             if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
                 modtypes_inner(type_ctx, env, mty_impl, &expanded, aliasable)
             } else {
@@ -332,6 +400,11 @@ fn modtypes_inner<'a>(
 
         // Identifier implementation matches signature
         (ModuleType::MtyIdent(path), ModuleType::MtySignature(sig_sig)) => {
+            if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
+                modtypes_inner(type_ctx, env, expanded, mty_sig, aliasable)
+            }) {
+                return result;
+            }
             if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
                 modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)
             } else {
@@ -340,6 +413,11 @@ fn modtypes_inner<'a>(
         }
 
         (ModuleType::MtyIdent(path), mty_sig) => {
+            if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
+                modtypes_inner(type_ctx, env, expanded, mty_sig, aliasable)
+            }) {
+                return result;
+            }
             if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
                 modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)
             } else {
@@ -348,6 +426,11 @@ fn modtypes_inner<'a>(
         }
 
         (mty_impl, ModuleType::MtyIdent(path)) => {
+            if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
+                modtypes_inner(type_ctx, env, mty_impl, expanded, aliasable)
+            }) {
+                return result;
+            }
             if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
                 modtypes_inner(type_ctx, env, mty_impl, &expanded, aliasable)
             } else {
@@ -413,6 +496,249 @@ fn simplify_structure_coercion(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum FieldDesc {
+    Value(String),
+    Type(String),
+    Typext(String),
+    Module(String),
+    Modtype(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ComponentEntry<'a> {
+    item: &'a SignatureItem,
+    runtime_pos: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PairedSignatureItem<'a> {
+    impl_item: &'a SignatureItem,
+    sig_item: &'a SignatureItem,
+    runtime_pos: usize,
+}
+
+fn item_ident_name(item: &SignatureItem) -> (&Ident, &crate::location::Location, FieldDesc) {
+    match item {
+        SignatureItem::SigValue(id, desc) => (id, &desc.val_loc, FieldDesc::Value(id.name().into())),
+        SignatureItem::SigType(id, decl, _) => (id, &decl.type_loc, FieldDesc::Type(id.name().into())),
+        SignatureItem::SigTypext(id, ext, _) => {
+            (id, &ext.ext_loc, FieldDesc::Typext(id.name().into()))
+        }
+        SignatureItem::SigModule(id, md, _) => {
+            (id, &md.md_loc, FieldDesc::Module(id.name().into()))
+        }
+        SignatureItem::SigModtype(id, mtd) => {
+            (id, &mtd.mtd_loc, FieldDesc::Modtype(id.name().into()))
+        }
+        SignatureItem::SigClass | SignatureItem::SigClassType => unreachable!(),
+    }
+}
+
+fn adjusted_item_field_desc(item: &SignatureItem) -> (FieldDesc, bool) {
+    match item {
+        SignatureItem::SigType(id, decl, _)
+            if decl.type_manifest.is_none() && crate::types::btype::is_row_name(id.name()) =>
+        {
+            (
+                FieldDesc::Type(id.name().trim_end_matches("#row").to_string()),
+                false,
+            )
+        }
+        _ => {
+            let (_, _, name) = item_ident_name(item);
+            (name, true)
+        }
+    }
+}
+
+fn build_component_table<'a>(
+    sig_impl: &'a Signature,
+) -> (usize, HashMap<FieldDesc, ComponentEntry<'a>>) {
+    let mut runtime_pos = 0usize;
+    let mut table = HashMap::new();
+
+    for item in sig_impl {
+        let (_, _, field_desc) = item_ident_name(item);
+        table.insert(item_field_desc_to_key(&field_desc), ComponentEntry { item, runtime_pos });
+        if is_runtime_component(item) {
+            runtime_pos += 1;
+        }
+    }
+
+    (runtime_pos, table)
+}
+
+fn item_field_desc_to_key(field_desc: &FieldDesc) -> FieldDesc {
+    match field_desc {
+        FieldDesc::Value(name) => FieldDesc::Value(name.clone()),
+        FieldDesc::Type(name) => FieldDesc::Type(name.clone()),
+        FieldDesc::Typext(name) => FieldDesc::Typext(name.clone()),
+        FieldDesc::Module(name) => FieldDesc::Module(name.clone()),
+        FieldDesc::Modtype(name) => FieldDesc::Modtype(name.clone()),
+    }
+}
+
+fn register_paired_signature_substitution(
+    paired: PairedSignatureItem<'_>,
+    type_subst: &mut HashMap<String, Path>,
+    module_subst: &mut HashMap<String, Path>,
+    modtype_subst: &mut HashMap<String, Path>,
+) {
+    match (paired.impl_item, paired.sig_item) {
+        (SignatureItem::SigType(impl_id, impl_type_decl, _), SignatureItem::SigType(sig_id, _, _)) => {
+            let subst_path = impl_type_decl
+                .type_path
+                .clone()
+                .unwrap_or_else(|| Path::pident(impl_id.clone()));
+            type_subst.insert(sig_id.name().to_string(), subst_path);
+        }
+        (SignatureItem::SigModule(impl_id, _, _), SignatureItem::SigModule(sig_id, _, _)) => {
+            module_subst.insert(sig_id.name().to_string(), Path::pident(impl_id.clone()));
+        }
+        (SignatureItem::SigModtype(impl_id, _), SignatureItem::SigModtype(sig_id, _)) => {
+            modtype_subst.insert(sig_id.name().to_string(), Path::pident(impl_id.clone()));
+        }
+        _ => {}
+    }
+}
+
+fn missing_signature_item_error(item: &SignatureItem, id: &Ident) -> IncludeModError {
+    match item {
+        SignatureItem::SigValue(_, _) => IncludeModError::MissingValue(id.clone()),
+        SignatureItem::SigType(_, _, _) => IncludeModError::MissingType(id.clone()),
+        SignatureItem::SigTypext(_, _, _) => IncludeModError::MissingValue(id.clone()),
+        SignatureItem::SigModule(_, _, _) => IncludeModError::MissingModule(id.clone()),
+        SignatureItem::SigModtype(_, _) => IncludeModError::MissingModuleType(id.clone()),
+        SignatureItem::SigClass | SignatureItem::SigClassType => unreachable!(),
+    }
+}
+
+fn pair_signature_items<'a>(
+    sig_impl: &'a Signature,
+    sig_sig: &'a Signature,
+    type_subst: &mut HashMap<String, Path>,
+    module_subst: &mut HashMap<String, Path>,
+    modtype_subst: &mut HashMap<String, Path>,
+) -> (usize, Vec<PairedSignatureItem<'a>>, Vec<IncludeModError>) {
+    let (len_impl, component_table) = build_component_table(sig_impl);
+    let mut paired = Vec::with_capacity(sig_sig.len());
+    let mut errors = Vec::new();
+
+    for sig_item in sig_sig {
+        let (sig_id, _, _) = item_ident_name(sig_item);
+        let (field_desc, report_missing) = adjusted_item_field_desc(sig_item);
+        if let Some(entry) = component_table.get(&field_desc).copied() {
+            let pair = PairedSignatureItem {
+                impl_item: entry.item,
+                sig_item,
+                runtime_pos: entry.runtime_pos,
+            };
+            register_paired_signature_substitution(pair, type_subst, module_subst, modtype_subst);
+            paired.push(pair);
+        } else if report_missing {
+            errors.push(missing_signature_item_error(sig_item, sig_id));
+        }
+    }
+
+    (len_impl, paired, errors)
+}
+
+fn check_paired_signature_items<'a>(
+    type_ctx: &'a TypeContext<'a>,
+    env: &Env,
+    paired: &[PairedSignatureItem<'_>],
+    type_subst: &HashMap<String, Path>,
+    module_subst: &HashMap<String, Path>,
+    modtype_subst: &HashMap<String, Path>,
+) -> IncludeModResult<Vec<(usize, ModuleCoercion)>> {
+    let mut coercions = Vec::new();
+
+    for pair in paired {
+        match (pair.impl_item, pair.sig_item) {
+            (
+                SignatureItem::SigValue(impl_id, impl_val_desc),
+                SignatureItem::SigValue(_, sig_val_desc),
+            ) => {
+                let coercion = value_descriptions(
+                    type_ctx,
+                    env,
+                    impl_id.clone(),
+                    impl_val_desc,
+                    sig_val_desc,
+                    type_subst,
+                )?;
+                if !matches!(sig_val_desc.val_kind, ValueKind::ValPrim(_)) {
+                    coercions.push((pair.runtime_pos, coercion));
+                }
+            }
+            (
+                SignatureItem::SigType(impl_id, impl_type_decl, _),
+                SignatureItem::SigType(_, sig_type_decl, _),
+            ) => {
+                type_declarations(
+                    type_ctx,
+                    env,
+                    impl_id.clone(),
+                    impl_type_decl,
+                    sig_type_decl,
+                )?;
+            }
+            (
+                SignatureItem::SigTypext(impl_id, impl_ext_constr, _),
+                SignatureItem::SigTypext(_, sig_ext_constr, _),
+            ) => {
+                extension_constructors(
+                    type_ctx,
+                    env,
+                    impl_id.clone(),
+                    impl_ext_constr,
+                    sig_ext_constr,
+                )?;
+                coercions.push((pair.runtime_pos, ModuleCoercion::Tcoerce_none));
+            }
+            (
+                SignatureItem::SigModule(impl_id, impl_mod_decl, _),
+                SignatureItem::SigModule(_, sig_mod_decl, _),
+            ) => {
+                let expected_mod_decl =
+                    substitute_module_declaration_paths(sig_mod_decl, module_subst, modtype_subst);
+                let coercion = if impl_mod_decl == &expected_mod_decl {
+                    ModuleCoercion::Tcoerce_none
+                } else {
+                    let impl_mty = crate::types::ctype::strengthen_module_type_for_inclusion_path(
+                        type_ctx,
+                        env,
+                        &Path::pident(impl_id.clone()),
+                        &impl_mod_decl.md_type,
+                    );
+                    modtypes(type_ctx, env, &impl_mty, &expected_mod_decl.md_type)?
+                };
+                coercions.push((pair.runtime_pos, coercion));
+            }
+            (
+                SignatureItem::SigModtype(impl_id, impl_modtype_decl),
+                SignatureItem::SigModtype(_, sig_modtype_decl),
+            ) => {
+                let expected_modtype_decl =
+                    substitute_modtype_declaration_paths(sig_modtype_decl, module_subst, modtype_subst);
+                modtype_declarations(
+                    type_ctx,
+                    env,
+                    impl_id.clone(),
+                    impl_modtype_decl,
+                    &expected_modtype_decl,
+                )?;
+            }
+            (SignatureItem::SigClass, SignatureItem::SigClass)
+            | (SignatureItem::SigClassType, SignatureItem::SigClassType) => {}
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(coercions)
+}
+
 pub fn simplify_signature(sig: &Signature) -> Signature {
     let mut seen_values = HashSet::new();
     let mut simplified = Vec::with_capacity(sig.len());
@@ -448,16 +774,10 @@ pub fn signatures<'a>(
     sig_impl: &Signature,
     sig_sig: &Signature,
 ) -> IncludeModResult<ModuleCoercion> {
-    let mut errors = Vec::new();
-    let mut coercions = Vec::new();
     let mut include_env = env.clone();
     let mut type_subst = HashMap::new();
     let mut module_subst = HashMap::new();
     let mut modtype_subst = HashMap::new();
-    let len_impl = sig_impl
-        .iter()
-        .filter(|item| is_runtime_component(item))
-        .count();
     let len_sig = sig_sig
         .iter()
         .filter(|item| is_runtime_component(item))
@@ -488,201 +808,39 @@ pub fn signatures<'a>(
         add_sig_item_to_env(sig_item, &mut include_env);
     }
 
-    // For each item in the signature, find the corresponding item in the implementation
-    for (pos, sig_item) in sig_sig.iter().enumerate() {
-        match signature_item(
-            type_ctx,
-            &include_env,
-            sig_impl,
-            sig_item,
-            &mut type_subst,
-            &mut module_subst,
-            &mut modtype_subst,
-        ) {
-            Ok((impl_pos, coercion)) => {
-                if is_runtime_component(sig_item) {
-                    coercions.push((impl_pos, coercion));
-                }
-            }
-            Err(err) => {
-                errors.push(err);
-            }
-        }
+    let (len_impl, paired, errors) = pair_signature_items(
+        sig_impl,
+        sig_sig,
+        &mut type_subst,
+        &mut module_subst,
+        &mut modtype_subst,
+    );
+
+    if !errors.is_empty() {
+        return Err(IncludeModError::SignatureMismatch(errors));
     }
 
-    if errors.is_empty() {
-        if len_impl == len_sig {
-            Ok(simplify_structure_coercion(
-                &coercions,
-                &id_pos_list,
-                &runtime_fields,
-            ))
-        } else {
-            Ok(ModuleCoercion::Tcoerce_structure(
-                coercions,
-                id_pos_list,
-                runtime_fields,
-            ))
-        }
+    let coercions = check_paired_signature_items(
+        type_ctx,
+        &include_env,
+        &paired,
+        &type_subst,
+        &module_subst,
+        &modtype_subst,
+    )?;
+
+    if len_impl == len_sig {
+        Ok(simplify_structure_coercion(
+            &coercions,
+            &id_pos_list,
+            &runtime_fields,
+        ))
     } else {
-        Err(IncludeModError::SignatureMismatch(errors))
-    }
-}
-
-/// Check a single signature item against an implementation signature.
-fn signature_item<'a>(
-    type_ctx: &'a TypeContext<'a>,
-    env: &Env,
-    sig_impl: &Signature,
-    sig_item: &SignatureItem,
-    type_subst: &mut HashMap<String, Path>,
-    module_subst: &mut HashMap<String, Path>,
-    modtype_subst: &mut HashMap<String, Path>,
-) -> IncludeModResult<(usize, ModuleCoercion)> {
-    match sig_item {
-        SignatureItem::SigValue(id, val_desc) => {
-            let mut runtime_pos = 0usize;
-            let mut found = None;
-            for impl_item in sig_impl {
-                let current_runtime_pos = runtime_pos;
-                if is_runtime_component(impl_item) {
-                    runtime_pos += 1;
-                }
-                if let SignatureItem::SigValue(impl_id, impl_val_desc) = impl_item {
-                    if impl_id.name() == id.name() {
-                        found = Some((current_runtime_pos, impl_val_desc));
-                    }
-                }
-            }
-            if let Some((pos, impl_val_desc)) = found {
-                let coercion = value_descriptions(
-                    type_ctx,
-                    env,
-                    id.clone(),
-                    impl_val_desc,
-                    val_desc,
-                    type_subst,
-                )?;
-                Ok((pos, coercion))
-            } else {
-                Err(IncludeModError::MissingValue(id.clone()))
-            }
-        }
-
-        SignatureItem::SigType(id, type_decl, rec_status) => {
-            // Find the type in the implementation
-            for (pos, impl_item) in sig_impl.iter().enumerate() {
-                if let SignatureItem::SigType(impl_id, impl_type_decl, _) = impl_item {
-                    if impl_id.name() == id.name() {
-                        // Check that the type declarations are compatible
-                        type_declarations(type_ctx, env, id.clone(), impl_type_decl, type_decl)?;
-                        let subst_path = impl_type_decl
-                            .type_path
-                            .clone()
-                            .unwrap_or_else(|| Path::pident(impl_id.clone()));
-                        type_subst.insert(id.name().to_string(), subst_path);
-                        return Ok((pos, ModuleCoercion::Tcoerce_none));
-                    }
-                }
-            }
-            Err(IncludeModError::MissingType(id.clone()))
-        }
-
-        SignatureItem::SigTypext(id, ext_constr, ext_status) => {
-            let mut runtime_pos = 0usize;
-            let mut found = None;
-            for impl_item in sig_impl {
-                let current_runtime_pos = runtime_pos;
-                if is_runtime_component(impl_item) {
-                    runtime_pos += 1;
-                }
-                if let SignatureItem::SigTypext(impl_id, impl_ext_constr, _) = impl_item {
-                    if impl_id.name() == id.name() {
-                        found = Some((current_runtime_pos, impl_ext_constr));
-                    }
-                }
-            }
-            if let Some((pos, impl_ext_constr)) = found {
-                extension_constructors(type_ctx, env, id.clone(), impl_ext_constr, ext_constr)?;
-                Ok((pos, ModuleCoercion::Tcoerce_none))
-            } else {
-                Err(IncludeModError::MissingValue(id.clone()))
-            }
-        }
-
-        SignatureItem::SigModule(id, mod_decl, rec_status) => {
-            let mut runtime_pos = 0usize;
-            let mut found = None;
-            for impl_item in sig_impl {
-                let current_runtime_pos = runtime_pos;
-                if is_runtime_component(impl_item) {
-                    runtime_pos += 1;
-                }
-                if let SignatureItem::SigModule(impl_id, impl_mod_decl, _) = impl_item {
-                    if impl_id.name() == id.name() {
-                        found = Some((current_runtime_pos, impl_id.clone(), impl_mod_decl));
-                    }
-                }
-            }
-            if let Some((pos, impl_id, impl_mod_decl)) = found {
-                let mut current_module_subst = module_subst.clone();
-                current_module_subst.insert(id.name().to_string(), Path::pident(impl_id.clone()));
-                let expected_mod_decl = substitute_module_declaration_paths(
-                    mod_decl,
-                    &current_module_subst,
-                    modtype_subst,
-                );
-                if impl_mod_decl == &expected_mod_decl {
-                    module_subst.insert(id.name().to_string(), Path::pident(impl_id));
-                    return Ok((pos, ModuleCoercion::Tcoerce_none));
-                }
-                let impl_mty = crate::types::ctype::strengthen_module_type_for_inclusion_path(
-                    type_ctx,
-                    env,
-                    &Path::pident(impl_id.clone()),
-                    &impl_mod_decl.md_type,
-                );
-                let coercion = modtypes(type_ctx, env, &impl_mty, &expected_mod_decl.md_type)?;
-                module_subst.insert(id.name().to_string(), Path::pident(impl_id));
-                Ok((pos, coercion))
-            } else {
-                Err(IncludeModError::MissingModule(id.clone()))
-            }
-        }
-
-        SignatureItem::SigModtype(id, modtype_decl) => {
-            // Find the module type in the implementation
-            for (pos, impl_item) in sig_impl.iter().enumerate() {
-                if let SignatureItem::SigModtype(impl_id, impl_modtype_decl) = impl_item {
-                    if impl_id.name() == id.name() {
-                        let mut current_modtype_subst = modtype_subst.clone();
-                        current_modtype_subst
-                            .insert(id.name().to_string(), Path::pident(impl_id.clone()));
-                        let expected_modtype_decl = substitute_modtype_declaration_paths(
-                            modtype_decl,
-                            module_subst,
-                            &current_modtype_subst,
-                        );
-                        // Check that the module type declarations are compatible
-                        modtype_declarations(
-                            type_ctx,
-                            env,
-                            id.clone(),
-                            impl_modtype_decl,
-                            &expected_modtype_decl,
-                        )?;
-                        modtype_subst.insert(id.name().to_string(), Path::pident(impl_id.clone()));
-                        return Ok((pos, ModuleCoercion::Tcoerce_none));
-                    }
-                }
-            }
-            Err(IncludeModError::MissingModuleType(id.clone()))
-        }
-
-        // Class and class type are not used in ReScript
-        SignatureItem::SigClass | SignatureItem::SigClassType => {
-            Ok((0, ModuleCoercion::Tcoerce_none))
-        }
+        Ok(ModuleCoercion::Tcoerce_structure(
+            coercions,
+            id_pos_list,
+            runtime_fields,
+        ))
     }
 }
 
@@ -1450,8 +1608,40 @@ mod tests {
     use super::*;
     use crate::context::IdGenerator;
     use crate::location::Location;
-    use crate::types::decl::{RecStatus, TypeKind, UnboxedStatus, ValueKind};
+    use crate::types::decl::{
+        ModtypeDeclaration, ModuleDeclaration, ModuleType, RecStatus, TypeKind, UnboxedStatus,
+        ValueKind,
+    };
     use crate::types::env::initial_env;
+    use crate::types::Path;
+
+    fn abstract_type_decl(type_path: Option<Path>) -> TypeDeclaration {
+        TypeDeclaration {
+            type_params: vec![],
+            type_arity: 0,
+            type_kind: TypeKind::TypeAbstract,
+            type_private: crate::types::PrivateFlag::Public,
+            type_manifest: None,
+            type_variance: vec![],
+            type_newtype_level: None,
+            type_loc: Location::none(),
+            type_attributes: vec![],
+            type_immediate: false,
+            type_unboxed: UnboxedStatus::FALSE_FALSE,
+            type_inlined_types: vec![],
+            type_path,
+        }
+    }
+
+    fn value_desc(val_type: TypeExprRef) -> ValueDescription {
+        ValueDescription {
+            val_type,
+            val_kind: ValueKind::ValReg,
+            val_loc: Location::none(),
+            val_attributes: vec![],
+            val_path: None,
+        }
+    }
 
     #[test]
     fn test_empty_signatures_match() {
@@ -1519,6 +1709,122 @@ mod tests {
 
         let result = signatures(&type_ctx, &env, &sig_impl, &sig_sig);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_signature_pairing_uses_final_type_substitution() {
+        let id_gen = IdGenerator::new();
+        let type_ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&type_ctx);
+
+        let impl_type_id = Ident::create_local("t");
+        let sig_type_id = Ident::create_local("t");
+        let impl_mod_id = Ident::create_local("M");
+        let sig_mod_id = Ident::create_local("M");
+
+        let impl_ty = type_ctx.new_generic_constr(Path::pident(impl_type_id.clone()), vec![]);
+        let sig_ty = type_ctx.new_generic_constr(Path::pident(sig_type_id.clone()), vec![]);
+
+        let sig_impl: Signature = vec![
+            SignatureItem::SigModule(
+                impl_mod_id,
+                ModuleDeclaration {
+                    md_type: ModuleType::MtySignature(vec![SignatureItem::SigValue(
+                        Ident::create_local("x"),
+                        value_desc(impl_ty),
+                    )]),
+                    md_attributes: vec![],
+                    md_loc: Location::none(),
+                    md_path: None,
+                },
+                RecStatus::TrecNot,
+            ),
+            SignatureItem::SigType(
+                impl_type_id.clone(),
+                abstract_type_decl(Some(Path::pident(impl_type_id))),
+                RecStatus::TrecNot,
+            ),
+        ];
+        let sig_sig: Signature = vec![
+            SignatureItem::SigModule(
+                sig_mod_id,
+                ModuleDeclaration {
+                    md_type: ModuleType::MtySignature(vec![SignatureItem::SigValue(
+                        Ident::create_local("x"),
+                        value_desc(sig_ty),
+                    )]),
+                    md_attributes: vec![],
+                    md_loc: Location::none(),
+                    md_path: None,
+                },
+                RecStatus::TrecNot,
+            ),
+            SignatureItem::SigType(
+                sig_type_id,
+                abstract_type_decl(None),
+                RecStatus::TrecNot,
+            ),
+        ];
+
+        let result = signatures(&type_ctx, &env, &sig_impl, &sig_sig);
+        assert!(matches!(result, Ok(ModuleCoercion::Tcoerce_none)));
+    }
+
+    #[test]
+    fn test_signature_pairing_uses_last_matching_component() {
+        let id_gen = IdGenerator::new();
+        let type_ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&type_ctx);
+
+        let val_ty = type_ctx.new_var(None);
+        let sig_impl: Signature = vec![
+            SignatureItem::SigValue(Ident::create_local("x"), value_desc(val_ty)),
+            SignatureItem::SigValue(Ident::create_local("x"), value_desc(val_ty)),
+        ];
+        let sig_sig: Signature =
+            vec![SignatureItem::SigValue(Ident::create_local("x"), value_desc(val_ty))];
+
+        let result = signatures(&type_ctx, &env, &sig_impl, &sig_sig).unwrap();
+        match result {
+            ModuleCoercion::Tcoerce_structure(coercions, _, runtime_fields) => {
+                assert!(matches!(
+                    coercions.as_slice(),
+                    [(1, ModuleCoercion::Tcoerce_none)]
+                ));
+                assert_eq!(runtime_fields, vec!["x".to_string()]);
+            }
+            other => panic!("expected structure coercion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_local_modtype_ident_matches_signature() {
+        let id_gen = IdGenerator::new();
+        let type_ctx = TypeContext::new(&id_gen);
+        let mut env = initial_env(&type_ctx);
+
+        let val_ty = type_ctx.new_var(None);
+        let sig: Signature = vec![SignatureItem::SigValue(
+            Ident::create_local("x"),
+            value_desc(val_ty),
+        )];
+        let modtype_id = Ident::create_local("BeltList");
+        env.add_modtype(
+            modtype_id.clone(),
+            ModtypeDeclaration {
+                mtd_type: Some(ModuleType::MtySignature(sig.clone())),
+                mtd_attributes: vec![],
+                mtd_loc: Location::none(),
+            },
+        );
+
+        let result = modtypes(
+            &type_ctx,
+            &env,
+            &ModuleType::MtySignature(sig),
+            &ModuleType::MtyIdent(Path::pident(modtype_id)),
+        );
+        assert!(matches!(result, Ok(ModuleCoercion::Tcoerce_none)));
     }
 
     #[test]
