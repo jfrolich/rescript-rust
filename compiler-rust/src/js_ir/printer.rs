@@ -1625,7 +1625,7 @@ impl JsPrinter {
     }
 
     fn print_literal_property_name(&mut self, name: &str) {
-        if is_valid_js_ident(name) {
+        if property_access_uses_dot(name) {
             self.write(name);
         } else {
             self.print_string(name);
@@ -3295,6 +3295,25 @@ mod tests {
         ));
 
         assert_eq!(rendered, "URL.catch");
+    }
+
+    #[test]
+    fn test_print_object_literal_allows_keyword_property_names_without_quotes() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Object(
+            None,
+            vec![
+                (
+                    PropertyName::lit("catch"),
+                    Expression::number(Number::int(1)),
+                ),
+                (
+                    PropertyName::lit("default"),
+                    Expression::number(Number::int(2)),
+                ),
+            ],
+        )));
+
+        assert_eq!(rendered, "{\n  catch: 1,\n  default: 2\n}");
     }
 
     #[test]

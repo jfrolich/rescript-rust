@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 335 / 657 JS snapshots passing, 0 compile errors, 322 output diffs
+**Status:** 338 / 657 JS snapshots passing, 0 compile errors, 319 output diffs
 
 ## Goal
 
@@ -35,13 +35,48 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **335 / 657**
+- JS snapshot parity: **338 / 657**
 - Compile errors: **0**
-- Output diffs: **322**
+- Output diffs: **319**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed object-literal key rule in
+  `compiler/core/js_dump_property.ml`, specifically
+  `obj_property_no_need_quot` allowing keyword-shaped identifiers like
+  `catch`, `default`, and `extends` to print bare in object literals
+- After rereading that OCaml property printer path, the Rust JS printer in
+  `compiler-rust/src/js_ir/printer.rs` now matches it more closely:
+  - object literal keys now use the same bare-identifier rule as OCaml instead
+    of routing through the stricter reserved-word-aware identifier check
+  - property access behavior is unchanged, so external members like
+    `URL.catch` still print with normal dot access and runtime members still
+    keep their separate mangling rules
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_object_literal_allows_keyword_property_names_without_quotes`
+  while keeping
+  `js_ir::printer::tests::test_print_qualified_external_member_preserves_js_property_access`
+  green as the guard for the property-access path
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_object_literal_allows_keyword_property_names_without_quotes -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_qualified_external_member_preserves_js_property_access -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/key_word_property.res -o /tmp/key_word_property.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/gpr_459_test.res` is no longer in the diff corpus,
+  `tests/tests/src/key_word_property.res` now only differs on its separate
+  import-shape drift, `tests/tests/src/record_with_test.res` now only differs
+  on the separate `uv` declaration-ordering drift, and
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
+- The authoritative JS snapshot baseline now reports **338 / 657** passing,
+  **0** compile errors, and **319** output diffs; this is a net **+3**
+  passing snapshots and **-3** output diffs from the previously recorded
+  **335 / 657**, **0** compile errors, **322** output diffs
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed function-body layout rule in
