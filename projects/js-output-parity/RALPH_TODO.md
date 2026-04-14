@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 340 / 657 JS snapshots passing, 0 compile errors, 317 output diffs
+**Status:** 341 / 657 JS snapshots passing, 0 compile errors, 316 output diffs
 
 ## Goal
 
@@ -35,13 +35,53 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **340 / 657**
+- JS snapshot parity: **341 / 657**
 - Compile errors: **0**
-- Output diffs: **317**
+- Output diffs: **316**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed operator-precedence rule in
+  `compiler/core/js_op_util.ml`, specifically `op_prec` using equal
+  left/right precedence for associative logical and bitwise operators instead
+  of Rust's stricter right-side precedence table
+- After rereading that OCaml precedence table, the Rust JS printer in
+  `compiler-rust/src/js_ir/printer.rs` now matches it more closely:
+  - `&&`, `||`, `|`, `^`, and `&` chains now print without spurious
+    right-nested parentheses when the JS IR is already grouped with the same
+    operator
+  - comparison, arithmetic, shift, assignment, and exponent precedence now
+    follow the same numeric table as OCaml instead of the previously shifted
+    Rust-specific table
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_chained_logical_and_without_right_nested_parens_like_ocaml`,
+  `js_ir::printer::tests::test_print_chained_logical_or_without_right_nested_parens_like_ocaml`,
+  and
+  `js_ir::printer::tests::test_print_chained_bitwise_or_without_right_nested_parens_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_chained_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - project `compiler-args` snapshot repro for
+    `tests/tests/src/js_date_test.res` from `tests/tests/lib/bs`
+  - project `compiler-args` snapshot repro for
+    `tests/tests/src/bdd.res` from `tests/tests/lib/bs`
+  - project `compiler-args` snapshot repro for
+    `tests/tests/src/set_gen.res` from `tests/tests/lib/bs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/js_date_test.res` is now out of the diff corpus,
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match, and
+  the refreshed diff corpus no longer contains any `&& (` or `|| (` printer
+  drift; broader files such as `bdd.res` and `set_gen.res` still fail on
+  separate recursion/loop-lowering differences after this printer slice
+- The authoritative JS snapshot baseline now reports **341 / 657** passing,
+  **0** compile errors, and **316** output diffs; this is a net **+1**
+  passing snapshot and **-1** output diff from the previously recorded
+  **340 / 657**, **0** compile errors, **317** output diffs
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed dead-binding emission rule in

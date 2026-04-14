@@ -2274,19 +2274,20 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
 /// Get operator precedence (output_level, left_level, right_level)
 fn op_precedence(op: BinOp) -> (u8, u8, u8) {
     match op {
-        BinOp::Eq => (1, 14, 1),
-        BinOp::Or => (3, 3, 4),
-        BinOp::And => (4, 4, 5),
-        BinOp::Bor => (6, 6, 7),
-        BinOp::Bxor => (7, 7, 8),
-        BinOp::Band => (8, 8, 9),
-        BinOp::EqEqEq | BinOp::NotEqEq => (9, 9, 10),
-        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::InstanceOf => (10, 10, 11),
-        BinOp::Lsl | BinOp::Lsr | BinOp::Asr => (11, 11, 12),
-        BinOp::Plus | BinOp::Minus => (12, 12, 13),
-        BinOp::Mul | BinOp::Div | BinOp::Mod => (13, 13, 14),
-        BinOp::Pow => (14, 15, 14), // Right-associative
-        BinOp::Bnot => (14, 14, 14),
+        // Keep this table in lockstep with compiler/core/js_op_util.ml::op_prec.
+        BinOp::Eq => (1, 13, 1),
+        BinOp::Or => (3, 3, 3),
+        BinOp::And => (4, 4, 4),
+        BinOp::Bor => (5, 5, 5),
+        BinOp::Bxor => (6, 6, 6),
+        BinOp::Band => (7, 7, 7),
+        BinOp::EqEqEq | BinOp::NotEqEq => (8, 8, 9),
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::InstanceOf => (9, 9, 10),
+        BinOp::Lsl | BinOp::Lsr | BinOp::Asr => (10, 10, 11),
+        BinOp::Plus | BinOp::Minus => (11, 11, 12),
+        BinOp::Mul | BinOp::Div | BinOp::Mod => (12, 12, 13),
+        BinOp::Pow => (13, 14, 12), // Right-associative
+        BinOp::Bnot => (13, 13, 13),
     }
 }
 
@@ -2595,6 +2596,48 @@ mod tests {
             Expression::number(Number::int(1)),
         );
         assert_eq!(print_expression(&expr), "(x << 1)");
+    }
+
+    #[test]
+    fn test_print_chained_logical_and_without_right_nested_parens_like_ocaml() {
+        let expr = Expression::bin(
+            BinOp::And,
+            Expression::var(Ident::create_local("a")),
+            Expression::bin(
+                BinOp::And,
+                Expression::var(Ident::create_local("b")),
+                Expression::var(Ident::create_local("c")),
+            ),
+        );
+        assert_eq!(print_expression(&expr), "a && b && c");
+    }
+
+    #[test]
+    fn test_print_chained_logical_or_without_right_nested_parens_like_ocaml() {
+        let expr = Expression::bin(
+            BinOp::Or,
+            Expression::var(Ident::create_local("a")),
+            Expression::bin(
+                BinOp::Or,
+                Expression::var(Ident::create_local("b")),
+                Expression::var(Ident::create_local("c")),
+            ),
+        );
+        assert_eq!(print_expression(&expr), "a || b || c");
+    }
+
+    #[test]
+    fn test_print_chained_bitwise_or_without_right_nested_parens_like_ocaml() {
+        let expr = Expression::bin(
+            BinOp::Bor,
+            Expression::var(Ident::create_local("a")),
+            Expression::bin(
+                BinOp::Bor,
+                Expression::var(Ident::create_local("b")),
+                Expression::var(Ident::create_local("c")),
+            ),
+        );
+        assert_eq!(print_expression(&expr), "a | b | c");
     }
 
     #[test]
