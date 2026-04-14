@@ -12,8 +12,8 @@ use crate::lambda::constant::Constant;
 use crate::lambda::free_variables::free_variables;
 use crate::lambda::primitive::{Mutable, Primitive};
 use crate::lambda::{
-    ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda,
-    LambdaSwitch, TagInfo,
+    Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda, LambdaSwitch,
+    TagInfo,
 };
 use crate::location::Location;
 
@@ -423,34 +423,33 @@ fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
 fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
     match lam {
         Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
-        Lambda::Lapply(apply) => {
-            let func = simplify_direct_function_applications_like_lets_dce(&apply.ap_func);
-            let args: Vec<_> = apply
+        Lambda::Lapply(apply)
+            if matches!(
+                apply.ap_func.as_ref(),
+                Lambda::Lfunction(func)
+                    if func.params.len() == apply.ap_args.len()
+                        && analysis::lfunction_can_be_inlined(func)
+            ) =>
+        {
+            let Lambda::Lfunction(func) = apply.ap_func.as_ref() else {
+                unreachable!("guard above ensures a direct function callee");
+            };
+            let reduced =
+                beta_reduce::no_names_beta_reduce(&func.params, &func.body, &apply.ap_args);
+            simplify_direct_function_applications_like_lets_dce(&reduced)
+        }
+        Lambda::Lapply(apply) => Lambda::Lapply(Apply {
+            ap_func: Box::new(simplify_direct_function_applications_like_lets_dce(
+                &apply.ap_func,
+            )),
+            ap_args: apply
                 .ap_args
                 .iter()
                 .map(simplify_direct_function_applications_like_lets_dce)
-                .collect();
-
-            match (&func, apply.ap_info.status) {
-                (Lambda::Lfunction(func), ApplyStatus::Na)
-                    if func.params.len() == args.len()
-                        && analysis::lfunction_can_be_inlined(func) =>
-                {
-                    let reduced = beta_reduce::no_names_beta_reduce(
-                        &func.params,
-                        &func.body,
-                        &args,
-                    );
-                    simplify_direct_function_applications_like_lets_dce(&reduced)
-                }
-                _ => Lambda::Lapply(Apply {
-                    ap_func: Box::new(func),
-                    ap_args: args,
-                    ap_info: apply.ap_info.clone(),
-                    ap_transformed_jsx: apply.ap_transformed_jsx,
-                }),
-            }
-        }
+                .collect(),
+            ap_info: apply.ap_info.clone(),
+            ap_transformed_jsx: apply.ap_transformed_jsx,
+        }),
         Lambda::Lfunction(func) => Lambda::function_(
             func.arity,
             func.params.clone(),
@@ -2184,6 +2183,19 @@ fn block_field<'a>(
 }
 
 fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) -> Lambda {
+    if env.allow_direct_function_beta_reduce {
+        if let Lambda::Lfunction(inline_func) = apply.ap_func.as_ref() {
+            if should_inline_direct_function(inline_func, &apply.ap_args) {
+                let reduced = beta_reduce::propagate_beta_reduce(
+                    &inline_func.params,
+                    &inline_func.body,
+                    &apply.ap_args,
+                );
+                return simplify_with_env(&reduced, env, exports);
+            }
+        }
+    }
+
     let args: Vec<_> = apply
         .ap_args
         .iter()
@@ -2223,28 +2235,6 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
                     {
                         return simplify_with_env(&reduced, env, exports);
                     }
-                }
-            }
-        }
-        if env.allow_direct_function_beta_reduce {
-            if let Some(inline_func) = inlineable_direct_wrapper_function(&func) {
-                if should_inline_direct_function(&inline_func, &args) {
-                    let reduced = beta_reduce::propagate_beta_reduce(
-                        &inline_func.params,
-                        &inline_func.body,
-                        &args,
-                    );
-                    return simplify_with_env(&reduced, env, exports);
-                }
-            }
-            if let Lambda::Lfunction(inline_func) = &func {
-                if should_inline_direct_function(inline_func, &args) {
-                    let reduced = beta_reduce::propagate_beta_reduce(
-                        &inline_func.params,
-                        &inline_func.body,
-                        &args,
-                    );
-                    return simplify_with_env(&reduced, env, exports);
                 }
             }
         }
@@ -4030,6 +4020,97 @@ mod tests {
                 )
             ),
             "expected nested curried call to collapse to a direct integer add, got {simplified:?}"
+        );
+    }
+
+    #[test]
+    fn simplifies_named_nested_pjs_fn_make_application_chain_from_ari_regress_shape() {
+        let f = Ident::create_local("f");
+        let x = Ident::create_local("x");
+        let extra = Ident::create_local("extra");
+        let prim0 = Ident::create_local("prim0");
+        let prim1 = Ident::create_local("prim1");
+        let g = Ident::create_local("g");
+
+        let lambda = Lambda::let_(
+            LetKind::Alias,
+            f.clone(),
+            Lambda::prim(
+                Primitive::PjsFnMake(1),
+                vec![Lambda::function_(
+                    1,
+                    vec![x.clone()],
+                    Lambda::function_(
+                        1,
+                        vec![extra.clone()],
+                        Lambda::Lapply(Apply {
+                            ap_func: Box::new(Lambda::function_(
+                                2,
+                                vec![prim0.clone(), prim1.clone()],
+                                Lambda::prim(
+                                    Primitive::Paddint,
+                                    vec![Lambda::var(prim0), Lambda::var(prim1)],
+                                    Location::none(),
+                                ),
+                                FunctionAttribute::default(),
+                            )),
+                            ap_args: vec![Lambda::var(x), Lambda::var(extra)],
+                            ap_info: ApInfo {
+                                loc: Location::none(),
+                                inlined: InlineAttribute::Default,
+                                status: ApplyStatus::Uncurry,
+                            },
+                            ap_transformed_jsx: false,
+                        }),
+                        FunctionAttribute::default(),
+                    ),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Alias,
+                g.clone(),
+                Lambda::Lapply(Apply {
+                    ap_func: Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(f)),
+                        ap_args: vec![Lambda::const_(Constant::int(3))],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Uncurry,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    ap_args: vec![Lambda::const_(Constant::int(4))],
+                    ap_info: ApInfo {
+                        loc: Location::none(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Uncurry,
+                    },
+                    ap_transformed_jsx: false,
+                }),
+                Lambda::var(g),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        assert!(
+            matches!(
+                simplified,
+                Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Paddint,
+                    ref args,
+                    ..
+                }) if matches!(
+                    args.as_slice(),
+                    [
+                        Lambda::Lconst(Constant::Int { i: 3, .. }),
+                        Lambda::Lconst(Constant::Int { i: 4, .. }),
+                    ]
+                )
+            ),
+            "expected ari_regress-style nested call to collapse to a direct integer add, got {simplified:?}"
         );
     }
 
@@ -5950,7 +6031,7 @@ mod tests {
                             vec![
                                 Lambda::prim(
                                     Primitive::Paddint,
-                                    vec![Lambda::var(x), Lambda::var(y)],
+                                    vec![Lambda::var(x.clone()), Lambda::var(y)],
                                     Location::none(),
                                 ),
                                 Lambda::var(z),
@@ -5981,13 +6062,21 @@ mod tests {
             ap_transformed_jsx: false,
         }));
 
-        assert!(
-            matches!(
-                simplified,
-                Lambda::Llet(_, _, _, _) | Lambda::Lprim(_) | Lambda::Lconst(_)
-            ) && !matches!(simplified, Lambda::Lapply(_)),
-            "expected the outer apply to disappear after the repeated alias and lets-dce passes, got {simplified:?}"
-        );
+        let Lambda::Lapply(apply) = simplified else {
+            panic!("expected the outer apply to remain after one backend beta-reduction sweep");
+        };
+        let Lambda::Llet(kind, bound, value, body) = apply.ap_func.as_ref() else {
+            panic!("expected the surviving callee to stay let-wrapped, got {apply:?}");
+        };
+
+        assert_eq!(*kind, LetKind::Strict);
+        assert!(bound.same(&x));
+        assert!(matches!(
+            value.as_ref(),
+            Lambda::Lconst(Constant::Int { i: 1, .. })
+        ));
+        assert!(matches!(body.as_ref(), Lambda::Lfunction(_)));
+        assert_eq!(apply.ap_args.len(), 2);
     }
 
     #[test]
@@ -6074,7 +6163,7 @@ mod tests {
                 Primitive::PjsFnMake(1),
                 vec![Lambda::function_(
                     1,
-                    vec![x],
+                    vec![x.clone()],
                     Lambda::let_(
                         LetKind::Strict,
                         j.clone(),
@@ -6129,8 +6218,21 @@ mod tests {
         let Lambda::Lapply(apply) = simplified else {
             panic!("expected the outer call to survive the final backend simplification sweep");
         };
+        let Lambda::Llet(kind, bound, value, body) = apply.ap_func.as_ref() else {
+            panic!("expected the surviving callee to stay let-wrapped, got {apply:?}");
+        };
+
+        assert_eq!(*kind, LetKind::Strict);
+        assert!(bound.same(&x));
+        assert!(matches!(
+            value.as_ref(),
+            Lambda::Lconst(Constant::String {
+                s,
+                delim: Some(crate::lambda::constant::StringDelim::StarJ),
+            }) if s.is_empty()
+        ));
+        assert!(matches!(body.as_ref(), Lambda::Lfunction(_)));
         assert_eq!(apply.ap_args.len(), 1);
-        assert!(matches!(apply.ap_func.as_ref(), Lambda::Lfunction(_)));
     }
 
     #[test]

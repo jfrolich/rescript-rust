@@ -43,6 +43,78 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: remove Rust's remaining second-chance direct beta reduction in
+  `simplify_apply(...)` so the JS backend only beta-reduces direct calls when
+  the original callee is syntactically a function, instead of simplifying a
+  let-wrapped / wrapper-produced callee first and then retrying the reduction
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`, because the mismatch still lived in the final
+  post-lowering lambda cleanup boundary before JS IR lowering:
+  `lam_pass_lets_dce.ml` only reduces `Lapply {ap_func = Lfunction ...}`, but
+  Rust's general `simplify_apply(...)` path could still simplify the callee
+  into a direct `Lfunction` and beta-reduce one more time
+- OCaml reference:
+  `compiler/core/lam_compile_main.ml`, especially the final
+  `simplify_alias -> alpha_conversion -> simplify_lets` sequence;
+  `compiler/core/lam_pass_lets_dce.ml`, especially the
+  `Lapply {ap_func = Lfunction ...}` match arm; and
+  `compiler/core/lam_compile.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so
+    `simplify_apply(...)` only does direct beta reduction when the original
+    `apply.ap_func` is already `Lambda::Lfunction`, instead of retrying after
+    simplifying the callee through alias / wrapper cleanup
+  - kept named-function reduction intact, but removed the extra
+    post-simplification direct-wrapper reduction path that OCaml does not have
+  - updated focused backend regression tests for the downarity and
+    `Pjs_fn_make` wrapper cases so they now assert the OCaml-aligned surviving
+    outer `Lapply` shape with a let-wrapped callee
+  - added focused coverage in
+    `simplifies_named_nested_pjs_fn_make_application_chain_from_ari_regress_shape`
+    for the nested `ari_regress_test` application chain that should still
+    collapse through the allowed direct-function path
+- Verified focused guards for this slice:
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml lets_dce_pass_beta_reduces_nested_curried_direct_function_applications -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml beta_reduces_let_wrapped_returned_functions_across_backend_alias_passes -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml beta_reduces_returned_pjs_fn_make_wrappers_across_backend_alias_passes -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml beta_reduces_downarity_pjs_fn_make_calls_past_the_outer_apply -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml simplifies_named_nested_pjs_fn_make_application_chain_from_ari_regress_shape -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml compile_effectful_underscore_binding_from_nested_js_function_calls_survives_shake -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/gpr_1692_test.res`, diffing
+    `/tmp/gpr_1692_test.mjs` against the checked-in snapshot
+  - direct guard repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/ari_regress_test.res`, diffing `/tmp/ari_regress_test.mjs`
+    against the checked-in snapshot
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/arity_deopt.res`, diffing `/tmp/arity_deopt.mjs` against
+    the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1692_test.res` remains an exact snapshot match, which
+    confirms Rust no longer reintroduces the old over-reduction bug while the
+    new direct-call narrowing stays in place
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - `tests/tests/src/ari_regress_test.res` and
+    `tests/tests/src/arity_deopt.res` still differ in the same arity cluster,
+    so removing this extra reduction path was not the remaining root cause for
+    those files
+  - the authoritative wrapper baseline is unchanged, so this OCaml-aligned
+    cleanup is parity-neutral on the current 657-file snapshot set
+- Topline impact:
+  - JS snapshot parity: **485 / 657** -> **485 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **172** -> **172** (**no change**)
+- Keep this change because it removes a remaining Rust-only backend reduction
+  path and makes the simplifier follow the same direct-call boundary as
+  OCaml; the still-failing arity files need a different backend fix rather
+  than restoring the extra retry logic.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: narrow Rust's final lets-DCE-style direct-application cleanup
   to the same scope OCaml uses, so the JS backend no longer beta-reduces
   let-wrapped / wrapper-produced calls that `lam_pass_lets_dce.ml` would leave
