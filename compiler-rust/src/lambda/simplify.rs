@@ -20,6 +20,7 @@ use crate::location::Location;
 #[derive(Clone, Default)]
 struct SimplifyEnv {
     blocks: HashMap<Ident, ImmutableBlockInfo>,
+    call_substitutions: HashMap<Ident, Lambda>,
     functions: HashMap<Ident, LFunction>,
     known_functions: HashMap<Ident, LFunction>,
     optional_blocks: HashMap<Ident, OptionalBlockInfo>,
@@ -58,6 +59,7 @@ impl SimplifyEnv {
     fn without_ident(&self, id: &Ident) -> Self {
         let mut next = self.clone();
         next.blocks.remove(id);
+        next.call_substitutions.remove(id);
         next.functions.remove(id);
         next.known_functions.remove(id);
         next.optional_blocks.remove(id);
@@ -70,6 +72,7 @@ impl SimplifyEnv {
         let mut next = self.clone();
         for id in ids {
             next.blocks.remove(id);
+            next.call_substitutions.remove(id);
             next.functions.remove(id);
             next.known_functions.remove(id);
             next.optional_blocks.remove(id);
@@ -469,7 +472,13 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                         propagated.insert(export_target);
                     }
                 }
-                if !env.preserved_export_bindings.contains(id) && !preserve_exported_eta_alias {
+                if preserve_exported_eta_alias {
+                    if module_field_call_substitution_candidate(&substitution) {
+                        body_env
+                            .call_substitutions
+                            .insert(id.clone(), substitution.clone());
+                    }
+                } else if !env.preserved_export_bindings.contains(id) {
                     body_env.substitutions.insert(id.clone(), substitution);
                 }
             }
@@ -1075,6 +1084,9 @@ fn simplify_primitive(
             env,
             exports,
         ),
+        (Primitive::PjsFnMake(_), [arg]) if module_field_call_substitution_candidate(arg) => {
+            arg.clone()
+        }
         (Primitive::PjsFnMakeUnit, [Lambda::Lfunction(func)])
             if func.arity == 1
                 && matches!(func.params.as_slice(), [param] if param.name() == "param") =>
@@ -1685,7 +1697,14 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
         }
     }
 
-    let func = simplify_with_env(&apply.ap_func, env, exports);
+    let func = match apply.ap_func.as_ref() {
+        Lambda::Lvar(id) => env
+            .call_substitutions
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| simplify_with_env(&apply.ap_func, env, exports)),
+        _ => simplify_with_env(&apply.ap_func, env, exports),
+    };
     if !matches!(apply.ap_func.as_ref(), Lambda::Lapply(_)) {
         if let Lambda::Lvar(id) = &func {
             if !args
@@ -2142,6 +2161,17 @@ fn plain_string_constant(lam: &Lambda) -> Option<String> {
     match lam {
         Lambda::Lconst(Constant::String { s, delim: None }) => Some(s.clone()),
         _ => None,
+    }
+}
+
+fn module_field_call_substitution_candidate(lam: &Lambda) -> bool {
+    match lam {
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
+            args,
+            ..
+        }) => matches!(args.as_slice(), [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]),
+        _ => false,
     }
 }
 
@@ -4886,6 +4916,214 @@ mod tests {
                 panic!("expected a retained async binding with a direct alias body, got {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn exported_eta_alias_calls_use_direct_callee_but_keep_export_binding_like_ocaml() {
+        let stdlib_lazy = Ident::create_persistent("Stdlib_Lazy");
+        let exported = Ident::create_local("a2");
+        let result = Ident::create_local("a4");
+        let param = Ident::create_local("x");
+        let direct_callee = Lambda::prim(
+            Primitive::Pfield(
+                0,
+                FieldDbgInfo::Module {
+                    name: "from_val".to_string(),
+                },
+            ),
+            vec![Lambda::LglobalModule(stdlib_lazy.clone(), false)],
+            Location::none(),
+        );
+
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Strict,
+            exported.clone(),
+            Lambda::function_(
+                1,
+                vec![param.clone()],
+                Lambda::Lapply(Apply {
+                    ap_func: Box::new(direct_callee.clone()),
+                    ap_args: vec![Lambda::var(param.clone())],
+                    ap_info: ApInfo {
+                        loc: Location::none(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Uncurry,
+                    },
+                    ap_transformed_jsx: false,
+                }),
+                FunctionAttribute::default(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                result.clone(),
+                Lambda::Lapply(Apply {
+                    ap_func: Box::new(Lambda::var(exported.clone())),
+                    ap_args: vec![Lambda::const_(Constant::int(3))],
+                    ap_info: ApInfo {
+                        loc: Location::none(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Uncurry,
+                    },
+                    ap_transformed_jsx: false,
+                }),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::ModuleExport(vec![exported.clone(), result.clone()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(exported.clone()), Lambda::var(result.clone())],
+                    Location::none(),
+                ),
+            ),
+        ));
+
+        let Lambda::Llet(_, kept_export, export_value, body) = simplified else {
+            panic!("expected the exported alias binding to remain materialized");
+        };
+        assert!(kept_export.same(&exported));
+        assert!(matches!(
+            *export_value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(_, FieldDbgInfo::Module { ref name }),
+                args,
+                ..
+            }) if name == "from_val"
+                && matches!(args.as_slice(), [Lambda::LglobalModule(id, false)] if id.same(&stdlib_lazy))
+        ));
+
+        let Lambda::Llet(_, kept_result, result_value, export_block) = *body else {
+            panic!("expected the direct call result binding to remain before exports");
+        };
+        assert!(kept_result.same(&result));
+        assert!(matches!(
+            *result_value,
+            Lambda::Lapply(Apply { ap_func, ap_args, .. })
+                if matches!(
+                    ap_func.as_ref(),
+                    Lambda::Lprim(crate::lambda::PrimInfo {
+                        primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+                        args,
+                        ..
+                    }) if name == "from_val"
+                        && matches!(args.as_slice(), [Lambda::LglobalModule(id, false)] if id.same(&stdlib_lazy))
+                )
+                    && matches!(
+                        ap_args.as_slice(),
+                        [Lambda::Lconst(Constant::Int { i: 3, .. })]
+                    )
+        ));
+
+        assert!(matches!(
+            *export_block,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _),
+                args,
+                ..
+            }) if matches!(ids.as_slice(), [first, second] if first.same(&exported) && second.same(&result))
+                && matches!(args.as_slice(), [Lambda::Lvar(first), Lambda::Lvar(second)] if first.same(&exported) && second.same(&result))
+        ));
+    }
+
+    #[test]
+    fn exported_pjs_fn_make_eta_alias_calls_use_direct_callee_like_lazy_test() {
+        let stdlib_lazy = Ident::create_persistent("Stdlib_Lazy");
+        let exported = Ident::create_local("a2");
+        let result = Ident::create_local("a4");
+        let param = Ident::create_local("x");
+        let direct_callee = Lambda::prim(
+            Primitive::Pfield(
+                7,
+                FieldDbgInfo::Module {
+                    name: "from_val".to_string(),
+                },
+            ),
+            vec![Lambda::LglobalModule(stdlib_lazy.clone(), false)],
+            Location::none(),
+        );
+
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Strict,
+            exported.clone(),
+            Lambda::prim(
+                Primitive::PjsFnMake(1),
+                vec![Lambda::function_(
+                    1,
+                    vec![param.clone()],
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(direct_callee.clone()),
+                        ap_args: vec![Lambda::var(param.clone())],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Uncurry,
+                        },
+                        ap_transformed_jsx: false,
+                    }),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                result.clone(),
+                Lambda::Lapply(Apply {
+                    ap_func: Box::new(Lambda::var(exported.clone())),
+                    ap_args: vec![Lambda::const_(Constant::int(3))],
+                    ap_info: ApInfo {
+                        loc: Location::none(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Uncurry,
+                    },
+                    ap_transformed_jsx: false,
+                }),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::ModuleExport(vec![exported.clone(), result.clone()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(exported.clone()), Lambda::var(result.clone())],
+                    Location::none(),
+                ),
+            ),
+        ));
+
+        let Lambda::Llet(_, kept_export, export_value, body) = simplified else {
+            panic!("expected the exported wrapper binding to simplify to a direct alias");
+        };
+        assert!(kept_export.same(&exported));
+        assert!(matches!(
+            *export_value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(_, FieldDbgInfo::Module { ref name }),
+                ref args,
+                ..
+            }) if name == "from_val"
+                && matches!(args.as_slice(), [Lambda::LglobalModule(id, false)] if id.same(&stdlib_lazy))
+        ));
+
+        let Lambda::Llet(_, kept_result, result_value, _) = *body else {
+            panic!("expected the direct call result binding to remain before exports");
+        };
+        assert!(kept_result.same(&result));
+        assert!(matches!(
+            *result_value,
+            Lambda::Lapply(Apply { ap_func, ap_args, .. })
+                if matches!(
+                    ap_func.as_ref(),
+                    Lambda::Lprim(crate::lambda::PrimInfo {
+                        primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+                        args,
+                        ..
+                    }) if name == "from_val"
+                        && matches!(args.as_slice(), [Lambda::LglobalModule(id, false)] if id.same(&stdlib_lazy))
+                )
+                    && matches!(
+                        ap_args.as_slice(),
+                        [Lambda::Lconst(Constant::Int { i: 3, .. })]
+                    )
+        ));
     }
 
     #[test]

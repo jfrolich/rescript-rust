@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 399 / 657 JS snapshots passing, 0 compile errors, 258 output diffs
+**Status:** 400 / 657 JS snapshots passing, 0 compile errors, 257 output diffs
 
 ## Goal
 
@@ -35,11 +35,72 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **399 / 657**
+- JS snapshot parity: **400 / 657**
 - Compile errors: **0**
-- Output diffs: **258**
+- Output diffs: **257**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the OCaml `Pjs_fn_make` simplify path for exported
+  eta-wrapped direct module-field callees into
+  `compiler-rust/src/lambda/simplify.rs` so exported wrappers like
+  `let a2 = x => Stdlib_Lazy.from_val(x)` keep the exported binding
+  materialized while call sites lower directly to the module field callee,
+  matching the checked-in `lazy_test` snapshot instead of emitting `a2(3)`
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in the post-lowering simplify pass that
+  the current JS backend still depends on, without reopening typedtree or
+  lambda parity work
+- OCaml reference:
+  `compiler/core/lam_pass_alpha_conversion.ml`, where the
+  `Lprim {primitive = Pjs_fn_make len; args = [arg]; ...}` branch simplifies
+  `arg` first and then runs `Lam_eta_conversion.unsafe_adjust_to_arity`,
+  allowing wrappers around direct module-field callees to collapse to the
+  callee while preserving exported alias bindings elsewhere in the backend
+- Rust change:
+  - added a dedicated `call_substitutions` environment for preserved exported
+    eta aliases so call sites can use the simplified direct module-field
+    callee without deleting the exported binding itself
+  - taught `PjsFnMake` simplification to unwrap simplified direct
+    module-field callees and nothing broader, which fixes the real lowered
+    `lazy_test` shape without regressing existing async exported-alias output
+  - added focused regression coverage in
+    `exported_eta_alias_calls_use_direct_callee_but_keep_export_binding_like_ocaml`
+    and
+    `exported_pjs_fn_make_eta_alias_calls_use_direct_callee_like_lazy_test`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml eta_alias_calls_use_direct_callee -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml eta_reduces_wrappers_around_known_async_functions_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact `compiler-args` repro for `tests/tests/src/lazy_test.res` from
+    `tests/tests/lib/bs`, diffing `/tmp/lazy_test.mjs` against the
+    checked-in snapshot
+  - exact `compiler-args` repro for `tests/tests/src/async_inline.res` from
+    `tests/tests/lib/bs`, diffing `/tmp/async_inline.mjs` against the
+    checked-in snapshot as a broader guard against alias-preservation
+    regressions
+  - exact `compiler-args` repro for `tests/tests/src/ExternalShadow.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/ExternalShadow.mjs` against the
+    checked-in snapshot as an unchanged backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/lazy_test.res` now matches its checked-in snapshot
+    exactly; the exported wrapper around `Stdlib_Lazy.from_val` still emits
+    the exported binding, but the actual call site lowers to
+    `Stdlib_Lazy.from_val(3)` instead of the Rust-only `a2(3)` shape
+  - `tests/tests/src/async_inline.res` and
+    `tests/tests/src/ExternalShadow.res` remain exact matches after narrowing
+    the new call-substitution rule to direct module-field callees only
+- Topline impact:
+  - JS snapshot parity: **399 / 657** -> **400 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **258** -> **257** (**-1**)
+- Keep this change because it ports the OCaml
+  `lam_pass_alpha_conversion.ml` `Pjs_fn_make` simplify ordering for the
+  missing direct-module-field wrapper case instead of preserving the Rust-only
+  extra alias call in final JS.
 
 Latest iteration on **2026-04-14**:
 
