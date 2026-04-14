@@ -7,6 +7,7 @@
 //! module-resolution paths use as their source of truth.
 
 use ahash::AHashMap as HashMap;
+use std::cell::RefCell;
 
 use crate::ident::Ident;
 
@@ -24,6 +25,8 @@ pub(crate) struct QualifiedModuleComponents {
     types: HashMap<String, usize>,
     modules: HashMap<String, (usize, usize)>,
     modtypes: HashMap<String, usize>,
+    qualified_modules: RefCell<HashMap<String, (Ident, ModuleDeclaration)>>,
+    qualified_modtypes: RefCell<HashMap<String, (Ident, ModtypeDeclaration)>>,
 }
 
 impl QualifiedModuleComponents {
@@ -66,6 +69,8 @@ impl QualifiedModuleComponents {
             types,
             modules,
             modtypes,
+            qualified_modules: RefCell::new(HashMap::new()),
+            qualified_modtypes: RefCell::new(HashMap::new()),
         }
     }
 
@@ -105,11 +110,65 @@ impl QualifiedModuleComponents {
         }
     }
 
+    pub(crate) fn lookup_qualified_module(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext<'_>,
+    ) -> Option<(usize, Ident, ModuleDeclaration)> {
+        let (idx, runtime_pos) = *self.modules.get(name)?;
+        if let Some((id, md)) = self.qualified_modules.borrow().get(name).cloned() {
+            return Some((runtime_pos, id, md));
+        }
+
+        let (id, mut md) = match &self.signature[idx] {
+            SignatureItem::SigModule(id, md, _) => (id.clone(), md.clone()),
+            _ => return None,
+        };
+        crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+            &mut md.md_type,
+            &self.signature,
+            &self.access_path,
+            ctx,
+        );
+        self.qualified_modules
+            .borrow_mut()
+            .insert(name.to_string(), (id.clone(), md.clone()));
+        Some((runtime_pos, id, md))
+    }
+
     pub(crate) fn lookup_modtype(&self, name: &str) -> Option<(&Ident, &ModtypeDeclaration)> {
         let idx = *self.modtypes.get(name)?;
         match &self.signature[idx] {
             SignatureItem::SigModtype(id, mtd) => Some((id, mtd)),
             _ => None,
         }
+    }
+
+    pub(crate) fn lookup_qualified_modtype(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext<'_>,
+    ) -> Option<(Ident, ModtypeDeclaration)> {
+        let idx = *self.modtypes.get(name)?;
+        if let Some((id, mtd)) = self.qualified_modtypes.borrow().get(name).cloned() {
+            return Some((id, mtd));
+        }
+
+        let (id, mut mtd) = match &self.signature[idx] {
+            SignatureItem::SigModtype(id, mtd) => (id.clone(), mtd.clone()),
+            _ => return None,
+        };
+        if let Some(mty) = mtd.mtd_type.as_mut() {
+            crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+                mty,
+                &self.signature,
+                &self.access_path,
+                ctx,
+            );
+        }
+        self.qualified_modtypes
+            .borrow_mut()
+            .insert(name.to_string(), (id.clone(), mtd.clone()));
+        Some((id, mtd))
     }
 }

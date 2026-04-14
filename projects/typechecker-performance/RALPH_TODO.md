@@ -1,7 +1,7 @@
 # Ralph TODO: Typechecker Performance
 
 **Last Updated:** 2026-04-14
-**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, `ctype` now skips one duplicate CMI signature rewrite, dotted shared module-signature scraping now consults env_lazy-backed qualified views first, and the broader env_lazy rollout is still incomplete
+**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, dotted shared module-signature scraping now consults env_lazy-backed qualified views first, lazy child module/modtype qualification now comes from cached parent qualified views, and the broader env_lazy rollout is still incomplete
 
 ## Goal
 
@@ -299,6 +299,73 @@ What this means:
   earlier checkpoint, so the next session should keep pushing the OCaml-shaped
   source-of-truth path deeper into inclusion/pack resolution while reducing
   detached copies rather than broadening them
+
+## Session Update: Cache Lazy Child Module/Modtype Qualification From Parent Views
+
+Additional checkpoint from this worktree on `2026-04-14` after making
+env_lazy-backed qualified parent components lazily cache dotted child
+module/modtype qualification and route the hot dotted lookup helpers through
+that cached child view:
+
+- exact `Import.res` repro:
+  - OCaml: `0.07s` (`/usr/bin/time -lp`)
+  - Rust: `0.24s` to `0.26s` across three immediate `/usr/bin/time -lp`
+    reruns after build
+  - Rust max RSS: about `78MB` to `81MB`
+  - Rust peak footprint: about `63MB` to `66MB`
+- focused import/module-alias benchmark
+  (`Import|global_module_alias_test|module_alias_test|test_include|bs_poly_set_test|bs_poly_map_test|bs_poly_mutable_set_test|bs_mutable_set_test`):
+  - Files tested: `12`
+  - Comparable files: `12`
+  - Aggregate OCaml total: `154.2ms`
+  - Aggregate Rust total: `699.6ms`
+  - Aggregate Rust / OCaml ratio: `4.54x`
+  - `Import.res`: OCaml `42.9ms`, Rust `239.0ms`, `5.58x`
+  - `global_module_alias_test.res`: OCaml `16.7ms`, Rust `92.7ms`, `5.56x`
+  - `bs_poly_set_test.res`: OCaml `13.9ms`, Rust `74.3ms`, `5.34x`
+- full typedtree parity: unchanged at `232/657`, `43117` hunk mismatches
+- canonical corpus benchmark:
+  - Files tested: `657`
+  - Comparable files: `656`
+  - Rust faster or equal: `3`
+  - Rust slower: `653`
+  - Materially slower: `226`
+  - Rust failures: `1` (`src/ticker.res`: stack overflow)
+  - Aggregate OCaml total: `5430.0ms`
+  - Aggregate Rust total: `11317.4ms`
+  - Aggregate Rust / OCaml ratio: `2.08x`
+  - `Import.res` benchmark entry: OCaml `44.1ms`, Rust `241.4ms`, `5.47x`
+
+What landed in this step:
+
+- `env_lazy::QualifiedModuleComponents` now lazily caches qualified dotted
+  child `ModuleDeclaration` and `ModtypeDeclaration` values instead of
+  re-running `substitute_type_paths_in_child_module_type` on every lookup
+- `typecore::with_resolved_module_components_for_path` can now build a dotted
+  child module's qualified components directly from the already-cached parent
+  qualified view when the child resolves to a signature, instead of rebuilding
+  the child signature pipeline from the raw module type first
+- `typecore::lookup_module_in_resolved_path` /
+  `lookup_modtype_in_resolved_path`, `ctype::resolve_module_type_through_env`,
+  `typemod::lookup_module_type_by_lid`, and the shared typed-module extraction
+  helpers now consume that cached child qualification path instead of doing
+  fresh child substitution work per query
+- access-path-only dotted lookup (`resolve_module_access_path_for_lid`) was left
+  on the cheap raw slot/path path so the new lazy child qualification only
+  forces when callers actually need the child module type/components, matching
+  OCaml's split between `comp_modules` and `comp_components`
+
+What this means:
+
+- env_lazy is now carrying one more OCaml-shaped responsibility: qualified
+  dotted child module/modtype forcing comes from cached parent views rather than
+  ad hoc child-substitution helpers in each caller
+- the canonical corpus moved from `2.20x` slower to `2.08x` slower without any
+  new typedtree parity regression
+- the import-heavy module-alias cluster improved again, but the project is
+  still materially slower than OCaml and the remaining work is now mostly the
+  residual inclusion/unpack/secondary-module-resolution costs above this child
+  view cache
 
 ## Task List
 

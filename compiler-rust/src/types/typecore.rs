@@ -15229,17 +15229,19 @@ impl Env {
                 if let Some(module_path) =
                     self.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)
                 {
-                    if let Some(Some((mod_path, pos, vd))) = with_resolved_module_components_for_path(
-                        &module_path,
-                        self,
-                        pers_env,
-                        ctx,
-                        |components| {
-                            components.lookup_value(value_name).map(|(pos, _, vd)| {
-                                (components.access_path().clone(), pos, vd.clone())
-                            })
-                        },
-                    ) {
+                    if let Some(Some((mod_path, pos, vd))) =
+                        with_resolved_module_components_for_path(
+                            &module_path,
+                            self,
+                            pers_env,
+                            ctx,
+                            |components| {
+                                components.lookup_value(value_name).map(|(pos, _, vd)| {
+                                    (components.access_path().clone(), pos, vd.clone())
+                                })
+                            },
+                        )
+                    {
                         let path =
                             Path::Pdot(Box::new(mod_path), value_name.to_string(), pos as i32);
                         return Ok((path, vd));
@@ -15377,17 +15379,23 @@ impl Env {
                     pers_env,
                     ctx,
                     |components| {
-                        components.lookup_module(submod_name.as_str()).map(|(pos, _, md)| {
-                            if parent_path.head().is_persistent()
-                                || parent_path.head().stamp() == 0
-                            {
-                                md.md_path.clone().unwrap_or_else(|| {
-                                    Path::pdot(parent_path.clone(), submod_name.clone())
-                                })
-                            } else {
-                                Path::Pdot(Box::new(parent_path.clone()), submod_name.clone(), pos as i32)
-                            }
-                        })
+                        components
+                            .lookup_module(submod_name.as_str())
+                            .map(|(pos, _, md)| {
+                                if parent_path.head().is_persistent()
+                                    || parent_path.head().stamp() == 0
+                                {
+                                    md.md_path.clone().unwrap_or_else(|| {
+                                        Path::pdot(parent_path.clone(), submod_name.clone())
+                                    })
+                                } else {
+                                    Path::Pdot(
+                                        Box::new(parent_path.clone()),
+                                        submod_name.clone(),
+                                        pos as i32,
+                                    )
+                                }
+                            })
                     },
                 )
                 .flatten()
@@ -15739,10 +15747,7 @@ impl Env {
                         );
                         if apply_subst {
                             return resolve_module_signature_for_path(
-                                &sub_path,
-                                self,
-                                pers_env,
-                                ctx,
+                                &sub_path, self, pers_env, ctx,
                             );
                         }
                         let result = self.resolve_module_type(&sub_md.md_type, pers_env, ctx);
@@ -18785,6 +18790,34 @@ fn module_components_cache_key(module_path: &Path, env: &Env) -> Option<String> 
     })
 }
 
+fn build_module_components_from_parent_path<'a>(
+    module_path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<crate::types::env_lazy::QualifiedModuleComponents> {
+    let Path::Pdot(parent, module_name, _) = module_path else {
+        return None;
+    };
+
+    with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
+        let (runtime_pos, _, md) = components.lookup_qualified_module(module_name.as_str(), ctx)?;
+        let access_path = qualified_submodule_access_path(
+            components.access_path(),
+            module_name.as_str(),
+            runtime_pos,
+            &md,
+        );
+        match md.md_type {
+            crate::types::decl::ModuleType::MtySignature(sig) => Some(
+                crate::types::env_lazy::QualifiedModuleComponents::new(access_path, sig),
+            ),
+            _ => None,
+        }
+    })
+    .flatten()
+}
+
 pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     module_path: &Path,
     env: &Env,
@@ -18796,17 +18829,25 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     let module_key = module_components_cache_key(module_path, env);
     if let Some(module_key) = module_key.as_deref() {
         if let Some(result) = ctx.with_qualified_module_components(module_key, |components| {
-            (f.take().expect("qualified module components callback reused"))(components)
+            (f.take()
+                .expect("qualified module components callback reused"))(components)
         }) {
             return Some(result);
         }
     }
 
-    let (access_path, sig) =
-        build_module_signature_for_path(module_path, env, pers_env, ctx)?;
-    let components = crate::types::env_lazy::QualifiedModuleComponents::new(access_path, sig);
-    let result =
-        (f.take().expect("qualified module components callback reused"))(&components);
+    let components = build_module_components_from_parent_path(module_path, env, pers_env, ctx)
+        .or_else(|| {
+            let (access_path, sig) =
+                build_module_signature_for_path(module_path, env, pers_env, ctx)?;
+            Some(crate::types::env_lazy::QualifiedModuleComponents::new(
+                access_path,
+                sig,
+            ))
+        })?;
+    let result = (f
+        .take()
+        .expect("qualified module components callback reused"))(&components);
     if let Some(module_key) = module_key.as_deref() {
         ctx.register_qualified_module_components(module_key, components);
     }
@@ -18840,16 +18881,18 @@ pub(crate) fn lookup_module_in_resolved_path<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<(Path, Path, crate::types::decl::ModuleDeclaration)> {
     with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
-        components.lookup_module(module_name).map(|(runtime_pos, _, md)| {
-            let parent_access_path = components.access_path().clone();
-            let access_path = qualified_submodule_access_path(
-                &parent_access_path,
-                module_name,
-                runtime_pos,
-                md,
-            );
-            (parent_access_path, access_path, md.clone())
-        })
+        components
+            .lookup_qualified_module(module_name, ctx)
+            .map(|(runtime_pos, _, md)| {
+                let parent_access_path = components.access_path().clone();
+                let access_path = qualified_submodule_access_path(
+                    &parent_access_path,
+                    module_name,
+                    runtime_pos,
+                    &md,
+                );
+                (parent_access_path, access_path, md)
+            })
     })
     .flatten()
 }
@@ -18888,9 +18931,9 @@ pub(crate) fn lookup_modtype_in_resolved_path<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<(Path, crate::types::decl::ModtypeDeclaration)> {
     with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
-        components.lookup_modtype(modtype_name).map(|(_, mtd)| {
-            (components.access_path().clone(), mtd.clone())
-        })
+        components
+            .lookup_qualified_modtype(modtype_name, ctx)
+            .map(|(_, mtd)| (components.access_path().clone(), mtd))
     })
     .flatten()
 }
@@ -18903,9 +18946,9 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<(Path, Ident, crate::types::decl::TypeDeclaration)> {
     with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
-        components.lookup_type(type_name).map(|(id, decl)| {
-            (components.access_path().clone(), id.clone(), decl.clone())
-        })
+        components
+            .lookup_type(type_name)
+            .map(|(id, decl)| (components.access_path().clone(), id.clone(), decl.clone()))
     })
     .flatten()
 }
@@ -18963,8 +19006,7 @@ fn build_module_signature_for_path<'a>(
                         .unwrap_or_else(|| Path::pident(id.clone())),
                 };
                 let mut sig = copy_lookup_signature_for_subst(&sig, ctx);
-                let skip_self_manifest_subst =
-                    Env::signature_has_package_self_manifests(&sig, ctx);
+                let skip_self_manifest_subst = Env::signature_has_package_self_manifests(&sig, ctx);
                 if matches!(&md.md_type, crate::types::decl::ModuleType::MtyAlias(..)) {
                     sig = strengthen_signature_for_module_access_path(ctx, &access_path, &sig);
                 }
@@ -19076,8 +19118,13 @@ fn build_module_signature_for_path<'a>(
             }
         }
         Path::Pdot(parent, submodule_name, _) => {
-            let (resolved_parent_path, access_path, md) =
-                lookup_module_in_resolved_path(parent, submodule_name.as_str(), env, pers_env, ctx)?;
+            let (resolved_parent_path, access_path, md) = lookup_module_in_resolved_path(
+                parent,
+                submodule_name.as_str(),
+                env,
+                pers_env,
+                ctx,
+            )?;
             let (sig, resolved_name) = env.resolve_module_type(&md.md_type, pers_env, ctx)?;
             let mut sig = copy_lookup_signature_for_subst(&sig, ctx);
             let skip_self_manifest_subst = Env::signature_has_package_self_manifests(&sig, ctx);
@@ -19162,11 +19209,7 @@ fn build_module_signature_for_path<'a>(
                 }
             }
             if !skip_self_manifest_subst {
-                crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                    &sig,
-                    &access_path,
-                    ctx,
-                );
+                crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &access_path, ctx);
                 crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(
                     &mut sig,
                     &access_path,
@@ -19269,12 +19312,10 @@ pub(crate) fn alias_target_for_module_path<'a>(
         Path::Pdot(parent, module_name, _) => {
             with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
                 components
-                    .lookup_module(module_name.as_str())
+                    .lookup_qualified_module(module_name.as_str(), ctx)
                     .and_then(|(_, _, md)| match &md.md_type {
                         crate::types::decl::ModuleType::MtyAlias(_, target)
-                        | crate::types::decl::ModuleType::MtyIdent(target) => {
-                            Some(target.clone())
-                        }
+                        | crate::types::decl::ModuleType::MtyIdent(target) => Some(target.clone()),
                         _ => None,
                     })
             })?
@@ -19303,11 +19344,9 @@ pub(crate) fn module_alias_target_for_path<'a>(
         Path::Pdot(parent, module_name, _) => {
             with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
                 components
-                    .lookup_module(module_name.as_str())
+                    .lookup_qualified_module(module_name.as_str(), ctx)
                     .and_then(|(_, _, md)| match &md.md_type {
-                        crate::types::decl::ModuleType::MtyAlias(_, target) => {
-                            Some(target.clone())
-                        }
+                        crate::types::decl::ModuleType::MtyAlias(_, target) => Some(target.clone()),
                         _ => None,
                     })
             })?
@@ -19336,7 +19375,11 @@ fn lookup_type_decl_for_path<'a>(
             env,
             &mut no_persistent_env,
             ctx,
-            |components| components.lookup_type(type_name).map(|(_, decl)| decl.clone()),
+            |components| {
+                components
+                    .lookup_type(type_name)
+                    .map(|(_, decl)| decl.clone())
+            },
         )
         .flatten()
     }

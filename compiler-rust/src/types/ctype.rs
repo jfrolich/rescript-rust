@@ -1066,25 +1066,19 @@ fn resolve_module_type_through_env_path<'a>(
                 &mut no_persistent_env,
                 ctx,
             );
-            let (resolved_parent_path, parent_sig) =
-                crate::types::typecore::resolve_module_signature_for_path(
+            if let Some((_, access_path, md)) =
+                crate::types::typecore::lookup_module_in_resolved_path(
                     parent,
+                    name,
                     env,
                     &mut no_persistent_env,
                     ctx,
-                )?;
-            if let Some((_, access_path, md)) = crate::types::typecore::lookup_module_in_resolved_path(
-                parent,
-                name,
-                env,
-                &mut no_persistent_env,
-                ctx,
-            ) {
+                )
+            {
                 match &md.md_type {
                     super::decl::ModuleType::MtySignature(_) => {
-                        let preferred_child_path = parent_alias_target
-                            .as_ref()
-                            .map(|target_parent_path| {
+                        let preferred_child_path =
+                            parent_alias_target.as_ref().map(|target_parent_path| {
                                 Path::pdot(target_parent_path.clone(), name.to_string())
                             });
                         crate::types::typecore::copy_resolved_module_signature_for_path(
@@ -1106,13 +1100,7 @@ fn resolve_module_type_through_env_path<'a>(
                         .map(|(_, sig)| super::decl::ModuleType::MtySignature(sig))
                     }
                     other => {
-                        let mut child_mty = other.clone();
-                        crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
-                            &mut child_mty,
-                            &parent_sig,
-                            &resolved_parent_path,
-                            ctx,
-                        );
+                        let child_mty = other.clone();
                         if let Some(target_parent_path) = parent_alias_target.as_ref() {
                             let child_target_path =
                                 Path::pdot(target_parent_path.clone(), name.to_string());
@@ -1135,14 +1123,7 @@ fn resolve_module_type_through_env_path<'a>(
                 &mut no_persistent_env,
                 ctx,
             ) {
-                let mut child_mty = mtd.mtd_type.clone()?;
-                crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
-                    &mut child_mty,
-                    &parent_sig,
-                    &resolved_parent_path,
-                    ctx,
-                );
-                Some(child_mty)
+                mtd.mtd_type.clone()
             } else {
                 None
             }
@@ -1591,17 +1572,17 @@ fn normalize_path_full_inner<'a>(
         if id.is_persistent() {
             ctx.trigger_module_sig_rename(id.name());
         }
-        if env.find_module_with_origin(id.name()).ok().is_some_and(
-            |(origin_id, md, is_local)| {
+        if env
+            .find_module_with_origin(id.name())
+            .ok()
+            .is_some_and(|(origin_id, md, is_local)| {
                 let target_is_local = match &md.md_type {
                     super::decl::ModuleType::MtyAlias(_, target)
                     | super::decl::ModuleType::MtyIdent(target) => {
                         let head = target.head();
-                        env.find_module_with_origin(head.name())
-                            .ok()
-                            .is_some_and(|(target_id, _, target_local)| {
-                                target_local && target_id.same(head)
-                            })
+                        env.find_module_with_origin(head.name()).ok().is_some_and(
+                            |(target_id, _, target_local)| target_local && target_id.same(head),
+                        )
                     }
                     _ => false,
                 };
@@ -1613,8 +1594,8 @@ fn normalize_path_full_inner<'a>(
                         super::decl::ModuleType::MtyAlias(..)
                             | super::decl::ModuleType::MtyIdent(..)
                     )
-            },
-        ) {
+            })
+        {
             return path;
         }
     }
