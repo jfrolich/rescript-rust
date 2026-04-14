@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-14
-**Status:** 479 / 657 JS snapshots passing, 0 compile errors, 178 output diffs
+**Last Updated:** 2026-04-15
+**Status:** 477 / 657 JS snapshots passing, 0 compile errors, 180 output diffs
 
 ## Goal
 
@@ -27,7 +27,7 @@ JS backend only.
 
 ## Current Baseline
 
-Latest authoritative wrapper run on **2026-04-14** using:
+Latest authoritative wrapper run on **2026-04-15** using:
 
 ```bash
 timeout 1800 ./scripts/test_js_output_parity.sh
@@ -35,11 +35,75 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **479 / 657**
+- JS snapshot parity: **477 / 657**
 - Compile errors: **0**
-- Output diffs: **178**
+- Output diffs: **180**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: align Rust's post-lowering lambda simplification pass sequence
+  with OCaml's backend pass boundaries so nested `Pjs_fn_make` top-level effect
+  calls are not beta-reduced away across an extra Rust-only backend sweep
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`, because the mismatch lived after optimized
+  lambda in the lambda-to-JS backend handoff: OCaml's final pipeline in
+  `lam_compile_main.ml` runs alias / alpha / lets-dce passes before
+  `lam_compile.ml`, but it does not run the extra second direct-function
+  beta-reduction sweep Rust had been applying inside `simplify_for_js_backend`
+- OCaml reference:
+  `compiler/core/lam_compile_main.ml`, especially the final
+  `simplify_alias -> alpha_conversion -> simplify_lets` sequence;
+  `compiler/core/lam_pass_lets_dce.ml`;
+  `compiler/core/lam_pass_remove_alias.ml`;
+  `compiler/core/lam_pass_alpha_conversion.ml`; and
+  `compiler/core/lam_compile.ml`, especially `Pjs_fn_make`
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so
+    `simplify_for_js_backend(...)` runs one direct-function beta-reducing pass
+    followed by a cleanup pass with direct beta reduction disabled, instead of
+    running two identical beta-reducing sweeps plus a final Rust-only
+    `simplify_direct_function_applications_like_lets_dce(...)` pass
+  - updated focused simplifier expectations in
+    `beta_reduces_let_wrapped_returned_functions_across_backend_alias_passes`
+    and
+    `beta_reduces_returned_pjs_fn_make_wrappers_across_backend_alias_passes`
+    to match the OCaml-aligned post-pass shape where the final outer call
+    survives
+  - added direct regression coverage in
+    `compile_effectful_underscore_binding_from_nested_js_function_calls_survives_shake`
+    so the `gpr_1692_test` shape keeps the emitted top-level call
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml compile_effectful_underscore_binding_from_nested_js_function_calls_survives_shake -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml beta_reduces_returned_pjs_fn_make_wrappers_across_backend_alias_passes -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml beta_reduces_let_wrapped_returned_functions_across_backend_alias_passes -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/gpr_1692_test.res`, diffing
+    `/tmp/gpr_1692_test.mjs` against the checked-in snapshot
+  - direct guard repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    broader guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1692_test.res` is now an exact snapshot match; the
+    emitted top-level `(f => 0)("")` call survives instead of being optimized
+    away to an empty module
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the simplifier sequencing change
+  - full-wrapper parity regressed because the OCaml-aligned fix exposed a new
+    declaration-ordering cluster in files such as
+    `DerivingAccessorsCurried.res`, `DerivingAccessorsUncurried.res`, and
+    `DisambiguateOptionalFields.res`, where pure top-level `let` bindings moved
+    later in the emitted JS
+- Topline impact:
+  - JS snapshot parity: **479 / 657** -> **477 / 657** (**-2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **178** -> **180** (**+2**)
+- Keep this change because it matches the real OCaml backend pass boundaries
+  and fixes the concrete `gpr_1692_test` over-simplification bug; the parity
+  regression is the next declaration-ordering cluster to address, not a reason
+  to restore the extra Rust-only simplification sweep.
 
 Latest iteration on **2026-04-14**:
 

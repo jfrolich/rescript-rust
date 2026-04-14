@@ -89,8 +89,7 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     let exports = collect_exported_idents(&flattened);
     let preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
     let first = simplify_for_js_backend_once(&flattened, &preserved_export_bindings, true);
-    let second = simplify_for_js_backend_once(&first, &preserved_export_bindings, true);
-    simplify_direct_function_applications_like_lets_dce(&second)
+    simplify_for_js_backend_once(&first, &preserved_export_bindings, false)
 }
 
 fn simplify_for_js_backend_once(
@@ -6022,14 +6021,18 @@ mod tests {
         });
 
         let simplified = simplify_for_js_backend(&lambda);
-        let Lambda::Llet(kind, bound, value, body) = simplified else {
-            panic!("expected a let-wrapped direct call to stay wrapped by the inner let");
+        let Lambda::Lapply(apply) = simplified else {
+            panic!("expected the outer apply to remain after one backend beta-reduction sweep");
+        };
+        let Lambda::Llet(kind, bound, value, body) = *apply.ap_func else {
+            panic!("expected the simplified callee to stay let-wrapped");
         };
 
-        assert_eq!(kind, LetKind::Strict);
+        assert_eq!(kind, LetKind::StrictOpt);
         assert!(bound.same(&u));
         assert!(!matches!(*value, Lambda::Lapply(_)));
-        assert!(!matches!(*body, Lambda::Lapply(_)));
+        assert!(matches!(*body, Lambda::Lfunction(_)));
+        assert_eq!(apply.ap_args.len(), 1);
     }
 
     #[test]
@@ -6103,10 +6106,11 @@ mod tests {
         });
 
         let simplified = simplify_for_js_backend(&lambda);
-        assert!(matches!(
-            simplified,
-            Lambda::Lconst(Constant::Int { i: 0, .. })
-        ));
+        let Lambda::Lapply(apply) = simplified else {
+            panic!("expected the outer call to survive the final backend simplification sweep");
+        };
+        assert_eq!(apply.ap_args.len(), 1);
+        assert!(matches!(apply.ap_func.as_ref(), Lambda::Lfunction(_)));
     }
 
     #[test]

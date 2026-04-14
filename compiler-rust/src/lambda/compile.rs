@@ -12211,6 +12211,92 @@ mod tests {
     }
 
     #[test]
+    fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_shake() {
+        let mut compiler = LambdaCompiler::new();
+        let outer_fn_param = Ident::create_local("x");
+        let inner_true_param = Ident::create_local("f");
+        let inner_zero_param = Ident::create_local("f");
+        let unused = Ident::create_local("_s");
+        let always_true = Ident::create_local("h");
+        let also_true = Ident::create_local("j");
+        let loc = Location::none();
+        let starj_empty = Lambda::const_(Constant::String {
+            s: "".to_string(),
+            delim: Some(StringDelim::StarJ),
+        });
+
+        let outer_value = Lambda::let_(
+            LetKind::Strict,
+            always_true,
+            Lambda::true_(),
+            Lambda::prim(
+                Primitive::PjsFnMake(1),
+                vec![Lambda::function_(
+                    1,
+                    vec![outer_fn_param.clone()],
+                    Lambda::let_(
+                        LetKind::Strict,
+                        also_true,
+                        Lambda::prim(
+                            Primitive::PjsFnMake(1),
+                            vec![Lambda::function_(
+                                1,
+                                vec![inner_true_param],
+                                Lambda::true_(),
+                                FunctionAttribute::default(),
+                            )],
+                            loc.clone(),
+                        ),
+                        Lambda::prim(
+                            Primitive::PjsFnMake(1),
+                            vec![Lambda::function_(
+                                1,
+                                vec![inner_zero_param],
+                                Lambda::const_(Constant::int(0)),
+                                FunctionAttribute::default(),
+                            )],
+                            loc.clone(),
+                        ),
+                    ),
+                    FunctionAttribute::default(),
+                )],
+                loc.clone(),
+            ),
+        );
+        let nested_call = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::Lapply(Apply {
+                ap_func: Box::new(outer_value),
+                ap_args: vec![starj_empty.clone()],
+                ap_info: ApInfo {
+                    loc: loc.clone(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Uncurry,
+                },
+                ap_transformed_jsx: false,
+            })),
+            ap_args: vec![starj_empty],
+            ap_info: ApInfo {
+                loc: loc.clone(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Uncurry,
+            },
+            ap_transformed_jsx: false,
+        });
+        let program = compiler.compile_program(&Lambda::let_(
+            LetKind::Strict,
+            unused,
+            nested_call,
+            Lambda::unit(),
+        ));
+
+        let rendered = print_block(&program.block);
+        assert!(
+            rendered.contains("(f => 0)(\"\")"),
+            "expected the top-level call to survive, got:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn compile_hash_primitives_lower_to_primitive_hash_runtime_calls_like_ocaml() {
         let mut compiler = LambdaCompiler::new();
         let x = Ident::create_local("x");
