@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 442 / 657 JS snapshots passing, 0 compile errors, 215 output diffs
+**Status:** 450 / 657 JS snapshots passing, 0 compile errors, 207 output diffs
 
 ## Goal
 
@@ -35,11 +35,70 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **441 / 657**
+- JS snapshot parity: **450 / 657**
 - Compile errors: **0**
-- Output diffs: **215**
+- Output diffs: **207**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the OCaml UTF-8-aware dump behavior for internal
+  byte-backed JS strings and raw JS snippets so parser-stored UTF-8 bytes do
+  not re-emit as Latin-1 mojibake on the Rust printer path
+- Active backend focus for this slice is **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; this is printer-only drift after the backend metadata path, and it
+  collapsed a repeated output motif across regular strings, template literals,
+  regex/raw snippets, and raw no-quote literals
+- OCaml reference:
+  `compiler/core/js_dump_string.ml`, where `escape_to_buffer` walks byte
+  strings and preserves valid UTF-8 sequences while escaping control bytes, and
+  `compiler/core/js_dump.ml`, where `Str {delim; txt}` and `Raw_js_code`
+  forward those internal byte strings directly into the final dump
+- Rust change:
+  - updated `compiler-rust/src/js_ir/printer.rs` so string literals, raw
+    no-quote/backquote strings, tagged-template segments, and `RawJsCode`
+    first decode parser-stored `0x00..0xFF` code units back into valid UTF-8
+    when possible instead of re-encoding the mojibake intermediary string
+  - kept the decode path narrow by only transforming strings whose code units
+    all fit in `0x00..0xFF` and whose reconstructed byte buffer is valid UTF-8,
+    leaving ordinary Rust-side Unicode strings unchanged
+  - added focused regression coverage in
+    `test_print_string_decodes_internal_utf8_bytes_before_escaping`,
+    `test_print_noquote_string_decodes_internal_utf8_bytes`,
+    `test_print_tagged_template_decodes_internal_utf8_bytes`, and
+    `test_print_raw_js_decodes_internal_utf8_bytes`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_string_decodes_internal_utf8_bytes_before_escaping -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_noquote_string_decodes_internal_utf8_bytes -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_tagged_template_decodes_internal_utf8_bytes -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_raw_js_decodes_internal_utf8_bytes -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/test_regex.res`, diffing the exact
+    emitted module against the checked-in snapshot
+  - direct repro for `tests/tests/src/prepend_data_ffi.res`, diffing the exact
+    emitted module against the checked-in snapshot
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_regex.res` now matches its checked-in snapshot
+    exactly; the regex literal had been re-emitted as Latin-1 mojibake through
+    the raw-JS printer path
+  - `tests/tests/src/prepend_data_ffi.res` remains an exact snapshot match
+    after the broader string/raw decode fix, confirming the regular string
+    literal path is aligned too
+  - the authoritative wrapper improved by eight snapshots and eight fewer diff
+    files with no compile-error regression, confirming this was a repeated
+    final-dump motif rather than a single-file accident
+- Topline impact:
+  - JS snapshot parity: **442 / 657** -> **450 / 657** (**+8**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **215** -> **207** (**-8**)
+- Keep this change because it ports the OCaml `js_dump_string` / `js_dump`
+  byte-preserving UTF-8 emission behavior instead of preserving the Rust-only
+  Latin-1 re-encoding bug in final JS output.
 
 Latest iteration on **2026-04-14**:
 

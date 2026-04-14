@@ -12,6 +12,7 @@ use super::{
 use crate::binary_ast::ppx::{JsExpClassification, classify_js_exp};
 use crate::ident::Ident;
 use crate::lambda::SwitchCaseTag;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
@@ -1457,7 +1458,7 @@ impl JsPrinter {
                 self.write_char('`');
                 for (i, s) in strings.iter().enumerate() {
                     if let ExpressionDesc::Str { txt, .. } = &s.desc {
-                        self.write(txt);
+                        self.write_decoded_internal_string(txt);
                     }
                     if i < values.len() {
                         self.write("${");
@@ -1924,8 +1925,9 @@ impl JsPrinter {
 
     /// Print a string literal
     fn print_string(&mut self, s: &str) {
+        let decoded = decode_internal_utf8_string(s);
         self.write_char('"');
-        for c in s.chars() {
+        for c in decoded.chars() {
             match c {
                 '"' => self.write("\\\""),
                 '\\' => self.write("\\\\"),
@@ -1946,17 +1948,24 @@ impl JsPrinter {
     fn print_string_with_delim(&mut self, s: &str, delim: Delim) {
         match delim {
             Delim::None => self.print_string(s),
-            Delim::NoQuotes => self.write(s),
+            Delim::NoQuotes => self.write_decoded_internal_string(s),
             Delim::BackQuotes => {
                 self.write_char('`');
-                self.write(s);
+                self.write_decoded_internal_string(s);
                 self.write_char('`');
             }
             Delim::StarJ => {
                 self.write_char('"');
-                self.write(s);
+                self.write_decoded_internal_string(s);
                 self.write_char('"');
             }
+        }
+    }
+
+    fn write_decoded_internal_string(&mut self, s: &str) {
+        match decode_internal_utf8_string(s) {
+            Cow::Borrowed(decoded) => self.write(decoded),
+            Cow::Owned(decoded) => self.write(&decoded),
         }
     }
 
@@ -1964,14 +1973,14 @@ impl JsPrinter {
     fn print_raw_js(&mut self, info: &JsRawInfo) {
         if info.is_stmt {
             self.newline();
-            self.write(&info.code);
+            self.write_decoded_internal_string(&info.code);
             self.newline();
         } else {
             let needs_paren = raw_js_expression_needs_paren(&info.code);
             if needs_paren {
                 self.write_char('(');
             }
-            self.write(&info.code);
+            self.write_decoded_internal_string(&info.code);
             if needs_paren {
                 self.write_char(')');
             }
@@ -2040,6 +2049,26 @@ fn deps_program_is_empty(program: &DepsProgram) -> bool {
         && program.side_effect.is_none()
         && program.program.block.is_empty()
         && program.program.exports.is_empty()
+}
+
+fn decode_internal_utf8_string(s: &str) -> Cow<'_, str> {
+    if s.is_ascii() {
+        return Cow::Borrowed(s);
+    }
+
+    let mut bytes = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        let code = c as u32;
+        if code > 0xFF {
+            return Cow::Borrowed(s);
+        }
+        bytes.push(code as u8);
+    }
+
+    match String::from_utf8(bytes) {
+        Ok(decoded) => Cow::Owned(decoded),
+        Err(_) => Cow::Borrowed(s),
+    }
 }
 
 fn raw_snippet_exp_simple_enough(s: &str) -> bool {
@@ -2829,6 +2858,42 @@ mod tests {
     }
 
     #[test]
+    fn test_print_string_decodes_internal_utf8_bytes_before_escaping() {
+        let expr = Expression::string(latin1_encoded_utf8("\u{4f60}\u{597d}"));
+        assert_eq!(print_expression(&expr), "\"\u{4f60}\u{597d}\"");
+    }
+
+    #[test]
+    fn test_print_noquote_string_decodes_internal_utf8_bytes() {
+        let regex = format!(
+            "/Bucklescript{}/",
+            "\u{662f}\u{4e00}\u{4e2a}\u{7a0b}\u{5e8f}\u{8bed}\u{8a00}"
+        );
+        let expr = Expression::new(ExpressionDesc::Str {
+            txt: latin1_encoded_utf8(&regex),
+            delim: Delim::NoQuotes,
+        });
+        assert_eq!(print_expression(&expr), regex);
+    }
+
+    #[test]
+    fn test_print_tagged_template_decodes_internal_utf8_bytes() {
+        let expr = Expression::new(ExpressionDesc::TaggedTemplate(
+            Box::new(Expression::var(Ident::create_local("tag"))),
+            vec![Expression::new(ExpressionDesc::Str {
+                txt: latin1_encoded_utf8("\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}"),
+                delim: Delim::NoQuotes,
+            })],
+            vec![],
+        ));
+
+        assert_eq!(
+            print_expression(&expr),
+            format!("tag`\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}`")
+        );
+    }
+
+    #[test]
     fn test_print_array() {
         let expr = Expression::array(
             vec![
@@ -2984,6 +3049,24 @@ mod tests {
             is_stmt: false,
         }));
         assert_eq!(print_expression(&expr), "/foo/g");
+    }
+
+    #[test]
+    fn test_print_raw_js_decodes_internal_utf8_bytes() {
+        let expr = Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
+            code: latin1_encoded_utf8(&format!(
+                "/Bucklescript{}/",
+                "\u{662f}\u{4e00}\u{4e2a}\u{7a0b}\u{5e8f}\u{8bed}\u{8a00}"
+            )),
+            is_stmt: false,
+        }));
+        assert_eq!(
+            print_expression(&expr),
+            format!(
+                "/Bucklescript{}/",
+                "\u{662f}\u{4e00}\u{4e2a}\u{7a0b}\u{5e8f}\u{8bed}\u{8a00}"
+            )
+        );
     }
 
     #[test]
@@ -4247,5 +4330,9 @@ mod tests {
             rendered,
             "switch (tag) {\n  case \"One\" :\n    return 1;\n  case \"Two\" :\n  default:\n    return 2;\n}"
         );
+    }
+
+    fn latin1_encoded_utf8(s: &str) -> String {
+        s.as_bytes().iter().map(|&byte| char::from(byte)).collect()
     }
 }
