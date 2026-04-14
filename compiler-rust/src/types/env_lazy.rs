@@ -219,48 +219,59 @@ fn build_local_module_components<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a super::context::TypeContext<'a>,
 ) -> Option<QualifiedModuleComponents> {
-    let sig = crate::types::typecore::build_qualified_signature_for_access_path(
-        env,
+    let (raw_sig, resolved_name) = env.resolve_module_type(&md.md_type, pers_env, ctx)?;
+    let qualified_sig = crate::types::typecore::qualify_resolved_signature_for_access_path(
         access_path,
         &md.md_type,
+        &raw_sig,
+        resolved_name.as_deref(),
         pers_env,
         ctx,
-    )?;
+    );
+    if raw_sig.len() != qualified_sig.len() {
+        return None;
+    }
+
     let mut working_env = env.clone_preserve_id();
+    let qualified_sig_for_children = Arc::new(qualified_sig.clone());
     let mut child_components = HashMap::new();
     let mut runtime_pos = 0usize;
 
-    for item in &sig {
-        match item {
-            SignatureItem::SigValue(_, desc) => {
+    // Match OCaml `components_of_module_maker`: component tables use the
+    // qualified view, but the evolving local env is extended from the raw
+    // signature items in left-to-right order.
+    for (raw_item, qualified_item) in raw_sig.iter().zip(qualified_sig.iter()) {
+        match (raw_item, qualified_item) {
+            (SignatureItem::SigValue(_, _), SignatureItem::SigValue(_, desc)) => {
                 if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
                     runtime_pos += 1;
                 }
             }
-            SignatureItem::SigType(id, decl, rec_status) => {
-                let item = SignatureItem::SigType(id.clone(), decl.clone(), *rec_status);
-                crate::cmi::persistent_env::add_signature_to_env(
-                    std::slice::from_ref(&item),
-                    access_path,
-                    &mut working_env,
-                    ctx,
-                    false,
-                );
+            (
+                SignatureItem::SigType(id, decl, _),
+                SignatureItem::SigType(qualified_id, qualified_decl, _),
+            ) => {
+                working_env.add_type(id.clone(), decl.clone());
+                ctx.register_type_decl(qualified_id.name(), qualified_decl.clone());
+                if qualified_id.stamp() != 0 {
+                    ctx.register_type_decl_by_stamp(qualified_id.stamp(), qualified_decl.clone());
+                }
             }
-            SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
+            (SignatureItem::SigTypext(_, _, _), SignatureItem::SigTypext(_, _, _))
+            | (SignatureItem::SigClass, SignatureItem::SigClass) => {
                 runtime_pos += 1;
             }
-            SignatureItem::SigModule(id, child_md, _) => {
+            (SignatureItem::SigModule(id, child_md, _), SignatureItem::SigModule(_, qmd, _)) => {
                 let child_access_path =
-                    qualified_submodule_access_path(access_path, id.name(), runtime_pos, child_md);
-                let mut child_md = child_md.clone();
-                child_md.md_path = Some(child_access_path.clone());
-                working_env.add_module_with_component_path(
+                    qualified_submodule_access_path(access_path, id.name(), runtime_pos, qmd);
+                working_env.add_module_with_component_context(
                     id.clone(),
                     child_md.clone(),
+                    qmd.clone(),
                     child_access_path,
+                    Some((access_path.clone(), qualified_sig_for_children.clone())),
                 );
-                crate::cmi::persistent_env::register_types_by_stamp_recursive(&child_md.md_type, ctx);
+                crate::cmi::persistent_env::register_types_by_stamp_recursive(&qmd.md_type, ctx);
                 if let Some(stored) = working_env.with_local_module_components(
                     &Path::pident(id.clone()),
                     |stored| Arc::new(stored.clone()),
@@ -269,23 +280,17 @@ fn build_local_module_components<'a>(
                 }
                 runtime_pos += 1;
             }
-            SignatureItem::SigModtype(id, mtd) => {
-                let item = SignatureItem::SigModtype(id.clone(), mtd.clone());
-                crate::cmi::persistent_env::add_signature_to_env(
-                    std::slice::from_ref(&item),
-                    access_path,
-                    &mut working_env,
-                    ctx,
-                    false,
-                );
+            (SignatureItem::SigModtype(id, mtd), SignatureItem::SigModtype(_, _)) => {
+                working_env.add_modtype(id.clone(), mtd.clone());
             }
-            SignatureItem::SigClassType => {}
+            (SignatureItem::SigClassType, SignatureItem::SigClassType) => {}
+            _ => return None,
         }
     }
 
     Some(QualifiedModuleComponents::new_with_child_components(
         access_path.clone(),
-        sig,
+        qualified_sig,
         child_components,
     ))
 }
@@ -295,6 +300,7 @@ pub(crate) struct StoredModuleComponents {
     seed_env: Box<super::env::Env>,
     access_path: Path,
     module_decl: ModuleDeclaration,
+    parent_context: Option<(Path, Arc<Signature>)>,
     cached: RefCell<Option<QualifiedModuleComponents>>,
 }
 
@@ -304,10 +310,20 @@ impl StoredModuleComponents {
         access_path: Path,
         module_decl: ModuleDeclaration,
     ) -> Self {
+        Self::new_with_parent_context(seed_env, access_path, module_decl, None)
+    }
+
+    pub(crate) fn new_with_parent_context(
+        seed_env: super::env::Env,
+        access_path: Path,
+        module_decl: ModuleDeclaration,
+        parent_context: Option<(Path, Arc<Signature>)>,
+    ) -> Self {
         Self {
             seed_env: Box::new(seed_env),
             access_path,
             module_decl,
+            parent_context,
             cached: RefCell::new(None),
         }
     }
@@ -319,10 +335,19 @@ impl StoredModuleComponents {
         f: impl FnOnce(&QualifiedModuleComponents) -> R,
     ) -> Option<R> {
         if self.cached.borrow().is_none() {
+            let mut module_decl = self.module_decl.clone();
+            if let Some((parent_access_path, parent_sig)) = &self.parent_context {
+                crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+                    &mut module_decl.md_type,
+                    parent_sig,
+                    parent_access_path,
+                    ctx,
+                );
+            }
             let components = build_local_module_components(
                 self.seed_env.as_ref(),
                 &self.access_path,
-                &self.module_decl,
+                &module_decl,
                 pers_env,
                 ctx,
             )?;

@@ -21,7 +21,7 @@ use super::context::TypeContext;
 use super::decl::{
     ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorTag,
     LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType, PrimitiveDescription,
-    SignatureItem, TypeDeclaration, TypeKind, ValueDescription, ValueKind,
+    Signature, SignatureItem, TypeDeclaration, TypeKind, ValueDescription, ValueKind,
 };
 use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
@@ -839,12 +839,32 @@ impl Env {
         decl: ModuleDeclaration,
         component_path: Path,
     ) {
-        let seed_env = self.clone_preserve_id();
-        let stored_components = Arc::new(super::env_lazy::StoredModuleComponents::new(
-            seed_env,
-            component_path,
+        self.add_module_with_component_context(
+            id,
             decl.clone(),
-        ));
+            decl,
+            component_path,
+            None,
+        );
+    }
+
+    pub(crate) fn add_module_with_component_context(
+        &mut self,
+        id: Ident,
+        decl: ModuleDeclaration,
+        component_decl: ModuleDeclaration,
+        component_path: Path,
+        parent_context: Option<(Path, Arc<Signature>)>,
+    ) {
+        let seed_env = self.clone_preserve_id();
+        let stored_components = Arc::new(
+            super::env_lazy::StoredModuleComponents::new_with_parent_context(
+                seed_env,
+                component_path,
+                component_decl,
+                parent_context,
+            ),
+        );
         self.bump_id();
         self.invalidate_module_alias_caches();
         let decl = Arc::new(decl);

@@ -15920,7 +15920,7 @@ impl Env {
     /// Resolve a module type to a signature, following aliases and loading from persistent env.
     /// Returns (signature, Option<resolved_module_name>) where resolved_module_name is Some
     /// when an alias was followed (so the caller can rewrite paths).
-    fn resolve_module_type<'b>(
+    pub(crate) fn resolve_module_type<'b>(
         &self,
         mty: &crate::types::decl::ModuleType,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -19045,15 +19045,15 @@ fn rewrite_alias_pident_child_prefixes<'a>(
     }
 }
 
-pub(crate) fn build_qualified_signature_for_access_path<'a>(
-    env: &Env,
+pub(crate) fn qualify_resolved_signature_for_access_path<'a>(
     access_path: &Path,
     mty: &crate::types::decl::ModuleType,
+    resolved_sig: &crate::types::decl::Signature,
+    resolved_name: Option<&str>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
-) -> Option<crate::types::decl::Signature> {
-    let (sig, resolved_name) = env.resolve_module_type(mty, pers_env, ctx)?;
-    let mut sig = copy_lookup_signature_for_subst(&sig, ctx);
+) -> crate::types::decl::Signature {
+    let mut sig = copy_lookup_signature_for_subst(resolved_sig, ctx);
     let skip_self_manifest_subst = Env::signature_has_package_self_manifests(&sig, ctx);
     if matches!(mty, crate::types::decl::ModuleType::MtyAlias(..)) {
         sig = strengthen_signature_for_module_access_path(ctx, access_path, &sig);
@@ -19068,7 +19068,7 @@ pub(crate) fn build_qualified_signature_for_access_path<'a>(
             allow_inferred_rebind_paths,
         );
     }
-    if let Some(ref old_name) = resolved_name {
+    if let Some(old_name) = resolved_name {
         crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
             &sig,
             old_name,
@@ -19130,7 +19130,25 @@ pub(crate) fn build_qualified_signature_for_access_path<'a>(
         ctx,
         &crate::types::decl::ModuleType::MtySignature(sig.clone()),
     );
-    Some(sig)
+    sig
+}
+
+pub(crate) fn build_qualified_signature_for_access_path<'a>(
+    env: &Env,
+    access_path: &Path,
+    mty: &crate::types::decl::ModuleType,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<crate::types::decl::Signature> {
+    let (sig, resolved_name) = env.resolve_module_type(mty, pers_env, ctx)?;
+    Some(qualify_resolved_signature_for_access_path(
+        access_path,
+        mty,
+        &sig,
+        resolved_name.as_deref(),
+        pers_env,
+        ctx,
+    ))
 }
 
 fn build_module_signature_for_path<'a>(
