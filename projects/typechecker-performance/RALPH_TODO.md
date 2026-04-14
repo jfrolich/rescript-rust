@@ -1,7 +1,7 @@
 # Ralph TODO: Typechecker Performance
 
 **Last Updated:** 2026-04-14
-**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, `ctype` now skips one duplicate CMI signature rewrite, and the broader env_lazy rollout is still incomplete
+**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, `ctype` now skips one duplicate CMI signature rewrite, dotted shared module-signature scraping now consults env_lazy-backed qualified views first, and the broader env_lazy rollout is still incomplete
 
 ## Goal
 
@@ -250,6 +250,55 @@ What this means:
 - the remaining hot path is now clearer: repeated unpack/module-type comparison
   work in `includemod::modtypes_inner` plus the remaining qualification work
   reached through `resolve_type_through_modules`
+
+## Session Update: Route Dotted Shared Module-Type Scraping Through `env_lazy`
+
+Additional checkpoint from this worktree on `2026-04-14` after routing dotted
+shared module/modtype signature scraping through the env_lazy-backed qualified
+view before falling back to raw recursive scans:
+
+- exact `Import.res` repro:
+  - OCaml: `0.07s` (`/usr/bin/time -lp`)
+  - Rust: `0.27s` (`/usr/bin/time -lp`)
+  - Rust max RSS: about `79MB`
+  - Rust peak footprint: about `65MB`
+- focused import parity: unchanged at `1/4`, `283` hunk mismatches
+- full typedtree parity: unchanged at `232/657`, `43117` hunk mismatches
+- canonical corpus benchmark:
+  - Files tested: `657`
+  - Comparable files: `656`
+  - Rust faster or equal: `2`
+  - Rust slower: `654`
+  - Materially slower: `225`
+  - Rust failures: `1` (`src/ticker.res`: stack overflow)
+  - Aggregate OCaml total: `4652.8ms`
+  - Aggregate Rust total: `10606.7ms`
+  - Aggregate Rust / OCaml ratio: `2.28x`
+  - `Import.res` benchmark entry: OCaml `43.6ms`, Rust `253.0ms`, `5.80x`
+
+What landed in this step:
+
+- `typemod::resolve_path_to_sig_impl` now tries
+  `typecore::resolve_module_signature_for_path` /
+  `lookup_modtype_in_resolved_path` for dotted paths before falling back to raw
+  recursive signature scans
+- `includemod::modtypes_inner` now tries
+  `ctype::resolve_module_type_through_env` for dotted and persistent paths
+  before the older local recursive module-type expansion
+- `ctype::resolve_module_type_through_env_path` now prefers the shared
+  env_lazy-backed qualified signature copy path for persistent `Pident`
+  fallback before going back to direct CMI resolution
+
+What this means:
+
+- dotted shared module-type scraping no longer bypasses the env_lazy-backed
+  qualified module view first
+- the typedtree parity checkpoint stayed flat, so this routing change did not
+  introduce a new parity regression
+- the broader corpus benchmark did not yet show a clear speedup over the best
+  earlier checkpoint, so the next session should keep pushing the OCaml-shaped
+  source-of-truth path deeper into inclusion/pack resolution while reducing
+  detached copies rather than broadening them
 
 ## Task List
 

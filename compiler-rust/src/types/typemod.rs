@@ -3022,6 +3022,7 @@ fn resolve_path_to_sig_impl<'b>(
                         return Some(sig);
                     }
                 }
+
                 if let Ok(mtd) = local_env.lookup_modtype(&Path::pident(id.clone())) {
                     if let Some(mty) = &mtd.mtd_type {
                         if let Some(sig) =
@@ -3045,6 +3046,35 @@ fn resolve_path_to_sig_impl<'b>(
             }
         }
         Path::Pdot(parent, name, _) => {
+            if let Some(local_env) = env {
+                if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
+                    path,
+                    local_env,
+                    pers_env,
+                    ctx,
+                ) {
+                    visiting.remove(path);
+                    return Some(sig);
+                }
+
+                if let Some((_, mtd)) = crate::types::typecore::lookup_modtype_in_resolved_path(
+                    parent,
+                    name.as_str(),
+                    local_env,
+                    pers_env,
+                    ctx,
+                ) {
+                    if let Some(mty) = &mtd.mtd_type {
+                        if let Some(sig) =
+                            resolve_mod_type_to_sig_impl(mty, env, pers_env, ctx, visiting)
+                        {
+                            visiting.remove(path);
+                            return Some(sig);
+                        }
+                    }
+                }
+            }
+
             let parent_sig = resolve_path_to_sig_impl(parent, env, pers_env, ctx, visiting)?;
             for sig_item in &parent_sig {
                 match sig_item {

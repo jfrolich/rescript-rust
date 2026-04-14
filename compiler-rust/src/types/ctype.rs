@@ -1029,16 +1029,33 @@ fn resolve_module_type_through_env_path<'a>(
                 if !id.is_persistent() {
                     return None;
                 }
-                let load_paths = ctx.load_paths();
-                if load_paths.is_empty() {
-                    None
-                } else {
-                    // Mirror OCaml's persistent-module lookup in Env.find_module:
-                    // if not found in local env, consult .cmi signatures.
-                    let mut cmi_visiting = HashSet::new();
-                    resolve_module_signature_through_cmi(ctx, &load_paths, path, &mut cmi_visiting)
+                let mut no_persistent_env = None;
+                crate::types::typecore::copy_resolved_module_signature_for_path(
+                    path,
+                    env,
+                    &mut no_persistent_env,
+                    ctx,
+                )
+                .map(|(_, sig)| super::decl::ModuleType::MtySignature(sig))
+                .or_else(|| {
+                    let load_paths = ctx.load_paths();
+                    if load_paths.is_empty() {
+                        None
+                    } else {
+                        // Mirror OCaml Env.find_module: if not found in local env,
+                        // consult .cmi signatures. Prefer the env_lazy-backed path
+                        // above so persistent module lookups share the same
+                        // qualified-view source of truth as other hot callers.
+                        let mut cmi_visiting = HashSet::new();
+                        resolve_module_signature_through_cmi(
+                            ctx,
+                            &load_paths,
+                            path,
+                            &mut cmi_visiting,
+                        )
                         .map(super::decl::ModuleType::MtySignature)
-                }
+                    }
+                })
             }
         }
         Path::Pdot(parent, name, _) => {

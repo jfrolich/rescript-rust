@@ -118,11 +118,11 @@ fn modtypes_inner<'a>(
     ) -> Option<ModuleType> {
         use crate::types::decl::SignatureItem as SigItem;
 
-        fn head_if_no_apply(path: &Path) -> Option<&crate::ident::Ident> {
+        fn should_try_env_lazy(path: &Path) -> bool {
             match path {
-                Path::Pident(id) => Some(id),
-                Path::Pdot(parent, _, _) => head_if_no_apply(parent),
-                Path::Papply(_, _) => None,
+                Path::Pident(id) => id.is_persistent() || id.stamp() == 0,
+                Path::Pdot(_, _, _) => true,
+                Path::Papply(_, _) => false,
             }
         }
 
@@ -198,13 +198,11 @@ fn modtypes_inner<'a>(
             }
         }
 
-        if let Some(head) = head_if_no_apply(path) {
-            if head.is_persistent() || head.stamp() == 0 {
-                if let Some(resolved) =
-                    crate::types::ctype::resolve_module_type_through_env(type_ctx, env, path)
-                {
-                    return Some(resolved);
-                }
+        if should_try_env_lazy(path) {
+            if let Some(resolved) =
+                crate::types::ctype::resolve_module_type_through_env(type_ctx, env, path)
+            {
+                return Some(resolved);
             }
         }
 
