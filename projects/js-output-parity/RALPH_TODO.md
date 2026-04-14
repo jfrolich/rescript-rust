@@ -43,6 +43,60 @@ reported:
 
 Latest iteration on **2026-04-14**:
 
+- Active slice: match OCaml's `J.ForRange` dumping in
+  `compiler-rust/src/js_ir/printer.rs` so complex loop bounds are evaluated
+  once into a synthetic `*_finish` binding and comma-sequence initializers
+  stay parenthesized in the `for` header
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this slice fixes backend dump-shape drift at the OCaml `js_dump.ml`
+  boundary without reopening typedtree or lambda parity work
+- OCaml reference:
+  `compiler/core/js_dump.ml`, where `ForRange` printing emits
+  `let i = ..., i_finish = ...; i <|<= i_finish; ++i` whenever the finish
+  expression is not already `Number _` or `Var _`, and prints initializer
+  expressions at a precedence that preserves comma-sequence grouping inside the
+  loop header
+- Rust change:
+  - added OCaml-aligned `ForRange` printer routing that synthesizes a scoped
+    `*_finish` name only for non-trivial bounds instead of always dumping the
+    bound inline in the condition
+  - prints `ForRange` initializer expressions in header-safe precedence
+    contexts so sequence expressions stay parenthesized in `let` bindings
+  - added focused printer coverage in
+    `test_print_for_range_complex_finish_uses_finish_binding`,
+    `test_print_for_range_without_init_binds_complex_finish_once`, and
+    `test_print_for_range_parenthesizes_sequence_init_in_header`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml test_print_for_range_ -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml test_print_while -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `cd tests/tests/lib/bs && timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/for_loop_test.ast -o /tmp/for_loop_test.mjs`
+  - `cd tests/tests/lib/bs && timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/for_side_effect_test.ast -o /tmp/for_side_effect_test.mjs`
+  - `cd tests/tests/lib/bs && timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/ExternalShadow.ast -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
+    after the `ForRange` dump change
+  - `tests/tests/src/for_loop_test.res` and
+    `tests/tests/src/for_side_effect_test.res` now show the OCaml-style
+    single-evaluation `i_finish` header shape and proper sequence
+    parenthesization instead of dumping raw comma expressions into the loop
+    condition
+  - the remaining loop drift in those files is now isolated to earlier backend
+    lowering, especially the Rust-only `undefined` sequence suffixes and
+    `Upto (len - 1)` vs `Up len` choice
+  - the authoritative wrapper still reports **0 compile errors**, so this
+    remains a pure backend dump-shape fix
+- Topline impact:
+  - JS snapshot parity: **377 / 657** (no change)
+  - Compile errors: **0** (no change)
+  - Output diffs: **280** (no change)
+- Keep this change because it matches OCaml's `js_dump.ml` `ForRange` printer
+  exactly and cleanly exposes the next loop-lowering mismatch instead of
+  preserving a Rust-only inline-bound dump shape
+
+Latest iteration on **2026-04-14**:
+
 - Active slice: stop forcing named-variant switch scrutinees through a
   synthetic `match` temp when OCaml's backend only reads the scrutinee once,
   while also matching OCaml's `js_exp_make.triple_equal` folding for strict

@@ -232,6 +232,21 @@ impl JsPrinter {
         printed
     }
 
+    fn fresh_scoped_name(&mut self, base: String) -> String {
+        let next = self
+            .current_name_scope_mut()
+            .next_suffix
+            .entry(base.clone())
+            .or_insert(0);
+        let printed = if *next == 0 {
+            base.clone()
+        } else {
+            format!("{base}${next}")
+        };
+        *next += 1;
+        printed
+    }
+
     /// Get a unique name for an identifier
     fn ident_name(&mut self, id: &Ident) -> String {
         if let Some(name) = self.lookup_visible_name(id) {
@@ -500,44 +515,71 @@ impl JsPrinter {
 
             StatementDesc::ForRange(init, end, id, direction, body) => {
                 let id_name = self.ident_name(id);
-                self.write("for ");
-                self.write_char('(');
+                self.with_local_ident_scope(std::slice::from_ref(&id_name), |this| {
+                    let finish_binding = for_range_finish_needs_binding(end).then(|| {
+                        this.fresh_scoped_name(format!("{}_finish", convert_ident_name(id.name())))
+                    });
 
-                // Initialization
-                if let Some(init_expr) = init {
-                    self.write("let ");
-                    self.write(&id_name);
-                    self.write(" = ");
-                    self.print_expression(init_expr, 0);
-                }
-                self.semi();
-                self.space();
+                    this.write("for ");
+                    this.write_char('(');
 
-                // Condition
-                self.write(&id_name);
-                match direction {
-                    ForDirection::Upto => self.write(" <= "),
-                    ForDirection::Downto => self.write(" >= "),
-                    ForDirection::Up => self.write(" < "),
-                }
-                self.print_expression(end, 0);
-                self.semi();
-                self.space();
-
-                // Increment/decrement
-                match direction {
-                    ForDirection::Upto | ForDirection::Up => {
-                        self.write("++");
-                        self.write(&id_name);
+                    match (init, finish_binding.as_deref()) {
+                        (Some(init_expr), Some(finish_name)) => {
+                            this.write("let ");
+                            this.write(&id_name);
+                            this.write(" = ");
+                            this.print_expression(init_expr, 1);
+                            this.write(", ");
+                            this.write(finish_name);
+                            this.write(" = ");
+                            this.print_expression(end, 1);
+                        }
+                        (Some(init_expr), None) => {
+                            this.write("let ");
+                            this.write(&id_name);
+                            this.write(" = ");
+                            this.print_expression(init_expr, 1);
+                        }
+                        (None, Some(finish_name)) => {
+                            this.write("let ");
+                            this.write(finish_name);
+                            this.write(" = ");
+                            this.print_expression(end, 1);
+                        }
+                        (None, None) => {}
                     }
-                    ForDirection::Downto => {
-                        self.write("--");
-                        self.write(&id_name);
-                    }
-                }
 
-                self.write(") ");
-                self.print_brace_block(body);
+                    this.semi();
+                    this.space();
+
+                    this.write(&id_name);
+                    match direction {
+                        ForDirection::Upto => this.write(" <= "),
+                        ForDirection::Downto => this.write(" >= "),
+                        ForDirection::Up => this.write(" < "),
+                    }
+                    if let Some(finish_name) = finish_binding.as_deref() {
+                        this.write(finish_name);
+                    } else {
+                        this.print_expression(end, 0);
+                    }
+                    this.semi();
+                    this.space();
+
+                    match direction {
+                        ForDirection::Upto | ForDirection::Up => {
+                            this.write("++");
+                            this.write(&id_name);
+                        }
+                        ForDirection::Downto => {
+                            this.write("--");
+                            this.write(&id_name);
+                        }
+                    }
+
+                    this.write(") ");
+                    this.print_brace_block(body);
+                });
             }
 
             StatementDesc::Continue => {
@@ -2451,6 +2493,10 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
     }
 }
 
+fn for_range_finish_needs_binding(expr: &Expression) -> bool {
+    !matches!(expr.desc, ExpressionDesc::Number(_) | ExpressionDesc::Var(_))
+}
+
 /// Get operator precedence (output_level, left_level, right_level)
 fn op_precedence(op: BinOp) -> (u8, u8, u8) {
     match op {
@@ -2688,7 +2734,7 @@ pub fn print_block(block: &Block) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::js_ir::op::{IdentInfo, ImportAttributes, MutableFlag, UsedStats};
+    use crate::js_ir::op::{IdentInfo, ImportAttributes, LengthObject, MutableFlag, UsedStats};
     use crate::js_ir::{CallInfo, Expression, ModuleId, ModulePathResolver, Statement};
     use crate::lambda::TagInfo;
     use std::path::Path;
@@ -3038,6 +3084,78 @@ mod tests {
         let result = print_block(&vec![stmt]);
         assert!(result.contains("while (true)"));
         assert!(result.contains("break;"));
+    }
+
+    #[test]
+    fn test_print_for_range_complex_finish_uses_finish_binding() {
+        let i = Ident::create_local("i");
+        let xs = Ident::create_local("xs");
+        let finish = Expression::new(ExpressionDesc::Length(
+            Box::new(Expression::var(xs)),
+            LengthObject::Array,
+        ));
+        let stmt = Statement::new(StatementDesc::ForRange(
+            Some(Expression::number(Number::int(0))),
+            finish,
+            i,
+            ForDirection::Up,
+            vec![],
+        ));
+        assert_eq!(
+            print_block(&vec![stmt]),
+            "for (let i = 0, i_finish = xs.length; i < i_finish; ++i) {}"
+        );
+    }
+
+    #[test]
+    fn test_print_for_range_without_init_binds_complex_finish_once() {
+        let i = Ident::create_local("i");
+        let xs = Ident::create_local("xs");
+        let finish = Expression::new(ExpressionDesc::Length(
+            Box::new(Expression::var(xs)),
+            LengthObject::Array,
+        ));
+        let stmt = Statement::new(StatementDesc::ForRange(
+            None,
+            finish,
+            i,
+            ForDirection::Upto,
+            vec![],
+        ));
+        assert_eq!(
+            print_block(&vec![stmt]),
+            "for (let i_finish = xs.length; i <= i_finish; ++i) {}"
+        );
+    }
+
+    #[test]
+    fn test_print_for_range_parenthesizes_sequence_init_in_header() {
+        let i = Ident::create_local("i");
+        let xs = Ident::create_local("xs");
+        let side_effect = Ident::create_local("sideEffect");
+        let init = Expression::new(ExpressionDesc::Seq(
+            Box::new(Expression::call(
+                Expression::var(side_effect),
+                vec![],
+                CallInfo::default(),
+            )),
+            Box::new(Expression::number(Number::int(0))),
+        ));
+        let finish = Expression::new(ExpressionDesc::Length(
+            Box::new(Expression::var(xs)),
+            LengthObject::Array,
+        ));
+        let stmt = Statement::new(StatementDesc::ForRange(
+            Some(init),
+            finish,
+            i,
+            ForDirection::Upto,
+            vec![],
+        ));
+        assert_eq!(
+            print_block(&vec![stmt]),
+            "for (let i = (sideEffect(), 0), i_finish = xs.length; i <= i_finish; ++i) {}"
+        );
     }
 
     #[test]
