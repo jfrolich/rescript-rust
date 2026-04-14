@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 366 / 657 JS snapshots passing, 0 compile errors, 291 output diffs
+**Status:** 367 / 657 JS snapshots passing, 0 compile errors, 290 output diffs
 
 ## Goal
 
@@ -35,11 +35,57 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **366 / 657**
+- JS snapshot parity: **367 / 657**
 - Compile errors: **0**
-- Output diffs: **291**
+- Output diffs: **290**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: preserve OCaml's per-use `dynamic_import` flag while still
+  reusing the first external-module binding id in
+  `compiler-rust/src/lambda/compile.rs`
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this slice fixes another backend module-environment drift exposed by
+  `tests/tests/src/import2.res` without reopening typedtree or lambda parity
+  work
+- OCaml reference:
+  `compiler/core/lam_compile_env.ml`,
+  `compiler/core/lam_module_ident.ml`, and
+  `compiler/core/lam_compile_external_call.ml`, where `add_js_module`
+  deduplicates external modules by `(bundle, default)` for the shared
+  `Ident.t`, but each emitted `J.module_id` still carries the current
+  `dynamic_import` bit for that use site
+- Rust change:
+  - changed the external-module cache from storing the whole `ModuleId` to
+    storing only the shared `Ident`
+  - rebuilds a fresh `ModuleId` for each use so static and dynamic imports of
+    the same default export can share the binding name without accidentally
+    turning the static import into a dynamic-only dependency
+  - extended the existing regression test to assert that dynamic and static
+    uses share the same id while preserving different `dynamic_import` flags
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml external_module_ids_reuse_first_binding_for_same_bundle_and_default -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `cd tests/tests/lib/bs && timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/import2.ast -o /tmp/import2.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/key_word_property.res -o /tmp/key_word_property.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/import2.res` now matches its checked-in `.mjs` snapshot
+    exactly; the static default import survives alongside the dynamic import
+    promise chain
+  - `tests/tests/src/key_word_property.res` remains an exact guard-file match,
+    so the earlier required-module ordering fix stays intact
+  - the wrapper remains at **0 compile errors**, confirming this was another
+    pure backend module-metadata bug rather than a type-checking or lowering
+    failure
+- Topline impact:
+  - JS snapshot parity: **367 / 657** (**+1**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **290** (**-1**)
+- Keep this change because it matches OCaml's external-module environment model
+  instead of papering over the missing import in the final printer
 
 Latest iteration on **2026-04-14**:
 

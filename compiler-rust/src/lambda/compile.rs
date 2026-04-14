@@ -83,7 +83,7 @@ pub struct LambdaCompiler {
     id_gen: IdGenerator,
     module_path_resolver: Option<ModulePathResolver>,
     cmj_constant_cache: HashMap<String, Option<HashMap<String, CmjExportConstant>>>,
-    external_module_ids: HashMap<ExternalModuleCacheKey, ModuleId>,
+    external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
     static_handlers: Vec<StaticHandler>,
 }
 
@@ -4193,21 +4193,21 @@ impl LambdaCompiler {
             bundle: module_name.bundle.clone(),
             default,
         };
-        if let Some(module) = self.external_module_ids.get(&key) {
-            return module.clone();
-        }
+        let id = self
+            .external_module_ids
+            .entry(key)
+            .or_insert_with(|| self.id_gen.create(&external_module_ident_name(module_name)))
+            .clone();
 
-        let module = ModuleId {
-            id: self.id_gen.create(&external_module_ident_name(module_name)),
+        ModuleId {
+            id,
             kind: Kind::External {
                 name: module_name.bundle.clone(),
                 default,
                 import_attributes: external_module_import_attributes(module_name),
             },
             dynamic_import,
-        };
-        self.external_module_ids.insert(key, module.clone());
-        module
+        }
     }
 
     fn external_module_binding(
@@ -15207,10 +15207,14 @@ mod tests {
         let plain_module = compiler.external_module_id(&plain, false, false);
         let hinted_module = compiler.external_module_id(&hinted, false, false);
         let default_module = compiler.external_module_id(&plain, true, false);
+        let dynamic_plain_module = compiler.external_module_id(&plain, false, true);
 
         assert_eq!(plain_module, hinted_module);
         assert_eq!(plain_module.id.name(), "X");
         assert!(!plain_module.id.same(&default_module.id));
+        assert!(plain_module.id.same(&dynamic_plain_module.id));
+        assert!(!plain_module.dynamic_import);
+        assert!(dynamic_plain_module.dynamic_import);
     }
 
     #[test]
