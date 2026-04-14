@@ -51,6 +51,23 @@ Performance engineering of the Rust parser to achieve best-in-class speed. 4-tie
 | [RALPH_PROMPT.md](./parser-performance-engineering/RALPH_PROMPT.md) | Agent loop instructions for performance optimization |
 | [RALPH_TODO.md](./parser-performance-engineering/RALPH_TODO.md) | Agent task tracking for performance optimization |
 
+### [typechecker-performance](./typechecker-performance/)
+
+Performance engineering of the Rust typechecker, focused first on the
+module-signature-heavy `Import.res` cliff where Rust currently spends seconds
+and multi-GB while OCaml finishes in milliseconds. The main target is to make
+module signature resolution, path qualification, and type expansion behave much
+more like OCaml's lazy cached module-components model.
+
+| Document | Description |
+|----------|-------------|
+| [PLAN.md](./typechecker-performance/PLAN.md) | Project goals, phases, and success criteria |
+| [RALPH_PROMPT.md](./typechecker-performance/RALPH_PROMPT.md) | Agent loop instructions for typechecker performance work |
+| [RALPH_TODO.md](./typechecker-performance/RALPH_TODO.md) | Baseline, task list, and acceptance gates |
+| [RALPH_SETUP.md](./typechecker-performance/RALPH_SETUP.md) | Exact repro, timing, and profiling workflow |
+| [CORPUS_BASELINE.md](./typechecker-performance/CORPUS_BASELINE.md) | Canonical 657-file benchmark baseline, slower-file clusters, and fix directions |
+| [IMPORT_RES_PERFORMANCE_HANDOFF.md](./typechecker-performance/IMPORT_RES_PERFORMANCE_HANDOFF.md) | Link to the detailed investigation and fix guidance |
+
 ### [raw-lambda-parity](./raw-lambda-parity/)
 
 Achieve full unoptimized lambda parity between the Rust and OCaml compilers. Focuses on building a real OCaml-aligned raw lambda stage, grouped match compilation from `matching.ml`, and module/coercion lowering from `translmod.ml`. Current baseline: 657/657 files, 0 hunks.

@@ -100,9 +100,17 @@ impl LambdaCompiler {
         let simplified = crate::lambda::simplify::simplify_for_js_backend(lam);
         let compiled = self.compile_expr(&simplified);
         let mut block = compiled.prelude;
-        let exports = extract_toplevel_exports(compiled.expr, &mut block)
-            .map(|exports| self.coerce_toplevel_exports(&mut block, exports))
-            .unwrap_or_default();
+        let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block)
+        {
+            if block_terminates(&block) {
+                for value in &mut exports.values {
+                    *value = Expression::undefined(false);
+                }
+            }
+            self.coerce_toplevel_exports(&mut block, exports)
+        } else {
+            vec![]
+        };
         let exports = resolve_export_aliases(&block, exports);
         let side_effect = module_side_effect_reason(&simplified);
 
@@ -147,6 +155,7 @@ impl LambdaCompiler {
 
         let mut declared = HashSet::new();
         collect_declared_idents(block, &mut declared);
+        let block_ended = block_terminates(block);
 
         let mut exports = Vec::with_capacity(extracted.exports.len());
         let mut rebound_exports = Vec::new();
@@ -163,6 +172,14 @@ impl LambdaCompiler {
                         continue;
                     }
                 }
+            }
+            if matches!(value.desc, ExpressionDesc::Undefined { .. })
+                && ((declared.contains(&export)
+                    && can_reuse_existing_undefined_export_binding(block, &export))
+                    || block_ended)
+            {
+                exports.push(export);
+                continue;
             }
 
             let rebound = self.id_gen.create(export.name());
@@ -182,6 +199,42 @@ impl LambdaCompiler {
 
         block.extend(rebound_exports);
         exports
+    }
+
+    fn compile_apply_call(&mut self, apply: &Apply) -> Compiled {
+        let mut prelude = vec![];
+        let func = self.compile_expr(&apply.ap_func);
+        prelude.extend(func.prelude);
+        let mut args = Vec::new();
+        for arg in &apply.ap_args {
+            let compiled = self.compile_expr(arg);
+            prelude.extend(compiled.prelude);
+            args.push(compiled.expr);
+        }
+
+        Compiled {
+            prelude,
+            expr: Expression::call(func.expr, args, CallInfo::default()),
+        }
+    }
+
+    fn materialize_compiled_value(&mut self, hint: &str, compiled: Compiled) -> Compiled {
+        if compiled.prelude.is_empty() {
+            return compiled;
+        }
+
+        let mut prelude = compiled.prelude;
+        let tmp = self.fresh_ident(hint);
+        prelude.push(Statement::variable(VariableDeclaration {
+            ident: tmp.clone(),
+            value: Some(compiled.expr),
+            property: LetKind::Strict,
+            ident_info: IdentInfo::default(),
+        }));
+        Compiled {
+            prelude,
+            expr: Expression::var(tmp),
+        }
     }
 
     fn compile_expr(&mut self, lam: &Lambda) -> Compiled {
@@ -205,42 +258,17 @@ impl LambdaCompiler {
                 prelude: vec![],
                 expr: Self::compile_constant(cst),
             },
-            Lambda::Lapply(Apply {
-                ap_func,
-                ap_args,
-                ap_info: _,
-                ap_transformed_jsx: _,
-            }) => {
-                let mut prelude = vec![];
-                let func = self.compile_expr(ap_func);
-                prelude.extend(func.prelude);
-                let mut args = Vec::new();
-                for arg in ap_args {
-                    let compiled = self.compile_expr(arg);
-                    prelude.extend(compiled.prelude);
-                    args.push(compiled.expr);
-                }
-                let call = Expression::call(func.expr, args, CallInfo::default());
-                if prelude.is_empty() {
-                    Compiled {
-                        prelude,
-                        expr: call,
-                    }
-                } else {
-                    let tmp = self.fresh_ident("call");
-                    prelude.push(Statement::variable(VariableDeclaration {
-                        ident: tmp.clone(),
-                        value: Some(call),
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    }));
-                    Compiled {
-                        prelude,
-                        expr: Expression::var(tmp),
-                    }
-                }
+            Lambda::Lapply(apply) => {
+                let compiled = self.compile_apply_call(apply);
+                self.materialize_compiled_value("call", compiled)
             }
             Lambda::Lfunction(func) => {
+                if let Some(expr) = self.compile_eta_wrapped_runtime_alias(func) {
+                    return Compiled {
+                        prelude: vec![],
+                        expr,
+                    };
+                }
                 let params = if func.attr.one_unit_arg {
                     vec![]
                 } else {
@@ -263,6 +291,12 @@ impl LambdaCompiler {
             Lambda::Llet(kind, id, value, body) => {
                 let mut prelude = self.compile_let_binding(*kind, id, value);
                 let body_compiled = self.compile_expr(body);
+                if block_terminates(&prelude) {
+                    return Compiled {
+                        prelude,
+                        expr: body_compiled.expr,
+                    };
+                }
                 prelude.extend(body_compiled.prelude);
                 Compiled {
                     prelude,
@@ -271,15 +305,27 @@ impl LambdaCompiler {
             }
             Lambda::Lletrec(bindings, body) => {
                 let mut prelude = vec![];
-                for (id, _) in bindings {
-                    prelude.push(Statement::variable(VariableDeclaration {
-                        ident: id.clone(),
-                        value: None,
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    }));
-                }
+                let mut deferred = Vec::new();
                 for (id, expr) in bindings {
+                    match expr {
+                        // OCaml's recursive-let path emits function bindings through the same
+                        // declared-binding route used by non-rec lets, which lets the printer
+                        // recover `function name(...)` at the top level.
+                        Lambda::Lfunction(_) => {
+                            prelude.extend(self.compile_let_binding(LetKind::Alias, id, expr));
+                        }
+                        _ => {
+                            prelude.push(Statement::variable(VariableDeclaration {
+                                ident: id.clone(),
+                                value: None,
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            }));
+                            deferred.push((id, expr));
+                        }
+                    }
+                }
+                for (id, expr) in deferred {
                     let compiled = self.compile_expr(expr);
                     prelude.extend(compiled.prelude);
                     let assign =
@@ -330,47 +376,24 @@ impl LambdaCompiler {
             }
             Lambda::LifThenElse(cond, then_, else_) => {
                 let cond_compiled = self.compile_expr(cond);
-                let then_compiled = self.compile_expr(then_);
-                let else_compiled = self.compile_expr(else_);
                 let mut prelude = cond_compiled.prelude;
-                if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
-                    Compiled {
-                        prelude,
-                        expr: Expression::cond(
-                            cond_compiled.expr,
-                            then_compiled.expr,
-                            else_compiled.expr,
-                        ),
-                    }
-                } else {
-                    let tmp = self.fresh_ident("ifres");
-                    prelude.push(Statement::variable(VariableDeclaration {
-                        ident: tmp.clone(),
-                        value: None,
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    }));
-                    let mut then_block = then_compiled.prelude;
-                    then_block.push(Statement::exp(Expression::bin(
-                        BinOp::Eq,
-                        Expression::var(tmp.clone()),
-                        then_compiled.expr,
-                    )));
-                    let mut else_block = else_compiled.prelude;
-                    else_block.push(Statement::exp(Expression::bin(
-                        BinOp::Eq,
-                        Expression::var(tmp.clone()),
-                        else_compiled.expr,
-                    )));
-                    prelude.push(Statement::if_(cond_compiled.expr, then_block, else_block));
-                    Compiled {
-                        prelude,
-                        expr: Expression::var(tmp),
-                    }
+                let tmp = self.fresh_ident("ifres");
+                let then_block = self.compile_assign_to_target_block(&tmp, then_);
+                let else_block = self.compile_assign_to_target_block(&tmp, else_);
+                prelude.extend(self.compile_declared_if_block(
+                    LetKind::Strict,
+                    &tmp,
+                    cond_compiled.expr,
+                    then_block,
+                    else_block,
+                ));
+                Compiled {
+                    prelude,
+                    expr: Expression::var(tmp),
                 }
             }
             Lambda::Lsequence(a, b) => {
-                let first = self.compile_expr(a);
+                let first = self.compile_effect_output(a);
                 let second = self.compile_expr(b);
                 self.append_effect_output(first, second)
             }
@@ -422,6 +445,9 @@ impl LambdaCompiler {
         match value {
             Lambda::Llet(inner_kind, inner_id, inner_value, body) => {
                 let mut block = self.compile_let_binding(*inner_kind, inner_id, inner_value);
+                if block_terminates(&block) {
+                    return block;
+                }
                 block.extend(self.compile_let_binding(kind, id, body));
                 block
             }
@@ -431,14 +457,7 @@ impl LambdaCompiler {
                 })
             }
             Lambda::LifThenElse(cond, then_, else_) => {
-                let mut block = vec![Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
-                    value: None,
-                    property: kind,
-                    ident_info: IdentInfo::default(),
-                })];
-                block.extend(self.compile_if_assignment_block(id, cond, then_, else_));
-                block
+                self.compile_if_binding_block(kind, id, cond, then_, else_)
             }
             Lambda::Lswitch(scrut, switch) => {
                 let mut block = vec![Statement::variable(VariableDeclaration {
@@ -468,6 +487,9 @@ impl LambdaCompiler {
             _ => {
                 let value_compiled = self.compile_expr(value);
                 let mut block = value_compiled.prelude;
+                if block_terminates(&block) {
+                    return block;
+                }
                 block.push(Statement::variable(VariableDeclaration {
                     ident: id.clone(),
                     value: Some(value_compiled.expr),
@@ -510,11 +532,40 @@ impl LambdaCompiler {
         }
     }
 
+    fn compile_if_binding_block(
+        &mut self,
+        kind: LetKind,
+        id: &Ident,
+        cond: &Lambda,
+        then_: &Lambda,
+        else_: &Lambda,
+    ) -> Block {
+        let cond_compiled = self.compile_expr(cond);
+        let then_block = self.compile_assign_to_target_block(id, then_);
+        let else_block = self.compile_assign_to_target_block(id, else_);
+
+        let mut block = cond_compiled.prelude;
+        block.extend(self.compile_declared_if_block(
+            kind,
+            id,
+            cond_compiled.expr,
+            then_block,
+            else_block,
+        ));
+        block
+    }
+
     fn compile_return_block(&mut self, lam: &Lambda) -> Block {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
                 let mut block = self.compile_let_binding(*kind, id, value);
                 block.extend(self.compile_return_block(body));
+                block
+            }
+            Lambda::Lapply(apply) => {
+                let compiled = self.compile_apply_call(apply);
+                let mut block = compiled.prelude;
+                block.push(Statement::return_(compiled.expr));
                 block
             }
             Lambda::LifThenElse(cond, then_, else_) => {
@@ -542,6 +593,47 @@ impl LambdaCompiler {
                 }
                 block
             }
+        }
+    }
+
+    fn compile_effect_output(&mut self, lam: &Lambda) -> Compiled {
+        match lam {
+            Lambda::Llet(kind, id, value, body) => {
+                let mut prelude = self.compile_let_binding(*kind, id, value);
+                if block_terminates(&prelude) {
+                    return Compiled {
+                        prelude,
+                        expr: Expression::undefined(false),
+                    };
+                }
+                let body_compiled = self.compile_effect_output(body);
+                prelude.extend(body_compiled.prelude);
+                Compiled {
+                    prelude,
+                    expr: body_compiled.expr,
+                }
+            }
+            Lambda::Lapply(apply) => self.compile_apply_call(apply),
+            Lambda::LifThenElse(cond, then_, else_) => {
+                compiled_from_effect_block(self.compile_if_effect_block(cond, then_, else_))
+            }
+            Lambda::Lsequence(first, second) => {
+                let first = self.compile_effect_output(first);
+                let second = self.compile_effect_output(second);
+                self.append_effect_output(first, second)
+            }
+            Lambda::LstaticCatch(body, (label, bindings), handler) => {
+                self.with_static_handler(*label, bindings, handler, |this| {
+                    this.compile_effect_output(body)
+                })
+            }
+            Lambda::Lswitch(scrut, switch) => {
+                compiled_from_effect_block(self.compile_switch_effect_block(scrut, switch))
+            }
+            Lambda::LstringSwitch(scrut, cases, default) => compiled_from_effect_block(
+                self.compile_string_switch_effect_block(scrut, cases, default.as_deref()),
+            ),
+            _ => self.compile_expr(lam),
         }
     }
 
@@ -1621,49 +1713,170 @@ impl LambdaCompiler {
         else_: &Lambda,
     ) -> Block {
         let cond_compiled = self.compile_expr(cond);
-        let then_compiled = self.compile_expr(then_);
-        let else_compiled = self.compile_expr(else_);
-
-        if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
-            let mut block = cond_compiled.prelude;
-            block.push(Statement::exp(Expression::bin(
-                BinOp::Eq,
-                Expression::var(result.clone()),
-                Expression::cond(cond_compiled.expr, then_compiled.expr, else_compiled.expr),
-            )));
-            return block;
-        }
+        let then_block = self.compile_assign_to_target_block(result, then_);
+        let else_block = self.compile_assign_to_target_block(result, else_);
 
         let mut block = cond_compiled.prelude;
-        block.push(Statement::if_(
-            cond_compiled.expr,
-            self.compile_assign_to_target_block(result, then_),
-            self.compile_assign_to_target_block(result, else_),
-        ));
+        match (
+            self.take_single_result_assignment(result, then_block),
+            self.take_single_result_assignment(result, else_block),
+        ) {
+            (Ok(then_expr), Ok(else_expr)) => {
+                block.push(self.result_assignment(
+                    result,
+                    Expression::cond(cond_compiled.expr, then_expr, else_expr),
+                ));
+            }
+            (then_result, else_result) => {
+                let then_block = match then_result {
+                    Ok(expr) => vec![self.result_assignment(result, expr)],
+                    Err(block) => block,
+                };
+                let else_block = match else_result {
+                    Ok(expr) => vec![self.result_assignment(result, expr)],
+                    Err(block) => block,
+                };
+                block.push(Statement::if_(cond_compiled.expr, then_block, else_block));
+            }
+        }
         block
+    }
+
+    fn compile_declared_if_block(
+        &self,
+        kind: LetKind,
+        id: &Ident,
+        cond: Expression,
+        then_block: Block,
+        else_block: Block,
+    ) -> Block {
+        match (
+            self.take_single_result_assignment(id, then_block),
+            self.take_single_result_assignment(id, else_block),
+        ) {
+            (Ok(then_expr), Ok(else_expr)) => {
+                vec![Statement::variable(VariableDeclaration {
+                    ident: id.clone(),
+                    value: Some(Expression::cond(cond, then_expr, else_expr)),
+                    property: kind,
+                    ident_info: IdentInfo::default(),
+                })]
+            }
+            (then_result, else_result) => {
+                let then_block = match then_result {
+                    Ok(expr) => vec![self.result_assignment(id, expr)],
+                    Err(block) => block,
+                };
+                let else_block = match else_result {
+                    Ok(expr) => vec![self.result_assignment(id, expr)],
+                    Err(block) => block,
+                };
+
+                vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: id.clone(),
+                        value: None,
+                        property: kind,
+                        ident_info: IdentInfo::default(),
+                    }),
+                    Statement::if_(cond, then_block, else_block),
+                ]
+            }
+        }
+    }
+
+    fn take_single_result_assignment(
+        &self,
+        id: &Ident,
+        block: Block,
+    ) -> Result<Expression, Block> {
+        let [stmt] = block.as_slice() else {
+            return Err(block);
+        };
+        let StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Bin(BinOp::Eq, lhs, ..),
+            ..
+        }) = &stmt.desc
+        else {
+            return Err(block);
+        };
+        let ExpressionDesc::Var(crate::js_ir::VIdent::Id(target)) = &lhs.desc else {
+            return Err(block);
+        };
+        if !target.same(id) {
+            return Err(block);
+        }
+
+        let stmt = block.into_iter().next().expect("single-statement block");
+        let Statement {
+            desc: StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Bin(BinOp::Eq, _, rhs),
+                ..
+            }),
+            ..
+        } = stmt
+        else {
+            unreachable!("validated single assignment shape")
+        };
+        Ok(*rhs)
+    }
+
+    fn result_assignment(&self, id: &Ident, expr: Expression) -> Statement {
+        Statement::exp(Expression::bin(
+            BinOp::Eq,
+            Expression::var(id.clone()),
+            expr,
+        ))
+    }
+
+    fn take_single_return_expr(&self, block: Block) -> Result<Expression, Block> {
+        let [stmt] = block.as_slice() else {
+            return Err(block);
+        };
+        if !matches!(stmt.desc, StatementDesc::Return(_)) {
+            return Err(block);
+        }
+
+        let stmt = block.into_iter().next().expect("single-statement block");
+        let Statement {
+            desc: StatementDesc::Return(expr),
+            ..
+        } = stmt
+        else {
+            unreachable!("validated single return shape")
+        };
+        Ok(expr)
     }
 
     fn compile_if_return_block(&mut self, cond: &Lambda, then_: &Lambda, else_: &Lambda) -> Block {
         let cond_compiled = self.compile_expr(cond);
-        let then_compiled = self.compile_expr(then_);
-        let else_compiled = self.compile_expr(else_);
-
-        if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
-            let mut block = cond_compiled.prelude;
-            block.push(Statement::return_(Expression::cond(
-                cond_compiled.expr,
-                then_compiled.expr,
-                else_compiled.expr,
-            )));
-            return block;
-        }
+        let then_block = self.compile_return_block(then_);
+        let else_block = self.compile_return_block(else_);
 
         let mut block = cond_compiled.prelude;
-        block.push(Statement::if_(
-            cond_compiled.expr,
-            self.compile_return_block(then_),
-            self.compile_return_block(else_),
-        ));
+        match (
+            self.take_single_return_expr(then_block),
+            self.take_single_return_expr(else_block),
+        ) {
+            (Ok(then_expr), Ok(else_expr)) => {
+                block.push(Statement::return_(Expression::cond(
+                    cond_compiled.expr,
+                    then_expr,
+                    else_expr,
+                )));
+            }
+            (then_result, else_result) => {
+                let then_block = match then_result {
+                    Ok(expr) => vec![Statement::return_(expr)],
+                    Err(block) => block,
+                };
+                let else_block = match else_result {
+                    Ok(expr) => vec![Statement::return_(expr)],
+                    Err(block) => block,
+                };
+                block.push(Statement::if_(cond_compiled.expr, then_block, else_block));
+            }
+        }
         block
     }
 
@@ -1677,6 +1890,26 @@ impl LambdaCompiler {
 
     fn compile_assign_to_target_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
         match lam {
+            Lambda::Llet(kind, id, value, body) => {
+                let mut block = self.compile_let_binding(*kind, id, value);
+                block.extend(self.compile_assign_to_target_block(result, body));
+                block
+            }
+            Lambda::Lapply(apply) => {
+                let compiled = self.compile_apply_call(apply);
+                let mut block = compiled.prelude;
+                block.push(Statement::exp(Expression::bin(
+                    BinOp::Eq,
+                    Expression::var(result.clone()),
+                    compiled.expr,
+                )));
+                block
+            }
+            Lambda::Lsequence(first, second) => {
+                let mut block = self.compile_effect_block(first);
+                block.extend(self.compile_assign_to_target_block(result, second));
+                block
+            }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 self.with_static_handler(*label, bindings, handler, |this| {
                     this.compile_assign_to_target_block(result, body)
@@ -2159,11 +2392,117 @@ impl LambdaCompiler {
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
+            Pobjcomp(cmp) => self.compile_object_comparison(
+                *cmp,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
             Pboolcomp(cmp) | Pintcomp(cmp) | Pfloatcomp(cmp) | Pbigintcomp(cmp)
             | Pstringcomp(cmp) | Pjscomp(cmp) => {
                 let op = comparison_to_binop(*cmp);
                 Expression::bin(op, compiled_args[0].clone(), compiled_args[1].clone())
             }
+            Pobjorder => self.runtime_call_expr("Primitive_object", "compare", compiled_args),
+            Pobjmin => self.runtime_call_expr("Primitive_object", "min", compiled_args),
+            Pobjmax => self.runtime_call_expr("Primitive_object", "max", compiled_args),
+            Pboolorder => match (
+                bool_literal(&compiled_args[0]),
+                bool_literal(&compiled_args[1]),
+            ) {
+                (Some(left), Some(right)) => {
+                    let result = match left.cmp(&right) {
+                        std::cmp::Ordering::Less => -1,
+                        std::cmp::Ordering::Equal => 0,
+                        std::cmp::Ordering::Greater => 1,
+                    };
+                    int_expr(result)
+                }
+                _ => self.runtime_call_expr("Primitive_bool", "compare", compiled_args),
+            },
+            Pboolmin => self.compile_typed_min_max(
+                "Primitive_bool",
+                "min",
+                Comparison::Lt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_bool_literals,
+            ),
+            Pboolmax => self.compile_typed_min_max(
+                "Primitive_bool",
+                "max",
+                Comparison::Gt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_bool_literals,
+            ),
+            Pintorder => self.runtime_call_expr("Primitive_int", "compare", compiled_args),
+            Pintmin => self.compile_typed_min_max(
+                "Primitive_int",
+                "min",
+                Comparison::Lt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_int_literals,
+            ),
+            Pintmax => self.compile_typed_min_max(
+                "Primitive_int",
+                "max",
+                Comparison::Gt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_int_literals,
+            ),
+            Pfloatorder => self.runtime_call_expr("Primitive_float", "compare", compiled_args),
+            Pfloatmin => self.compile_typed_min_max(
+                "Primitive_float",
+                "min",
+                Comparison::Lt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_float_literals,
+            ),
+            Pfloatmax => self.compile_typed_min_max(
+                "Primitive_float",
+                "max",
+                Comparison::Gt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_float_literals,
+            ),
+            Pbigintorder => self.runtime_call_expr("Primitive_bigint", "compare", compiled_args),
+            Pbigintmin => self.compile_typed_min_max(
+                "Primitive_bigint",
+                "min",
+                Comparison::Lt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_bigint_literals,
+            ),
+            Pbigintmax => self.compile_typed_min_max(
+                "Primitive_bigint",
+                "max",
+                Comparison::Gt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_bigint_literals,
+            ),
+            Pstringorder => self.runtime_call_expr("Primitive_string", "compare", compiled_args),
+            Pstringmin => self.compile_typed_min_max(
+                "Primitive_string",
+                "min",
+                Comparison::Lt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_string_literals,
+            ),
+            Pstringmax => self.compile_typed_min_max(
+                "Primitive_string",
+                "max",
+                Comparison::Gt,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+                both_string_literals,
+            ),
             Psequand => Expression::bin(
                 BinOp::And,
                 compiled_args[0].clone(),
@@ -2221,6 +2560,39 @@ impl LambdaCompiler {
                 ))
             }
             Pmakearray => Expression::array(compiled_args, MutableFlag::Mutable),
+            Pmakedict => match compiled_args.as_slice() {
+                [Expression {
+                    desc: ExpressionDesc::Array(items, _),
+                    ..
+                }] => {
+                    let props = items
+                        .iter()
+                        .filter_map(|item| match &item.desc {
+                            ExpressionDesc::CamlBlock(fields, _, _, _)
+                                if matches!(
+                                    fields.as_slice(),
+                                    [Expression {
+                                        desc: ExpressionDesc::Str { .. },
+                                        ..
+                                    }, _]
+                                ) =>
+                            {
+                                let [Expression {
+                                    desc: ExpressionDesc::Str { txt, .. },
+                                    ..
+                                }, value] = fields.as_slice()
+                                else {
+                                    unreachable!("checked by matches! above");
+                                };
+                                Some((PropertyName::lit(txt.clone()), value.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    Expression::new(ExpressionDesc::Object(None, props))
+                }
+                _ => Expression::undefined(false),
+            },
             Pstringadd => Expression::new(ExpressionDesc::StringAppend(
                 Box::new(compiled_args[0].clone()),
                 Box::new(compiled_args[1].clone()),
@@ -2266,7 +2638,7 @@ impl LambdaCompiler {
             }
             PrawJsCode(info) => {
                 Expression::new(ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
-                    code: info.code.clone(),
+                    code: info.code.trim().to_string(),
                     is_stmt: info.is_stmt,
                 }))
             }
@@ -2302,6 +2674,14 @@ impl LambdaCompiler {
                 .cloned()
                 .unwrap_or_else(|| Expression::undefined(false)),
             Pawait => Expression::new(ExpressionDesc::Await(Box::new(compiled_args[0].clone()))),
+            PwrapExn => {
+                self.runtime_call_expr("Primitive_exceptions", "internalToException", compiled_args)
+            }
+            PcreateExtension(name) => self.pure_runtime_call_expr(
+                "Primitive_exceptions",
+                "create",
+                vec![Expression::string(name.clone())],
+            ),
             PjsObjectCreate(obj_params) => {
                 self.compile_js_object_create(obj_params, compiled_args, &mut prelude)
             }
@@ -2394,15 +2774,25 @@ impl LambdaCompiler {
                 Some(ConstructorRuntimeTag::Null) => Expression::null(),
                 Some(ConstructorRuntimeTag::Undefined) => Expression::undefined(false),
                 None if tag.name != "[]" => Expression::string(tag.name.clone()),
+                None => Expression::with_comment(
+                    ExpressionDesc::Number(Number::int(*i)),
+                    tag.name.clone(),
+                ),
+            },
+            Constant::Int { i, comment } => match pointer_info_comment_text(comment.as_ref()) {
+                Some(comment) => {
+                    Expression::with_comment(ExpressionDesc::Number(Number::int(*i)), comment)
+                }
                 None => Expression::number(Number::int(*i)),
             },
-            Constant::Int { i, comment } => {
-                let _ = comment;
-                Expression::number(Number::int(*i))
-            }
             Constant::NativeInt { i, comment } => {
-                let _ = comment;
-                Expression::number(Number::float(i.to_string()))
+                match pointer_info_comment_text(comment.as_ref()) {
+                    Some(comment) => Expression::with_comment(
+                        ExpressionDesc::Number(Number::float(i.to_string())),
+                        comment,
+                    ),
+                    None => Expression::number(Number::float(i.to_string())),
+                }
             }
             Constant::Char(c) => Expression::number(Number::Int { i: *c, c: Some(*c) }),
             Constant::String { s, delim } => {
@@ -2559,6 +2949,80 @@ impl LambdaCompiler {
             args,
             CallInfo::default(),
         )
+    }
+
+    fn pure_runtime_call_expr(
+        &self,
+        module_name: &str,
+        member: &str,
+        args: Vec<Expression>,
+    ) -> Expression {
+        Expression::with_comment(
+            ExpressionDesc::Call(
+                Box::new(self.runtime_member_expr(module_name, member)),
+                args,
+                CallInfo::default(),
+            ),
+            "@__PURE__",
+        )
+    }
+
+    fn compile_eta_wrapped_runtime_alias(
+        &self,
+        func: &crate::lambda::LFunction,
+    ) -> Option<Expression> {
+        if func.attr.one_unit_arg || func.attr.async_ || func.attr.directive.is_some() {
+            return None;
+        }
+
+        let Lambda::Lprim(info) = func.body.as_ref() else {
+            return None;
+        };
+        if !eta_wrapped_args_match_params(&func.params, &info.args) {
+            return None;
+        }
+        let (module_name, member) = runtime_member_for_eta_wrapped_primitive(&info.primitive)?;
+        Some(self.runtime_member_expr(module_name, member))
+    }
+
+    fn compile_object_comparison(
+        &self,
+        cmp: Comparison,
+        left: Expression,
+        right: Expression,
+    ) -> Expression {
+        match cmp {
+            Comparison::Eq | Comparison::Neq
+                if is_nullish_literal(&left).is_some() || is_nullish_literal(&right).is_some() =>
+            {
+                compile_nullish_strict_comparison(cmp, left, right)
+            }
+            _ => self.runtime_call_expr(
+                "Primitive_object",
+                comparison_to_runtime_member(cmp),
+                vec![left, right],
+            ),
+        }
+    }
+
+    fn compile_typed_min_max(
+        &self,
+        module_name: &str,
+        member: &str,
+        compare: Comparison,
+        left: Expression,
+        right: Expression,
+        literal_fast_path: fn(&Expression, &Expression) -> bool,
+    ) -> Expression {
+        if literal_fast_path(&left, &right) {
+            Expression::cond(
+                Expression::bin(comparison_to_binop(compare), left.clone(), right.clone()),
+                left,
+                right,
+            )
+        } else {
+            self.runtime_call_expr(module_name, member, vec![left, right])
+        }
     }
 
     fn external_module_id(
@@ -2938,13 +3402,16 @@ impl LambdaCompiler {
 
                 if *tagged_template {
                     match args.as_slice() {
-                        [Expression {
-                            desc: ExpressionDesc::Array(strings, _),
-                            ..
-                        }, Expression {
-                            desc: ExpressionDesc::Array(values, _),
-                            ..
-                        }] => {
+                        [
+                            Expression {
+                                desc: ExpressionDesc::Array(strings, _),
+                                ..
+                            },
+                            Expression {
+                                desc: ExpressionDesc::Array(values, _),
+                                ..
+                            },
+                        ] => {
                             return Expression::new(ExpressionDesc::TaggedTemplate(
                                 Box::new(target),
                                 strings.clone(),
@@ -3097,10 +3564,13 @@ impl LambdaCompiler {
     fn compile_import(&self, args: Vec<Expression>) -> Expression {
         let arg = match args.as_slice() {
             [arg] => arg,
-            [arg, Expression {
-                desc: ExpressionDesc::Undefined { is_unit: true },
-                ..
-            }] => arg,
+            [
+                arg,
+                Expression {
+                    desc: ExpressionDesc::Undefined { is_unit: true },
+                    ..
+                },
+            ] => arg,
             _ => {
                 return Expression::call(
                     Expression::var(Ident::create_persistent("import")),
@@ -3696,7 +4166,9 @@ fn max_ident_stamp_in_statement(stmt: &Statement) -> i32 {
         StatementDesc::Try(body, catch, finally) => {
             let mut max_stamp = max_ident_stamp_in_block(body);
             if let Some((ident, catch_block)) = catch {
-                max_stamp = max_stamp.max(ident.stamp()).max(max_ident_stamp_in_block(catch_block));
+                max_stamp = max_stamp
+                    .max(ident.stamp())
+                    .max(max_ident_stamp_in_block(catch_block));
             }
             if let Some(finally) = finally {
                 max_stamp = max_stamp.max(max_ident_stamp_in_block(finally));
@@ -3726,14 +4198,17 @@ fn max_ident_stamp_in_expression(expr: &Expression) -> i32 {
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
         | ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => max_ident_stamp_in_expression(left)
-            .max(max_ident_stamp_in_expression(right)),
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            max_ident_stamp_in_expression(left).max(max_ident_stamp_in_expression(right))
+        }
         ExpressionDesc::Cond(test, consequent, alternate) => max_ident_stamp_in_expression(test)
             .max(max_ident_stamp_in_expression(consequent))
             .max(max_ident_stamp_in_expression(alternate)),
-        ExpressionDesc::Call(func, args, _) => args.iter().fold(max_ident_stamp_in_expression(func), |max_stamp, arg| {
-            max_stamp.max(max_ident_stamp_in_expression(arg))
-        }),
+        ExpressionDesc::Call(func, args, _) => args
+            .iter()
+            .fold(max_ident_stamp_in_expression(func), |max_stamp, arg| {
+                max_stamp.max(max_ident_stamp_in_expression(arg))
+            }),
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
             let mut max_stamp = max_ident_stamp_in_expression(tag);
             for string in strings {
@@ -3855,6 +4330,22 @@ fn extract_toplevel_exports(expr: Expression, block: &mut Block) -> Option<Extra
     }
 }
 
+fn can_reuse_existing_undefined_export_binding(block: &Block, export: &Ident) -> bool {
+    let flattened = flatten_toplevel_block(block);
+    let Some(export_index) = flattened.iter().position(|stmt| {
+        matches!(
+            &stmt.desc,
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(export)
+        )
+    }) else {
+        return false;
+    };
+
+    flattened[export_index + 1..]
+        .iter()
+        .all(statement_allows_undefined_export_reuse)
+}
+
 fn push_effect_expression(block: &mut Block, expr: Expression) {
     match expr.desc {
         ExpressionDesc::Seq(left, right) => {
@@ -3863,6 +4354,45 @@ fn push_effect_expression(block: &mut Block, expr: Expression) {
         }
         _ if js_expr_no_side_effects(&expr) => {}
         _ => block.push(Statement::exp(expr)),
+    }
+}
+
+fn statement_allows_undefined_export_reuse(stmt: &Statement) -> bool {
+    match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration { value, .. }) => value.as_ref().is_none_or(
+            |expr| {
+                !matches!(expr.desc, ExpressionDesc::Fun { .. }) && js_expr_no_side_effects(expr)
+            },
+        ),
+        _ => false,
+    }
+}
+
+fn compiled_from_effect_block(mut block: Block) -> Compiled {
+    if block.len() == 1 {
+        let stmt = block.pop().expect("single-item block");
+        let Statement { desc, comment } = stmt;
+        return match desc {
+            StatementDesc::Exp(mut expr) => {
+                if expr.comment.is_none() {
+                    expr.comment = comment;
+                }
+                Compiled {
+                    prelude: vec![],
+                    expr,
+                }
+            }
+            StatementDesc::Block(inner) if comment.is_none() => compiled_from_effect_block(inner),
+            desc => Compiled {
+                prelude: vec![Statement { desc, comment }],
+                expr: Expression::undefined(false),
+            },
+        };
+    }
+
+    Compiled {
+        prelude: block,
+        expr: Expression::undefined(false),
     }
 }
 
@@ -3910,6 +4440,141 @@ fn comparison_to_binop(cmp: Comparison) -> BinOp {
         Comparison::Gt => BinOp::Gt,
         Comparison::Ge => BinOp::Ge,
     }
+}
+
+fn comparison_to_runtime_member(cmp: Comparison) -> &'static str {
+    match cmp {
+        Comparison::Eq => "equal",
+        Comparison::Neq => "notequal",
+        Comparison::Lt => "lessthan",
+        Comparison::Le => "lessequal",
+        Comparison::Gt => "greaterthan",
+        Comparison::Ge => "greaterequal",
+    }
+}
+
+fn runtime_member_for_eta_wrapped_primitive(
+    primitive: &Primitive,
+) -> Option<(&'static str, &'static str)> {
+    match primitive {
+        Primitive::Pobjcomp(cmp) => Some(("Primitive_object", comparison_to_runtime_member(*cmp))),
+        Primitive::Pobjorder => Some(("Primitive_object", "compare")),
+        Primitive::Pobjmin => Some(("Primitive_object", "min")),
+        Primitive::Pobjmax => Some(("Primitive_object", "max")),
+        Primitive::Pboolorder => Some(("Primitive_bool", "compare")),
+        Primitive::Pboolmin => Some(("Primitive_bool", "min")),
+        Primitive::Pboolmax => Some(("Primitive_bool", "max")),
+        Primitive::Pintorder => Some(("Primitive_int", "compare")),
+        Primitive::Pintmin => Some(("Primitive_int", "min")),
+        Primitive::Pintmax => Some(("Primitive_int", "max")),
+        Primitive::Pfloatorder => Some(("Primitive_float", "compare")),
+        Primitive::Pfloatmin => Some(("Primitive_float", "min")),
+        Primitive::Pfloatmax => Some(("Primitive_float", "max")),
+        Primitive::Pbigintorder => Some(("Primitive_bigint", "compare")),
+        Primitive::Pbigintmin => Some(("Primitive_bigint", "min")),
+        Primitive::Pbigintmax => Some(("Primitive_bigint", "max")),
+        Primitive::Pstringorder => Some(("Primitive_string", "compare")),
+        Primitive::Pstringmin => Some(("Primitive_string", "min")),
+        Primitive::Pstringmax => Some(("Primitive_string", "max")),
+        _ => None,
+    }
+}
+
+fn eta_wrapped_args_match_params(params: &[Ident], args: &[Lambda]) -> bool {
+    params.len() == args.len()
+        && params.iter().zip(args).all(|(param, arg)| match arg {
+            Lambda::Lvar(id) => id.same(param),
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit,
+                args: inner_args,
+                ..
+            }) => matches!(inner_args.as_slice(), [Lambda::Lvar(id)] if id.same(param)),
+            _ => false,
+        })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NullishLiteral {
+    Null,
+    Undefined,
+}
+
+fn is_nullish_literal(expr: &Expression) -> Option<NullishLiteral> {
+    match expr.desc {
+        ExpressionDesc::Null => Some(NullishLiteral::Null),
+        ExpressionDesc::Undefined { .. } => Some(NullishLiteral::Undefined),
+        _ => None,
+    }
+}
+
+fn is_nullish_eq_impossible_non_null_expr(expr: &Expression) -> bool {
+    matches!(
+        expr.desc,
+        ExpressionDesc::Bool(_)
+            | ExpressionDesc::Number(_)
+            | ExpressionDesc::Typeof(_)
+            | ExpressionDesc::Fun { .. }
+            | ExpressionDesc::Array(_, _)
+            | ExpressionDesc::CamlBlock(_, _, _, _)
+    ) && js_expr_no_side_effects(expr)
+}
+
+fn compile_nullish_strict_comparison(
+    cmp: Comparison,
+    left: Expression,
+    right: Expression,
+) -> Expression {
+    match (is_nullish_literal(&left), is_nullish_literal(&right)) {
+        (Some(NullishLiteral::Null), Some(NullishLiteral::Null))
+        | (Some(NullishLiteral::Undefined), Some(NullishLiteral::Undefined)) => {
+            return Expression::bool(matches!(cmp, Comparison::Eq));
+        }
+        (Some(NullishLiteral::Null), Some(NullishLiteral::Undefined))
+        | (Some(NullishLiteral::Undefined), Some(NullishLiteral::Null)) => {
+            return Expression::bool(matches!(cmp, Comparison::Neq));
+        }
+        _ => {}
+    }
+
+    if is_nullish_literal(&left).is_some() && is_nullish_eq_impossible_non_null_expr(&right) {
+        return Expression::bool(matches!(cmp, Comparison::Neq));
+    }
+
+    if is_nullish_literal(&right).is_some() && is_nullish_eq_impossible_non_null_expr(&left) {
+        return Expression::bool(matches!(cmp, Comparison::Neq));
+    }
+
+    Expression::bin(comparison_to_binop(cmp), left, right)
+}
+
+fn bool_literal(expr: &Expression) -> Option<bool> {
+    match expr.desc {
+        ExpressionDesc::Bool(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn both_bool_literals(left: &Expression, right: &Expression) -> bool {
+    bool_literal(left).is_some() && bool_literal(right).is_some()
+}
+
+fn both_int_literals(left: &Expression, right: &Expression) -> bool {
+    int_literal(left).is_some() && int_literal(right).is_some()
+}
+
+fn both_float_literals(left: &Expression, right: &Expression) -> bool {
+    matches!(left.desc, ExpressionDesc::Number(Number::Float(_)))
+        && matches!(right.desc, ExpressionDesc::Number(Number::Float(_)))
+}
+
+fn both_bigint_literals(left: &Expression, right: &Expression) -> bool {
+    matches!(left.desc, ExpressionDesc::Number(Number::BigInt(_)))
+        && matches!(right.desc, ExpressionDesc::Number(Number::BigInt(_)))
+}
+
+fn both_string_literals(left: &Expression, right: &Expression) -> bool {
+    matches!(left.desc, ExpressionDesc::Str { .. })
+        && matches!(right.desc, ExpressionDesc::Str { .. })
 }
 
 fn int_expr(value: i32) -> Expression {
@@ -3988,29 +4653,32 @@ fn apply_js_flatten_pass(mut deps: DepsProgram) -> DepsProgram {
 }
 
 fn apply_js_flatten_and_mark_dead_pass(mut deps: DepsProgram) -> DepsProgram {
-    deps.program = flatten_and_mark_dead_program(deps.program);
+    let id_gen = IdGenerator::with_start_stamp(max_ident_stamp_in_program(&deps.program));
+    deps.program = flatten_and_mark_dead_program(deps.program, &id_gen);
     deps
 }
 
-fn flatten_and_mark_dead_program(mut program: Program) -> Program {
+fn flatten_and_mark_dead_program(mut program: Program, id_gen: &IdGenerator) -> Program {
     let mut substitution = HashMap::new();
-    program.block = flatten_and_mark_dead_block(program.block, &mut substitution);
+    program.block = flatten_and_mark_dead_block(program.block, id_gen, &mut substitution);
     mark_dead_code(&mut program);
     program
 }
 
 fn flatten_and_mark_dead_block(
     block: Block,
+    id_gen: &IdGenerator,
     substitution: &mut HashMap<Ident, Expression>,
 ) -> Block {
     block
         .into_iter()
-        .map(|stmt| flatten_and_mark_dead_statement(stmt, substitution))
+        .map(|stmt| flatten_and_mark_dead_statement(stmt, id_gen, substitution))
         .collect()
 }
 
 fn flatten_and_mark_dead_statement(
     stmt: Statement,
+    id_gen: &IdGenerator,
     substitution: &mut HashMap<Ident, Expression>,
 ) -> Statement {
     let Statement { desc, comment } = stmt;
@@ -4054,8 +4722,8 @@ fn flatten_and_mark_dead_statement(
                                 rewritten_items.push(item);
                             } else {
                                 let rewritten =
-                                    flatten_and_mark_dead_expression(item, substitution);
-                                let temp = Ident::create_local(block_substitution_name(
+                                    flatten_and_mark_dead_expression(item, id_gen, substitution);
+                                let temp = id_gen.create(&block_substitution_name(
                                     &decl.ident,
                                     &tag_info,
                                     index,
@@ -4127,7 +4795,7 @@ fn flatten_and_mark_dead_statement(
                     ident: decl.ident,
                     value: decl
                         .value
-                        .map(|value| flatten_and_mark_dead_expression(value, substitution)),
+                        .map(|value| flatten_and_mark_dead_expression(value, id_gen, substitution)),
                     property: decl.property,
                     ident_info: decl.ident_info,
                 }),
@@ -4135,91 +4803,110 @@ fn flatten_and_mark_dead_statement(
             }
         }
         StatementDesc::Block(block) => Statement {
-            desc: StatementDesc::Block(flatten_and_mark_dead_block(block, substitution)),
+            desc: StatementDesc::Block(flatten_and_mark_dead_block(block, id_gen, substitution)),
             comment,
         },
         StatementDesc::Exp(expr) => Statement {
-            desc: StatementDesc::Exp(flatten_and_mark_dead_expression(expr, substitution)),
+            desc: StatementDesc::Exp(flatten_and_mark_dead_expression(expr, id_gen, substitution)),
             comment,
         },
         StatementDesc::Return(expr) => Statement {
-            desc: StatementDesc::Return(flatten_and_mark_dead_expression(expr, substitution)),
+            desc: StatementDesc::Return(flatten_and_mark_dead_expression(
+                expr,
+                id_gen,
+                substitution,
+            )),
             comment,
         },
         StatementDesc::If(cond, then_block, else_block) => Statement {
             desc: StatementDesc::If(
-                flatten_and_mark_dead_expression(cond, substitution),
-                flatten_and_mark_dead_block(then_block, substitution),
-                flatten_and_mark_dead_block(else_block, substitution),
+                flatten_and_mark_dead_expression(cond, id_gen, substitution),
+                flatten_and_mark_dead_block(then_block, id_gen, substitution),
+                flatten_and_mark_dead_block(else_block, id_gen, substitution),
             ),
             comment,
         },
         StatementDesc::While(cond, body) => Statement {
             desc: StatementDesc::While(
-                flatten_and_mark_dead_expression(cond, substitution),
-                flatten_and_mark_dead_block(body, substitution),
+                flatten_and_mark_dead_expression(cond, id_gen, substitution),
+                flatten_and_mark_dead_block(body, id_gen, substitution),
             ),
             comment,
         },
         StatementDesc::ForRange(start, finish, ident, direction, body) => Statement {
             desc: StatementDesc::ForRange(
-                start.map(|expr| flatten_and_mark_dead_expression(expr, substitution)),
-                flatten_and_mark_dead_expression(finish, substitution),
+                start.map(|expr| flatten_and_mark_dead_expression(expr, id_gen, substitution)),
+                flatten_and_mark_dead_expression(finish, id_gen, substitution),
                 ident,
                 direction,
-                flatten_and_mark_dead_block(body, substitution),
+                flatten_and_mark_dead_block(body, id_gen, substitution),
             ),
             comment,
         },
         StatementDesc::IntSwitch(test, clauses, default) => Statement {
             desc: StatementDesc::IntSwitch(
-                flatten_and_mark_dead_expression(test, substitution),
+                flatten_and_mark_dead_expression(test, id_gen, substitution),
                 clauses
                     .into_iter()
                     .map(|(tag, clause)| {
                         (
                             tag,
                             CaseClause {
-                                body: flatten_and_mark_dead_block(clause.body, substitution),
+                                body: flatten_and_mark_dead_block(
+                                    clause.body,
+                                    id_gen,
+                                    substitution,
+                                ),
                                 should_break: clause.should_break,
                                 comment: clause.comment,
                             },
                         )
                     })
                     .collect(),
-                default.map(|block| flatten_and_mark_dead_block(block, substitution)),
+                default.map(|block| flatten_and_mark_dead_block(block, id_gen, substitution)),
             ),
             comment,
         },
         StatementDesc::StringSwitch(test, clauses, default) => Statement {
             desc: StatementDesc::StringSwitch(
-                flatten_and_mark_dead_expression(test, substitution),
+                flatten_and_mark_dead_expression(test, id_gen, substitution),
                 clauses
                     .into_iter()
                     .map(|clause| crate::js_ir::StringClause {
                         tag_type: clause.tag_type,
                         clause: CaseClause {
-                            body: flatten_and_mark_dead_block(clause.clause.body, substitution),
+                            body: flatten_and_mark_dead_block(
+                                clause.clause.body,
+                                id_gen,
+                                substitution,
+                            ),
                             should_break: clause.clause.should_break,
                             comment: clause.clause.comment,
                         },
                     })
                     .collect(),
-                default.map(|block| flatten_and_mark_dead_block(block, substitution)),
+                default.map(|block| flatten_and_mark_dead_block(block, id_gen, substitution)),
             ),
             comment,
         },
         StatementDesc::Throw(expr) => Statement {
-            desc: StatementDesc::Throw(flatten_and_mark_dead_expression(expr, substitution)),
+            desc: StatementDesc::Throw(flatten_and_mark_dead_expression(
+                expr,
+                id_gen,
+                substitution,
+            )),
             comment,
         },
         StatementDesc::Try(body, catch, finally) => Statement {
             desc: StatementDesc::Try(
-                flatten_and_mark_dead_block(body, substitution),
+                flatten_and_mark_dead_block(body, id_gen, substitution),
                 catch.map(|(ident, block)| {
-                    (ident, flatten_and_mark_dead_block(block, substitution))
+                    (
+                        ident,
+                        flatten_and_mark_dead_block(block, id_gen, substitution),
+                    )
                 }),
-                finally.map(|block| flatten_and_mark_dead_block(block, substitution)),
+                finally.map(|block| flatten_and_mark_dead_block(block, id_gen, substitution)),
             ),
             comment,
         },
@@ -4240,6 +4927,7 @@ fn flatten_and_mark_dead_statement(
 
 fn flatten_and_mark_dead_expression(
     expr: Expression,
+    id_gen: &IdGenerator,
     substitution: &mut HashMap<Ident, Expression>,
 ) -> Expression {
     if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution) {
@@ -4249,85 +4937,169 @@ fn flatten_and_mark_dead_expression(
     let Expression { desc, comment } = expr;
     let desc = match desc {
         ExpressionDesc::Length(inner, object) => ExpressionDesc::Length(
-            Box::new(flatten_and_mark_dead_expression(*inner, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *inner,
+                id_gen,
+                substitution,
+            )),
             object,
         ),
         ExpressionDesc::IsNullOrUndefined(inner) => ExpressionDesc::IsNullOrUndefined(Box::new(
-            flatten_and_mark_dead_expression(*inner, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
         ExpressionDesc::StringAppend(left, right) => ExpressionDesc::StringAppend(
-            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *left,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *right,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::Bool(value) => ExpressionDesc::Bool(value),
         ExpressionDesc::Typeof(inner) => ExpressionDesc::Typeof(Box::new(
-            flatten_and_mark_dead_expression(*inner, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
         ExpressionDesc::In(left, right) => ExpressionDesc::In(
-            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *left,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *right,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::JsNot(inner) => ExpressionDesc::JsNot(Box::new(
-            flatten_and_mark_dead_expression(*inner, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
         ExpressionDesc::JsBnot(inner) => ExpressionDesc::JsBnot(Box::new(
-            flatten_and_mark_dead_expression(*inner, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
         ExpressionDesc::Seq(left, right) => ExpressionDesc::Seq(
-            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *left,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *right,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::Cond(test, consequent, alternate) => ExpressionDesc::Cond(
-            Box::new(flatten_and_mark_dead_expression(*test, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*consequent, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*alternate, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *test,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *consequent,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *alternate,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::Bin(op, left, right) => ExpressionDesc::Bin(
             op,
-            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *left,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *right,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::FlatCall(func, args) => ExpressionDesc::FlatCall(
-            Box::new(flatten_and_mark_dead_expression(*func, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*args, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *func,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *args,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::Call(func, args, info) => ExpressionDesc::Call(
-            Box::new(flatten_and_mark_dead_expression(*func, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *func,
+                id_gen,
+                substitution,
+            )),
             args.into_iter()
-                .map(|arg| flatten_and_mark_dead_expression(arg, substitution))
+                .map(|arg| flatten_and_mark_dead_expression(arg, id_gen, substitution))
                 .collect(),
             info,
         ),
         ExpressionDesc::StringIndex(left, right) => ExpressionDesc::StringIndex(
-            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *left,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *right,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::ArrayIndex(left, right) => ExpressionDesc::ArrayIndex(
-            Box::new(flatten_and_mark_dead_expression(*left, substitution)),
-            Box::new(flatten_and_mark_dead_expression(*right, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *left,
+                id_gen,
+                substitution,
+            )),
+            Box::new(flatten_and_mark_dead_expression(
+                *right,
+                id_gen,
+                substitution,
+            )),
         ),
         ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
-            Box::new(flatten_and_mark_dead_expression(*tag, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*tag, id_gen, substitution)),
             strings
                 .into_iter()
-                .map(|value| flatten_and_mark_dead_expression(value, substitution))
+                .map(|value| flatten_and_mark_dead_expression(value, id_gen, substitution))
                 .collect(),
             values
                 .into_iter()
-                .map(|value| flatten_and_mark_dead_expression(value, substitution))
+                .map(|value| flatten_and_mark_dead_expression(value, id_gen, substitution))
                 .collect(),
         ),
         ExpressionDesc::StaticIndex(target, field, pos) => ExpressionDesc::StaticIndex(
-            Box::new(flatten_and_mark_dead_expression(*target, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *target,
+                id_gen,
+                substitution,
+            )),
             field,
             pos,
         ),
         ExpressionDesc::New(target, args) => ExpressionDesc::New(
-            Box::new(flatten_and_mark_dead_expression(*target, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *target,
+                id_gen,
+                substitution,
+            )),
             args.map(|items| {
                 items
                     .into_iter()
-                    .map(|arg| flatten_and_mark_dead_expression(arg, substitution))
+                    .map(|arg| flatten_and_mark_dead_expression(arg, id_gen, substitution))
                     .collect()
             }),
         ),
@@ -4343,7 +5115,7 @@ fn flatten_and_mark_dead_expression(
         } => ExpressionDesc::Fun {
             is_method,
             params,
-            body: flatten_and_mark_dead_block(body, substitution),
+            body: flatten_and_mark_dead_block(body, id_gen, substitution),
             env,
             return_unit,
             async_,
@@ -4354,42 +5126,61 @@ fn flatten_and_mark_dead_expression(
         ExpressionDesc::Array(items, mutable_flag) => ExpressionDesc::Array(
             items
                 .into_iter()
-                .map(|item| flatten_and_mark_dead_expression(item, substitution))
+                .map(|item| flatten_and_mark_dead_expression(item, id_gen, substitution))
                 .collect(),
             mutable_flag,
         ),
         ExpressionDesc::OptionalBlock(inner, flag) => ExpressionDesc::OptionalBlock(
-            Box::new(flatten_and_mark_dead_expression(*inner, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *inner,
+                id_gen,
+                substitution,
+            )),
             flag,
         ),
         ExpressionDesc::CamlBlock(items, mutable_flag, tag, tag_info) => ExpressionDesc::CamlBlock(
             items
                 .into_iter()
-                .map(|item| flatten_and_mark_dead_expression(item, substitution))
+                .map(|item| flatten_and_mark_dead_expression(item, id_gen, substitution))
                 .collect(),
             mutable_flag,
-            Box::new(flatten_and_mark_dead_expression(*tag, substitution)),
+            Box::new(flatten_and_mark_dead_expression(*tag, id_gen, substitution)),
             tag_info,
         ),
         ExpressionDesc::CamlBlockTag(inner, tag) => ExpressionDesc::CamlBlockTag(
-            Box::new(flatten_and_mark_dead_expression(*inner, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *inner,
+                id_gen,
+                substitution,
+            )),
             tag,
         ),
         ExpressionDesc::Number(number) => ExpressionDesc::Number(number),
         ExpressionDesc::Object(dup, props) => ExpressionDesc::Object(
-            dup.map(|expr| Box::new(flatten_and_mark_dead_expression(*expr, substitution))),
+            dup.map(|expr| {
+                Box::new(flatten_and_mark_dead_expression(
+                    *expr,
+                    id_gen,
+                    substitution,
+                ))
+            }),
             props
                 .into_iter()
-                .map(|(name, value)| (name, flatten_and_mark_dead_expression(value, substitution)))
+                .map(|(name, value)| {
+                    (
+                        name,
+                        flatten_and_mark_dead_expression(value, id_gen, substitution),
+                    )
+                })
                 .collect(),
         ),
         ExpressionDesc::Undefined { is_unit } => ExpressionDesc::Undefined { is_unit },
         ExpressionDesc::Null => ExpressionDesc::Null,
         ExpressionDesc::Await(inner) => ExpressionDesc::Await(Box::new(
-            flatten_and_mark_dead_expression(*inner, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
         ExpressionDesc::Spread(inner) => ExpressionDesc::Spread(Box::new(
-            flatten_and_mark_dead_expression(*inner, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
         )),
     };
 
@@ -4467,6 +5258,13 @@ fn block_substitution_name(ident: &Ident, tag_info: &TagInfo, index: usize) -> S
         _ => index.to_string(),
     };
     format!("{}_{}", ident.name(), suffix)
+}
+
+fn max_ident_stamp_in_program(program: &Program) -> i32 {
+    program.exports.iter().fold(
+        max_ident_stamp_in_block(&program.block),
+        |max_stamp, export| max_stamp.max(export.stamp()),
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -7290,16 +8088,26 @@ fn is_builtin_untagged_switch_name(name: &str) -> bool {
     )
 }
 
+fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option<String> {
+    match comment {
+        Some(PointerInfo::None) | None => None,
+        Some(PointerInfo::Constructor(tag)) => Some(tag.name.clone()),
+        Some(PointerInfo::AssertFalse) => Some("assert_false".to_string()),
+        Some(PointerInfo::Some(name)) | Some(PointerInfo::PolyVariant(name)) => Some(name.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cmi::persistent_env::PersistentEnv;
-    use crate::js_ir::{print_block, print_expression, ModulePathResolver};
+    use crate::js_ir::{ModulePathResolver, print_block, print_expression};
     use crate::lambda::constant::{Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo};
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
         ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
-        ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper, ExternalSpec,
+        ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, JsRawInfo,
+        Primitive,
     };
     use crate::lambda::{
         ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, Lambda, SwitchNames,
@@ -7353,6 +8161,34 @@ mod tests {
     }
 
     #[test]
+    fn compile_raw_js_trims_outer_whitespace_before_js_ir_printing() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::prim(
+            Primitive::PrawJsCode(JsRawInfo {
+                code: "\nif (import.meta.hot){\n  console.log('es6')\n}\n".to_string(),
+                is_stmt: true,
+            }),
+            vec![],
+            Location::none(),
+        );
+
+        let program = compiler.compile_program(&lam);
+        let raw_code = program
+            .block
+            .iter()
+            .find_map(|stmt| match &stmt.desc {
+                StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::RawJsCode(info),
+                    ..
+                }) => Some(info.code.as_str()),
+                _ => None,
+            })
+            .expect("compiled raw js statement");
+
+        assert_eq!(raw_code, "if (import.meta.hot){\n  console.log('es6')\n}");
+    }
+
+    #[test]
     fn compile_constant_named_constructor_uses_string_runtime_name() {
         let compiled = LambdaCompiler::compile_constant(&Constant::Int {
             i: 0,
@@ -7395,7 +8231,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_constant_empty_list_keeps_numeric_zero() {
+    fn compile_constant_empty_list_keeps_numeric_zero_with_pointer_comment() {
         let compiled = LambdaCompiler::compile_constant(&Constant::Int {
             i: 0,
             comment: Some(PointerInfo::Constructor(ConstructorTag {
@@ -7410,9 +8246,11 @@ mod tests {
             compiled,
             Expression {
                 desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
-                ..
+                comment: Some(ref comment),
             }
+            if comment == "[]"
         ));
+        assert_eq!(print_expression(&compiled), "/* [] */0");
     }
 
     #[test]
@@ -7448,11 +8286,260 @@ mod tests {
             )
         ));
         let printed = print_expression(&compiled.expr);
-        assert!(printed.contains("**"), "expected exponentiation operator, got {printed}");
+        assert!(
+            printed.contains("**"),
+            "expected exponentiation operator, got {printed}"
+        );
         assert!(
             !printed.contains("Math.pow"),
             "expected float pow lowering to avoid Math.pow, got {printed}"
         );
+    }
+
+    #[test]
+    fn compile_create_extension_uses_primitive_exceptions_create() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PcreateExtension("Local_exception_test.A".to_string()),
+            vec![],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        let ExpressionDesc::Call(func, args, _) = &compiled.expr.desc else {
+            panic!("expected extension constructors to lower to a runtime call");
+        };
+        assert!(matches!(
+            func.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, Some(member))),
+                ..
+            } if module.id.name() == "Primitive_exceptions" && member == "create"
+        ));
+        assert!(matches!(
+            args.as_slice(),
+            [Expression {
+                desc: ExpressionDesc::Str { txt, .. },
+                ..
+            }] if txt == "Local_exception_test.A"
+        ));
+        assert_eq!(compiled.expr.comment.as_deref(), Some("@__PURE__"));
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "/* @__PURE__ */Primitive_exceptions.create(\"Local_exception_test.A\")"
+        );
+    }
+
+    #[test]
+    fn compile_wrap_exn_uses_primitive_exceptions_internal_to_exception() {
+        let mut compiler = LambdaCompiler::new();
+        let exn = Ident::create_local("exn");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PwrapExn,
+            vec![Lambda::var(exn.clone())],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        let ExpressionDesc::Call(func, args, _) = &compiled.expr.desc else {
+            panic!("expected exception wrapping to lower to a runtime call");
+        };
+        assert!(matches!(
+            func.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, Some(member))),
+                ..
+            } if module.id.name() == "Primitive_exceptions" && member == "internalToException"
+        ));
+        assert!(matches!(
+            args.as_slice(),
+            [Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            }] if id.same(&exn)
+        ));
+    }
+
+    #[test]
+    fn compile_int_order_uses_primitive_int_compare() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("left");
+        let right = Ident::create_local("right");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pintorder,
+            vec![Lambda::var(left), Lambda::var(right)],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_int.compare(left, right)"
+        );
+    }
+
+    #[test]
+    fn compile_string_order_uses_primitive_string_compare() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("left");
+        let right = Ident::create_local("right");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pstringorder,
+            vec![Lambda::var(left), Lambda::var(right)],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_string.compare(left, right)"
+        );
+    }
+
+    #[test]
+    fn compile_obj_compare_against_null_uses_strict_equality() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pobjcomp(Comparison::Eq),
+            vec![Lambda::const_(Constant::JsNull), Lambda::var(value)],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "null === value");
+    }
+
+    #[test]
+    fn compile_obj_compare_null_against_number_literal_folds_false() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pobjcomp(Comparison::Eq),
+            vec![
+                Lambda::const_(Constant::JsNull),
+                Lambda::const_(Constant::int(5)),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "false");
+    }
+
+    #[test]
+    fn compile_obj_notequal_undefined_against_number_literal_folds_true() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pobjcomp(Comparison::Neq),
+            vec![
+                Lambda::const_(Constant::JsUndefined { is_unit: false }),
+                Lambda::const_(Constant::int(5)),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "true");
+    }
+
+    #[test]
+    fn compile_obj_order_uses_primitive_object_compare() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("left");
+        let right = Ident::create_local("right");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pobjorder,
+            vec![Lambda::var(left), Lambda::var(right)],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_object.compare(left, right)"
+        );
+    }
+
+    #[test]
+    fn compile_eta_wrapped_object_compare_function_aliases_runtime_member() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("left");
+        let right = Ident::create_local("right");
+        let compiled = compiler.compile_expr(&Lambda::function_(
+            2,
+            vec![left.clone(), right.clone()],
+            Lambda::prim(
+                Primitive::Pobjorder,
+                vec![Lambda::var(left), Lambda::var(right)],
+                Location::none(),
+            ),
+            Default::default(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "Primitive_object.compare");
+    }
+
+    #[test]
+    fn compile_eta_wrapped_float_compare_function_aliases_runtime_member() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("x");
+        let right = Ident::create_local("y");
+        let compiled = compiler.compile_expr(&Lambda::function_(
+            2,
+            vec![left.clone(), right.clone()],
+            Lambda::prim(
+                Primitive::Pfloatorder,
+                vec![Lambda::var(left), Lambda::var(right)],
+                Location::none(),
+            ),
+            Default::default(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "Primitive_float.compare");
+    }
+
+    #[test]
+    fn compile_eta_wrapped_float_equality_stays_as_function() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("x");
+        let right = Ident::create_local("y");
+        let compiled = compiler.compile_expr(&Lambda::function_(
+            2,
+            vec![left.clone(), right.clone()],
+            Lambda::prim(
+                Primitive::Pfloatcomp(Comparison::Eq),
+                vec![Lambda::var(left), Lambda::var(right)],
+                Location::none(),
+            ),
+            Default::default(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert!(matches!(compiled.expr.desc, ExpressionDesc::Fun { .. }));
+    }
+
+    #[test]
+    fn compile_bigint_min_literals_use_conditional_fast_path() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pbigintmin,
+            vec![
+                Lambda::const_(Constant::BigInt {
+                    negative: false,
+                    value: "9".to_string(),
+                }),
+                Lambda::const_(Constant::BigInt {
+                    negative: false,
+                    value: "1".to_string(),
+                }),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "9n < 1n ? 9n : 1n");
     }
 
     #[test]
@@ -7510,6 +8597,184 @@ mod tests {
     }
 
     #[test]
+    fn coerce_toplevel_exports_reuses_existing_undefined_binding() {
+        let mut compiler = LambdaCompiler::new();
+        let alias = Ident::create_local("VS");
+        let other = Ident::create_local("y");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: alias.clone(),
+                value: Some(Expression::undefined(false)),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: other.clone(),
+                value: Some(Expression::number(Number::int(13))),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![alias.clone(), other.clone()],
+                values: vec![Expression::undefined(false), Expression::var(other.clone())],
+            },
+        );
+
+        assert_eq!(exports, vec![alias.clone(), other.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected the existing bindings to be reused without rebound placeholders");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => assert!(ident.same(&alias)),
+            other => panic!("expected the original alias binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => assert!(ident.same(&other)),
+            other => panic!("expected the later binding second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_keeps_undefined_rebound_after_later_effects() {
+        let mut compiler = LambdaCompiler::new();
+        let alias = Ident::create_local("MyURL");
+        let callback = Ident::create_persistent("callback");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: alias.clone(),
+                value: Some(Expression::undefined(false)),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(callback),
+                vec![],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![alias.clone()],
+                values: vec![Expression::undefined(false)],
+            },
+        );
+
+        let [decl, effect, rebound] = block.as_slice() else {
+            panic!("expected the later effect to force a trailing rebound placeholder");
+        };
+        match &decl.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => assert!(ident.same(&alias)),
+            other => panic!("expected the original alias binding first, got {other:?}"),
+        }
+        assert!(matches!(effect.desc, StatementDesc::Exp(_)));
+        match &rebound.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(!ident.same(&alias), "expected a rebound export placeholder at the tail");
+                assert_eq!(ident.name(), alias.name());
+                assert_eq!(exports, vec![ident.clone()]);
+            }
+            other => panic!("expected the trailing rebound export placeholder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_skips_unreachable_undefined_placeholder_after_throw() {
+        let mut compiler = LambdaCompiler::new();
+        let exported = Ident::create_local("u");
+        let mut block = vec![Statement::throw(Expression::string("boom".to_string()))];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::undefined(false)],
+            },
+        );
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [stmt] = block.as_slice() else {
+            panic!("expected the terminating effect to stay alone in the block");
+        };
+        assert!(matches!(
+            stmt.desc,
+            StatementDesc::Throw(Expression {
+                desc: ExpressionDesc::Str { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn compile_deps_program_preserves_toplevel_binding_order_during_shake() {
+        let mut compiler = LambdaCompiler::new();
+        let first = Ident::create_local("first");
+        let second = Ident::create_local("second");
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            first.clone(),
+            Lambda::const_(Constant::int(3)),
+            Lambda::let_(
+                LetKind::Strict,
+                second.clone(),
+                Lambda::const_(Constant::int(4)),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::ModuleExport(vec![first.clone(), second.clone()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(first.clone()), Lambda::var(second.clone())],
+                    Location::none(),
+                ),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        let [first_export, second_export] = deps.program.exports.as_slice() else {
+            panic!("expected two exports");
+        };
+        assert!(first_export.same(&first));
+        assert!(second_export.same(&second));
+
+        let [first_stmt, second_stmt] = deps.program.block.as_slice() else {
+            panic!("expected the retained bindings to stay in the OCaml shake order");
+        };
+
+        match &first_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
+                        ..
+                    }),
+                ..
+            }) => assert!(ident.same(&first)),
+            other => panic!("expected the earlier retained binding first, got {other:?}"),
+        }
+
+        match &second_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 4, .. }),
+                        ..
+                    }),
+                ..
+            }) => assert!(ident.same(&second)),
+            other => panic!("expected the later retained binding second, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn compile_deps_program_rebinds_different_name_exports_after_effects() {
         let mut compiler = LambdaCompiler::new();
         let original_export = Ident::create_local("MyURL");
@@ -7544,7 +8809,9 @@ mod tests {
         );
 
         let [debugger, rebound] = deps.program.block.as_slice() else {
-            panic!("expected the original placeholder to shake away and the rebound export to remain");
+            panic!(
+                "expected the original placeholder to shake away and the rebound export to remain"
+            );
         };
         assert!(matches!(debugger.desc, StatementDesc::Debugger));
         match &rebound.desc {
@@ -7655,6 +8922,113 @@ mod tests {
             )),
             "expected the trailing assignment effect to remain in the program block"
         );
+    }
+
+    #[test]
+    fn compile_deps_program_skips_unreachable_throwing_export_binding_declaration() {
+        let mut compiler = LambdaCompiler::new();
+        let exported = Ident::create_local("u");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![exported.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(exported.clone())],
+            Location::none(),
+        );
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            exported.clone(),
+            Lambda::prim(
+                Primitive::Praise,
+                vec![Lambda::const_(Constant::string("boom"))],
+                Location::none(),
+            ),
+            export_block,
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        assert_eq!(deps.program.exports, vec![exported.clone()]);
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!(
+                "expected the terminating throw to stay as the only statement, got {:?}",
+                deps.program.block
+            );
+        };
+        assert!(matches!(
+            stmt,
+            Statement {
+                desc: StatementDesc::Throw(Expression {
+                    desc: ExpressionDesc::Str { txt, .. },
+                    ..
+                }),
+                ..
+            } if txt == "boom"
+        ));
+    }
+
+    #[test]
+    fn compile_deps_program_skips_unreachable_nested_throwing_export_binding_declaration() {
+        let mut compiler = LambdaCompiler::new();
+        let exported = Ident::create_local("A");
+        let nested = Ident::create_local("u");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![exported.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(exported.clone())],
+            Location::none(),
+        );
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            exported.clone(),
+            Lambda::let_(
+                LetKind::Strict,
+                nested.clone(),
+                Lambda::prim(
+                    Primitive::Praise,
+                    vec![Lambda::const_(Constant::string("boom"))],
+                    Location::none(),
+                ),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::record(
+                            vec![(nested.name().to_string(), false)],
+                            crate::parser::ast::MutableFlag::Immutable,
+                        ),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(nested)],
+                    Location::none(),
+                ),
+            ),
+            export_block,
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        assert_eq!(deps.program.exports, vec![exported.clone()]);
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!(
+                "expected the terminating throw to stay as the only statement, got {:?}",
+                deps.program.block
+            );
+        };
+        assert!(matches!(
+            stmt,
+            Statement {
+                desc: StatementDesc::Throw(Expression {
+                    desc: ExpressionDesc::Str { txt, .. },
+                    ..
+                }),
+                ..
+            } if txt == "boom"
+        ), "expected a terminating throw, got {:?}", stmt);
     }
 
     #[test]
@@ -8249,6 +9623,61 @@ mod tests {
     }
 
     #[test]
+    fn let_bindings_merge_direct_if_assignments_into_initialized_declarations() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let result = Ident::create_local("result");
+        let compiled = compiler.compile_expr(&Lambda::Llet(
+            LetKind::Strict,
+            result.clone(),
+            Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::var(cond.clone())),
+                Box::new(Lambda::const_(Constant::int(1))),
+                Box::new(Lambda::const_(Constant::int(0))),
+            )),
+            Box::new(Lambda::var(result.clone())),
+        ));
+
+        let [result_decl] = compiled.prelude.as_slice() else {
+            panic!("expected the let-bound if to collapse into one initialized declaration");
+        };
+        let StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::Cond(test, then_expr, else_expr),
+                    ..
+                }),
+            ..
+        }) = &result_decl.desc
+        else {
+            panic!("expected a single initialized declaration for the let-bound result");
+        };
+        assert!(ident.same(&result));
+        assert!(matches!(
+            test.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&cond)
+        ));
+        assert!(matches!(
+            then_expr.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                ..
+            }
+        ));
+        assert!(matches!(
+            else_expr.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn effect_blocks_lower_ifs_without_a_result_temp() {
         let mut compiler = LambdaCompiler::new();
         let cond = Ident::create_local("cond");
@@ -8366,6 +9795,163 @@ mod tests {
                     ExpressionDesc::Number(Number::Int { i: 2, .. })
                 ) if rhs_id.same(&rhs)
             )
+        ));
+    }
+
+    #[test]
+    fn sequence_prefix_ifs_use_effect_lowering_without_result_temps() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let value = Ident::create_local("value");
+        let compiled = compiler.compile_expr(&Lambda::Lsequence(
+            Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::var(cond.clone())),
+                Box::new(Lambda::const_(Constant::int(0))),
+                Box::new(Lambda::LstaticRaise(
+                    1,
+                    vec![Lambda::const_(Constant::string("boom"))],
+                )),
+            )),
+            Box::new(Lambda::var(value.clone())),
+        ));
+
+        assert!(
+            compiled
+                .prelude
+                .iter()
+                .all(|stmt| !matches!(stmt.desc, StatementDesc::Variable(_))),
+            "effect-lowered sequence prefixes should not allocate result temps"
+        );
+
+        let [if_stmt] = compiled.prelude.as_slice() else {
+            panic!("expected a single effect-position if prelude");
+        };
+        let StatementDesc::If(_, then_block, else_block) = &if_stmt.desc else {
+            panic!("expected an effect-lowered if statement");
+        };
+        assert!(
+            matches!(
+                then_block.as_slice(),
+                [Statement {
+                    desc: StatementDesc::Throw(_),
+                    ..
+                }]
+            ) || matches!(
+                else_block.as_slice(),
+                [Statement {
+                    desc: StatementDesc::Throw(_),
+                    ..
+                }]
+            ),
+            "expected the lowered branch to throw directly"
+        );
+        assert!(matches!(
+            compiled.expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&value)
+        ));
+    }
+
+    #[test]
+    fn if_value_branches_keep_assignment_continuation_through_let_bindings() {
+        let mut compiler = LambdaCompiler::new();
+        let outer_cond = Ident::create_local("outerCond");
+        let inner_cond = Ident::create_local("innerCond");
+        let alias = Ident::create_local("alias");
+        let compiled = compiler.compile_expr(&Lambda::LifThenElse(
+            Box::new(Lambda::var(outer_cond.clone())),
+            Box::new(Lambda::Llet(
+                LetKind::Strict,
+                alias.clone(),
+                Box::new(Lambda::const_(Constant::int(1))),
+                Box::new(Lambda::LifThenElse(
+                    Box::new(Lambda::var(inner_cond.clone())),
+                    Box::new(Lambda::const_(Constant::int(2))),
+                    Box::new(Lambda::const_(Constant::int(3))),
+                )),
+            )),
+            Box::new(Lambda::const_(Constant::int(4))),
+        ));
+
+        let [result_decl, if_stmt] = compiled.prelude.as_slice() else {
+            panic!("expected a temp declaration and one if statement");
+        };
+
+        let result = match &result_decl.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => ident.clone(),
+            _ => panic!("expected a result temp declaration"),
+        };
+        let StatementDesc::If(_, then_block, else_block) = &if_stmt.desc else {
+            panic!("expected an if statement");
+        };
+
+        let [alias_decl, then_assign] = then_block.as_slice() else {
+            panic!("expected the then branch to bind the alias then assign");
+        };
+        assert!(matches!(
+            alias_decl,
+            Statement {
+                desc: StatementDesc::Variable(VariableDeclaration { ident, .. }),
+                ..
+            } if ident.same(&alias)
+        ));
+        assert!(matches!(
+            then_assign,
+            Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Bin(
+                        BinOp::Eq,
+                        lhs,
+                        rhs
+                    ),
+                    ..
+                }),
+                ..
+            } if matches!(
+                (&lhs.desc, &rhs.desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                    ExpressionDesc::Cond(test, consequent, alternate)
+                ) if lhs_id.same(&result)
+                    && matches!(
+                        test.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(test_id)),
+                            ..
+                        } if test_id.same(&inner_cond)
+                    )
+                    && matches!(consequent.desc, ExpressionDesc::Number(Number::Int { i: 2, .. }))
+                    && matches!(alternate.desc, ExpressionDesc::Number(Number::Int { i: 3, .. }))
+            )
+        ));
+        assert!(matches!(
+            else_block.as_slice(),
+            [Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Bin(
+                        BinOp::Eq,
+                        lhs,
+                        rhs
+                    ),
+                    ..
+                }),
+                ..
+            }] if matches!(
+                (&lhs.desc, &rhs.desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                    ExpressionDesc::Number(Number::Int { i: 4, .. })
+                ) if lhs_id.same(&result)
+            )
+        ));
+        assert!(matches!(
+            compiled.expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&result)
         ));
     }
 
@@ -8932,6 +10518,189 @@ mod tests {
     }
 
     #[test]
+    fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
+        let mut compiler = LambdaCompiler::new();
+        let before = Ident::create_local("before");
+        let after = Ident::create_local("after");
+        let then_fn = Ident::create_local("thenFn");
+        let else_fn = Ident::create_local("elseFn");
+        let lam = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::const_(Constant::JsTrue)),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(before.clone())),
+                        ap_args: vec![],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    Box::new(Lambda::var(then_fn.clone())),
+                )),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(after.clone())),
+                        ap_args: vec![],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    Box::new(Lambda::var(else_fn.clone())),
+                )),
+            )),
+            ap_args: vec![Lambda::const_(Constant::int(1))],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let program = compiler.compile_program(&lam);
+        let rendered = print_block(&program.block);
+        assert!(
+            !rendered.contains("let call ="),
+            "effect-context apply reintroduced a call temp:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("(1);"),
+            "effect-context apply lost the direct call:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
+        let mut compiler = LambdaCompiler::new();
+        let before = Ident::create_local("before");
+        let after = Ident::create_local("after");
+        let then_fn = Ident::create_local("thenFn");
+        let else_fn = Ident::create_local("elseFn");
+        let lam = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::const_(Constant::JsTrue)),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(before.clone())),
+                        ap_args: vec![],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    Box::new(Lambda::var(then_fn.clone())),
+                )),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(after.clone())),
+                        ap_args: vec![],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    Box::new(Lambda::var(else_fn.clone())),
+                )),
+            )),
+            ap_args: vec![Lambda::const_(Constant::int(1))],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let block = compiler.compile_return_block(&lam);
+        let rendered = print_block(&block);
+        assert!(
+            !rendered.contains("let call ="),
+            "return-context apply reintroduced a call temp:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("return call;"),
+            "return-context apply still returns the call temp:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("return ") && rendered.contains("(1);"),
+            "return-context apply lost the direct return call:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
+        let mut compiler = LambdaCompiler::new();
+        let before = Ident::create_local("before");
+        let after = Ident::create_local("after");
+        let then_fn = Ident::create_local("thenFn");
+        let else_fn = Ident::create_local("elseFn");
+        let result = Ident::create_local("result");
+        let lam = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::const_(Constant::JsTrue)),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(before.clone())),
+                        ap_args: vec![],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    Box::new(Lambda::var(then_fn.clone())),
+                )),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(after.clone())),
+                        ap_args: vec![],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    Box::new(Lambda::var(else_fn.clone())),
+                )),
+            )),
+            ap_args: vec![Lambda::const_(Constant::int(1))],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let block = compiler.compile_assign_to_target_block(&result, &lam);
+        let rendered = print_block(&block);
+        assert!(
+            !rendered.contains("let call ="),
+            "assignment-context apply reintroduced a call temp:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("= call;"),
+            "assignment-context apply still assigns from the call temp:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("result = ") && rendered.contains("(1);"),
+            "assignment-context apply lost the direct assignment call:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn function_bodies_drop_pure_undefined_sequence_suffixes() {
         let mut compiler = LambdaCompiler::new();
         let callback = Ident::create_local("callback");
@@ -9006,6 +10775,44 @@ mod tests {
             }) => assert!(id.same(&value)),
             other => panic!("expected a return of the original value, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn top_level_if_effects_drop_trailing_pure_undefined_branch_suffixes() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let then_callback = Ident::create_local("thenCallback");
+        let else_callback = Ident::create_local("elseCallback");
+        let call = |id: &Ident| {
+            Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::var(id.clone())),
+                ap_args: vec![],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            })
+        };
+        let lam = Lambda::LifThenElse(
+            Box::new(Lambda::var(cond)),
+            Box::new(Lambda::Lsequence(
+                Box::new(call(&then_callback)),
+                Box::new(Lambda::const_(Constant::none())),
+            )),
+            Box::new(Lambda::Lsequence(
+                Box::new(call(&else_callback)),
+                Box::new(Lambda::const_(Constant::none())),
+            )),
+        );
+
+        let program = compiler.compile_program(&lam);
+        let rendered = print_block(&program.block);
+        assert!(
+            !rendered.contains("undefined;"),
+            "top-level if effect branch kept a pure undefined suffix:\n{rendered}"
+        );
     }
 
     #[test]
@@ -10124,6 +11931,73 @@ mod tests {
     }
 
     #[test]
+    fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
+        let mut compiler = LambdaCompiler::new();
+        let dict_ident = Ident::create_local("stringDict");
+        let dict_value = Lambda::prim(
+            Primitive::Pmakedict,
+            vec![Lambda::prim(
+                Primitive::Pmakearray,
+                vec![Lambda::prim(
+                    Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+                    vec![
+                        Lambda::const_(Constant::string("first")),
+                        Lambda::const_(Constant::string("hello")),
+                    ],
+                    Location::none(),
+                )],
+                Location::none(),
+            )],
+            Location::none(),
+        );
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            dict_ident.clone(),
+            dict_value,
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::ModuleExport(vec![dict_ident.clone()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::var(dict_ident.clone())],
+                Location::none(),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!("expected one exported dict binding");
+        };
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Object(_, props),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&dict_ident));
+                assert_eq!(props.len(), 1);
+                assert!(matches!(
+                    &props[0],
+                    (
+                        PropertyName::Lit(name),
+                        Expression {
+                            desc: ExpressionDesc::Str { txt, .. },
+                            ..
+                        },
+                    ) if name == "first" && txt == "hello"
+                ));
+            }
+            other => panic!("expected exported dict object literal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn collects_static_module_dependencies() {
         let mut compiler = LambdaCompiler::new();
         let deps = compiler.compile_deps_program(&Lambda::global_module(
@@ -10823,9 +12697,9 @@ mod tests {
                 assert!(matches!(module.kind, Kind::Ml));
                 assert_eq!(member, "default");
             }
-            other => panic!(
-                "expected qualified ml-module access for default export, got {other:?}"
-            ),
+            other => {
+                panic!("expected qualified ml-module access for default export, got {other:?}")
+            }
         }
 
         assert_eq!(print_expression(&expr), "Es6_export.default");
@@ -10855,9 +12729,9 @@ mod tests {
                 assert!(matches!(module.kind, Kind::Ml));
                 assert_eq!(member, "catch");
             }
-            other => panic!(
-                "expected qualified ml-module access for reserved field, got {other:?}"
-            ),
+            other => {
+                panic!("expected qualified ml-module access for reserved field, got {other:?}")
+            }
         }
 
         assert_eq!(print_expression(&expr), "Js_promise2.$$catch");
@@ -11011,22 +12885,10 @@ mod tests {
             side_effect: None,
         });
 
-        let [dep_stmt, exported_stmt, side_stmt] = deps.program.block.as_slice() else {
+        let [side_stmt, exported_stmt, dep_stmt] = deps.program.block.as_slice() else {
             panic!("expected the dependency chain and impure binding to remain");
         };
 
-        match &dep_stmt.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
-                assert!(ident.same(&dep));
-            }
-            other => panic!("expected the dependency binding to remain, got {other:?}"),
-        }
-        match &exported_stmt.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
-                assert!(ident.same(&exported));
-            }
-            other => panic!("expected the exported binding to remain, got {other:?}"),
-        }
         match &side_stmt.desc {
             StatementDesc::Variable(VariableDeclaration {
                 ident,
@@ -11047,7 +12909,19 @@ mod tests {
                     } if id.same(&callback)
                 ));
             }
-            other => panic!("expected the impure binding to remain, got {other:?}"),
+            other => panic!("expected the impure binding to remain first, got {other:?}"),
+        }
+        match &exported_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&exported));
+            }
+            other => panic!("expected the exported binding to remain in the middle, got {other:?}"),
+        }
+        match &dep_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&dep));
+            }
+            other => panic!("expected the dependency binding to remain last, got {other:?}"),
         }
     }
 
@@ -11069,5 +12943,87 @@ mod tests {
             ExpressionDesc::Fun { params, .. } => assert!(params.is_empty()),
             other => panic!("expected lowered JS function, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn recursive_function_bindings_lower_directly_without_placeholder_assignments() {
+        let mut compiler = LambdaCompiler::new();
+        let func = Ident::create_local("u");
+        let param = Ident::create_local("param");
+        let lam = Lambda::letrec(
+            vec![(
+                func.clone(),
+                Lambda::function_(
+                    1,
+                    vec![param],
+                    Lambda::var(func.clone()),
+                    FunctionAttribute::default(),
+                ),
+            )],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert!(
+            rendered.contains("function u(param)"),
+            "expected a direct recursive function declaration:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("let u;"),
+            "unexpected recursive placeholder declaration:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("u ="),
+            "unexpected recursive assignment fallback:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn mutually_recursive_function_bindings_lower_without_placeholder_assignments() {
+        let mut compiler = LambdaCompiler::new();
+        let even = Ident::create_local("even");
+        let odd = Ident::create_local("odd");
+        let n = Ident::create_local("n");
+        let lam = Lambda::letrec(
+            vec![
+                (
+                    even.clone(),
+                    Lambda::function_(
+                        1,
+                        vec![n.clone()],
+                        Lambda::var(odd.clone()),
+                        FunctionAttribute::default(),
+                    ),
+                ),
+                (
+                    odd.clone(),
+                    Lambda::function_(
+                        1,
+                        vec![n],
+                        Lambda::var(even.clone()),
+                        FunctionAttribute::default(),
+                    ),
+                ),
+            ],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert!(
+            rendered.contains("function even(n)"),
+            "expected the first recursive function to lower directly:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("function odd(n)"),
+            "expected the second recursive function to lower directly:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("let even;") && !rendered.contains("let odd;"),
+            "unexpected recursive placeholders remained:\n{rendered}"
+        );
     }
 }

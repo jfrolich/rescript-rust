@@ -812,7 +812,7 @@ impl PersistentEnv {
             None => return false,
         };
         let module_path = Path::Pident(Ident::create_persistent(name));
-        add_signature_to_env(&ps.ps_sig, &module_path, env, ctx, true);
+        add_signature_to_env_with_options(&ps.ps_sig, &module_path, env, ctx, true, false, true);
         true
     }
 
@@ -976,7 +976,7 @@ fn register_sig_types_recursive<'a>(
     sig: &Signature,
     module_path: &Path,
     ctx: &'a TypeContext<'a>,
-    load_path: &[PathBuf],
+    _load_path: &[PathBuf],
 ) {
     for item in sig {
         match item {
@@ -995,78 +995,18 @@ fn register_sig_types_recursive<'a>(
                 match &md.md_type {
                     ModuleType::MtySignature(sub_sig) => {
                         // Recurse into sub-module signatures with extended path
-                        register_sig_types_recursive(sub_sig, &sub_path, ctx, load_path);
+                        register_sig_types_recursive(sub_sig, &sub_path, ctx, _load_path);
                     }
-                    ModuleType::MtyAlias(_, alias_path) => {
-                        // Module alias: resolve by loading the aliased module's CMI
-                        let alias_module_name = match alias_path {
-                            Path::Pident(alias_id) => Some(alias_id.name().to_string()),
-                            // For Pdot paths like Js_promise.Make, use the root module
-                            Path::Pdot(parent, _, _) => {
-                                if let Path::Pident(alias_id) = parent.as_ref() {
-                                    Some(alias_id.name().to_string())
-                                } else {
-                                    None
-                                }
-                            }
-                            _ => None,
-                        };
-                        if let Some(alias_name) = alias_module_name {
-                            if let Some(alias_sig) =
-                                load_module_sig_for_alias(&alias_name, ctx, load_path)
-                            {
-                                register_sig_types_recursive(&alias_sig, &sub_path, ctx, load_path);
-                            }
-                        }
-                    }
+                    // Match OCaml's lazy persistent-module behavior: don't eagerly
+                    // load aliased CMIs here just to pre-register their nested types.
+                    // Module-alias type lookup goes through module resolution later.
+                    ModuleType::MtyAlias(_, _) => {}
                     _ => {}
                 }
             }
             _ => {}
         }
     }
-}
-
-/// Load a module's signature for resolving module aliases during type registration.
-/// This is a lightweight version that doesn't use the persistent env cache.
-fn load_module_sig_for_alias<'a>(
-    name: &str,
-    ctx: &'a TypeContext<'a>,
-    load_path: &[PathBuf],
-) -> Option<Signature> {
-    let cmi_filename = format!("{}.cmi", name);
-
-    // Search load path for the CMI file
-    let full_path = find_in_path(load_path, &cmi_filename)?;
-
-    // Read and parse the CMI file
-    let cmi = cmi_format::read_cmi(&full_path).ok()?;
-
-    // Convert to Rust type structures
-    let mut sig_ctx = SigReadContext::new(ctx);
-    let signature = sig_ctx.read_signature(&cmi.cmi_sign);
-
-    Some(signature)
-}
-
-/// Search load paths for a file (case-insensitive on first character).
-fn find_in_path(load_path: &[PathBuf], filename: &str) -> Option<String> {
-    for dir in load_path {
-        let exact = dir.join(filename);
-        if exact.exists() {
-            return Some(exact.to_string_lossy().into_owned());
-        }
-        if let Some(first_char) = filename.chars().next() {
-            if first_char.is_ascii_uppercase() {
-                let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]);
-                let uncap_path = dir.join(&uncap);
-                if uncap_path.exists() {
-                    return Some(uncap_path.to_string_lossy().into_owned());
-                }
-            }
-        }
-    }
-    None
 }
 
 fn read_cmj_pure(path: &FsPath) -> Option<bool> {
@@ -1087,7 +1027,7 @@ fn read_cmj_pure(path: &FsPath) -> Option<bool> {
 /// Recursively register all types from a module type (and sub-modules) by stamp.
 /// This ensures that types referenced in function signatures can be expanded
 /// during type unification, even when the type comes from a deeply nested module.
-fn register_types_by_stamp_recursive(md_type: &ModuleType, ctx: &TypeContext<'_>) {
+pub(crate) fn register_types_by_stamp_recursive(md_type: &ModuleType, ctx: &TypeContext<'_>) {
     if let ModuleType::MtySignature(sig) = md_type {
         for item in sig {
             match item {
@@ -2598,6 +2538,16 @@ fn rewrite_type_expr_by_path_prefix(
     }
 }
 
+pub fn rewrite_type_expr_by_path_prefix_pub(
+    ty_ref: TypeExprRef,
+    old_prefix: &Path,
+    new_prefix: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    let mut visited = HashSet::new();
+    rewrite_type_expr_by_path_prefix(ty_ref, old_prefix, new_prefix, ctx, &mut visited);
+}
+
 /// Rewrite all type paths in a signature by replacing path prefix `old_prefix`
 /// with `new_prefix`. Used when resolving module aliases like `module J = Js.Json`:
 /// rewrites `Pdot(Pdot(Pident("Js"), "Json"), "Kind")` → `Pdot(Pident("J"), "Kind")`.
@@ -3017,10 +2967,24 @@ pub fn add_signature_to_env(
     ctx: &TypeContext<'_>,
     as_opened: bool,
 ) {
+    add_signature_to_env_with_options(sig_items, module_path, env, ctx, as_opened, true, true);
+}
+
+fn add_signature_to_env_with_options(
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    env: &mut Env,
+    ctx: &TypeContext<'_>,
+    as_opened: bool,
+    apply_path_subst: bool,
+    register_loaded_types: bool,
+) {
     // Apply path substitution: rewrite Tconstr paths from internal
     // (e.g., Pident "ref") to qualified (e.g., Pdot(Pident "Pervasives") "ref").
     // This matches OCaml's `prefix_idents` + `Subst.type_path` mechanism.
-    substitute_type_paths_in_sig(sig_items, module_path, ctx);
+    if apply_path_subst {
+        substitute_type_paths_in_sig(sig_items, module_path, ctx);
+    }
 
     fn collect_target_constr_nodes(
         ctx: &TypeContext<'_>,
@@ -3182,10 +3146,12 @@ pub fn add_signature_to_env(
                 }
 
                 // Also register in global type store for alias expansion
-                ctx.register_type_decl(id.name(), decl.clone());
-                // Register by stamp for types from CMI modules (non-zero stamp)
-                if id.stamp() != 0 {
-                    ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                if register_loaded_types {
+                    ctx.register_type_decl(id.name(), decl.clone());
+                    // Register by stamp for types from CMI modules (non-zero stamp)
+                    if id.stamp() != 0 {
+                        ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                    }
                 }
 
                 // Also add constructors and labels from this type
@@ -3442,7 +3408,9 @@ pub fn add_signature_to_env(
                 }
                 // Recursively register types from sub-module signatures by stamp,
                 // so that types referenced in function return types can be expanded
-                register_types_by_stamp_recursive(&md.md_type, ctx);
+                if register_loaded_types {
+                    register_types_by_stamp_recursive(&md.md_type, ctx);
+                }
             }
             SignatureItem::SigModtype(id, mtd) => {
                 if as_opened {

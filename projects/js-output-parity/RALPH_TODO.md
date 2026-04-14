@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-13
-**Status:** 184 / 657 JS snapshots passing, 0 compile errors, 473 output diffs
+**Status:** 256 / 657 JS snapshots passing, 0 compile errors, 401 output diffs
 
 ## Goal
 
@@ -35,13 +35,1010 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **184 / 657**
+- JS snapshot parity: **256 / 657**
 - Compile errors: **0**
-- Output diffs: **473**
+- Output diffs: **401**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed raw-`%%raw` payload
+  normalization slice across `compiler/core/js_exp_make.ml` together with the
+  `Ext_pp` newline-state behavior used by `compiler/core/js_dump.ml`
+- After reading OCaml's `raw_js_code` there, which builds
+  `Raw_js_code {code = String.trim s; ...}`, plus `compiler/ext/ext_pp.ml`
+  for `newline` / `at_least_two_lines`, the Rust backend now trims raw-JS
+  payloads at the matching JS-IR construction point in
+  `compiler-rust/src/lambda/compile.rs`, and the JS printer in
+  `compiler-rust/src/js_ir/printer.rs` now tracks OCaml's `last_new_line`
+  state so raw statement printers and purity trailers stop injecting extra
+  blank lines or dropping the final trailing newline
+- Added focused regression coverage in
+  `lambda::compile::tests::compile_raw_js_trims_outer_whitespace_before_js_ir_printing`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'lambda::compile::tests::compile_raw_js_trims_outer_whitespace_before_js_ir_printing' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_deps_program_keeps_blank_line_after_imports' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_4931.res -o /tmp/gpr_4931.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/gpr_4931.res` now matches its checked-in snapshot exactly
+  again, `tests/tests/src/ExternalShadow.res` remains an exact guard-file
+  match, and the raw-snippet diff files
+  `gpr_4931.res`, `gpr_4931_allow.res`, `bs_auto_uncurry_test.res`, and
+  `gpr_3492_test.res` all dropped out of `temp/rust-parity/diffs` after the
+  authoritative rerun; meanwhile `gpr_1692_test.res` still fails for the
+  separate pure-module elimination / dead-code issue, so that cluster remains
+  open
+- The authoritative JS snapshot baseline now reports **256 / 657** passing,
+  **0** compile errors, and **401** output diffs; this is a net **+5**
+  passing snapshots and **-5** output diffs from the previously recorded
+  **251 / 657**, **0** compile errors, **406** output diffs
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed unreachable-let / export-body
+  lowering slice in `compiler/core/lam_compile.ml` together with
+  `compiler/core/js_output.ml`
+- After reading OCaml's `compile_lambda` handling for `Llet` there plus
+  `Js_output.append_output` / `output_finished`, the Rust backend in
+  `compiler-rust/src/lambda/compile.rs` now stops appending unreachable let
+  body preludes after a terminating RHS prelude, stops emitting unreachable
+  declarations for let-bound values whose RHS already throws, and normalizes
+  extracted export payload values to `undefined` when the surrounding block has
+  already terminated so the legacy export-extraction path matches OCaml's
+  dropped-body behavior
+- Added focused regression coverage in
+  `lambda::compile::tests::compile_deps_program_skips_unreachable_throwing_export_binding_declaration`
+  and
+  `lambda::compile::tests::compile_deps_program_skips_unreachable_nested_throwing_export_binding_declaration`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release skips_unreachable -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release coerce_toplevel_exports_skips_unreachable_undefined_placeholder_after_throw -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/conditional/cond_a.res -o /tmp/cond_a.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/conditional/cond_a_none.res -o /tmp/cond_a_none.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/conditional/cond_a.res` and
+  `tests/tests/src/conditional/cond_a_none.res` now match their checked-in
+  snapshots exactly again, which confirms the Rust backend now drops the same
+  unreachable post-raise let/export scaffolding as OCaml; meanwhile
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change
+- The authoritative JS snapshot baseline now reports **251 / 657** passing,
+  **0** compile errors, and **406** output diffs; this is a net **+2**
+  passing snapshots and **-2** output diffs from the previously recorded
+  **249 / 657**, **0** compile errors, **408** output diffs
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed empty arrow-function body
+  printer slice in `compiler/core/js_dump.ml`
+- After reading OCaml's `pp_function` branch there for
+  `[{statement_desc = Return {expression_desc = Undefined _}}] when arrow`,
+  the Rust printer in `compiler-rust/src/js_ir/printer.rs` now emits the same
+  compact `() => {}` form for arrow functions whose body is exactly
+  `return undefined`, instead of routing them through the generic block-body
+  printer and expanding them into multi-line empty blocks
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_arrow_function_with_undefined_body_uses_compact_empty_block`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_arrow_function_with_undefined_body_uses_compact_empty_block' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_arrow_function_parenthesizes_object_literal_body' -- --exact --nocapture`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/tuple_alloc.res -o /tmp/tuple_alloc.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_while_closure.res -o /tmp/test_while_closure.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/tuple_alloc.res` now matches its checked-in snapshot
+  exactly again, `tests/tests/src/ExternalShadow.res` remains an exact
+  guard-file match, and `tests/tests/src/test_while_closure.res` no longer
+  differs on the empty `() => {}` closure shape and is reduced to separate
+  loop-lowering / declaration-order drift
+- Across cached diff artifacts, the empty-arrow-body motif
+  (`+...=> {` multiline expansion) shrank from **55** diff files to **37**
+  after the authoritative rerun; confirmed files that dropped out of the diff
+  set on this slice include `tuple_alloc.res`, `bs_auto_uncurry.res`,
+  `test_closure.res`, and `js_global_test.res`
+- The authoritative JS snapshot baseline now reports **249 / 657** passing,
+  **0** compile errors, and **408** output diffs; this is a net **+5**
+  passing snapshots and **-5** output diffs from the previously recorded
+  **244 / 657**, **0** compile errors, **413** output diffs
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed arrow-function body
+  parenthesization slice in `compiler/core/js_dump.ml`
+- After reading OCaml's `pp_function` / `function_body` path there together
+  with `exp_need_paren ~arrow:true`, the Rust printer in
+  `compiler-rust/src/js_ir/printer.rs` now applies the same arrow-specific
+  paren rule for concise bodies that are object-like expressions, instead of
+  reusing the looser generic expression paren check and emitting block-shaped
+  arrow bodies for object literals and constructor blocks
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_arrow_function_parenthesizes_object_literal_body`
+  and
+  `js_ir::printer::tests::test_print_arrow_function_parenthesizes_constructor_block_body`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_arrow_function_parenthesizes_object_literal_body' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_arrow_function_parenthesizes_constructor_block_body' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_7012_test.res -o /tmp/gpr_7012_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/react.res -o /tmp/react.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/gpr_7012_test.res` now matches its checked-in snapshot
+  exactly again, which confirms concise arrow functions returning
+  object-shaped expressions are back on the OCaml printer path; meanwhile
+  `tests/tests/src/react.res` no longer differs on the missing
+  `async () => ({ ... })` parentheses and is reduced to a separate quoted-key
+  drift on `"default"`, while `tests/tests/src/ExternalShadow.res` remains an
+  exact guard-file match after the same printer change
+- The authoritative JS snapshot baseline now reports **244 / 657** passing,
+  **0** compile errors, and **413** output diffs; this is a net **+1**
+  passing snapshot and **-1** output diff from the previously recorded
+  **243 / 657**, **0** compile errors, **414** output diffs
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed inline-record constructor-object
+  printer slice in `compiler/core/js_dump.ml`
+- After reading OCaml's `Caml_block (..., Blk_record_inlined ...)` path there,
+  the Rust printer in `compiler-rust/src/js_ir/printer.rs` now emits the
+  leading `TAG` field for inline-record variants before their payload fields,
+  instead of treating `TagInfo::RecordInlined` like a plain record object and
+  dropping the constructor tag entirely
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_inline_record_variant_keeps_tag_field`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_inline_record_variant_keeps_tag_field' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib 'js_ir::printer::tests::test_print_non_cons_constructor_keeps_tag_object_shape' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/VariantSpreads.res -o /tmp/VariantSpreads.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/object_type_spreads.res -o /tmp/object_type_spreads.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/VariantSpreads.res` and
+  `tests/tests/src/object_type_spreads.res` now match their checked-in
+  snapshots exactly again, which confirms the inline-record constructor-object
+  `TAG` field is back on the Rust path; `tests/tests/src/ExternalShadow.res`
+  remains an exact guard-file match after the same printer change
+- Across cached diff artifacts, the removed inline-record `TAG:` motif shrank
+  from **130** removed lines across **37** files to **107** removed lines
+  across **30** files after the authoritative rerun
+- The authoritative JS snapshot baseline now reports **243 / 657** passing,
+  **0** compile errors, and **414** output diffs; this is a net **+2**
+  passing snapshots and **-2** output diffs from the previously recorded
+  **241 / 657**, **0** compile errors, **416** output diffs
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed conditional-expression cleanup
+  slice in `compiler/core/js_exp_make.ml` via `econd`
+- After reading OCaml's special-case there for
+  `Seq(effect, undefined)` on both conditional arms, the Rust JS IR builder in
+  `compiler-rust/src/js_ir/mod.rs` now folds that same shape before statement
+  lowering, instead of preserving branch-local trailing `undefined` effects
+- Added focused regression coverage in
+  `lambda::compile::tests::top_level_if_effects_drop_trailing_pure_undefined_branch_suffixes`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release top_level_if_effects_drop_trailing_pure_undefined_branch_suffixes -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalExtension.res -o /tmp/ExternalExtension.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/ExternalExtension.res` and
+  `tests/tests/src/array_subtle_test.res` no longer differ on the
+  branch-local `undefined;` tails that previously followed effect-only
+  conditional arms; `ExternalExtension.res` now differs only on the older
+  `typeof (__DEV__)` parenthesization plus pure-module comment text/spacing,
+  and `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
+- The authoritative JS snapshot baseline remains **241 / 657** passing,
+  **0** compile errors, and **416** output diffs after this OCaml-aligned
+  `econd` cleanup; the headline total is flat, but the targeted conditional
+  `undefined`-tail cluster is smaller
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed recursive-function lowering
+  slice in `compiler/core/lam_compile.ml` via `compile_recursive_let`
+- After reading OCaml's recursive-let function path there, the Rust backend in
+  `compiler-rust/src/lambda/compile.rs` now routes `Lletrec` bindings whose
+  RHS is `Lfunction` through the same declared-binding path as non-rec lets,
+  instead of always falling back to a placeholder declaration followed by a
+  rebinding assignment
+- Added focused regression coverage in
+  `lambda::compile::tests::recursive_function_bindings_lower_directly_without_placeholder_assignments`
+  and
+  `mutually_recursive_function_bindings_lower_without_placeholder_assignments`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release recursive_function_bindings_lower -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/unboxed_attribute.res -o /tmp/unboxed_attribute.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/fib.res -o /tmp/fib.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/unboxed_attribute.res` and
+  `tests/tests/src/polymorphism_test.res` dropped out of
+  `temp/rust-parity/diffs`, which confirms this recursive-function
+  declaration slice now reaches at least two previously failing in-repo
+  snapshots end-to-end
+- `tests/tests/src/fib.res` no longer differs on the top-level
+  `let fib; fib = ...` recursive-function cluster; the remaining drift there is
+  now in separate conditional, loop, and mutable-state lowering for `fib`,
+  `fib2`, and `fib3`
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same backend change
+- The authoritative JS snapshot baseline now reports **241 / 657** passing,
+  **0** compile errors, and **416** output diffs; this is a net **+3**
+  passing snapshots and **-3** output diffs from the previously recorded
+  **238 / 657**, **0** compile errors, **419** output diffs
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed top-level export-coercion slice
+  at the `lam_compile_main.ml` / `J.program.exports` boundary
+- After reading OCaml's backend flow there, the Rust backend in
+  `compiler-rust/src/lambda/compile.rs` now reuses an existing top-level
+  `undefined` export binding only when the remaining suffix is limited to
+  simple effect-free non-function bindings; otherwise it keeps the trailing
+  rebound placeholder path
+- Added focused regression coverage in
+  `lambda::compile::tests::coerce_toplevel_exports_reuses_existing_undefined_binding`,
+  `coerce_toplevel_exports_keeps_undefined_rebound_after_later_effects`, and
+  `coerce_toplevel_exports_skips_unreachable_undefined_placeholder_after_throw`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ModuleWithAlias.res -o /tmp/ModuleWithAlias.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/nested_module_alias.res -o /tmp/nested_module_alias.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalScopeShadow.res -o /tmp/ExternalScopeShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/ModuleWithAlias.res`,
+  `tests/tests/src/nested_module_alias.res`, and
+  `tests/tests/src/ExternalScopeShadow.res` now match the checked-in OCaml
+  snapshots on this top-level placeholder-order cluster, while
+  `tests/tests/src/conditional/cond_a.res` and `tests/tests/src/Import.res`
+  remain separate export/declaration-order drifts
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same backend change
+- The authoritative JS snapshot baseline now reports **238 / 657** passing,
+  **0** compile errors, and **419** output diffs; this is a net **+1**
+  passing snapshot and **-1** output diff from the previously recorded
+  **237 / 657**, **0** compile errors, **420** output diffs
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed declaration-continuation slice
+  in `compiler/core/lam_compile.ml` together with `compiler/core/js_stmt_make.ml`
+- After reading OCaml's `Declare` continuation for `Lifthenelse` plus the
+  `Js_stmt_make.if_ ~declaration` merge rule for same-target assignments, the
+  Rust backend in `compiler-rust/src/lambda/compile.rs` now preserves that
+  declared-binding path for let-bound `if` values instead of always emitting
+  an uninitialized binding followed by a conditional assignment
+- Added focused regression coverage in
+  `lambda::compile::tests::let_bindings_merge_direct_if_assignments_into_initialized_declarations`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release let_bindings_merge_direct_if_assignments_into_initialized_declarations -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release let_bindings_lower_ifs_without_a_result_temp -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/alias_test.res -o /tmp/alias_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/alias_test.res` no longer differs on the split
+  `let v; v = ...` declaration/assignment shape; Rust now emits the same
+  initialized binding form as OCaml for that cluster
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same backend change
+- Across the authoritative parity run, `tests/tests/src/DictInternalRepresentation.res`
+  dropped out of `temp/rust-parity/diffs`, which confirms this declaration
+  slice reached at least one previously failing in-repo snapshot end-to-end
+- The authoritative JS snapshot baseline now reports **237 / 657** passing,
+  **0** compile errors, and **420** output diffs; this is a net **+2**
+  passing snapshots and **-2** output diffs from the previously recorded
+  **235 / 657**, **0** compile errors, **422** output diffs
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed primitive-lowering slice in
+  `compiler/core/lam_compile_primitive.ml`
+- After reading OCaml's `Pmakedict` branch there, the Rust backend in
+  `compiler-rust/src/lambda/compile.rs` now lowers `Primitive::Pmakedict`
+  to a JS object literal by unpacking the array-of-pairs payload, instead of
+  falling through to `undefined`
+- Added focused regression coverage in
+  `lambda::compile::tests::compile_deps_program_keeps_exported_dict_initializer_object_literals`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_deps_program_keeps_exported_dict_initializer_object_literals -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DictInternalRepresentation.res -o /tmp/DictInternalRepresentation.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/DictInternalRepresentation.res` no longer differs on the
+  missing top-level dict initializers (`let stringDict;` / `let intDict;`);
+  the remaining drift in that file is now only the separate let-continuation
+  split on `first$1`, `second`, and `third`
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same primitive fix
+- Across cached diff artifacts, `let stringDict;` and `let intDict;` no longer
+  appear in the JS diffs
+- The authoritative JS snapshot baseline remains **235 / 657** passing,
+  **0** compile errors, and **422** output diffs after this OCaml-aligned
+  `Pmakedict` fix; the headline total is flat, but the missing-dict-literal
+  cluster is smaller
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed continuation slice in
+  `compiler/core/lam_compile.ml` together with
+  `compiler/core/js_output.ml`
+- After reading OCaml's `compile_apply` +
+  `output_of_block_and_expression` path, the Rust backend in
+  `compiler-rust/src/lambda/compile.rs` now keeps `Lapply` on that same
+  continuation-aware path for effect, return, and assignment contexts instead
+  of materializing a synthetic `call` binding whenever the callee lowering had
+  prelude statements
+- The new Rust helper still materializes a temp in true value contexts, but
+  effect-position `apply`, `return (apply ...)`, and `result = apply ...`
+  now append the call directly after the prelude, which matches the OCaml
+  backend contract more closely
+- Added focused regression coverage in:
+  `lambda::compile::tests::effect_context_calls_with_arg_preludes_skip_intermediate_call_temps`,
+  `return_context_calls_with_arg_preludes_skip_intermediate_call_temps`, and
+  `assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release skip_intermediate_call_temps -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/arity_infer.res -o /tmp/arity_infer.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/arity_infer.res` no longer differs on the synthetic
+  `let call = ...; return call;` pattern in `f0`, `f1`, and `f3`; the
+  remaining drift there is now limited to the older temp-name / switch-format
+  mismatch (`tmp` vs `ifres` / `$$switch`, plus `case 0 :` formatting)
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same continuation change
+- Across cached diff artifacts, files whose diffs still contain `let call =`
+  dropped from **16** to **5** in this iteration, and `return call;` no longer
+  appears in the cached JS diffs
+- The authoritative JS snapshot baseline remains **235 / 657** passing,
+  **0** compile errors, and **422** output diffs after this OCaml-aligned
+  continuation fix; the headline total is flat, but the apply-continuation
+  cluster is materially smaller
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed alias-removal slice in
+  `compiler/core/lam_pass_remove_alias.ml`
+- After reading OCaml's fallback for
+  `Pval_from_option_not_nest (Lvar v) -> v`, the Rust JS-backend simplifier in
+  `compiler-rust/src/lambda/simplify.rs` now applies the same rewrite even when
+  the value was not introduced by the narrower nullable-wrapper tracking
+- Added focused regression coverage in
+  `lambda::simplify::tests::unboxes_plain_val_from_option_not_nest_vars`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib unboxes_plain_val_from_option_not_nest_vars -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib rewrites_nullable_alias_checks_to_raw_nullable_predicates -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/json_decorders.res -o /tmp/json_decorders.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/json_decorders.res` now collapses the optional-email branch
+  to a single conditional assignment
+  (`ifres = email !== undefined ? (typeof email === "string" ? email : undefined) : undefined`)
+  instead of the older nested alias + branch-body form
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same simplifier change
+- The authoritative JS snapshot baseline remains **235 / 657** passing,
+  **0** compile errors, and **422** output diffs after this OCaml-aligned
+  alias-removal fix; the headline total is flat, but the optional-unbox drift
+  in `json_decorders.res` is measurably narrower
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed assignment-continuation slice in
+  `compiler/core/lam_compile.ml`
+- After reading OCaml's `compile_ifthenelse` handling for `Assign id`,
+  the Rust backend in `compiler-rust/src/lambda/compile.rs` now routes complex
+  value-position `if` branches through `compile_assign_to_target_block`
+  instead of compiling branch values first and assigning them afterward
+- The same Rust assignment helper now threads through `Llet` and `Lsequence`,
+  which matches the OCaml continuation flow more closely and lets nested
+  switches/conditionals assign directly into the outer result slot
+- Added focused regression coverage in
+  `lambda::compile::tests::if_value_branches_keep_assignment_continuation_through_let_bindings`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib if_value_branches_keep_assignment_continuation_through_let_bindings -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib sequence_prefix_ifs_use_effect_lowering_without_result_temps -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/json_decorders.res -o /tmp/json_decorders.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_2682_test.res -o /tmp/gpr_2682_test.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/json_decorders.res` no longer differs on the nested
+  `$$switch` temporary inside the optional-email branch; the remaining drift in
+  that file is the outer conditional-assignment shape around the final result
+  slot
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match, and
+  `tests/tests/src/gpr_2682_test.res` stays reduced to the separate raw-JS
+  formatting drift only
+- Across cached diff artifacts, files whose diffs still contain `let ifres`
+  dropped from **27** to **24** in this iteration
+- The authoritative JS snapshot baseline remains **235 / 657** passing,
+  **0** compile errors, and **422** output diffs after this OCaml-aligned
+  continuation fix; the global total is flat, but the remaining
+  value-position conditional cluster is smaller and more localized
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed effect-continuation slice in
+  `compiler/core/lam_compile.ml`
+- After reading OCaml's `Lsequence` lowering there, the Rust backend in
+  `compiler-rust/src/lambda/compile.rs` now compiles the first operand of
+  `Lambda::Lsequence` through the same effect-position path instead of the
+  generic value-expression path
+- The new `compile_effect_output` helper preserves OCaml's
+  `EffectCall Not_tail` behavior for sequence prefixes, nested effect-position
+  `if` lowering, switches, static catches, and lets, which removes synthetic
+  result temporaries from effect-only control-flow
+- Added focused regression coverage in
+  `lambda::compile::tests::sequence_prefix_ifs_use_effect_lowering_without_result_temps`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release --lib sequence_prefix_ifs_use_effect_lowering_without_result_temps -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_2682_test.res -o /tmp/gpr_2682_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/gpr_2682_test.res` no longer differs on the old
+  `let ifres; if (...) { ... } else { throw ...; ifres = undefined; }`
+  assert scaffold; the remaining drift in that file is down to separate raw-JS
+  formatting details
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same backend change
+- Across cached diff artifacts, files whose diffs still contain `let ifres`
+  dropped from **37** to **27** in this iteration
+- The authoritative JS snapshot baseline now reports **235 / 657** passing,
+  **0** compile errors, and **422** output diffs; this is a net **+1**
+  passing snapshot and **-1** output diff from the previously recorded
+  **234 / 657**, **0** compile errors, **423** output diffs
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed printer slice in
+  `compiler/core/js_dump.ml`
+- After reading the OCaml `Array`, `Object`, and `Caml_block` constructor
+  branches there, the Rust printer in `compiler-rust/src/js_ir/printer.rs`
+  now follows the same vertical-layout rules more closely:
+  non-singleton JS arrays print with one item per line, cons / constructor /
+  polyvariant object blocks print through the shared object-literal path, and
+  numeric-field record blocks that lower to arrays now use the same multiline
+  array layout too
+- This removes the old compact-array / compact-record / compact-constructor
+  byte drift that was still visible after the earlier list-comment fix
+- Added focused regression coverage in:
+  `js_ir::printer::tests::test_print_array`,
+  `test_print_cons_constructor_as_hd_tl_object`,
+  `test_print_non_cons_constructor_keeps_tag_object_shape`, and
+  `test_print_numeric_named_record_as_array`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_array -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_cons_constructor_as_hd_tl_object -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_non_cons_constructor_keeps_tag_object_shape -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_numeric_named_record_as_array -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact harness-mode AST repro for `tests/tests/src/Import.res` from
+    `tests/tests/lib/bs` using the checked-in `compiler-args`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/Import.res` no longer differs on the nested list literal or
+  multiline array-return shape; its remaining drift is now only the later
+  statement-order issue around `each` / `each2`
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same printer change
+- The authoritative JS snapshot baseline now reports **234 / 657** passing,
+  **0** compile errors, and **423** output diffs; this is a net **+39**
+  passing snapshots and **-39** output diffs from the previously recorded
+  **195 / 657**, **0** compile errors, **462** output diffs
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed constant-lowering / dumper
+  metadata slice in `compiler/core/lam_compile_const.ml` and
+  `compiler/core/js_dump.ml`
+- After reading those OCaml files, the Rust backend now preserves
+  `Lam_constant.string_of_pointer_info` comments on numeric constants instead of
+  dropping them in `compiler-rust/src/lambda/compile.rs`
+- This specifically restores the `/* [] */0` empty-list marker on the JS IR
+  node for constructor-backed numeric zero, which is how OCaml keeps list-tail
+  and empty-list literals annotated all the way into `js_dump.ml`
+- The same Rust-side helper now preserves other pointer-info comments like
+  `assert_false` and named constructor/polyvariant comments when they lower to
+  numeric literals instead of strings
+- Added focused regression coverage in
+  `lambda::compile::tests::compile_constant_empty_list_keeps_numeric_zero_with_pointer_comment`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_constant_empty_list_keeps_numeric_zero_with_pointer_comment -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Import.res -o /tmp/Import.mjs`
+  - exact harness-mode AST repro for `tests/tests/src/belt_list_test.res` from
+    `tests/tests/lib/bs` using the checked-in `compiler-args`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/Import.res` now preserves `/* [] */0` in the generated JS;
+  its remaining drift is the separate statement-order / compact-array /
+  compact-record printer cluster, not missing constant comments
+- The broader list-heavy harness repro for `tests/tests/src/belt_list_test.res`
+  now also preserves `/* [] */0` throughout the emitted output
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change
+- Across cached diff artifacts, files whose diffs still contain missing
+  `/* [] */0` markers dropped from **62** to **60** in this iteration
+- The authoritative JS snapshot baseline now reports **195 / 657** passing,
+  **0** compile errors, and **462** output diffs; this is a net **+1** passing
+  snapshot and **-1** output diff from the freshly re-baselined
+  **194 / 657**, **0** compile errors, **463** output diffs that preceded this
+  fix
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  but this iteration isolated and fixed one OCaml-backed nontermination guard
+  in `compiler/core/lam_pass_remove_alias.ml`
+- After reading that OCaml pass, the Rust JS-backend simplifier now follows the
+  same recursive-apply avoidance direction more closely:
+  `compiler-rust/src/lambda/simplify.rs` now refuses to re-inline a named
+  function when the argument reaches that same function through the
+  simplifier-visible alias/block environment, not just when the raw argument
+  syntax directly mentions the callee
+- This specifically fixes the hidden `g(A(g))` / `let x = A(g) in g x`
+  re-inline loop that was overflowing the Rust compiler stack during
+  `src/a_recursive_type.res`
+- Added focused regression coverage in
+  `lambda::simplify::tests::does_not_reinline_named_function_through_block_aliases`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release does_not_reinline_named_function_through_block_aliases -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/a_recursive_type.res -o /tmp/a_recursive_type.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - exact harness-mode AST repro for `tests/tests/src/Import.res` from
+    `tests/tests/lib/bs` using the checked-in `compiler-args`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/a_recursive_type.res` no longer aborts with a Rust stack
+  overflow and now emits regular JS output under timeout; its remaining drift is
+  ordinary backend parity work around recursive-record lowering and export
+  coercion (`let xx = {}; xx.xx = xx;` vs `let xx; xx = {xx: xx};`, plus extra
+  exports)
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same simplifier change
+- The authoritative wrapper numbers remain **194 / 657** passing, **1** compile
+  error, and **462** output diffs, but the lone compile-error label moved off
+  `src/a_recursive_type.res`
+- The current remaining harness artifact is
+  `temp/rust-parity/diffs/js_src_Import.res.err`; however, an exact AST-mode
+  repro for `Import.res` now exits successfully and produces a normal JS diff,
+  so the next iteration should treat `Import.res` as a downstream output-shape
+  issue or a harness/output-path classification problem rather than another
+  backend crash
+- Older iteration notes follow below
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration verified one OCaml-backed alias-cleanup / JS-pass slice in
+  `compiler/core/lam_pass_lets_dce.ml` and
+  `compiler/core/js_pass_flatten_and_mark_dead.ml`
+- After reading those OCaml passes, the Rust JS backend now matches OCaml more
+  closely in two places:
+  `compiler-rust/src/lambda/simplify.rs` now inlines non-exported single-use,
+  uncaptured `Alias` lets on the JS backend path, and
+  `compiler-rust/src/lambda/compile.rs` now allocates
+  `flatten_and_mark_dead` helper bindings from a fresh `IdGenerator` seeded
+  above the program's current max stamp instead of `Ident::create_local`
+- The simplify port removes the stale `let set = match[1]; let get = match[0];`
+  shape before JS lowering for the `React.useState`/module-block cluster,
+  which is the same alias-cleanup direction OCaml takes before
+  `js_pass_flatten_and_mark_dead`
+- The JS-pass identifier fix removes stamp collisions between newly introduced
+  helper bindings like `StandardNotation_get` and pre-existing exported module
+  bindings, which was the direct cause of the wrong
+  `let StandardNotation_get = {...}; export { StandardNotation_get as StandardNotation }`
+  corruption seen during focused repro
+- Added focused regression coverage in
+  `lambda::simplify::tests::inlines_single_use_alias_field_reads_into_module_blocks`
+  and
+  `lambda::simplify::tests::does_not_inline_captured_single_use_aliases`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release inlines_single_use_alias_field_reads_into_module_blocks`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release does_not_inline_captured_single_use_aliases`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UncurriedExternals.res -o /tmp/UncurriedExternals.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/UncurriedExternals.res` now has the correct
+  `StandardNotation` module binding/export shape again; the remaining drift in
+  that file is down to the known `let <ident> = this ;` spacing detail
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same backend changes
+- The authoritative harness now reports one remaining compile-failure artifact:
+  `temp/rust-parity/diffs/js_src_a_recursive_type.res.err` records a Rust
+  stack overflow for `src/a_recursive_type.res`
+- The authoritative JS snapshot baseline now reports **194 / 657** passing,
+  **1** compile error, and **462** output diffs after this OCaml-aligned
+  alias-cleanup / JS-pass identifier fix; this is a net **+6** passing
+  snapshots over the previously recorded baseline
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration verified one OCaml-backed `Pjs_fn_make`/method-function
+  slice without changing the authoritative wrapper baseline yet
+- After reading `compiler/core/lam_compile.ml`,
+  `compiler/core/lam_eta_conversion.ml`, and `compiler/core/js_dump.ml`,
+  the Rust backend now moves direct `PjsFnMake` arity adjustment into
+  `compiler-rust/src/lambda/simplify.rs`, matching the OCaml stage boundary
+  more closely instead of doing the adjustment late during JS IR lowering in
+  `compiler-rust/src/lambda/compile.rs`
+- `compiler-rust/src/js_ir/printer.rs` now matches OCaml method-function
+  dumping more closely for this slice:
+  method expressions omit the synthetic leading `this` parameter from the
+  printed formal argument list, emit a `let <ident> = this;` binding only when
+  that synthetic parameter is actually used, and print top-level method-valued
+  bindings as named `function ...` declarations
+- The printer follow-up in the same file also removes the transient
+  `=>  {` arrow-body spacing regression introduced while wiring the method
+  body printer, restoring the wrapper baseline after the backend change
+- Added focused regression coverage in:
+  `lambda::simplify::tests::adjusts_direct_pjs_fn_make_callbacks_to_requested_arity_during_simplify`,
+  `beta_reduces_downarity_pjs_fn_make_calls_before_js_lowering`,
+  `beta_reduces_fully_applied_returned_pjs_fn_make_wrappers`,
+  plus the existing method printer tests in `js_ir::printer`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release pjs_fn_make -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release method_function -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release function_expression_preserves_raw_directive -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UncurriedExternals.res -o /tmp/UncurriedExternals.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/arity_deopt.res` no longer shows the old extra
+  callback-wrapper drift from late `PjsFnMake` lowering; after the printer
+  spacing fix it is back to the same global baseline accounting as before
+- `tests/tests/src/UncurriedExternals.res` now matches the OCaml callback shape
+  more closely in the `@this` / direct-callback cluster; the remaining drift in
+  that file is the `let <ident> = this ;` spacing detail plus the separate
+  `React.useState` destructuring/binding-order issue
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change
+- The authoritative JS snapshot baseline remains **188 / 657** passing,
+  **0** compile errors, and **469** output diffs after this OCaml-aligned
+  backend/printer cleanup; this is a net **0** from the previously recorded
+  baseline, but the late-wrapper drift in this cluster is no longer the
+  active blocker
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-aligned eta-wrapper slice on the JS
+  backend path: value-level functions that do nothing except forward their
+  parameters into the same `Primitive_*` runtime compare/equal/order/min/max
+  helpers OCaml later emits as direct member aliases
+- After reading the OCaml backend path around
+  `compiler/core/lam_compile_primitive.ml`,
+  `compiler/core/lam_compile.ml`,
+  `compiler/core/lam.ml`, and
+  `compiler/core/lam_eta_conversion.ml`, the Rust fix landed in
+  `compiler-rust/src/lambda/compile.rs`:
+  eta-wrapped runtime-helper functions now lower directly to the corresponding
+  qualified runtime member expression instead of always materializing a JS
+  wrapper function
+- The new Rust-side aliasing covers the same runtime-helper family visible in
+  the OCaml snapshots for value-level compare helpers:
+  `Primitive_object.{compare,equal,notequal,lessthan,lessequal,greaterthan,greaterequal}`,
+  `Primitive_bool.{compare,min,max}`,
+  `Primitive_int.{compare,min,max}`,
+  `Primitive_float.{compare,min,max}`,
+  `Primitive_bigint.{compare,min,max}`, and
+  `Primitive_string.{compare,min,max}`
+- Added focused regression coverage in:
+  `lambda::compile::tests::compile_eta_wrapped_object_compare_function_aliases_runtime_member`,
+  `compile_eta_wrapped_float_compare_function_aliases_runtime_member`, and
+  `compile_eta_wrapped_float_equality_stays_as_function`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release eta_wrapped_ -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_obj_order_uses_primitive_object_compare -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/console_log_test.res -o /tmp/console_log_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/console_log_test.res` now matches its checked-in snapshot
+  exactly again, and `tests/tests/src/ExternalShadow.res` remains an exact
+  guard-file match after the same change
+- The direct helper-alias drift is gone from the remaining diff artifacts:
+  there are now **0** snapshot diffs left whose first mismatch is an expected
+  `let ... = Primitive_*.{compare,equal,notequal,lessthan,lessequal,greaterthan,greaterequal,min,max};`
+  alias replaced by a Rust wrapper function
+- `tests/tests/src/float_test.res` improved materially but still fails on a
+  later callback/destructuring cleanup shape around
+  `[[1, 3], [2, 1], [3, 2]].map(...)`; the old top-of-file runtime-helper alias
+  wrappers are gone there
+- `tests/tests/src/int_map.res` also improved inside this cluster: the compare
+  alias is now correct, and the remaining drift is a later temporary-binding
+  shape (`let call = ...; let IntCmp = call;`) rather than missing helper
+  aliasing
+- The authoritative JS snapshot baseline now reports **188 / 657** passing,
+  **0** compile errors, and **469** output diffs after this eta-wrapped
+  runtime-helper alias port; this is a net **+3** over the previously recorded
+  baseline
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed comparison/runtime-helper slice
+  in `compiler/core/lam_compile_primitive.ml` plus one still-separate strict
+  comparison route that is not fully wired into the emitting backend yet
+- `compiler-rust/src/lambda/compile.rs` now matches the OCaml backend more
+  closely for the missing primitive comparison/order/min/max families:
+  `Pobjcomp`, `Pobjorder`, `Pobjmin`, `Pobjmax`, `Pboolorder`,
+  `Pboolmin`, `Pboolmax`, `Pintorder`, `Pintmin`, `Pintmax`,
+  `Pfloatorder`, `Pfloatmin`, `Pfloatmax`, `Pbigintorder`,
+  `Pbigintmin`, `Pbigintmax`, `Pstringorder`, `Pstringmin`, and
+  `Pstringmax` now lower to the corresponding `Primitive_*` runtime helpers or
+  the same literal fast paths OCaml uses instead of falling through to
+  `undefined`
+- `compiler-rust/src/js_ir/mod.rs` now folds strict null/undefined comparisons
+  against side-effect-free bool/number/typeof/function/array/caml-block
+  expressions in the shared JS IR builder, matching the OCaml
+  `js_exp_make.ml` nullish strict-comparison behavior closely enough for the
+  backend paths that already route through this builder
+- Added focused regression coverage in:
+  `lambda::compile::tests::compile_int_order_uses_primitive_int_compare`,
+  `compile_string_order_uses_primitive_string_compare`,
+  `compile_obj_compare_against_null_uses_strict_equality`,
+  `compile_obj_compare_null_against_number_literal_folds_false`,
+  `compile_obj_notequal_undefined_against_number_literal_folds_true`,
+  `compile_obj_order_uses_primitive_object_compare`,
+  `compile_bigint_min_literals_use_conditional_fast_path`,
+  `js_ir::tests::test_strict_eq_null_against_number_folds_false`,
+  `test_strict_neq_undefined_against_number_folds_true`, and
+  `test_strict_eq_null_against_variable_is_preserved`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_int_order_uses_primitive_int_compare' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_string_order_uses_primitive_string_compare' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_obj_compare_against_null_uses_strict_equality' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_obj_compare_null_against_number_literal_folds_false' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_obj_notequal_undefined_against_number_literal_folds_true' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_obj_order_uses_primitive_object_compare' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'lambda::compile::tests::compile_bigint_min_literals_use_conditional_fast_path' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'js_ir::tests::test_strict_eq_null_against_number_folds_false' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'js_ir::tests::test_strict_neq_undefined_against_number_folds_true' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release 'js_ir::tests::test_strict_eq_null_against_variable_is_preserved' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - focused harness-accurate snapshot repros for
+    `tests/tests/src/string_set.res`,
+    `tests/tests/src/bs_min_max_test.res`, and
+    `tests/tests/src/ExternalShadow.res`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/string_set.res` improved materially inside this cluster:
+  the old cached baseline diff emitted `undefined | 0` in the comparator path,
+  while the fresh direct repro now emits `Primitive_string.compare(...)` there
+  and drops from **481** diff lines to **462** diff lines, even though the file
+  still fails on broader recursive/function-shape drift
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change
+- `tests/tests/src/bs_min_max_test.res` still fails because the remaining
+  `undefined !== 5` vs `true` drift is coming through a separate strict
+  comparison route, which indicates a follow-up backend-routing or JS-pass
+  cleanup task rather than another missing `Primitive_*` helper lowering
+- The authoritative JS snapshot baseline now reports **185 / 657** passing,
+  **0** compile errors, and **472** output diffs after this comparison/runtime
+  helper port; this is a net **+1** over the previously recorded baseline
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  but this iteration isolated one still-missing post-lowering alias
+  simplification slice that feeds the initial JS IR before any JS pass runs
+- OCaml `-bs-diagnose` pass dumps for `tests/tests/src/ExternalScopeShadow.res`
+  showed the correct statement order already present in
+  `tests/tests/src/ExternalScopeShadow.01.initial.jsx`:
+  the trailing `let MyURL;` placeholder is introduced only after
+  `Lam_pass_remove_alias` collapses the export payload to
+  `Const_module_alias`, so this was not a `js_pass_external_shadow`,
+  `Js_shake`, or printer-ordering bug after all
+- `compiler-rust/src/lambda/simplify.rs` now matches
+  `compiler/core/lam_pass_remove_alias.ml` more closely on the Rust JS path for
+  direct `TagInfo::ModuleExport` payloads:
+  Rust now simplifies only the direct exported bindings whose current
+  substitution is `Const_module_alias`, while still preserving ordinary direct
+  export vars for the existing same-name export and trailing-effect coercion
+  behavior
+- This restores the OCaml pipeline for module-alias exports such as
+  `module MyURL = URL`:
+  the inert source-position alias payload now collapses to
+  `Const_module_alias`, later export coercion synthesizes the fresh trailing
+  export placeholder, and the final JS regains OCaml's
+  `globalThis.URL.revokeObjectURL(...); ...; let MyURL;` order
+- Added focused regression coverage in
+  `lambda::simplify::tests::simplifies_module_alias_export_payloads_before_export_coercion`
+  and reran the existing `compile_deps_program_*` export-coercion guard tests
+  to confirm the narrowed module-alias rule does not perturb the previously
+  verified same-name export cases
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release simplifies_module_alias_export_payloads_before_export_coercion -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_deps_program_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalScopeShadow.res -o /tmp/ExternalScopeShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/ExternalScopeShadow.res` now matches its checked-in `.mjs`
+  snapshot exactly again, `tests/tests/src/ExternalShadow.res` remains an exact
+  guard-file match, and the focused diff artifacts for both files are now absent
+- The authoritative JS snapshot baseline now reports **184 / 657** passing,
+  **0** compile errors, and **473** output diffs after this OCaml-aligned
+  module-alias export simplification fix; this is a net **+4** over the
+  previously recorded baseline
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration took a contained OCaml-aligned printer slice that was
+  still blocking exact JS snapshots across several files
+- `compiler-rust/src/js_ir/printer.rs` now matches
+  `compiler/core/js_dump.ml` `Number (Float {f})` more closely by routing float
+  literals through the OCaml `compiler/core/js_number.ml`
+  `caml_float_literal_to_js_string` behavior instead of printing the raw parsed
+  literal text unchanged
+- Rust now strips OCaml-only float-literal syntax that should not survive into
+  emitted JS byte-for-byte, including trailing dots and underscores on
+  integral-valued float literals, and it also normalizes simple hexadecimal
+  float-literal tokens like `0x10` to the decimal JS shape OCaml prints
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_number` for integral float-literal
+  normalization cases: `1. -> 1`, `0012. -> 12`, `-0. -> -0`, and
+  `0x10 -> 16`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_number -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/b.res -o /tmp/b.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/attr_test.res -o /tmp/attr_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/external_ppx.res -o /tmp/external_ppx.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/b.res`, `tests/tests/src/attr_test.res`,
+  `tests/tests/src/external_ppx.res`, and `tests/tests/src/js_math_test.res`
+  now match their checked-in snapshots exactly, while
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same printer change
+- The authoritative JS snapshot baseline now reports **180 / 657** passing,
+  **0** compile errors, and **477** output diffs after this OCaml-aligned
+  float-literal printer port; this is a net **+5** over the previous recorded
+  baseline
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  but this iteration also fixed one still-missing late-Phase-3 primitive slice
+  in `compiler/core/lam_compile_primitive.ml`
+- `compiler-rust/src/lambda/compile.rs` now matches the OCaml backend for
+  exception primitives more closely:
+  `Pcreate_extension` lowers to
+  `/* @__PURE__ */Primitive_exceptions.create(...)` and `Pwrap_exn` lowers to
+  `Primitive_exceptions.internalToException(...)` instead of falling through to
+  `undefined`
+- The same file now also matches `compiler/core/js_shake.ml` more closely on
+  toplevel retention order:
+  the previous Rust-only extra reverse after flattening was wrong because
+  OCaml's `List.rev @@ rev_toplevel_flatten` already restores source order
+- `compiler-rust/src/js_ir/printer.rs` now matches the OCaml pure-runtime-call
+  byte shape more closely by printing expression comments without an extra
+  space before the callee, e.g.
+  `/* @__PURE__ */Primitive_exceptions.create(...)`
+- Added focused regression coverage for this slice in:
+  - `lambda::compile::tests::compile_create_extension_uses_primitive_exceptions_create`
+  - `lambda::compile::tests::compile_wrap_exn_uses_primitive_exceptions_internal_to_exception`
+  - `lambda::compile::tests::compile_deps_program_preserves_toplevel_binding_order_during_shake`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_create_extension_uses_primitive_exceptions_create -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_wrap_exn_uses_primitive_exceptions_internal_to_exception -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_deps_program_preserves_toplevel_binding_order_during_shake -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/internal_unused_test.res -o /tmp/internal_unused_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_exception_escape.res -o /tmp/test_exception_escape.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/internal_unused_test.res` now matches exactly, and
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the corrected `Js_shake` order rule
+- Remaining exception-heavy files such as
+  `tests/tests/src/test_exception_escape.res`,
+  `tests/tests/src/exception_raise_test.res`,
+  `tests/tests/src/exception_value_test.res`, and
+  `tests/tests/src/js_exception_catch_test.res` still differ, but they have
+  moved on from missing `Primitive_exceptions.create(...)` lowering to later
+  try/catch and declaration-order shaping
+- The authoritative JS snapshot baseline now reports **175 / 657** passing,
+  **0** compile errors, and **482** output diffs after this OCaml-aligned
+  exception-primitive plus corrected-`Js_shake` order fix; this is a net
+  **+5** over the previous recorded baseline
+
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed on the OCaml post-lowering safe-alias
+  path for module field reads instead of treating the surviving import/module
+  alias temporaries as printer drift
+- `compiler-rust/src/lambda/simplify.rs` now matches another slice of
+  `compiler/core/lam_util.ml` `refine_let` / `is_safe_to_alias` more closely on
+  the Rust JS path: module-field reads are now considered substitutable not
+  just when they come from `Lglobal_module`, but also when they come from a
+  local module variable (`Lvar`) like the awaited import bindings OCaml already
+  aliases through
+- This removes another OCaml-backed class of redundant locals before JS
+  lowering, including shapes like `let each = O.forEach` inside module blocks
+  and `let b = MS.forEach` before grouped tuple returns; Rust now lowers those
+  through the same direct member-access shape OCaml uses
+- Added focused regression coverage in
+  `lambda::simplify::tests::aliases_module_field_reads_from_local_module_bindings_into_tuple_blocks`
+  and reran
+  `lambda::simplify::tests::refines_immediate_module_field_reads_over_awaited_imports`
+  so this stays pinned to the OCaml `SafeAlias` predicate rather than a single
+  snapshot file
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release module_field_reads -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Import.res -o /tmp/Import.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/Import.res` now narrows again: the extra Rust-side alias
+  locals around awaited module field reads in the grouped/module-return path are
+  gone, including the old `let b = MS.forEach` helper in `f6`; the remaining
+  drift in that file is now later compaction and list-formatting byte shape
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change, which confirms this aliasing slice stays isolated from the
+  already-stable external-shadow path
+- The authoritative JS snapshot baseline now reports **188 / 657** passing,
+  **0** compile errors, and **469** output diffs after this OCaml-aligned local
+  module-field alias port; this is a net **+1** over the previous recorded
+  baseline
+
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this iteration stayed on the OCaml post-lowering let
+  refinement path that feeds JS IR instead of treating the surviving dynamic
+  import temporaries as printer-only drift
+- `compiler-rust/src/lambda/simplify.rs` now matches another slice of
+  `compiler/core/lam_util.ml` `refine_let` and
+  `compiler/core/lam_pass_lets_dce.ml` more closely on the Rust JS path:
+  immediate let-bound uses now collapse before JS lowering for the OCaml-backed
+  cases `let x = e in x`, `let x = e in prim x` (excluding block constructors),
+  and `let x = e in f x` when the callee does not capture `x`
+- This specifically removes the extra Rust backend temporary around awaited
+  module field reads, so expressions like `let M3 = await Belt.List; M3.forEach`
+  can lower through the same direct member-access shape OCaml uses when the
+  binding is consumed immediately
+- Added focused regression coverage in
+  `lambda::simplify::tests::refines_immediate_module_field_reads_over_awaited_imports`
+  so this stays pinned to the OCaml `refine_let` primitive-use rewrite rather
+  than a single snapshot file
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release refines_immediate_module_field_reads_over_awaited_imports -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Import.res -o /tmp/Import.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- `tests/tests/src/Import.res` now narrows materially: the Rust side now emits
+  the OCaml direct-awaited-member shape for the immediate-use cases in `f`,
+  `f1`, and `f4`, instead of first materializing a temporary module binding;
+  the remaining drift in that file has moved on to later alias naming and
+  statement/compaction shape such as `each` rebinding and the `f6` tuple helper
+- `tests/tests/src/ExternalShadow.res` remains an exact guard-file match after
+  the same change, which confirms this `refine_let` slice stays isolated from
+  the already-stable external-shadow path
+- The authoritative JS snapshot baseline now reports **187 / 657** passing,
+  **0** compile errors, and **470** output diffs after this OCaml-aligned
+  immediate-let-use refinement port; this is a net **+3** over the previous
+  recorded baseline
 
 - Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
   from `PLAN.md`; this iteration stayed on the OCaml float-exponentiation

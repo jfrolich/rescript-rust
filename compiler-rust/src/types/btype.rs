@@ -18,6 +18,7 @@ use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, GENERIC_LEVEL, LOWEST_LEVEL, PIVOT_LEVEL, RowDesc, RowField,
     TypeDesc, TypeExprRef,
 };
+use std::borrow::Cow;
 
 // ============================================================================
 // Type Level Constants
@@ -112,12 +113,27 @@ pub fn row_repr(ctx: &TypeContext<'_>, row: &RowDesc) -> RowDesc {
     row_repr_aux(ctx, &[], row)
 }
 
-fn row_repr_aux(ctx: &TypeContext<'_>, ll: &[Vec<(String, RowField)>], row: &RowDesc) -> RowDesc {
+pub fn row_repr_ref<'a>(ctx: &'a TypeContext<'a>, row: &'a RowDesc) -> Cow<'a, RowDesc> {
+    let more = ctx.repr(row.row_more);
+    let desc = ctx.get_desc(more);
+    if matches!(&*desc, TypeDesc::Tvariant(_)) {
+        drop(desc);
+        Cow::Owned(row_repr(ctx, row))
+    } else {
+        Cow::Borrowed(row)
+    }
+}
+
+fn row_repr_aux(
+    ctx: &TypeContext<'_>,
+    ll: &[Vec<(crate::types::asttypes::Label, RowField)>],
+    row: &RowDesc,
+) -> RowDesc {
     let more = ctx.repr(row.row_more);
     match &*ctx.get_desc(more) {
         TypeDesc::Tvariant(inner_row) => {
             let f = &row.row_fields;
-            let new_ll: Vec<Vec<(String, RowField)>> = if f.is_empty() {
+            let new_ll: Vec<Vec<(crate::types::asttypes::Label, RowField)>> = if f.is_empty() {
                 ll.to_vec()
             } else {
                 let mut new_ll = vec![f.clone()];
@@ -168,13 +184,13 @@ pub fn row_field(ctx: &TypeContext<'_>, tag: &str, row: &RowDesc) -> RowField {
 
 /// Check if a row is fixed.
 pub fn row_fixed(ctx: &TypeContext<'_>, row: &RowDesc) -> bool {
-    let row = row_repr(ctx, row);
     if row.row_fixed {
         return true;
     }
 
     let more = ctx.repr(row.row_more);
     match &*ctx.get_desc(more) {
+        TypeDesc::Tvariant(inner_row) => row_fixed(ctx, inner_row),
         TypeDesc::Tvar(_) | TypeDesc::Tnil => false,
         TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. } => true,
         _ => false,
@@ -183,7 +199,7 @@ pub fn row_fixed(ctx: &TypeContext<'_>, row: &RowDesc) -> bool {
 
 /// Check if a row is static (closed with no Reither fields).
 pub fn static_row(ctx: &TypeContext<'_>, row: &RowDesc) -> bool {
-    let row = row_repr(ctx, row);
+    let row = row_repr_ref(ctx, row);
     row.row_closed
         && row
             .row_fields

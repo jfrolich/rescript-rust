@@ -588,6 +588,9 @@ impl Expression {
 
     /// Create a binary operation
     pub fn bin(op: BinOp, left: Expression, right: Expression) -> Self {
+        if let Some(value) = fold_strict_nullish_comparison(op, &left, &right) {
+            return Expression::bool(value);
+        }
         Self::new(ExpressionDesc::Bin(op, Box::new(left), Box::new(right)))
     }
 
@@ -598,6 +601,25 @@ impl Expression {
 
     /// Create a conditional expression
     pub fn cond(test: Expression, consequent: Expression, alternate: Expression) -> Self {
+        if let (
+            ExpressionDesc::Seq(consequent_effect, consequent_suffix),
+            ExpressionDesc::Seq(alternate_effect, alternate_suffix),
+        ) = (&consequent.desc, &alternate.desc)
+        {
+            if matches!(consequent_suffix.as_ref().desc, ExpressionDesc::Undefined { .. })
+                && matches!(alternate_suffix.as_ref().desc, ExpressionDesc::Undefined { .. })
+            {
+                return Self::new(ExpressionDesc::Seq(
+                    Box::new(Expression::cond(
+                        test,
+                        consequent_effect.as_ref().clone(),
+                        alternate_effect.as_ref().clone(),
+                    )),
+                    Box::new(Expression::undefined(false)),
+                ));
+            }
+        }
+
         Self::new(ExpressionDesc::Cond(
             Box::new(test),
             Box::new(consequent),
@@ -653,6 +675,122 @@ impl Expression {
                 })
             }
         }
+    }
+}
+
+fn fold_strict_nullish_comparison(op: BinOp, left: &Expression, right: &Expression) -> Option<bool> {
+    let equality = match op {
+        BinOp::EqEqEq => true,
+        BinOp::NotEqEq => false,
+        _ => return None,
+    };
+
+    let same_nullish = matches!(
+        (&left.desc, &right.desc),
+        (ExpressionDesc::Null, ExpressionDesc::Null)
+            | (
+                ExpressionDesc::Undefined { .. },
+                ExpressionDesc::Undefined { .. }
+            )
+    );
+    if same_nullish {
+        return Some(equality);
+    }
+
+    let mismatched_nullish = matches!(
+        (&left.desc, &right.desc),
+        (ExpressionDesc::Null, ExpressionDesc::Undefined { .. })
+            | (ExpressionDesc::Undefined { .. }, ExpressionDesc::Null)
+    );
+    if mismatched_nullish {
+        return Some(!equality);
+    }
+
+    if is_nullish_literal(left) && is_nullish_eq_impossible_non_null_expr(right) {
+        return Some(!equality);
+    }
+
+    if is_nullish_literal(right) && is_nullish_eq_impossible_non_null_expr(left) {
+        return Some(!equality);
+    }
+
+    None
+}
+
+fn is_nullish_literal(expr: &Expression) -> bool {
+    matches!(
+        expr.desc,
+        ExpressionDesc::Null | ExpressionDesc::Undefined { .. }
+    )
+}
+
+fn is_nullish_eq_impossible_non_null_expr(expr: &Expression) -> bool {
+    matches!(
+        expr.desc,
+        ExpressionDesc::Bool(_)
+            | ExpressionDesc::Number(_)
+            | ExpressionDesc::Typeof(_)
+            | ExpressionDesc::Fun { .. }
+            | ExpressionDesc::Array(_, _)
+            | ExpressionDesc::CamlBlock(_, _, _, _)
+    ) && expression_has_no_side_effects(expr)
+}
+
+fn expression_has_no_side_effects(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Var(_)
+        | ExpressionDesc::Fun { .. }
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Str { .. } => true,
+        ExpressionDesc::StaticIndex(target, _, _) => expression_has_no_side_effects(target),
+        ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right)
+        | ExpressionDesc::In(left, right)
+        | ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::Seq(left, right) => {
+            expression_has_no_side_effects(left) && expression_has_no_side_effects(right)
+        }
+        ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::OptionalBlock(inner, _) => expression_has_no_side_effects(inner),
+        ExpressionDesc::Array(items, _) => items.iter().all(expression_has_no_side_effects),
+        ExpressionDesc::CamlBlock(items, _, _, _) => {
+            items.iter().all(expression_has_no_side_effects)
+        }
+        ExpressionDesc::Object(dup, props) => {
+            dup.as_deref().is_none_or(expression_has_no_side_effects)
+                && props
+                    .iter()
+                    .all(|(_, value)| expression_has_no_side_effects(value))
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            expression_has_no_side_effects(test)
+                && expression_has_no_side_effects(consequent)
+                && expression_has_no_side_effects(alternate)
+        }
+        ExpressionDesc::Bin(op, left, right) => {
+            *op != BinOp::Eq
+                && expression_has_no_side_effects(left)
+                && expression_has_no_side_effects(right)
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            expression_has_no_side_effects(tag)
+                && strings.iter().all(expression_has_no_side_effects)
+                && values.iter().all(expression_has_no_side_effects)
+        }
+        ExpressionDesc::FlatCall(_, _)
+        | ExpressionDesc::Call(_, _, _)
+        | ExpressionDesc::New(_, _)
+        | ExpressionDesc::RawJsCode(_)
+        | ExpressionDesc::Await(_)
+        | ExpressionDesc::Spread(_) => false,
     }
 }
 
@@ -867,14 +1005,18 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
     if let (Some(then_ret), Some(else_ret)) =
         (single_return_expr(&then_), single_return_expr(&else_))
     {
-        return Statement::return_(Expression::cond(cond, then_ret, else_ret));
+        return Statement::return_(Expression::cond(
+            cond,
+            then_ret.clone(),
+            else_ret.clone(),
+        ));
     }
 
     if let Some(else_ret) = single_return_expr(&else_) {
         let mut block = Vec::with_capacity(1 + then_.len());
         block.push(Statement::new(StatementDesc::If(
             negate_condition(cond),
-            vec![Statement::return_(else_ret)],
+            vec![Statement::return_(else_ret.clone())],
             vec![],
         )));
         block.extend(then_);
@@ -892,17 +1034,17 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         single_assignment_expr(&then_),
         single_assignment_expr(&else_),
     ) {
-        if same_assignment_target(&lhs_then, &lhs_else) {
+        if same_assignment_target(lhs_then, lhs_else) {
             return Statement::exp(Expression::bin(
                 BinOp::Eq,
-                lhs_then,
-                Expression::cond(cond, rhs_then, rhs_else),
+                lhs_then.clone(),
+                Expression::cond(cond, rhs_then.clone(), rhs_else.clone()),
             ));
         }
     }
 
     if let (Some(then_expr), Some(else_expr)) = (single_exp_expr(&then_), single_exp_expr(&else_)) {
-        return Statement::exp(Expression::cond(cond, then_expr, else_expr));
+        return Statement::exp(Expression::cond(cond, then_expr.clone(), else_expr.clone()));
     }
 
     Statement::new(StatementDesc::If(cond, then_, else_))
@@ -917,17 +1059,17 @@ fn block_last_is_terminal(block: &Block) -> bool {
     )
 }
 
-fn single_return_expr(block: &Block) -> Option<Expression> {
+fn single_return_expr(block: &Block) -> Option<&Expression> {
     let [stmt] = block.as_slice() else {
         return None;
     };
     match &stmt.desc {
-        StatementDesc::Return(expr) => Some(expr.clone()),
+        StatementDesc::Return(expr) => Some(expr),
         _ => None,
     }
 }
 
-fn single_assignment_expr(block: &Block) -> Option<(Expression, Expression)> {
+fn single_assignment_expr(block: &Block) -> Option<(&Expression, &Expression)> {
     let [stmt] = block.as_slice() else {
         return None;
     };
@@ -937,7 +1079,7 @@ fn single_assignment_expr(block: &Block) -> Option<(Expression, Expression)> {
     let ExpressionDesc::Bin(BinOp::Eq, lhs, rhs) = &expr.desc else {
         return None;
     };
-    Some(((*lhs.clone()), (*rhs.clone())))
+    Some((lhs, rhs))
 }
 
 fn same_assignment_target(lhs: &Expression, rhs: &Expression) -> bool {
@@ -966,14 +1108,14 @@ fn same_assignment_target(lhs: &Expression, rhs: &Expression) -> bool {
     }
 }
 
-fn single_exp_expr(block: &Block) -> Option<Expression> {
+fn single_exp_expr(block: &Block) -> Option<&Expression> {
     let [stmt] = block.as_slice() else {
         return None;
     };
     let StatementDesc::Exp(expr) = &stmt.desc else {
         return None;
     };
-    Some(expr.clone())
+    Some(expr)
 }
 
 fn negate_condition(cond: Expression) -> Expression {
@@ -1082,6 +1224,39 @@ mod tests {
             ExpressionDesc::Bin(BinOp::Plus, _, _) => {}
             _ => panic!("Expected Bin(Plus)"),
         }
+    }
+
+    #[test]
+    fn test_strict_eq_null_against_number_folds_false() {
+        let expr = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::null(),
+            Expression::number(Number::int(5)),
+        );
+
+        assert!(matches!(expr.desc, ExpressionDesc::Bool(false)));
+    }
+
+    #[test]
+    fn test_strict_neq_undefined_against_number_folds_true() {
+        let expr = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::undefined(false),
+            Expression::number(Number::int(5)),
+        );
+
+        assert!(matches!(expr.desc, ExpressionDesc::Bool(true)));
+    }
+
+    #[test]
+    fn test_strict_eq_null_against_variable_is_preserved() {
+        let expr = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::null(),
+            Expression::var(Ident::create_local("value")),
+        );
+
+        assert!(matches!(expr.desc, ExpressionDesc::Bin(BinOp::EqEqEq, _, _)));
     }
 
     #[test]

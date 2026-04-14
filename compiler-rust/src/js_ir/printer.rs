@@ -25,6 +25,8 @@ pub struct JsPrinter {
     output: String,
     /// Current indentation level
     indent: usize,
+    /// Matches OCaml's Ext_pp.last_new_line state.
+    last_new_line: bool,
     /// Indentation string (2 spaces)
     indent_str: &'static str,
     /// Assigned printable names for identifiers in the active lexical scopes.
@@ -45,6 +47,7 @@ impl JsPrinter {
         Self {
             output: String::new(),
             indent: 0,
+            last_new_line: false,
             indent_str: "  ",
             name_scopes: vec![NameScope::default()],
             module_path_resolver: None,
@@ -71,19 +74,36 @@ impl JsPrinter {
     /// Write a string
     fn write(&mut self, s: &str) {
         self.output.push_str(s);
+        self.last_new_line = false;
     }
 
     /// Write a character
     fn write_char(&mut self, c: char) {
         self.output.push(c);
+        self.last_new_line = false;
     }
 
     /// Write a newline with current indentation
     fn newline(&mut self) {
+        if !self.last_new_line {
+            self.output.push('\n');
+            for _ in 0..self.indent {
+                self.output.push_str(self.indent_str);
+            }
+            self.last_new_line = true;
+        }
+    }
+
+    /// Match OCaml's Ext_pp.at_least_two_lines.
+    fn at_least_two_lines(&mut self) {
+        if !self.last_new_line {
+            self.output.push('\n');
+        }
         self.output.push('\n');
         for _ in 0..self.indent {
             self.output.push_str(self.indent_str);
         }
+        self.last_new_line = true;
     }
 
     /// Write a space
@@ -94,6 +114,7 @@ impl JsPrinter {
     /// Write a semicolon
     fn semi(&mut self) {
         self.output.push(';');
+        self.last_new_line = false;
     }
 
     /// Increase indentation
@@ -155,6 +176,7 @@ impl JsPrinter {
 
     /// Print a program
     pub fn print_program(&mut self, program: &Program) {
+        self.at_least_two_lines();
         self.print_statements(&program.block, true);
     }
 
@@ -181,22 +203,14 @@ impl JsPrinter {
             self.newline();
             return;
         }
-        self.newline();
-        let printed_imports = self.print_module_imports(&program.modules);
-        if printed_imports {
-            self.newline();
-            self.newline();
-        } else {
-            self.newline();
-        }
+        self.at_least_two_lines();
+        let _printed_imports = self.print_module_imports(&program.modules);
+        self.at_least_two_lines();
         self.print_statements(&program.program.block, true);
 
+        self.at_least_two_lines();
         if !program.program.exports.is_empty() {
-            self.newline();
-            self.newline();
             self.print_esmodule_exports(&program.program.exports);
-        } else if !program.program.block.is_empty() {
-            self.newline();
         }
 
         self.newline();
@@ -204,6 +218,7 @@ impl JsPrinter {
             None => self.write("/* No side effect */"),
             Some(reason) => {
                 let _ = write!(self.output, "/* {} Not a pure module */", reason);
+                self.last_new_line = false;
             }
         }
         self.newline();
@@ -270,9 +285,10 @@ impl JsPrinter {
         for (i, stmt) in stmts.iter().enumerate() {
             if i > 0 {
                 if top_level {
+                    self.at_least_two_lines();
+                } else {
                     self.newline();
                 }
-                self.newline();
             }
             self.print_statement(stmt, top_level);
         }
@@ -306,7 +322,7 @@ impl JsPrinter {
                     if let Some(Expression {
                         desc:
                             ExpressionDesc::Fun {
-                                is_method: false,
+                                is_method,
                                 params,
                                 body,
                                 return_unit,
@@ -319,6 +335,7 @@ impl JsPrinter {
                     {
                         self.print_function_declaration(
                             &decl.ident,
+                            *is_method,
                             params,
                             body,
                             *return_unit,
@@ -597,6 +614,7 @@ impl JsPrinter {
     fn print_function_declaration(
         &mut self,
         ident: &Ident,
+        is_method: bool,
         params: &[Ident],
         body: &Block,
         return_unit: bool,
@@ -610,24 +628,67 @@ impl JsPrinter {
         let fn_name = self.ident_name(ident);
         self.write(&fn_name);
         self.with_function_ident_scope(params, body, Some(ident), |this| {
+            let (this_binding, rendered_params) =
+                this.method_params_and_binding(is_method, params, body);
             this.write_char('(');
-            for (i, param) in params.iter().enumerate() {
+            for (i, param_name) in rendered_params.iter().enumerate() {
                 if i > 0 {
                     this.write(", ");
                 }
-                let param_name = this.ident_name(param);
-                this.write(&param_name);
+                this.write(param_name);
             }
-            this.write(") {");
-            if !body.is_empty() || directive.is_some() {
-                this.indent();
-                this.print_function_directive(directive, !body.is_empty());
-                this.print_function_body(body, return_unit);
-                this.dedent();
-                this.newline();
-            }
-            this.write_char('}');
+            this.write_char(')');
+            this.print_function_body_block(body, return_unit, directive, this_binding.as_ref());
         });
+    }
+
+    fn method_params_and_binding(
+        &mut self,
+        is_method: bool,
+        params: &[Ident],
+        body: &Block,
+    ) -> (Option<String>, Vec<String>) {
+        if !is_method {
+            let rendered_params = params.iter().map(|param| self.ident_name(param)).collect();
+            return (None, rendered_params);
+        }
+
+        let (this_param, args) = params
+            .split_first()
+            .expect("method functions must carry an explicit `this` parameter");
+        let free = free_variables_of_block_with_defined(body, std::iter::empty());
+        let this_binding = free
+            .contains(this_param)
+            .then(|| self.ident_name(this_param));
+        let rendered_params = args.iter().map(|param| self.ident_name(param)).collect();
+        (this_binding, rendered_params)
+    }
+
+    fn print_function_body_block(
+        &mut self,
+        body: &Block,
+        return_unit: bool,
+        directive: Option<&str>,
+        this_binding: Option<&String>,
+    ) {
+        self.write(" {");
+        if this_binding.is_some() || !body.is_empty() || directive.is_some() {
+            self.indent();
+            if let Some(this_binding) = this_binding {
+                self.newline();
+                self.write("let ");
+                self.write(this_binding);
+                self.write(" = this");
+                self.semi();
+            }
+            if directive.is_some() || !body.is_empty() {
+                self.print_function_directive(directive, !body.is_empty());
+                self.print_function_body(body, return_unit);
+            }
+            self.dedent();
+            self.newline();
+        }
+        self.write_char('}');
     }
 
     fn print_esmodule_exports(&mut self, exports: &[Ident]) {
@@ -671,6 +732,7 @@ impl JsPrinter {
         self.newline();
         self.write("case ");
         write!(self.output, "{}", value).unwrap();
+        self.last_new_line = false;
         self.write_char(':');
 
         if !clause.body.is_empty() {
@@ -714,13 +776,32 @@ impl JsPrinter {
         )
     }
 
+    fn arrow_expr_needs_paren(&self, expr: &Expression) -> bool {
+        match &expr.desc {
+            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) => true,
+            ExpressionDesc::RawJsCode(info) => !info.is_stmt,
+            ExpressionDesc::CamlBlock(_, _, _, tag_info) => matches!(
+                tag_info,
+                crate::lambda::TagInfo::Record { .. }
+                    | crate::lambda::TagInfo::Module(_)
+                    | crate::lambda::TagInfo::PolyVar(_)
+                    | crate::lambda::TagInfo::Extension
+                    | crate::lambda::TagInfo::RecordExt { .. }
+                    | crate::lambda::TagInfo::RecordInlined { .. }
+                    | crate::lambda::TagInfo::Constructor { .. }
+            ),
+            ExpressionDesc::OptionalBlock(inner, true) => self.arrow_expr_needs_paren(inner),
+            _ => false,
+        }
+    }
+
     /// Print an expression
     pub fn print_expression(&mut self, expr: &Expression, level: u8) {
         // Print comment if present
         if let Some(ref comment) = expr.comment {
             self.write("/* ");
             self.write(comment);
-            self.write(" */ ");
+            self.write(" */");
         }
 
         self.print_expression_desc(&expr.desc, level);
@@ -754,14 +835,7 @@ impl JsPrinter {
             }
 
             ExpressionDesc::Array(elements, _) => {
-                self.write_char('[');
-                for (i, elem) in elements.iter().enumerate() {
-                    if i > 0 {
-                        self.write(", ");
-                    }
-                    self.print_expression(elem, 1);
-                }
-                self.write_char(']');
+                self.print_array_literal(elements);
             }
 
             ExpressionDesc::Object(dup, props) => self.print_object_literal(
@@ -880,10 +954,12 @@ impl JsPrinter {
                 let printed_args = match args.as_slice() {
                     // OCaml's js_dump.ml omits the synthetic unit argument so `f(())`
                     // prints as `f()`, while plain `undefined` stays explicit.
-                    [Expression {
-                        desc: ExpressionDesc::Undefined { is_unit: true },
-                        ..
-                    }] => &[][..],
+                    [
+                        Expression {
+                            desc: ExpressionDesc::Undefined { is_unit: true },
+                            ..
+                        },
+                    ] => &[][..],
                     _ => args.as_slice(),
                 };
                 for (i, arg) in printed_args.iter().enumerate() {
@@ -1011,9 +1087,8 @@ impl JsPrinter {
             } => {
                 let use_arrow = !*is_method;
                 self.with_function_ident_scope(params, body, None, |this| {
-                    // Collect param names upfront to avoid borrow issues
-                    let param_names: Vec<String> =
-                        params.iter().map(|p| this.ident_name(p)).collect();
+                    let (this_binding, param_names) =
+                        this.method_params_and_binding(*is_method, params, body);
 
                     // Async prefix
                     if *async_ {
@@ -1023,6 +1098,7 @@ impl JsPrinter {
                     // Function keyword or arrow
                     if !use_arrow {
                         this.write("function");
+                        this.write(" ");
                     }
 
                     // Parameters
@@ -1039,18 +1115,32 @@ impl JsPrinter {
                         this.write_char(')');
                     }
 
-                    this.space();
-
                     if use_arrow {
-                        this.write("=> ");
+                        this.write(" =>");
                     }
 
                     // Body
                     if use_arrow
                         && directive.is_none()
+                        && body.as_slice().len() == 1
+                        && matches!(
+                            body[0].desc,
+                            StatementDesc::Return(Expression {
+                                desc: ExpressionDesc::Undefined { .. },
+                                ..
+                            })
+                        )
+                    {
+                        this.write(" {}");
+                        return;
+                    }
+
+                    if use_arrow
+                        && directive.is_none()
                         && let Some(expr) = single_arrow_function_expr(body)
                     {
-                        let needs_paren = this.expr_needs_paren(expr);
+                        this.write(" ");
+                        let needs_paren = this.arrow_expr_needs_paren(expr);
                         if needs_paren {
                             this.write_char('(');
                         }
@@ -1061,15 +1151,12 @@ impl JsPrinter {
                         return;
                     }
 
-                    this.write_char('{');
-                    if !body.is_empty() || directive.is_some() {
-                        this.indent();
-                        this.print_function_directive(directive.as_deref(), !body.is_empty());
-                        this.print_function_body(body, *return_unit);
-                        this.dedent();
-                        this.newline();
-                    }
-                    this.write_char('}');
+                    this.print_function_body_block(
+                        body,
+                        *return_unit,
+                        directive.as_deref(),
+                        this_binding.as_ref(),
+                    );
                 });
             }
 
@@ -1140,14 +1227,7 @@ impl JsPrinter {
                 match tag_info {
                     TagInfo::Record { fields, .. } if fields.len() == elements.len() => {
                         if record_uses_array_syntax(fields) {
-                            self.write_char('[');
-                            for (i, elem) in elements.iter().enumerate() {
-                                if i > 0 {
-                                    self.write(", ");
-                                }
-                                self.print_expression(elem, 1);
-                            }
-                            self.write_char(']');
+                            self.print_array_literal(elements);
                         } else {
                             self.print_object_literal(
                                 level,
@@ -1169,23 +1249,32 @@ impl JsPrinter {
                             );
                         }
                     }
-                    TagInfo::RecordInlined { fields, .. } if fields.len() == elements.len() => {
+                    TagInfo::RecordInlined { name, fields, .. }
+                        if fields.len() == elements.len() =>
+                    {
                         self.print_object_literal(
                             level,
                             None,
-                            elements.iter().zip(fields.iter()).filter_map(
+                            std::iter::once((None, None)).chain(elements.iter().zip(fields.iter()).filter_map(
                                 |(elem, (field_name, optional))| {
                                     if *optional && is_undefined_literal(elem) {
                                         None
                                     } else {
-                                        Some((field_name.as_str(), elem))
+                                        Some((Some(field_name.as_str()), Some(elem)))
                                     }
                                 },
-                            ),
-                            |this, (field_name, elem)| {
-                                this.print_literal_property_name(field_name);
-                                this.write(": ");
-                                this.print_expression(elem, 1);
+                            )),
+                            |this, prop| match prop {
+                                (None, None) => {
+                                    this.write("TAG: ");
+                                    this.print_string(name);
+                                }
+                                (Some(field_name), Some(elem)) => {
+                                    this.print_literal_property_name(field_name);
+                                    this.write(": ");
+                                    this.print_expression(elem, 1);
+                                }
+                                _ => unreachable!("inline record literal properties stay aligned"),
                             },
                         );
                     }
@@ -1203,57 +1292,75 @@ impl JsPrinter {
                         );
                     }
                     TagInfo::Constructor { name, .. } => {
-                        self.write_char('{');
                         if name == "::" {
-                            for (i, elem) in elements.iter().enumerate() {
-                                if i > 0 {
-                                    self.write(", ");
-                                }
-                                match i {
-                                    0 => self.write("hd"),
-                                    1 => self.write("tl"),
-                                    _ => {
-                                        self.write("_");
-                                        self.write(&i.to_string());
+                            self.print_object_literal(
+                                level,
+                                None,
+                                elements.iter().enumerate(),
+                                |this, (i, elem)| {
+                                    match i {
+                                        0 => this.write("hd"),
+                                        1 => this.write("tl"),
+                                        _ => {
+                                            this.write("_");
+                                            this.write(&i.to_string());
+                                        }
                                     }
-                                }
-                                self.write(": ");
-                                self.print_expression(elem, 1);
-                            }
+                                    this.write(": ");
+                                    this.print_expression(elem, 1);
+                                },
+                            );
                         } else {
-                            self.write("TAG: ");
-                            self.print_string(name);
-                            for (i, elem) in elements.iter().enumerate() {
-                                self.write(", _");
-                                self.write(&i.to_string());
-                                self.write(": ");
-                                self.print_expression(elem, 1);
-                            }
+                            self.print_object_literal(
+                                level,
+                                None,
+                                std::iter::once((None, None)).chain(
+                                    elements
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, elem)| (Some(i), Some(elem))),
+                                ),
+                                |this, prop| match prop {
+                                    (None, None) => {
+                                        this.write("TAG: ");
+                                        this.print_string(name);
+                                    }
+                                    (Some(i), Some(elem)) => {
+                                        this.write("_");
+                                        this.write(&i.to_string());
+                                        this.write(": ");
+                                        this.print_expression(elem, 1);
+                                    }
+                                    _ => {
+                                        unreachable!("constructor literal properties stay aligned")
+                                    }
+                                },
+                            );
                         }
-                        self.write_char('}');
                     }
                     TagInfo::PolyVar(name) => {
-                        // Output as JS object with NAME field: {NAME: "name", VAL: val}
-                        self.write_char('{');
-                        self.write("NAME: ");
-                        self.print_string(name);
-                        if let Some(val) = elements.get(1) {
-                            // First element is the NAME constant, second is the value
-                            self.write(", VAL: ");
-                            self.print_expression(val, 1);
-                        }
-                        self.write_char('}');
+                        self.print_object_literal(
+                            level,
+                            None,
+                            std::iter::once((false, None)).chain(
+                                elements.get(1).into_iter().map(|value| (true, Some(value))),
+                            ),
+                            |this, (is_value, value)| {
+                                if is_value {
+                                    this.write("VAL: ");
+                                    this.print_expression(
+                                        value.expect("polyvar value property must exist"),
+                                        1,
+                                    );
+                                } else {
+                                    this.write("NAME: ");
+                                    this.print_string(name);
+                                }
+                            },
+                        );
                     }
                     _ => {
-                        // Output as array for tuples, etc.
-                        self.write_char('[');
-                        for (i, elem) in elements.iter().enumerate() {
-                            if i > 0 {
-                                self.write(", ");
-                            }
-                            self.print_expression(elem, 1);
-                        }
-                        self.write_char(']');
+                        self.print_array_literal(elements);
                     }
                 }
             }
@@ -1419,6 +1526,27 @@ impl JsPrinter {
         }
     }
 
+    fn print_array_literal(&mut self, elements: &[Expression]) {
+        self.write_char('[');
+        match elements {
+            [] => {}
+            [single] => self.print_expression(single, 1),
+            _ => {
+                self.indent();
+                for (index, elem) in elements.iter().enumerate() {
+                    self.newline();
+                    self.print_expression(elem, 1);
+                    if index + 1 < elements.len() {
+                        self.write_char(',');
+                    }
+                }
+                self.dedent();
+                self.newline();
+            }
+        }
+        self.write_char(']');
+    }
+
     fn print_literal_property_name(&mut self, name: &str) {
         if is_valid_js_ident(name) {
             self.write(name);
@@ -1455,7 +1583,7 @@ impl JsPrinter {
     /// Print a number
     fn print_number(&mut self, n: &Number, level: u8) {
         let s = match n {
-            Number::Float(f) => f.f.clone(),
+            Number::Float(f) => normalize_float_literal_for_js(&f.f),
             Number::Int { i, c: Some(c) } => {
                 format!("/* {} */{}", format_char_comment(*c), i)
             }
@@ -1490,6 +1618,7 @@ impl JsPrinter {
                 '\t' => self.write("\\t"),
                 c if c < ' ' => {
                     write!(self.output, "\\x{:02x}", c as u32).unwrap();
+                    self.last_new_line = false;
                 }
                 c => self.write_char(c),
             }
@@ -1600,11 +1729,10 @@ fn else_is_single_return_undefined(block: &Block) -> bool {
     matches!(
         block.as_slice(),
         [Statement {
-            desc:
-                StatementDesc::Return(Expression {
-                    desc: ExpressionDesc::Undefined { .. },
-                    ..
-                }),
+            desc: StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Undefined { .. },
+                ..
+            }),
             ..
         }]
     )
@@ -1622,14 +1750,18 @@ fn function_tail_statement_prints(stmt: &Statement) -> bool {
 
 fn single_arrow_function_expr(body: &Block) -> Option<&Expression> {
     match body.as_slice() {
-        [Statement {
-            desc: StatementDesc::Return(expr),
-            ..
-        }] if !matches!(expr.desc, ExpressionDesc::Undefined { .. }) => Some(expr),
-        [Statement {
-            desc: StatementDesc::Exp(expr),
-            ..
-        }] => Some(expr),
+        [
+            Statement {
+                desc: StatementDesc::Return(expr),
+                ..
+            },
+        ] if !matches!(expr.desc, ExpressionDesc::Undefined { .. }) => Some(expr),
+        [
+            Statement {
+                desc: StatementDesc::Exp(expr),
+                ..
+            },
+        ] => Some(expr),
         _ => None,
     }
 }
@@ -1646,6 +1778,70 @@ fn format_char_comment(codepoint: i32) -> String {
         None => "?".to_string(),
     };
     format!("'{escaped}'")
+}
+
+fn normalize_float_literal_for_js(float_str: &str) -> String {
+    if is_hex_float_literal(float_str) {
+        normalize_hex_float_literal(float_str).unwrap_or_else(|| transform_float_literal(float_str))
+    } else {
+        transform_float_literal(float_str)
+    }
+}
+
+fn is_hex_float_literal(float_str: &str) -> bool {
+    let bytes = float_str.as_bytes();
+    let mut cur = 0;
+    if matches!(bytes.first(), Some(b'-' | b'+')) {
+        cur += 1;
+    }
+    matches!(bytes.get(cur), Some(b'0')) && matches!(bytes.get(cur + 1), Some(b'x' | b'X'))
+}
+
+fn normalize_hex_float_literal(float_str: &str) -> Option<String> {
+    let (negative, digits) = if let Some(rest) = float_str.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = float_str.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, float_str)
+    };
+
+    let digits = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))?;
+    let digits = digits.replace('_', "");
+    if digits.is_empty() || digits.contains('.') || digits.contains('p') || digits.contains('P') {
+        return None;
+    }
+
+    let value = u128::from_str_radix(&digits, 16).ok()?;
+    let rendered = value.to_string();
+    Some(if negative {
+        format!("-{rendered}")
+    } else {
+        rendered
+    })
+}
+
+fn transform_float_literal(float_str: &str) -> String {
+    let bytes = float_str.as_bytes();
+    let len = bytes.len();
+    let mut start = 0;
+    while start + 1 < len && bytes[start] == b'0' && bytes[start + 1] != b'.' {
+        start += 1;
+    }
+
+    let mut out = String::with_capacity(len.saturating_sub(start));
+    for (idx, byte) in bytes[start..].iter().copied().enumerate() {
+        if byte == b'_' {
+            continue;
+        }
+        if byte == b'.' && start + idx == len - 1 {
+            continue;
+        }
+        out.push(byte as char);
+    }
+    out
 }
 
 fn record_uses_array_syntax(fields: &[(String, bool)]) -> bool {
@@ -2189,6 +2385,18 @@ mod tests {
         let expr = Expression::number(Number::float("3.14"));
         assert_eq!(print_expression(&expr), "3.14");
 
+        let expr = Expression::number(Number::float("1."));
+        assert_eq!(print_expression(&expr), "1");
+
+        let expr = Expression::number(Number::float("0012."));
+        assert_eq!(print_expression(&expr), "12");
+
+        let expr = Expression::number(Number::float("-0."));
+        assert_eq!(print_expression(&expr), "-0");
+
+        let expr = Expression::number(Number::float("0x10"));
+        assert_eq!(print_expression(&expr), "16");
+
         let expr = Expression::number(Number::char('A'));
         assert_eq!(print_expression(&expr), "/* 'A' */65");
 
@@ -2215,7 +2423,7 @@ mod tests {
             ],
             MutableFlag::Immutable,
         );
-        assert_eq!(print_expression(&expr), "[1, 2, 3]");
+        assert_eq!(print_expression(&expr), "[\n  1,\n  2,\n  3\n]");
     }
 
     #[test]
@@ -2467,6 +2675,59 @@ mod tests {
         }));
 
         assert_eq!(rendered, "() => Test_utils.eq(\"loc\", 1, 1)");
+    }
+
+    #[test]
+    fn test_print_arrow_function_with_undefined_body_uses_compact_empty_block() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
+            is_method: false,
+            params: vec![],
+            body: vec![Statement::return_(Expression::undefined(false))],
+            env: Default::default(),
+            return_unit: false,
+            async_: false,
+            directive: None,
+        }));
+
+        assert_eq!(rendered, "() => {}");
+    }
+
+    #[test]
+    fn test_print_arrow_function_parenthesizes_object_literal_body() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
+            is_method: false,
+            params: vec![],
+            body: vec![Statement::return_(Expression::new(ExpressionDesc::Object(
+                None,
+                vec![(PropertyName::lit("default"), Expression::number(Number::int(1)))],
+            )))],
+            env: Default::default(),
+            return_unit: false,
+            async_: false,
+            directive: None,
+        }));
+
+        assert_eq!(rendered, "() => ({\n  \"default\": 1\n})");
+    }
+
+    #[test]
+    fn test_print_arrow_function_parenthesizes_constructor_block_body() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
+            is_method: false,
+            params: vec![],
+            body: vec![Statement::return_(Expression::new(ExpressionDesc::CamlBlock(
+                vec![Expression::number(Number::int(1))],
+                MutableFlag::Immutable,
+                Box::new(Expression::number(Number::int(0))),
+                TagInfo::constructor("Some", 1, 0),
+            )))],
+            env: Default::default(),
+            return_unit: false,
+            async_: false,
+            directive: None,
+        }));
+
+        assert_eq!(rendered, "() => ({\n  TAG: \"Some\",\n  _0: 1\n})");
     }
 
     #[test]
@@ -2802,6 +3063,53 @@ mod tests {
     }
 
     #[test]
+    fn test_print_method_function_expression_omits_the_this_parameter() {
+        let this_param = Ident::create_local("me");
+        let amount = Ident::create_local("amount");
+
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
+            is_method: true,
+            params: vec![this_param.clone(), amount],
+            body: vec![Statement::return_(Expression::var(this_param))],
+            env: Default::default(),
+            return_unit: false,
+            async_: false,
+            directive: None,
+        }));
+
+        assert_eq!(
+            rendered,
+            "function (amount) {\n  let me = this;\n  return me;\n}"
+        );
+    }
+
+    #[test]
+    fn test_print_top_level_method_function_as_named_declaration() {
+        let this_param = Ident::create_local("self");
+        let value = Ident::create_local("value");
+
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: Ident::create_local("methodWithThis"),
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: true,
+                params: vec![this_param.clone(), value.clone()],
+                body: vec![Statement::return_(Expression::var(this_param))],
+                env: Default::default(),
+                return_unit: false,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert_eq!(
+            rendered,
+            "function methodWithThis(value) {\n  let self = this;\n  return self;\n}"
+        );
+    }
+
+    #[test]
     fn test_print_cons_constructor_as_hd_tl_object() {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![
@@ -2813,7 +3121,7 @@ mod tests {
             TagInfo::constructor("::", 1, 0),
         ));
 
-        assert_eq!(print_expression(&expr), "{hd: 1, tl: 0}");
+        assert_eq!(print_expression(&expr), "{\n  hd: 1,\n  tl: 0\n}");
     }
 
     #[test]
@@ -2825,7 +3133,7 @@ mod tests {
             TagInfo::constructor("Some", 1, 0),
         ));
 
-        assert_eq!(print_expression(&expr), "{TAG: \"Some\", _0: 1}");
+        assert_eq!(print_expression(&expr), "{\n  TAG: \"Some\",\n  _0: 1\n}");
     }
 
     #[test]
@@ -2847,6 +3155,28 @@ mod tests {
     }
 
     #[test]
+    fn test_print_inline_record_variant_keeps_tag_field() {
+        let expr = Expression::new(ExpressionDesc::CamlBlock(
+            vec![Expression::string("hello")],
+            MutableFlag::Immutable,
+            Box::new(Expression::number(Number::int(0))),
+            TagInfo::RecordInlined {
+                name: "One".to_string(),
+                num_nonconst: 1,
+                tag: 0,
+                fields: vec![("name".to_string(), false)],
+                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                attrs: vec![],
+            },
+        ));
+
+        assert_eq!(
+            print_expression(&expr),
+            "{\n  TAG: \"One\",\n  name: \"hello\"\n}"
+        );
+    }
+
+    #[test]
     fn test_print_numeric_named_record_as_array() {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![
@@ -2861,7 +3191,7 @@ mod tests {
             ),
         ));
 
-        assert_eq!(print_expression(&expr), "[1, 2]");
+        assert_eq!(print_expression(&expr), "[\n  1,\n  2\n]");
     }
 
     #[test]
