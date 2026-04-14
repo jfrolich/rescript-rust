@@ -375,10 +375,14 @@ impl LambdaCompiler {
                 } else {
                     func.params.clone()
                 };
+                let body = self
+                    .try_compile_identity_module_return_expr(&func.body)
+                    .map(|expr| vec![Statement::return_(expr)])
+                    .unwrap_or_else(|| self.compile_return_block(&func.body));
                 let expr = Expression::new(ExpressionDesc::Fun {
                     is_method: false,
                     params,
-                    body: self.compile_return_block(&func.body),
+                    body,
                     env: Default::default(),
                     return_unit: func.attr.return_unit,
                     async_: func.attr.async_,
@@ -3440,6 +3444,135 @@ impl LambdaCompiler {
         }
         let (module_name, member) = runtime_member_for_eta_wrapped_primitive(&info.primitive)?;
         Some(self.runtime_member_expr(module_name, member))
+    }
+
+    fn try_compile_identity_module_return_expr(&mut self, lam: &Lambda) -> Option<Expression> {
+        let mut module_target_var: Option<Ident> = None;
+        let mut module_target_global: Option<(Ident, bool)> = None;
+        let mut alias_chain = Vec::new();
+        let mut cursor = lam;
+
+        let mut note_target = |target: &Lambda| -> Option<()> {
+            match target {
+                Lambda::Lvar(id) => {
+                    if module_target_global.is_some()
+                        || module_target_var
+                            .as_ref()
+                            .is_some_and(|current| !current.same(id))
+                    {
+                        return None;
+                    }
+                    module_target_var.get_or_insert_with(|| id.clone());
+                    Some(())
+                }
+                Lambda::LglobalModule(id, dynamic_import) => {
+                    if module_target_var.is_some()
+                        || module_target_global.as_ref().is_some_and(
+                            |(current_id, current_dynamic_import)| {
+                                !current_id.same(id) || *current_dynamic_import != *dynamic_import
+                            },
+                        )
+                    {
+                        return None;
+                    }
+                    module_target_global.get_or_insert_with(|| (id.clone(), *dynamic_import));
+                    Some(())
+                }
+                _ => None,
+            }
+        };
+
+        loop {
+            match cursor {
+                Lambda::Llet(kind, alias_id, value, body)
+                    if matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt) =>
+                {
+                    let Lambda::Lprim(info) = value.as_ref() else {
+                        return None;
+                    };
+                    let Primitive::Pfield(index, FieldDbgInfo::Module { name }) = &info.primitive
+                    else {
+                        return None;
+                    };
+                    let [target] = info.args.as_slice() else {
+                        return None;
+                    };
+                    note_target(target)?;
+
+                    alias_chain.push((alias_id.clone(), *index, name.clone()));
+                    cursor = body.as_ref();
+                }
+                Lambda::Lprim(info) => {
+                    let Primitive::Pmakeblock(_, TagInfo::Module(fields), Mutable::Immutable) =
+                        &info.primitive
+                    else {
+                        return None;
+                    };
+                    if alias_chain.len() != fields.len() || info.args.len() != fields.len() {
+                        // The simplifier can inline the alias chain into the final
+                        // Pmakeblock args, so only the final runtime field count is exact.
+                        if info.args.len() != fields.len() {
+                            return None;
+                        }
+                    }
+
+                    for (position, arg) in info.args.iter().enumerate() {
+                        let expected_field = &fields[position];
+                        match arg {
+                            Lambda::Lvar(arg_id) => {
+                                let Some((_, field_index, field_name)) = alias_chain
+                                    .iter()
+                                    .find(|(alias_id, _, _)| alias_id.same(arg_id))
+                                else {
+                                    return None;
+                                };
+                                if *field_index != position as i32
+                                    || field_name != expected_field
+                                {
+                                    return None;
+                                }
+                            }
+                            Lambda::Lprim(crate::lambda::PrimInfo {
+                                primitive:
+                                    Primitive::Pfield(
+                                        field_index,
+                                        FieldDbgInfo::Module { name: field_name },
+                                    ),
+                                args,
+                                ..
+                            }) => {
+                                if *field_index != position as i32
+                                    || field_name != expected_field
+                                {
+                                    return None;
+                                }
+                                let [target] = args.as_slice() else {
+                                    return None;
+                                };
+                                note_target(target)?;
+                            }
+                            _ => return None,
+                        }
+                    }
+
+                    return if let Some(id) = module_target_var {
+                        Some(Expression::var(id))
+                    } else if let Some((id, dynamic_import)) = module_target_global {
+                        Some(Expression::qualified(
+                            ModuleId {
+                                id,
+                                kind: Kind::Ml,
+                                dynamic_import,
+                            },
+                            None,
+                        ))
+                    } else {
+                        None
+                    };
+                }
+                _ => return None,
+            }
+        }
     }
 
     fn compile_object_comparison(
@@ -12157,6 +12290,179 @@ mod tests {
             }) => assert!(id.same(&value)),
             other => panic!("expected the direct IIFE to inline to `return value`, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn function_return_blocks_collapse_identity_module_wrapper_to_parameter() {
+        let mut compiler = LambdaCompiler::new();
+        let module_param = Ident::create_local("U");
+        let field_alias = Ident::create_local("x");
+        let loc = crate::location::Location::none();
+
+        let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+            arity: 1,
+            params: vec![module_param.clone()],
+            body: Box::new(Lambda::let_(
+                LetKind::Alias,
+                field_alias.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: "x".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(module_param.clone())],
+                    loc.clone(),
+                ),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::Module(vec!["x".to_string()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(field_alias)],
+                    loc,
+                ),
+            )),
+            attr: crate::lambda::FunctionAttribute::default(),
+        }));
+
+        let Expression {
+            desc: ExpressionDesc::Fun { body, .. },
+            ..
+        } = compiled.expr
+        else {
+            panic!("expected a function expression");
+        };
+
+        let [stmt] = body.as_slice() else {
+            panic!("expected the identity module wrapper to collapse to one return statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            }) if id.same(&module_param) => {}
+            other => panic!("expected `return U`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn function_return_blocks_collapse_inlined_identity_module_wrapper_to_parameter() {
+        let mut compiler = LambdaCompiler::new();
+        let module_param = Ident::create_local("U");
+        let loc = crate::location::Location::none();
+
+        let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+            arity: 1,
+            params: vec![module_param.clone()],
+            body: Box::new(Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::Module(vec!["x".to_string()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: "x".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(module_param.clone())],
+                    loc,
+                )],
+                crate::location::Location::none(),
+            )),
+            attr: crate::lambda::FunctionAttribute::default(),
+        }));
+
+        let Expression {
+            desc: ExpressionDesc::Fun { body, .. },
+            ..
+        } = compiled.expr
+        else {
+            panic!("expected a function expression");
+        };
+
+        let [stmt] = body.as_slice() else {
+            panic!("expected the inlined identity module wrapper to collapse to one return");
+        };
+        match &stmt.desc {
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            }) if id.same(&module_param) => {}
+            other => panic!("expected `return U`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn function_return_blocks_keep_non_identity_module_wrapper() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("Left");
+        let right = Ident::create_local("Right");
+        let left_alias = Ident::create_local("x");
+        let right_alias = Ident::create_local("y");
+        let loc = crate::location::Location::none();
+
+        let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+            arity: 2,
+            params: vec![left.clone(), right.clone()],
+            body: Box::new(Lambda::let_(
+                LetKind::Alias,
+                left_alias.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: "x".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(left.clone())],
+                    loc.clone(),
+                ),
+                Lambda::let_(
+                    LetKind::Alias,
+                    right_alias.clone(),
+                    Lambda::prim(
+                        Primitive::Pfield(
+                            1,
+                            FieldDbgInfo::Module {
+                                name: "y".to_string(),
+                            },
+                        ),
+                        vec![Lambda::var(right.clone())],
+                        loc.clone(),
+                    ),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::Module(vec!["x".to_string(), "y".to_string()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(left_alias), Lambda::var(right_alias)],
+                        loc,
+                    ),
+                ),
+            )),
+            attr: crate::lambda::FunctionAttribute::default(),
+        }));
+
+        let Expression {
+            desc: ExpressionDesc::Fun { body, .. },
+            ..
+        } = compiled.expr
+        else {
+            panic!("expected a function expression");
+        };
+
+        assert_eq!(
+            body.len(),
+            3,
+            "expected the mixed-target module wrapper to keep its alias bindings"
+        );
     }
 
     #[test]
