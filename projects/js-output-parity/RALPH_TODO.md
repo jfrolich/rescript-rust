@@ -43,6 +43,71 @@ reported:
 
 Latest iteration on **2026-04-14**:
 
+- Active slice: port the OCaml `Js_output.append_output` / `output_as_block`
+  finished-output rule more precisely so Rust drops unreachable trailing
+  output after real terminal statements, but does **not** treat switch-local
+  `break` statements as finishing the surrounding output
+- Active backend focus for this slice remains **Phase 5: Byte-Exact Dumping**
+  from `PLAN.md`, but the bug lived one stage earlier in the Rust backend's
+  output-sequencing model: I initially applied OCaml's `output_finished`
+  behavior using the broader `block_terminates(...)` predicate, which
+  incorrectly treated `break`/`continue` as if they finished the enclosing
+  JS output instead of only the local switch/loop control flow
+- OCaml reference:
+  `compiler/core/js_output.ml`, where `append_output` returns the left-hand
+  output unchanged only when `output_finished = True`, and `output_as_block`
+  ignores the trailing expression only in that same finished-output case;
+  the Rust fix needed a matching notion of "finished output" rather than the
+  broader "statement terminates local control flow" predicate
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so the new terminal-output
+    pruning paths in `compile_effect_block(...)`,
+    `compile_return_block(...)`, `append_effect_output(...)`, and
+    `compiled_to_effect_block(...)` use a dedicated
+    `block_finishes_output(...)` / `statement_finishes_output(...)` helper
+    that counts only `return`/`throw`-style finished output and ignores
+    switch/loop-local `break` / `continue`
+  - kept the earlier unreachable-throw cleanup for
+    `compile_return_block(...)`, but narrowed it so `bb.res` no longer loses
+    the post-switch return ladder after case bodies that end in `break`
+  - added focused regression coverage in
+    `compile_return_block_skips_unreachable_sequence_after_throw` and
+    `block_finishes_output_ignores_switch_case_breaks`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml block_finishes_output_ignores_switch_case_breaks -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_return_block_skips_unreachable_sequence_after_throw -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/bb.res`, diffing the emitted module
+    against the checked-in snapshot to confirm the switch-local `break`
+    regression is gone
+  - direct repro for `tests/tests/src/test_trywith.res`, diffing the emitted
+    module against the checked-in snapshot to confirm the bogus unreachable
+    `return 12;` after a `throw` is still gone while the remaining drift stays
+    limited to the tail-try and export-order cluster
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bb.res` remains an exact snapshot match; the narrowed
+    finished-output helper no longer drops the post-switch return ladder after
+    case bodies that merely `break`
+  - `tests/tests/src/test_trywith.res` still shows the same remaining
+    tail-try/export-order diff, but the previously bogus unreachable
+    `return 12;` after the `throw` stays removed
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the finished-output narrowing
+- Topline impact:
+  - JS snapshot parity: **458 / 657** -> **458 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **199** -> **199** (**no change**)
+- Keep this change because it ports the OCaml `Js_output` finished-output rule
+  more faithfully than the initial Rust slice: `return`/`throw` now suppress
+  unreachable trailing output, while switch-local `break` no longer masquerades
+  as a finished output boundary.
+
+Latest iteration on **2026-04-14**:
+
 - Active slice: port the OCaml exotic-uppercase identifier unwrapping rule for
   property keys and property access so JS dump uses the underlying identifier
   text instead of re-emitting the encoded `\\\"...\"` form

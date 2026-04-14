@@ -888,6 +888,9 @@ impl LambdaCompiler {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
                 let mut block = self.compile_let_binding(*kind, id, value);
+                if block_finishes_output(&block) {
+                    return block;
+                }
                 block.extend(self.compile_effect_block(body));
                 block
             }
@@ -896,6 +899,9 @@ impl LambdaCompiler {
             }
             Lambda::Lsequence(first, second) => {
                 let mut block = self.compile_effect_block(first);
+                if block_finishes_output(&block) {
+                    return block;
+                }
                 block.extend(self.compile_effect_block(second));
                 block
             }
@@ -1006,6 +1012,9 @@ impl LambdaCompiler {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
                 let mut block = self.compile_let_binding(*kind, id, value);
+                if block_finishes_output(&block) {
+                    return block;
+                }
                 block.extend(self.compile_return_block(body));
                 block
             }
@@ -1031,6 +1040,9 @@ impl LambdaCompiler {
             }
             Lambda::Lsequence(first, second) => {
                 let mut block = self.compile_effect_block(first);
+                if block_finishes_output(&block) {
+                    return block;
+                }
                 block.extend(self.compile_return_block(second));
                 block
             }
@@ -1569,6 +1581,13 @@ impl LambdaCompiler {
     }
 
     fn append_effect_output(&self, first: Compiled, second: Compiled) -> Compiled {
+        if block_finishes_output(&first.prelude) {
+            return Compiled {
+                prelude: first.prelude,
+                expr: Expression::undefined(false),
+            };
+        }
+
         let first_is_pure = js_expr_no_side_effects(&first.expr);
         if first.prelude.is_empty() {
             if first_is_pure {
@@ -1595,6 +1614,9 @@ impl LambdaCompiler {
 
     fn compiled_to_effect_block(&self, compiled: Compiled) -> Block {
         let mut block = compiled.prelude;
+        if block_finishes_output(&block) {
+            return block;
+        }
         push_effect_expression(&mut block, compiled.expr);
         block
     }
@@ -7064,6 +7086,10 @@ fn block_terminates(block: &Block) -> bool {
     block.last().is_some_and(statement_terminates)
 }
 
+fn block_finishes_output(block: &Block) -> bool {
+    block.last().is_some_and(statement_finishes_output)
+}
+
 fn statement_terminates(stmt: &Statement) -> bool {
     match &stmt.desc {
         StatementDesc::Block(block) => block_terminates(block),
@@ -7090,6 +7116,34 @@ fn statement_terminates(stmt: &Statement) -> bool {
                 && cases
                     .iter()
                     .all(|clause| block_terminates(&clause.clause.body))
+        }
+        _ => false,
+    }
+}
+
+fn statement_finishes_output(stmt: &Statement) -> bool {
+    match &stmt.desc {
+        StatementDesc::Block(block) => block_finishes_output(block),
+        StatementDesc::Return(_) | StatementDesc::Throw(_) => true,
+        StatementDesc::If(_, then_block, else_block) => {
+            !then_block.is_empty()
+                && !else_block.is_empty()
+                && block_finishes_output(then_block)
+                && block_finishes_output(else_block)
+        }
+        StatementDesc::IntSwitch(_, cases, default) => {
+            default.as_ref().is_some_and(block_finishes_output)
+                && !cases.is_empty()
+                && cases
+                    .iter()
+                    .all(|(_, clause)| block_finishes_output(&clause.body))
+        }
+        StatementDesc::StringSwitch(_, cases, default) => {
+            default.as_ref().is_some_and(block_finishes_output)
+                && !cases.is_empty()
+                && cases
+                    .iter()
+                    .all(|clause| block_finishes_output(&clause.clause.body))
         }
         _ => false,
     }
@@ -12815,6 +12869,52 @@ mod tests {
             "expected a terminating throw, got {:?}",
             stmt
         );
+    }
+
+    #[test]
+    fn compile_return_block_skips_unreachable_sequence_after_throw() {
+        let mut compiler = LambdaCompiler::new();
+        let block = compiler.compile_return_block(&Lambda::seq(
+            Lambda::prim(
+                Primitive::Praise,
+                vec![Lambda::const_(Constant::string("boom"))],
+                Location::none(),
+            ),
+            Lambda::const_(Constant::int(12)),
+        ));
+
+        let [stmt] = block.as_slice() else {
+            panic!("expected only the terminating throw, got {:?}", block);
+        };
+        assert!(matches!(
+            stmt,
+            Statement {
+                desc: StatementDesc::Throw(Expression {
+                    desc: ExpressionDesc::Str { txt, .. },
+                    ..
+                }),
+                ..
+            } if txt == "boom"
+        ));
+    }
+
+    #[test]
+    fn block_finishes_output_ignores_switch_case_breaks() {
+        let block = vec![Statement::new(StatementDesc::StringSwitch(
+            Expression::bool(true),
+            vec![StringClause {
+                tag_type: crate::lambda::SwitchCaseTag::String("a".to_string()),
+                clause: CaseClause {
+                    body: vec![Statement::exp(Expression::string("a".to_string())), Statement::break_()],
+                    should_break: false,
+                    comment: None,
+                },
+            }],
+            Some(vec![Statement::throw(Expression::string("boom".to_string()))]),
+        ))];
+
+        assert!(block_terminates(&block));
+        assert!(!block_finishes_output(&block));
     }
 
     #[test]
