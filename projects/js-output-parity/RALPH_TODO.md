@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 349 / 657 JS snapshots passing, 0 compile errors, 308 output diffs
+**Status:** 351 / 657 JS snapshots passing, 0 compile errors, 306 output diffs
 
 ## Goal
 
@@ -35,11 +35,48 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **349 / 657**
+- JS snapshot parity: **351 / 657**
 - Compile errors: **0**
-- Output diffs: **308**
+- Output diffs: **306**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: preserve exported bindings reduced from applications across the
+  second JS-path simplify pass in `compiler-rust/src/lambda/simplify.rs`
+- OCaml reference: `compiler/core/lam_pass_remove_alias.ml`, where export
+  payload simplification can fold aliases and pure constants before export
+  coercion, but the original exported binding shape still survives when the
+  binding itself came from a named application
+- Rust change:
+  - the extra Rust-only second `simplify_for_js_backend` pass now carries the
+    set of exported bindings whose original RHS was an application
+  - those bindings are no longer added to the substitution map on later
+    passes, so they stay as explicit exported declarations instead of being
+    substituted into the export block and rebound at the end
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release keeps_export_bindings_reduced_from_named_function_calls`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release simplifies_export_payloads_before_export_coercion`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsCurried.res -o /tmp/DerivingAccessorsCurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsUncurried.res -o /tmp/DerivingAccessorsUncurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/functors.res -o /tmp/functors.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `DerivingAccessorsCurried` and `DerivingAccessorsUncurried` now both match
+    their checked-in `.mjs` snapshots exactly
+  - the earlier functor/module-alias fixes remain intact: the diff corpus still
+    has no `functors*` or `global_module_alias_test` failures
+  - `ExternalShadow` remains an exact guard-file match
+- Topline impact:
+  - JS snapshot parity: **351 / 657** (**+2**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **306** (**-2**)
+- Keep this change because it tightens the Rust-only second simplify pass to
+  preserve OCaml’s exported binding shape instead of introducing a later
+  rebinding artifact in emitted JS
 
 Latest iteration on **2026-04-14**:
 

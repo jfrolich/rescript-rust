@@ -21,6 +21,7 @@ struct SimplifyEnv {
     blocks: HashMap<Ident, ImmutableBlockInfo>,
     functions: HashMap<Ident, LFunction>,
     optional_blocks: HashMap<Ident, OptionalBlockInfo>,
+    preserved_export_bindings: HashSet<Ident>,
     substitutions: HashMap<Ident, Lambda>,
 }
 
@@ -73,15 +74,23 @@ impl SimplifyEnv {
 
 /// Simplify lowered lambda before JS IR lowering.
 pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
-    let first = simplify_for_js_backend_once(lam);
-    simplify_for_js_backend_once(&first)
+    let flattened = deep_flatten_for_js_backend(lam);
+    let exports = collect_exported_idents(&flattened);
+    let preserved_export_bindings =
+        collect_exported_apply_bindings(&flattened, &exports);
+    let first = simplify_for_js_backend_once(&flattened, &preserved_export_bindings);
+    simplify_for_js_backend_once(&first, &preserved_export_bindings)
 }
 
-fn simplify_for_js_backend_once(lam: &Lambda) -> Lambda {
+fn simplify_for_js_backend_once(
+    lam: &Lambda,
+    preserved_export_bindings: &HashSet<Ident>,
+) -> Lambda {
     let flattened = deep_flatten_for_js_backend(lam);
     let exports = collect_exported_idents(&flattened);
     let env = SimplifyEnv {
         functions: collect_inlineable_functions(&flattened),
+        preserved_export_bindings: preserved_export_bindings.clone(),
         ..SimplifyEnv::default()
     };
     simplify_with_env(&flattened, &env, &exports)
@@ -426,7 +435,9 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 body_env.optional_blocks.insert(id.clone(), optional_info);
             }
             if let Some(substitution) = substitution_candidate(*kind, original_value, &value) {
-                body_env.substitutions.insert(id.clone(), substitution);
+                if !env.preserved_export_bindings.contains(id) {
+                    body_env.substitutions.insert(id.clone(), substitution);
+                }
             }
             if *kind != LetKind::Variable {
                 if let Some(func) = inlineable_local_function(&value) {
@@ -1632,6 +1643,12 @@ fn collect_exported_idents(lam: &Lambda) -> HashSet<Ident> {
     exports
 }
 
+fn collect_exported_apply_bindings(lam: &Lambda, exports: &HashSet<Ident>) -> HashSet<Ident> {
+    let mut preserved = HashSet::new();
+    collect_exported_apply_bindings_into(lam, exports, &mut preserved);
+    preserved
+}
+
 fn collect_exported_idents_into(lam: &Lambda, exports: &mut HashSet<Ident>) {
     match lam {
         Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
@@ -1704,6 +1721,91 @@ fn collect_exported_idents_into(lam: &Lambda, exports: &mut HashSet<Ident>) {
             collect_exported_idents_into(body, exports);
         }
         Lambda::Lassign(_, value) => collect_exported_idents_into(value, exports),
+    }
+}
+
+fn collect_exported_apply_bindings_into(
+    lam: &Lambda,
+    exports: &HashSet<Ident>,
+    preserved: &mut HashSet<Ident>,
+) {
+    match lam {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
+        Lambda::Lapply(apply) => {
+            collect_exported_apply_bindings_into(&apply.ap_func, exports, preserved);
+            for arg in &apply.ap_args {
+                collect_exported_apply_bindings_into(arg, exports, preserved);
+            }
+        }
+        Lambda::Lfunction(func) => {
+            collect_exported_apply_bindings_into(&func.body, exports, preserved)
+        }
+        Lambda::Llet(_, id, value, body) => {
+            if exports.contains(id) && matches!(value.as_ref(), Lambda::Lapply(_)) {
+                preserved.insert(id.clone());
+            }
+            collect_exported_apply_bindings_into(value, exports, preserved);
+            collect_exported_apply_bindings_into(body, exports, preserved);
+        }
+        Lambda::Lletrec(bindings, body) => {
+            for (id, expr) in bindings {
+                if exports.contains(id) && matches!(expr, Lambda::Lapply(_)) {
+                    preserved.insert(id.clone());
+                }
+                collect_exported_apply_bindings_into(expr, exports, preserved);
+            }
+            collect_exported_apply_bindings_into(body, exports, preserved);
+        }
+        Lambda::Lprim(info) => {
+            for arg in &info.args {
+                collect_exported_apply_bindings_into(arg, exports, preserved);
+            }
+        }
+        Lambda::Lswitch(scrutinee, switch) => {
+            collect_exported_apply_bindings_into(scrutinee, exports, preserved);
+            for (_, lam) in &switch.sw_consts {
+                collect_exported_apply_bindings_into(lam, exports, preserved);
+            }
+            for (_, lam) in &switch.sw_blocks {
+                collect_exported_apply_bindings_into(lam, exports, preserved);
+            }
+            if let Some(failaction) = &switch.sw_failaction {
+                collect_exported_apply_bindings_into(failaction, exports, preserved);
+            }
+        }
+        Lambda::LstringSwitch(scrutinee, cases, default) => {
+            collect_exported_apply_bindings_into(scrutinee, exports, preserved);
+            for (_, lam) in cases {
+                collect_exported_apply_bindings_into(lam, exports, preserved);
+            }
+            if let Some(default) = default {
+                collect_exported_apply_bindings_into(default, exports, preserved);
+            }
+        }
+        Lambda::LstaticRaise(_, args) => {
+            for arg in args {
+                collect_exported_apply_bindings_into(arg, exports, preserved);
+            }
+        }
+        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+            collect_exported_apply_bindings_into(body, exports, preserved);
+            collect_exported_apply_bindings_into(handler, exports, preserved);
+        }
+        Lambda::LifThenElse(cond, then_, else_) => {
+            collect_exported_apply_bindings_into(cond, exports, preserved);
+            collect_exported_apply_bindings_into(then_, exports, preserved);
+            collect_exported_apply_bindings_into(else_, exports, preserved);
+        }
+        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+            collect_exported_apply_bindings_into(first, exports, preserved);
+            collect_exported_apply_bindings_into(second, exports, preserved);
+        }
+        Lambda::Lfor(_, start, end, _, body) => {
+            collect_exported_apply_bindings_into(start, exports, preserved);
+            collect_exported_apply_bindings_into(end, exports, preserved);
+            collect_exported_apply_bindings_into(body, exports, preserved);
+        }
+        Lambda::Lassign(_, value) => collect_exported_apply_bindings_into(value, exports, preserved),
     }
 }
 
