@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 426 / 657 JS snapshots passing, 0 compile errors, 231 output diffs
+**Status:** 430 / 657 JS snapshots passing, 0 compile errors, 227 output diffs
 
 ## Goal
 
@@ -35,11 +35,71 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **426 / 657**
+- JS snapshot parity: **430 / 657**
 - Compile errors: **0**
-- Output diffs: **231**
+- Output diffs: **227**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port OCaml `compile_sequand` / `compile_sequor` return-path
+  lowering from `compiler/core/lam_compile.ml` so boolean short-circuit
+  primitives re-enter the return-position `if` path, and make recursive
+  self-tailcall detection follow that same OCaml expansion through the right
+  branch instead of leaving Rust-only direct recursive `&&` / `||` calls in
+  emitted JS
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is a `Lam_compile` control-flow /
+  short-circuit lowering fix downstream of the already-green optimized lambda
+  boundary
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, where `compile_sequand` and
+  `compile_sequor` call back into `compile_lambda` with `Lam.sequand` /
+  `Lam.sequor` when the continuation is a return so the boolean primitive is
+  lowered as an `if`, and where the tailcall branch of `compile_apply`
+  rewrites self-calls into parameter assignments plus `continue`
+- Rust change:
+  - taught `compiler-rust/src/lambda/compile.rs` to route `Psequand` /
+    `Psequor` through dedicated short-circuit handling in expression and
+    return contexts instead of always compiling them straight to JS `&&` / `||`
+  - added return-path handling for those primitives in both
+    `compile_return_block(...)` and
+    `compile_tail_loop_return_block(...)`, matching the OCaml behavior that
+    re-expands them to `if` branches before later return/loop lowering
+  - updated `function_has_self_tailcall(...)` to inspect the right-hand branch
+    of `Psequand` / `Psequor`, which is the only tail-position branch after
+    OCaml's `Lam.sequand` / `Lam.sequor` expansion
+  - added focused regression coverage in
+    `function_return_blocks_lower_effectful_sequands_without_a_result_temp`,
+    `recursive_self_tailcalls_lower_sequands_to_looping_while_bodies`, and
+    `recursive_self_tailcalls_lower_sequors_to_looping_while_bodies`
+- Verified focused guards for this slice:
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml function_return_blocks_lower_effectful_sequands_without_a_result_temp -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml recursive_self_tailcalls_lower_sequands_to_looping_while_bodies -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml recursive_self_tailcalls_lower_sequors_to_looping_while_bodies -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/and_or_tailcall_test.res`, diffing the
+    exact test-harness AST compile output against the checked-in snapshot
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/and_or_tailcall_test.res` now matches its checked-in
+    snapshot exactly; Rust had been leaving `b && f(...)` / `b || f(...)` as
+    recursive JS calls because the short-circuit primitives never re-entered
+    the return-path `if` lowering that exposes self-tailcalls to the loop pass
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the short-circuit / tailcall lowering change
+  - `and_or_tailcall_test` no longer appears under `temp/rust-parity/diffs`
+- Topline impact:
+  - JS snapshot parity: **426 / 657** -> **430 / 657** (**+4**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **231** -> **227** (**-4**)
+- Keep this change because it ports the OCaml return-continuation lowering for
+  `Psequand` / `Psequor` and the corresponding self-tailcall visibility rather
+  than preserving the Rust-only direct-recursion shortcut in emitted JS.
 
 Latest iteration on **2026-04-14**:
 

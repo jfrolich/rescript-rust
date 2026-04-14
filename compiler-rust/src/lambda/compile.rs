@@ -70,6 +70,36 @@ impl TailLoopState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShortCircuitOp {
+    And,
+    Or,
+}
+
+impl ShortCircuitOp {
+    fn default_expr(self) -> Expression {
+        Expression::bool(matches!(self, Self::Or))
+    }
+
+    fn default_lambda(self) -> Lambda {
+        match self {
+            Self::And => Lambda::false_(),
+            Self::Or => Lambda::true_(),
+        }
+    }
+}
+
+fn short_circuit_primitive<'a>(
+    primitive: &'a Primitive,
+    args: &'a [Lambda],
+) -> Option<(ShortCircuitOp, &'a Lambda, &'a Lambda)> {
+    match (primitive, args) {
+        (Primitive::Psequand, [lhs, rhs]) => Some((ShortCircuitOp::And, lhs, rhs)),
+        (Primitive::Psequor, [lhs, rhs]) => Some((ShortCircuitOp::Or, lhs, rhs)),
+        _ => None,
+    }
+}
+
 fn empty_switch_case_clause() -> CaseClause {
     CaseClause {
         body: vec![],
@@ -458,7 +488,13 @@ impl LambdaCompiler {
                     expr: body_compiled.expr,
                 }
             }
-            Lambda::Lprim(info) => self.compile_primitive(&info.primitive, &info.args),
+            Lambda::Lprim(info) => {
+                if let Some((op, lhs, rhs)) = short_circuit_primitive(&info.primitive, &info.args)
+                {
+                    return self.compile_short_circuit_expr(op, lhs, rhs);
+                }
+                self.compile_primitive(&info.primitive, &info.args)
+            }
             Lambda::Lswitch(scrut, switch) => self.compile_switch(scrut, switch),
             Lambda::LstringSwitch(scrut, cases, default) => {
                 self.compile_string_switch(scrut, cases, default.as_deref())
@@ -892,6 +928,70 @@ impl LambdaCompiler {
         block
     }
 
+    fn compile_short_circuit_expr(
+        &mut self,
+        op: ShortCircuitOp,
+        lhs: &Lambda,
+        rhs: &Lambda,
+    ) -> Compiled {
+        let lhs_compiled = self.compile_expr(lhs);
+        let rhs_compiled = self.compile_expr(rhs);
+        let mut prelude = lhs_compiled.prelude;
+
+        if rhs_compiled.prelude.is_empty() {
+            let expr = match op {
+                ShortCircuitOp::And => {
+                    Expression::bin(BinOp::And, lhs_compiled.expr, rhs_compiled.expr)
+                }
+                ShortCircuitOp::Or => {
+                    Expression::bin(BinOp::Or, lhs_compiled.expr, rhs_compiled.expr)
+                }
+            };
+            return Compiled { prelude, expr };
+        }
+
+        let tmp = self.fresh_ident("tmp");
+        prelude.push(Statement::variable(VariableDeclaration {
+            ident: tmp.clone(),
+            value: Some(op.default_expr()),
+            property: LetKind::Strict,
+            ident_info: IdentInfo::default(),
+        }));
+
+        let mut then_block = rhs_compiled.prelude;
+        if !block_terminates(&then_block) {
+            then_block.push(Statement::exp(Expression::bin(
+                BinOp::Eq,
+                Expression::var(tmp.clone()),
+                rhs_compiled.expr,
+            )));
+        }
+
+        let test = match op {
+            ShortCircuitOp::And => lhs_compiled.expr,
+            ShortCircuitOp::Or => Expression::not(lhs_compiled.expr),
+        };
+        prelude.push(Statement::if_(test, then_block, vec![]));
+
+        Compiled {
+            prelude,
+            expr: Expression::var(tmp),
+        }
+    }
+
+    fn compile_short_circuit_return_block(
+        &mut self,
+        op: ShortCircuitOp,
+        lhs: &Lambda,
+        rhs: &Lambda,
+    ) -> Block {
+        let default = op.default_lambda();
+        match op {
+            ShortCircuitOp::And => self.compile_if_return_block(lhs, rhs, &default),
+            ShortCircuitOp::Or => self.compile_if_return_block(lhs, &default, rhs),
+        }
+    }
+
     fn compile_return_block(&mut self, lam: &Lambda) -> Block {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
@@ -907,6 +1007,18 @@ impl LambdaCompiler {
             }
             Lambda::LifThenElse(cond, then_, else_) => {
                 self.compile_if_return_block(cond, then_, else_)
+            }
+            Lambda::Lprim(info) => {
+                if let Some((op, lhs, rhs)) = short_circuit_primitive(&info.primitive, &info.args)
+                {
+                    return self.compile_short_circuit_return_block(op, lhs, rhs);
+                }
+                let compiled = self.compile_expr(lam);
+                let mut block = compiled.prelude;
+                if !block_terminates(&block) {
+                    block.push(Statement::return_(compiled.expr));
+                }
+                block
             }
             Lambda::Lsequence(first, second) => {
                 let mut block = self.compile_effect_block(first);
@@ -1132,6 +1244,20 @@ impl LambdaCompiler {
             Lambda::LifThenElse(cond, then_, else_) => {
                 self.compile_tail_loop_if_return_block(cond, then_, else_, tail_loop)
             }
+            Lambda::Lprim(info) => {
+                if let Some((op, lhs, rhs)) = short_circuit_primitive(&info.primitive, &info.args)
+                {
+                    return self.compile_short_circuit_tail_loop_return_block(
+                        op, lhs, rhs, tail_loop,
+                    );
+                }
+                let compiled = self.compile_expr(lam);
+                let mut block = compiled.prelude;
+                if !block_terminates(&block) {
+                    block.push(Statement::return_(compiled.expr));
+                }
+                block
+            }
             Lambda::Lsequence(first, second) => {
                 let mut block = self.compile_effect_block(first);
                 block.extend(self.compile_tail_loop_return_block(second, tail_loop));
@@ -1189,6 +1315,24 @@ impl LambdaCompiler {
 
         block.push(Statement::if_(cond_compiled.expr, then_block, else_block));
         block
+    }
+
+    fn compile_short_circuit_tail_loop_return_block(
+        &mut self,
+        op: ShortCircuitOp,
+        lhs: &Lambda,
+        rhs: &Lambda,
+        tail_loop: &mut TailLoopState,
+    ) -> Block {
+        let default = op.default_lambda();
+        match op {
+            ShortCircuitOp::And => {
+                self.compile_tail_loop_if_return_block(lhs, rhs, &default, tail_loop)
+            }
+            ShortCircuitOp::Or => {
+                self.compile_tail_loop_if_return_block(lhs, &default, rhs, tail_loop)
+            }
+        }
     }
 
     fn compile_tail_loop_switch_return_block(
@@ -5628,6 +5772,8 @@ fn function_has_self_tailcall(function: &Ident, lam: &Lambda) -> bool {
                 || function_has_self_tailcall(function, else_)
         }
         Lambda::Lsequence(_, second) => function_has_self_tailcall(function, second),
+        Lambda::Lprim(info) => short_circuit_primitive(&info.primitive, &info.args)
+            .is_some_and(|(_, _, rhs)| function_has_self_tailcall(function, rhs)),
         Lambda::Lswitch(_, switch) => {
             switch
                 .sw_consts
@@ -5659,7 +5805,6 @@ fn function_has_self_tailcall(function: &Ident, lam: &Lambda) -> bool {
         | Lambda::Lconst(_)
         | Lambda::Lfunction(_)
         | Lambda::Lletrec(_, _)
-        | Lambda::Lprim(_)
         | Lambda::LstaticRaise(_, _)
         | Lambda::LtryWith(_, _, _)
         | Lambda::Lwhile(_, _)
@@ -12750,6 +12895,152 @@ mod tests {
     }
 
     #[test]
+    fn function_return_blocks_lower_effectful_sequands_without_a_result_temp() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let branch = Ident::create_local("branch");
+        let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+            arity: 1,
+            params: vec![cond.clone()],
+            body: Box::new(Lambda::prim(
+                Primitive::Psequand,
+                vec![
+                    Lambda::var(cond.clone()),
+                    Lambda::let_(
+                        LetKind::Strict,
+                        branch.clone(),
+                        Lambda::const_(Constant::int(1)),
+                        Lambda::var(branch.clone()),
+                    ),
+                ],
+                Location::none(),
+            )),
+            attr: crate::lambda::FunctionAttribute::default(),
+        }));
+
+        let Expression {
+            desc: ExpressionDesc::Fun { body, .. },
+            ..
+        } = compiled.expr
+        else {
+            panic!("expected a function expression");
+        };
+
+        let [stmt] = body.as_slice() else {
+            panic!("expected a single short-circuit lowering statement");
+        };
+        match &stmt.desc {
+            StatementDesc::If(test, then_block, else_block) => {
+                assert!(matches!(
+                    test,
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&cond)
+                ));
+
+                let [branch_decl, branch_return] = then_block.as_slice() else {
+                    panic!("expected the right-hand branch declaration and return");
+                };
+                let StatementDesc::Variable(VariableDeclaration {
+                    ident,
+                    value:
+                        Some(Expression {
+                            desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                            ..
+                        }),
+                    ..
+                }) = &branch_decl.desc
+                else {
+                    panic!("expected the right-hand branch local declaration");
+                };
+                assert!(ident.same(&branch));
+                assert!(matches!(
+                    branch_return,
+                    Statement {
+                        desc: StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                            ..
+                        }),
+                        ..
+                    } if id.same(&branch)
+                ));
+
+                let [else_return] = else_block.as_slice() else {
+                    panic!("expected a single false return in the else branch");
+                };
+                assert!(matches!(
+                    else_return,
+                    Statement {
+                        desc: StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Bool(false),
+                            ..
+                        }),
+                        ..
+                    }
+                ));
+            }
+            StatementDesc::Block(block) => {
+                let [guard_if, branch_decl, branch_return] = block.as_slice() else {
+                    panic!("expected a guarded false-return plus the right-hand branch");
+                };
+                let StatementDesc::If(test, then_block, else_block) = &guard_if.desc else {
+                    panic!("expected the short-circuit false-return guard");
+                };
+                assert!(matches!(
+                    test,
+                    Expression {
+                        desc: ExpressionDesc::JsNot(inner),
+                        ..
+                    } if matches!(
+                        &inner.desc,
+                        ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) if id.same(&cond)
+                    )
+                ));
+                assert!(else_block.is_empty());
+                let [guard_return] = then_block.as_slice() else {
+                    panic!("expected the false-return guard body");
+                };
+                assert!(matches!(
+                    guard_return,
+                    Statement {
+                        desc: StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Bool(false),
+                            ..
+                        }),
+                        ..
+                    }
+                ));
+
+                let StatementDesc::Variable(VariableDeclaration {
+                    ident,
+                    value:
+                        Some(Expression {
+                            desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                            ..
+                        }),
+                    ..
+                }) = &branch_decl.desc
+                else {
+                    panic!("expected the right-hand branch local declaration");
+                };
+                assert!(ident.same(&branch));
+                assert!(matches!(
+                    branch_return,
+                    Statement {
+                        desc: StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                            ..
+                        }),
+                        ..
+                    } if id.same(&branch)
+                ));
+            }
+            _ => panic!("expected direct return-position short-circuit lowering"),
+        }
+    }
+
+    #[test]
     fn let_bindings_lower_ifs_without_a_result_temp() {
         let mut compiler = LambdaCompiler::new();
         let cond = Ident::create_local("cond");
@@ -17820,6 +18111,104 @@ mod tests {
         assert!(
             rendered.contains("continue;"),
             "expected recursive self-tailcall lowering to continue the loop:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("return loop("),
+            "unexpected recursive return call remained:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn recursive_self_tailcalls_lower_sequands_to_looping_while_bodies() {
+        let mut compiler = LambdaCompiler::new();
+        let loop_ = Ident::create_local("loop");
+        let flag = Ident::create_local("flag");
+        let tailcall = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::var(loop_.clone())),
+            ap_args: vec![Lambda::const_(Constant::JsFalse)],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+        let lam = Lambda::letrec(
+            vec![(
+                loop_.clone(),
+                Lambda::function_(
+                    1,
+                    vec![flag.clone()],
+                    Lambda::prim(
+                        Primitive::Psequand,
+                        vec![Lambda::var(flag), tailcall],
+                        Location::none(),
+                    ),
+                    FunctionAttribute::default(),
+                ),
+            )],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert!(
+            rendered.contains("while (true)"),
+            "expected recursive sequand lowering to emit a loop:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("continue;"),
+            "expected recursive sequand lowering to continue the loop:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("return loop("),
+            "unexpected recursive return call remained:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn recursive_self_tailcalls_lower_sequors_to_looping_while_bodies() {
+        let mut compiler = LambdaCompiler::new();
+        let loop_ = Ident::create_local("loop");
+        let flag = Ident::create_local("flag");
+        let tailcall = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::var(loop_.clone())),
+            ap_args: vec![Lambda::const_(Constant::JsFalse)],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+        let lam = Lambda::letrec(
+            vec![(
+                loop_.clone(),
+                Lambda::function_(
+                    1,
+                    vec![flag.clone()],
+                    Lambda::prim(
+                        Primitive::Psequor,
+                        vec![Lambda::var(flag), tailcall],
+                        Location::none(),
+                    ),
+                    FunctionAttribute::default(),
+                ),
+            )],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert!(
+            rendered.contains("while (true)"),
+            "expected recursive sequor lowering to emit a loop:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("continue;"),
+            "expected recursive sequor lowering to continue the loop:\n{rendered}"
         );
         assert!(
             !rendered.contains("return loop("),
