@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 477 / 657 JS snapshots passing, 0 compile errors, 180 output diffs
+**Status:** 485 / 657 JS snapshots passing, 0 compile errors, 172 output diffs
 
 ## Goal
 
@@ -35,11 +35,71 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **477 / 657**
+- JS snapshot parity: **485 / 657**
 - Compile errors: **0**
-- Output diffs: **180**
+- Output diffs: **172**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep exported bindings that were originally call results
+  materialized across the second backend alias-cleanup sweep so export coercion
+  can preserve OCaml's declaration order instead of rebinding those constants
+  at the end of the module
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`, because the mismatch lived after optimized
+  lambda in Rust's post-lowering simplifier / export-coercion handoff:
+  OCaml's backend leaves exported call-result bindings in place until export
+  coercion, while Rust's late alias single-use rewrite was still deleting those
+  bindings on the second cleanup pass
+- OCaml reference:
+  `compiler/core/lam_compile_main.ml`, especially the final
+  `simplify_alias -> alpha_conversion -> simplify_lets` pipeline before
+  coercion; `compiler/core/lam_pass_lets_dce.ml`; and
+  `compiler/core/lam_coercion.ml`, especially `handle_exports`
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so the late
+    single-use alias substitution now respects `preserved_export_bindings`,
+    matching the OCaml backend behavior for exported bindings that were
+    originally `Lapply` results or exported eta wrappers
+  - added backend regression coverage in
+    `compile_deps_program_keeps_exported_call_result_before_rebound_constant_block_export`
+    so reduced exported call results stay before later rebound constant-block
+    exports in the emitted JS order
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml keeps_export_bindings_reduced_from_named_function_calls -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml compile_deps_program_keeps_exported_call_result_before_rebound_constant_block_export -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/DisambiguateOptionalFields.res`,
+    diffing `/tmp/DisambiguateOptionalFields.mjs` against the checked-in
+    snapshot
+  - direct release repro for `tests/tests/src/DerivingAccessorsCurried.res`,
+    diffing `/tmp/DerivingAccessorsCurried.mjs` against the checked-in snapshot
+  - direct release repro for
+    `tests/tests/src/DerivingAccessorsUncurried.res`, diffing
+    `/tmp/DerivingAccessorsUncurried.mjs` against the checked-in snapshot
+  - direct guard repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    broader guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/DisambiguateOptionalFields.res` is now an exact snapshot
+    match again; the reduced exported call result `res` stays before the later
+    rebound `v` object export, matching OCaml's declaration order
+  - `tests/tests/src/DerivingAccessorsCurried.res` and
+    `tests/tests/src/DerivingAccessorsUncurried.res` are now exact snapshot
+    matches again; `_composedMyField` stays materialized in place instead of
+    being rebound at the end of the module
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the simplifier change
+- Topline impact:
+  - JS snapshot parity: **477 / 657** -> **485 / 657** (**+8**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **180** -> **172** (**-8**)
+- Keep this change because it matches OCaml's backend cleanup/coercion
+  interaction and removes the declaration-ordering regression without adding
+  any printer-only rewrite.
 
 Latest iteration on **2026-04-15**:
 

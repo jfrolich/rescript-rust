@@ -12808,6 +12808,96 @@ mod tests {
     }
 
     #[test]
+    fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block_export() {
+        let mut compiler = LambdaCompiler::new();
+        let f = Ident::create_local("f");
+        let v = Ident::create_local("v");
+        let res = Ident::create_local("res");
+        let param = Ident::create_local("v");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![v.clone(), res.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(v.clone()), Lambda::var(res.clone())],
+            Location::none(),
+        );
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            f.clone(),
+            Lambda::prim(
+                Primitive::PjsFnMake(1),
+                vec![Lambda::function_(
+                    1,
+                    vec![param.clone()],
+                    Lambda::prim(
+                        Primitive::Pfield(
+                            0,
+                            crate::lambda::compat::FieldDbgInfo::Record {
+                                name: "x".to_string(),
+                                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                            },
+                        ),
+                        vec![Lambda::var(param)],
+                        Location::none(),
+                    ),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                v.clone(),
+                Lambda::const_(Constant::Block {
+                    tag: 0,
+                    tag_info: TagInfo::record(
+                        vec![
+                            ("x".to_string(), false),
+                            ("y".to_string(), false),
+                            ("z".to_string(), false),
+                        ],
+                        crate::parser::ast::MutableFlag::Immutable,
+                    ),
+                    elements: vec![
+                        Constant::int(3),
+                        Constant::int(4),
+                        Constant::JsUndefined { is_unit: false },
+                    ],
+                }),
+                Lambda::let_(
+                    LetKind::Strict,
+                    res.clone(),
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(f)),
+                        ap_args: vec![Lambda::var(v.clone())],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Uncurry,
+                        },
+                        ap_transformed_jsx: false,
+                    }),
+                    export_block,
+                ),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+        let rendered = print_deps_program(&deps, None);
+        let res_idx = rendered
+            .find("let res = 3;")
+            .expect("expected the reduced exported call result binding");
+        let v_idx = rendered
+            .find("let v = {\n  x: 3,")
+            .expect("expected the rebound constant-block export binding");
+        assert!(
+            res_idx < v_idx,
+            "expected the preserved exported call result before the rebound block export:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn compile_deps_program_rebinds_different_name_exports_after_effects() {
         let mut compiler = LambdaCompiler::new();
         let original_export = Ident::create_local("MyURL");

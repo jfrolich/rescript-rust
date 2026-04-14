@@ -705,7 +705,10 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             {
                 body = substitute_alias_use(&body, id, &value);
             }
-            if kind == LetKind::Alias && !preserve_exported_eta_alias {
+            if kind == LetKind::Alias
+                && !preserve_exported_eta_alias
+                && !env.preserved_export_bindings.contains(id)
+            {
                 let use_info = alias_use_info(id, &body);
                 if use_info.times == 1
                     && (!use_info.captured || matches!(value, Lambda::Lconst(_) | Lambda::Lvar(_)))
