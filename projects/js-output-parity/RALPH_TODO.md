@@ -43,42 +43,45 @@ reported:
 
 Interpretation:
 
-- This iteration moved back onto the **Phase 3: Port JS IR Lowering And Metadata**
-  path from `PLAN.md`, specifically the function/module-wrapper lowering in
-  `compiler-rust/src/lambda/compile.rs`
-- The OCaml-aligned rule here is the immutable identity-module collapse in
+- This iteration stays on the **Phase 3: Port JS IR Lowering And Metadata**
+  path from `PLAN.md`, extending the module-wrapper lowering work into
+  `compiler-rust/src/lambda/simplify.rs`
+- The OCaml-aligned rule is still the immutable identity-module collapse in
   `compiler/core/lam.ml`, where `Lam.prim` rewrites
   `Pmakeblock (Blk_module ...)` built entirely from matching `Pfield`
   projections of the same module input back to that original `Lvar` or
   `Lglobal_module`
-- The Rust JS lowering now mirrors that end result for function return blocks:
-  - functor-style functions that only rebuild their argument module through
-    matching immutable module-field projections now emit `return U;` /
-    `return M;` instead of materializing a fresh object literal wrapper
-  - the matcher accepts both the direct lowered alias-chain shape and the
-    `simplify_for_js_backend` inlined `Pfield` shape that reaches the JS
-    backend on real files
+- The Rust JS-path simplifier now applies that collapse generally before JS IR
+  lowering instead of only at function-return emission time:
+  - immutable module blocks reconstructed from alias or direct module-field
+    projections of the same source module now simplify back to that source
+    module expression
+  - this catches top-level module aliases and effectful functor bodies that
+    still reached the backend with explicit `Blk_module` wrappers after the
+    earlier return-block-only fix
 - Added focused regression coverage in
-  `lambda::compile::tests::function_return_blocks_collapse_identity_module_wrapper_to_parameter`,
-  `lambda::compile::tests::function_return_blocks_collapse_inlined_identity_module_wrapper_to_parameter`,
+  `lambda::simplify::tests::collapses_identity_module_block_built_from_alias_projections`,
+  `lambda::simplify::tests::collapses_identity_module_block_built_from_global_module_projections`,
   and
-  `lambda::compile::tests::function_return_blocks_keep_non_identity_module_wrapper`
+  `lambda::simplify::tests::keeps_non_identity_module_block_with_mixed_sources`
 - Verified focused guards for this slice:
-  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::compile::tests::function_return_blocks_collapse_identity_module_wrapper_to_parameter -- --exact`
-  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::compile::tests::function_return_blocks_collapse_inlined_identity_module_wrapper_to_parameter -- --exact`
-  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::compile::tests::function_return_blocks_keep_non_identity_module_wrapper -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release identity_module_block -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release keeps_non_identity_module_block_with_mixed_sources -- --exact`
   - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
-  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_3897_test.res -o /tmp/gpr_3897_test.mjs`
-  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_3865_bar.res -o /tmp/gpr_3865_bar.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/coercion_module_alias_test.res -o /tmp/coercion_module_alias_test.mjs`
   - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
   - `timeout 1800 ./scripts/test_js_output_parity.sh`
 - Focused outcome:
-  `gpr_3897_test`, `gpr_3865_bar`, and `test_non_export` are now out of the
-  diff corpus, and `ExternalShadow` remains an exact guard-file match
+  `global_module_alias_test` no longer lowers its functor result aliases into
+  giant explicit object literals, `coercion_module_alias_test` drops several
+  explicit module-alias wrapper objects such as `C3 = { ... }`, and
+  `ExternalShadow` remains an exact guard-file match
 - The authoritative JS snapshot baseline now reports **346 / 657** passing,
-  **0** compile errors, and **311** output diffs; this is a net **+3**
-  passing snapshots and **-3** output diffs from the previously recorded
-  **343 / 657**, **0** compile errors, **314** output diffs
+  **0** compile errors, and **311** output diffs; this change is a net **0**
+  at the topline from the previously recorded **346 / 657**, **0** compile
+  errors, and **311** output diffs, and it is kept because it removes a real
+  OCaml-aligned module-wrapper lowering gap even though the remaining files
+  still fail later in the same cluster
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed primitive-lowering gap in

@@ -854,6 +854,15 @@ fn simplify_primitive(
             .map(|optional| optional.value.clone())
             .unwrap_or_else(|| Lambda::var(id.clone())),
         (
+            Primitive::Pmakeblock(
+                _,
+                TagInfo::Module(fields),
+                crate::lambda::primitive::Mutable::Immutable,
+            ),
+            _,
+        ) => collapse_identity_module_block(fields, &args)
+            .unwrap_or_else(|| Lambda::prim(info.primitive.clone(), args, info.loc.clone())),
+        (
             Primitive::Pstringadd,
             [
                 Lambda::Lconst(Constant::String {
@@ -870,6 +879,48 @@ fn simplify_primitive(
             delim: left_delim.clone().or(right_delim.clone()),
         }),
         _ => Lambda::prim(info.primitive.clone(), args, info.loc.clone()),
+    }
+}
+
+fn collapse_identity_module_block(fields: &[String], args: &[Lambda]) -> Option<Lambda> {
+    if fields.len() != args.len() || fields.is_empty() {
+        return None;
+    }
+
+    let target = projected_identity_module_target(&fields[0], 0, &args[0])?;
+    for (index, (field_name, arg)) in fields.iter().zip(args.iter()).enumerate().skip(1) {
+        let arg_target = projected_identity_module_target(field_name, index as i32, arg)?;
+        if !same_identity_module_target(&target, &arg_target) {
+            return None;
+        }
+    }
+
+    Some(target)
+}
+
+fn projected_identity_module_target(field_name: &str, index: i32, arg: &Lambda) -> Option<Lambda> {
+    match arg {
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive:
+                Primitive::Pfield(field_index, FieldDbgInfo::Module { name: projected_name }),
+            args,
+            ..
+        }) if *field_index == index && projected_name == field_name => match args.as_slice() {
+            [Lambda::Lvar(_) | Lambda::LglobalModule(_, _)] => Some(args[0].clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn same_identity_module_target(left: &Lambda, right: &Lambda) -> bool {
+    match (left, right) {
+        (Lambda::Lvar(left_id), Lambda::Lvar(right_id)) => left_id.same(right_id),
+        (
+            Lambda::LglobalModule(left_id, left_dynamic_import),
+            Lambda::LglobalModule(right_id, right_dynamic_import),
+        ) => left_id.same(right_id) && left_dynamic_import == right_dynamic_import,
+        _ => false,
     }
 }
 
@@ -2284,6 +2335,130 @@ mod tests {
             panic!("expected the body to reference the original function");
         };
         assert_eq!(body_id, kept_id);
+    }
+
+    #[test]
+    fn collapses_identity_module_block_built_from_alias_projections() {
+        let module_param = Ident::create_local("U");
+        let projected = Ident::create_local("x");
+
+        let lambda = Lambda::let_(
+            LetKind::Alias,
+            projected.clone(),
+            Lambda::prim(
+                Primitive::Pfield(
+                    0,
+                    FieldDbgInfo::Module {
+                        name: "x".to_string(),
+                    },
+                ),
+                vec![Lambda::var(module_param.clone())],
+                Location::none(),
+            ),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::Module(vec!["x".to_string()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::var(projected)],
+                Location::none(),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lvar(id) = simplified else {
+            panic!("expected the identity module block to collapse to the original module");
+        };
+        assert!(id.same(&module_param));
+    }
+
+    #[test]
+    fn collapses_identity_module_block_built_from_global_module_projections() {
+        let source = Ident::create_persistent("Belt_List");
+        let lambda = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::Module(vec!["length".to_string(), "size".to_string()]),
+                Mutable::Immutable,
+            ),
+            vec![
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: "length".to_string(),
+                        },
+                    ),
+                    vec![Lambda::global_module(source.clone(), false)],
+                    Location::none(),
+                ),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        1,
+                        FieldDbgInfo::Module {
+                            name: "size".to_string(),
+                        },
+                    ),
+                    vec![Lambda::global_module(source.clone(), false)],
+                    Location::none(),
+                ),
+            ],
+            Location::none(),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::LglobalModule(id, dynamic_import) = simplified else {
+            panic!("expected the identity module block to collapse to the global module");
+        };
+        assert!(id.same(&source));
+        assert!(!dynamic_import);
+    }
+
+    #[test]
+    fn keeps_non_identity_module_block_with_mixed_sources() {
+        let left = Ident::create_local("Left");
+        let right = Ident::create_local("Right");
+        let lambda = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::Module(vec!["x".to_string(), "y".to_string()]),
+                Mutable::Immutable,
+            ),
+            vec![
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: "x".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(left.clone())],
+                    Location::none(),
+                ),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        1,
+                        FieldDbgInfo::Module {
+                            name: "y".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(right.clone())],
+                    Location::none(),
+                ),
+            ],
+            Location::none(),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::Module(fields), _),
+            ..
+        }) = simplified
+        else {
+            panic!("expected mixed-source module blocks to stay explicit");
+        };
+        assert_eq!(fields, vec!["x".to_string(), "y".to_string()]);
     }
 
     #[test]
