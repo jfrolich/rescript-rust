@@ -19193,13 +19193,14 @@ fn rewrite_alias_pident_child_prefixes<'a>(
     }
 }
 
-pub(crate) fn qualify_resolved_signature_for_access_path<'a>(
+fn qualify_resolved_signature_for_access_path_inner<'a>(
     access_path: &Path,
     mty: &crate::types::decl::ModuleType,
     resolved_sig: &crate::types::decl::Signature,
     resolved_name: Option<&str>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
+    force_generalize_values: bool,
 ) -> crate::types::decl::Signature {
     let (should_rebind_direct_type_family, allow_inferred_rebind_paths) =
         direct_sig_type_family_rebind_options(mty, access_path);
@@ -19285,11 +19286,51 @@ pub(crate) fn qualify_resolved_signature_for_access_path<'a>(
         crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, access_path, ctx);
         crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, access_path);
     }
-    crate::types::ctype::force_generalize_module_sig_values(
-        ctx,
-        &crate::types::decl::ModuleType::MtySignature(sig.clone()),
-    );
+    if force_generalize_values {
+        crate::types::ctype::force_generalize_module_sig_values(
+            ctx,
+            &crate::types::decl::ModuleType::MtySignature(sig.clone()),
+        );
+    }
     sig
+}
+
+pub(crate) fn qualify_resolved_signature_for_access_path<'a>(
+    access_path: &Path,
+    mty: &crate::types::decl::ModuleType,
+    resolved_sig: &crate::types::decl::Signature,
+    resolved_name: Option<&str>,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> crate::types::decl::Signature {
+    qualify_resolved_signature_for_access_path_inner(
+        access_path,
+        mty,
+        resolved_sig,
+        resolved_name,
+        pers_env,
+        ctx,
+        true,
+    )
+}
+
+pub(crate) fn qualify_resolved_signature_for_local_components<'a>(
+    access_path: &Path,
+    mty: &crate::types::decl::ModuleType,
+    resolved_sig: &crate::types::decl::Signature,
+    resolved_name: Option<&str>,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> crate::types::decl::Signature {
+    qualify_resolved_signature_for_access_path_inner(
+        access_path,
+        mty,
+        resolved_sig,
+        resolved_name,
+        pers_env,
+        ctx,
+        false,
+    )
 }
 
 pub(crate) fn build_qualified_signature_for_access_path<'a>(

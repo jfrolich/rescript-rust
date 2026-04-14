@@ -220,7 +220,7 @@ fn build_local_module_components<'a>(
     ctx: &'a super::context::TypeContext<'a>,
 ) -> Option<QualifiedModuleComponents> {
     let (raw_sig, resolved_name) = env.resolve_module_type(&md.md_type, pers_env, ctx)?;
-    let qualified_sig = crate::types::typecore::qualify_resolved_signature_for_access_path(
+    let qualified_sig = crate::types::typecore::qualify_resolved_signature_for_local_components(
         access_path,
         &md.md_type,
         &raw_sig,
