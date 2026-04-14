@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 400 / 657 JS snapshots passing, 0 compile errors, 257 output diffs
+**Status:** 401 / 657 JS snapshots passing, 0 compile errors, 256 output diffs
 
 ## Goal
 
@@ -35,11 +35,64 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **400 / 657**
+- JS snapshot parity: **401 / 657**
 - Compile errors: **0**
-- Output diffs: **257**
+- Output diffs: **256**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the missing OCaml `Phash` / `Phash_mixint` /
+  `Phash_mixstring` / `Phash_finalmix` lowering from
+  `compiler/core/lam_compile_primitive.ml` into
+  `compiler-rust/src/lambda/compile.rs` so `%hash` externals emit
+  `Primitive_hash.*` runtime calls instead of falling through the Rust
+  primitive matcher to an empty `undefined` body
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice fixes post-lambda primitive lowering in the
+  OCaml `lam_compile_primitive.ml` backend without reopening typedtree or
+  lambda parity work
+- OCaml reference:
+  `compiler/core/lam_compile_primitive.ml`, where `Phash`,
+  `Phash_mixint`, `Phash_mixstring`, and `Phash_finalmix` each lower with
+  `E.runtime_call Primitive_modules.hash ...`
+- Rust change:
+  - added direct `Primitive_hash.hash`, `hash_mix_int`,
+    `hash_mix_string`, and `hash_final_mix` runtime-call lowering in
+    `compile_primitive(...)`
+  - extended `runtime_member_for_eta_wrapped_primitive(...)` so eta-wrapped
+    hash primitives alias the runtime member exactly like the other OCaml
+    runtime-call primitive families
+  - added focused regression coverage in
+    `compile_hash_primitives_lower_to_primitive_hash_runtime_calls_like_ocaml`
+    and `compile_eta_wrapped_hash_function_aliases_runtime_member`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml compile_hash_primitive -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml compile_eta_wrapped_hash_function_aliases_runtime_member -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact `compiler-args` repro for `tests/tests/src/hash_utils.res` from
+    `tests/tests/lib/bs`, diffing `/tmp/hash_utils.mjs` against the
+    checked-in snapshot
+  - exact `compiler-args` repro for `tests/tests/src/ExternalShadow.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/ExternalShadow.mjs` against the
+    checked-in snapshot as an unchanged backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/hash_utils.res` now matches its checked-in snapshot
+    exactly; Rust once emitted an empty `hash` function because the hash
+    primitive family fell through `compile_primitive(...)`, and it now emits
+    the same `Primitive_hash.hash(...)` runtime call as OCaml
+  - `tests/tests/src/ExternalShadow.res` remains an exact match after the
+    new hash-family lowering, confirming the change stayed scoped to the
+    missing primitive branches
+- Topline impact:
+  - JS snapshot parity: **400 / 657** -> **401 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **257** -> **256** (**-1**)
+- Keep this change because it ports the exact OCaml
+  `lam_compile_primitive.ml` hash-runtime-call branches instead of preserving
+  the Rust-only primitive fallback to `undefined`.
 
 Latest iteration on **2026-04-14**:
 

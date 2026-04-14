@@ -3514,6 +3514,14 @@ impl LambdaCompiler {
                 compiled_args[1].clone(),
                 both_string_literals,
             ),
+            Phash => self.runtime_call_expr("Primitive_hash", "hash", compiled_args),
+            PhashMixint => self.runtime_call_expr("Primitive_hash", "hash_mix_int", compiled_args),
+            PhashMixstring => {
+                self.runtime_call_expr("Primitive_hash", "hash_mix_string", compiled_args)
+            }
+            PhashFinalmix => {
+                self.runtime_call_expr("Primitive_hash", "hash_final_mix", compiled_args)
+            }
             Psequand => Expression::bin(
                 BinOp::And,
                 compiled_args[0].clone(),
@@ -6288,6 +6296,10 @@ fn runtime_member_for_eta_wrapped_primitive(
         Primitive::Pboolorder => Some(("Primitive_bool", "compare")),
         Primitive::Pboolmin => Some(("Primitive_bool", "min")),
         Primitive::Pboolmax => Some(("Primitive_bool", "max")),
+        Primitive::Phash => Some(("Primitive_hash", "hash")),
+        Primitive::PhashMixint => Some(("Primitive_hash", "hash_mix_int")),
+        Primitive::PhashMixstring => Some(("Primitive_hash", "hash_mix_string")),
+        Primitive::PhashFinalmix => Some(("Primitive_hash", "hash_final_mix")),
         Primitive::Pintorder => Some(("Primitive_int", "compare")),
         Primitive::Pintmin => Some(("Primitive_int", "min")),
         Primitive::Pintmax => Some(("Primitive_int", "max")),
@@ -10761,6 +10773,95 @@ mod tests {
 
         assert!(compiled.prelude.is_empty());
         assert_eq!(print_expression(&compiled.expr), "Primitive_float.compare");
+    }
+
+    #[test]
+    fn compile_hash_primitives_lower_to_primitive_hash_runtime_calls_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let x = Ident::create_local("x");
+        let seed = Ident::create_local("seed");
+        let value = Ident::create_local("value");
+
+        let hash = compiler.compile_expr(&Lambda::prim(
+            Primitive::Phash,
+            vec![
+                Lambda::const_(Constant::int(10)),
+                Lambda::const_(Constant::int(100)),
+                Lambda::const_(Constant::int(0)),
+                Lambda::var(x.clone()),
+            ],
+            Location::none(),
+        ));
+        assert!(hash.prelude.is_empty());
+        assert_eq!(
+            print_expression(&hash.expr),
+            "Primitive_hash.hash(10, 100, 0, x)"
+        );
+
+        let hash_mix_int = compiler.compile_expr(&Lambda::prim(
+            Primitive::PhashMixint,
+            vec![Lambda::var(seed.clone()), Lambda::var(value.clone())],
+            Location::none(),
+        ));
+        assert!(hash_mix_int.prelude.is_empty());
+        assert_eq!(
+            print_expression(&hash_mix_int.expr),
+            "Primitive_hash.hash_mix_int(seed, value)"
+        );
+
+        let hash_mix_string = compiler.compile_expr(&Lambda::prim(
+            Primitive::PhashMixstring,
+            vec![Lambda::var(seed.clone()), Lambda::var(value.clone())],
+            Location::none(),
+        ));
+        assert!(hash_mix_string.prelude.is_empty());
+        assert_eq!(
+            print_expression(&hash_mix_string.expr),
+            "Primitive_hash.hash_mix_string(seed, value)"
+        );
+
+        let hash_final_mix = compiler.compile_expr(&Lambda::prim(
+            Primitive::PhashFinalmix,
+            vec![Lambda::var(seed)],
+            Location::none(),
+        ));
+        assert!(hash_final_mix.prelude.is_empty());
+        assert_eq!(
+            print_expression(&hash_final_mix.expr),
+            "Primitive_hash.hash_final_mix(seed)"
+        );
+    }
+
+    #[test]
+    fn compile_eta_wrapped_hash_function_aliases_runtime_member() {
+        let mut compiler = LambdaCompiler::new();
+        let hash_limit = Ident::create_local("hash_limit");
+        let hash_count = Ident::create_local("hash_count");
+        let hash_acc = Ident::create_local("hash_acc");
+        let value = Ident::create_local("value");
+        let compiled = compiler.compile_expr(&Lambda::function_(
+            4,
+            vec![
+                hash_limit.clone(),
+                hash_count.clone(),
+                hash_acc.clone(),
+                value.clone(),
+            ],
+            Lambda::prim(
+                Primitive::Phash,
+                vec![
+                    Lambda::var(hash_limit),
+                    Lambda::var(hash_count),
+                    Lambda::var(hash_acc),
+                    Lambda::var(value),
+                ],
+                Location::none(),
+            ),
+            Default::default(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "Primitive_hash.hash");
     }
 
     #[test]
