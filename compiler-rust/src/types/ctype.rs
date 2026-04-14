@@ -23,7 +23,7 @@
 //! about what went wrong during unification or other operations.
 
 use super::asttypes::PrivateFlag;
-use super::btype::{self, iter_type_expr, row_fixed, row_more, row_repr};
+use super::btype::{self, iter_type_expr, row_fixed, row_more, row_repr, row_repr_ref};
 use super::context::TypeContext;
 use super::env::Env;
 use super::path::Path;
@@ -3522,8 +3522,11 @@ fn unify_types<'a>(
 // ============================================================================
 
 /// Sort row fields alphabetically by label, matching OCaml's `sort_row_fields`.
-fn sort_row_fields(fields: &[(String, RowField)]) -> Vec<(String, RowField)> {
-    let mut sorted = fields.to_vec();
+type RowFieldEntryRef<'a> = (&'a String, &'a RowField);
+type RowPairRef<'a, 'b> = (&'a str, &'a RowField, &'b RowField);
+
+fn sort_row_fields<'a>(fields: &'a [(String, RowField)]) -> Vec<RowFieldEntryRef<'a>> {
+    let mut sorted: Vec<_> = fields.iter().map(|(label, field)| (label, field)).collect();
     sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
     sorted
 }
@@ -3533,17 +3536,17 @@ fn sort_row_fields(fields: &[(String, RowField)]) -> Vec<(String, RowField)> {
 /// - r1: fields only in fi1 (sorted)
 /// - r2: fields only in fi2 (sorted)
 /// - pairs: matched fields from both sides
-fn merge_rf(
-    fi1: &[(String, RowField)],
-    fi2: &[(String, RowField)],
+fn merge_rf<'a, 'b>(
+    fi1: &[RowFieldEntryRef<'a>],
+    fi2: &[RowFieldEntryRef<'b>],
 ) -> (
-    Vec<(String, RowField)>,
-    Vec<(String, RowField)>,
-    Vec<(String, RowField, RowField)>,
+    Vec<RowFieldEntryRef<'a>>,
+    Vec<RowFieldEntryRef<'b>>,
+    Vec<RowPairRef<'a, 'b>>,
 ) {
-    let mut r1: Vec<(String, RowField)> = Vec::new();
-    let mut r2: Vec<(String, RowField)> = Vec::new();
-    let mut pairs: Vec<(String, RowField, RowField)> = Vec::new();
+    let mut r1 = Vec::new();
+    let mut r2 = Vec::new();
+    let mut pairs = Vec::new();
 
     let mut i1 = 0;
     let mut i2 = 0;
@@ -3552,24 +3555,24 @@ fn merge_rf(
         let (l1, f1) = &fi1[i1];
         let (l2, f2) = &fi2[i2];
         if l1 == l2 {
-            pairs.push((l1.clone(), f1.clone(), f2.clone()));
+            pairs.push((l1.as_str(), *f1, *f2));
             i1 += 1;
             i2 += 1;
         } else if l1 < l2 {
-            r1.push((l1.clone(), f1.clone()));
+            r1.push((*l1, *f1));
             i1 += 1;
         } else {
-            r2.push((l2.clone(), f2.clone()));
+            r2.push((*l2, *f2));
             i2 += 1;
         }
     }
     // Remaining elements
     while i1 < fi1.len() {
-        r1.push(fi1[i1].clone());
+        r1.push(fi1[i1]);
         i1 += 1;
     }
     while i2 < fi2.len() {
-        r2.push(fi2[i2].clone());
+        r2.push(fi2[i2]);
         i2 += 1;
     }
 
@@ -3584,25 +3587,39 @@ fn merge_rf(
 /// Merge row fields matching OCaml's `merge_row_fields`.
 /// Sorts both inputs, then uses sorted merge to partition into
 /// (r1_only, r2_only, pairs).
-fn merge_row_fields(
-    fi1: &[(String, RowField)],
-    fi2: &[(String, RowField)],
+fn merge_row_fields<'a, 'b>(
+    fi1: &'a [(String, RowField)],
+    fi2: &'b [(String, RowField)],
 ) -> (
-    Vec<(String, RowField)>,
-    Vec<(String, RowField)>,
-    Vec<(String, RowField, RowField)>,
+    Vec<RowFieldEntryRef<'a>>,
+    Vec<RowFieldEntryRef<'b>>,
+    Vec<RowPairRef<'a, 'b>>,
 ) {
     // Match OCaml's fast paths
     if fi1.is_empty() || fi2.is_empty() {
-        return (fi1.to_vec(), fi2.to_vec(), Vec::new());
+        return (
+            fi1.iter().map(|(label, field)| (label, field)).collect(),
+            fi2.iter().map(|(label, field)| (label, field)).collect(),
+            Vec::new(),
+        );
     }
     if fi1.len() == 1 && fi2.iter().all(|(l, _)| l != &fi1[0].0) {
-        return (fi1.to_vec(), fi2.to_vec(), Vec::new());
+        return (
+            fi1.iter().map(|(label, field)| (label, field)).collect(),
+            fi2.iter().map(|(label, field)| (label, field)).collect(),
+            Vec::new(),
+        );
     }
     if fi2.len() == 1 && fi1.iter().all(|(l, _)| l != &fi2[0].0) {
-        return (fi1.to_vec(), fi2.to_vec(), Vec::new());
+        return (
+            fi1.iter().map(|(label, field)| (label, field)).collect(),
+            fi2.iter().map(|(label, field)| (label, field)).collect(),
+            Vec::new(),
+        );
     }
-    merge_rf(&sort_row_fields(fi1), &sort_row_fields(fi2))
+    let sorted1 = sort_row_fields(fi1);
+    let sorted2 = sort_row_fields(fi2);
+    merge_rf(&sorted1, &sorted2)
 }
 
 /// Unify two row types (for polymorphic variants).
@@ -3615,8 +3632,10 @@ fn unify_rows<'a>(
     row1: &RowDesc,
     row2: &RowDesc,
 ) -> TypeResult<()> {
-    let row1 = row_repr(ctx, row1);
-    let row2 = row_repr(ctx, row2);
+    let row1 = row_repr_ref(ctx, row1);
+    let row2 = row_repr_ref(ctx, row2);
+    let row1 = row1.as_ref();
+    let row2 = row2.as_ref();
 
     let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
 
@@ -3642,9 +3661,9 @@ fn unify_rows<'a>(
     let closed = row1.row_closed || row2.row_closed;
 
     let filter_row_fields =
-        |erase: bool, fields: &[(String, RowField)]| -> Vec<(String, RowField)> {
+        |erase: bool, fields: &[RowFieldEntryRef<'_>]| -> Vec<(String, RowField)> {
             let mut filtered = Vec::new();
-            for (label, field) in fields {
+            for (label, field) in fields.iter().copied() {
                 match super::btype::row_field_repr(ctx, field) {
                     RowField::Rabsent => {}
                     RowField::Reither {
@@ -3659,10 +3678,10 @@ fn unify_rows<'a>(
             }
             filtered
         };
-    let empty = |fields: &[(String, RowField)]| {
-        fields
-            .iter()
-            .all(|(_, f)| matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent))
+    let empty = |fields: &[RowFieldEntryRef<'_>]| {
+        fields.iter().copied().all(|(_, f)| {
+            matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent)
+        })
     };
 
     if closed {
@@ -3706,13 +3725,16 @@ fn unify_rows<'a>(
     let set_more = |ctx: &'a TypeContext<'a>,
                     state: &mut UnifyState,
                     row: &RowDesc,
-                    rest: &[(String, RowField)]|
+                    rest: &[RowFieldEntryRef<'_>]|
      -> TypeResult<()> {
         let row_is_fixed = row_fixed(ctx, row);
         let rest = if closed {
             filter_row_fields(row.row_closed, rest)
         } else {
-            rest.to_vec()
+            rest.iter()
+                .copied()
+                .map(|(label, field)| (label.clone(), field.clone()))
+                .collect()
         };
         if (!rest.is_empty() && (row.row_closed || row_is_fixed))
             || (closed && row_is_fixed && !row.row_closed)
@@ -5354,7 +5376,8 @@ fn copy_sep_inner(
         }
         TypeDesc::Tunivar(name) => TypeDesc::Tunivar(name),
         TypeDesc::Tvariant(row0) => {
-            let row = row_repr(ctx, &row0);
+            let row = row_repr_ref(ctx, &row0);
+            let row = row.as_ref();
             let more = ctx.repr(row.row_more);
             let keep = super::btype::is_tvar(ctx, more) && ctx.get_level(more) != GENERIC_LEVEL;
             let more_copy = copy_sep_inner(
@@ -5858,7 +5881,8 @@ pub fn copy_type_deep(
         TypeDesc::Tvariant(row) => {
             let placeholder = ctx.new_var(None);
             cache.insert(ty, placeholder);
-            let row = row_repr(ctx, row);
+            let row = row_repr_ref(ctx, row);
+            let row = row.as_ref();
             let new_row_more = copy_type_deep(ctx, row.row_more, cache);
             let new_row_fields: Vec<_> = row
                 .row_fields
@@ -6623,7 +6647,8 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
     // already-registered variant copy directly.
     if ctx.get_level(ty) == GENERIC_LEVEL {
         if let TypeDesc::Tvariant(row0) = &*ctx.get_desc(ty) {
-            let row = row_repr(ctx, row0);
+            let row = row_repr_ref(ctx, row0);
+            let row = row.as_ref();
             let more = ctx.repr(row.row_more);
             if let Some(marker) = cache.row_more_markers.get(&more).copied() {
                 cache.nodes.insert(ty, marker.variant);
@@ -6901,7 +6926,8 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
                 CopyAction::Variant(row) => {
                     // OCaml Ctype.copy uses copy_row with keep/fixed semantics
                     // derived from row_more, not a plain structural field copy.
-                    let row = row_repr(ctx, &row);
+                    let row = row_repr_ref(ctx, &row);
+                    let row = row.as_ref();
                     let more = ctx.repr(row.row_more);
                     let more_level = ctx.get_level(more);
                     let keep = super::btype::is_tvar(ctx, more) && more_level != GENERIC_LEVEL;
