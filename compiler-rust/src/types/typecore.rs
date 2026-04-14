@@ -16833,16 +16833,6 @@ fn is_local_module_access_path(path: &Path) -> bool {
     matches!(path_root_module(path), Path::Pident(id) if !id.is_persistent())
 }
 
-fn path_has_prefix(path: &Path, prefix: &Path) -> bool {
-    if path.same(prefix) {
-        return true;
-    }
-    match path {
-        Path::Pdot(parent, _, _) => path_has_prefix(parent, prefix),
-        _ => false,
-    }
-}
-
 fn type_contains_unresolved_local_path<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
     env: &Env,
@@ -18761,18 +18751,7 @@ fn path_cache_key(path: &Path) -> Option<String> {
 }
 
 fn module_path_requires_env_scoped_cache(env: &Env, module_path: &Path) -> bool {
-    env.current_local_module_aliases()
-        .into_iter()
-        .any(|(_, target_path)| {
-            let target_head = target_path.head();
-            env.find_module_with_origin(target_head.name())
-                .ok()
-                .is_some_and(|(origin_id, _, is_local)| {
-                    is_local
-                        && origin_id.same(target_head)
-                        && path_has_prefix(module_path, &target_path)
-                })
-        })
+    env.module_path_requires_env_scoped_cache(module_path)
 }
 
 fn scope_local_module_cache_key(base_key: &str, module_path: &Path, env: &Env) -> String {

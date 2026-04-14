@@ -1517,7 +1517,7 @@ fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Opt
 }
 
 fn normalize_path_through_local_aliases(env: &Env, path: &Path) -> Option<Path> {
-    let mut aliases = env.current_local_module_aliases();
+    let mut aliases = env.with_current_local_module_aliases(|aliases| aliases.to_vec());
     aliases.sort_by(|(left_id, left_target), (right_id, right_target)| {
         right_target
             .name()

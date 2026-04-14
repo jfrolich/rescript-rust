@@ -1,7 +1,7 @@
 # Ralph TODO: Typechecker Performance
 
 **Last Updated:** 2026-04-14
-**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, dotted shared module-signature scraping now consults env_lazy-backed qualified views first, lazy child module/modtype qualification now comes from cached parent qualified views, a broader `typemod`/`typecore` env_lazy rollout was attempted and reverted because it regressed import-family parity, and the broader env_lazy rollout is still incomplete
+**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, dotted shared module-signature scraping now consults env_lazy-backed qualified views first, lazy child module/modtype qualification now comes from cached parent qualified views, the env_lazy cache-key path now uses env-owned cached local-alias metadata instead of rebuilding it on every lookup, a broader `typemod`/`typecore` env_lazy rollout was attempted and reverted because it regressed import-family parity, and the broader env_lazy rollout is still incomplete
 
 ## Goal
 
@@ -517,6 +517,66 @@ What landed in this step:
   dotted/persistent/alias cases
 - added `types::includemod::tests::test_local_modtype_ident_matches_signature`
   to lock the local module-type identifier inclusion case
+
+## Session Update: Cache EnvLazy Alias-Scope Metadata In `Env`
+
+Additional checkpoint from this worktree on `2026-04-14` after moving the
+env_lazy cache-scope alias metadata into `Env` and memoizing the
+`module-components` env-scope decision per environment:
+
+- exact `Import.res` repro after release rebuild:
+  - OCaml: `0.09s` cold (`/usr/bin/time -lp`)
+  - Rust: cold rerun `0.32s`, then warmed reruns `0.17s`, `0.16s`, `0.16s`
+  - Rust max RSS on warmed reruns: about `54MB` to `58MB`
+  - Rust peak footprint on warmed reruns: about `41.7MB` to `43.3MB`
+- canonical corpus benchmark:
+  - Files tested: `657`
+  - Comparable files: `657`
+  - Rust faster or equal: `2`
+  - Rust slower: `655`
+  - Materially slower: `220`
+  - OCaml failures: `0`
+  - Rust failures: `0`
+  - Aggregate OCaml total: `5747.7ms`
+  - Aggregate Rust total: `11427.2ms`
+  - Aggregate Rust / OCaml ratio: `1.99x`
+  - `Import.res` benchmark entry: OCaml `48.4ms`, Rust `154.7ms`, `3.18x`
+- full typedtree parity after clearing `.parity-cache/tests/*` files: unchanged
+  at `232/657`, `43117` hunk mismatches
+
+What landed in this step:
+
+- `Env` now memoizes the active local module-alias list instead of rebuilding
+  and sorting it from the modules table on every env_lazy cache-key lookup
+- `Env` now memoizes whether a given module path needs env-scoped
+  `module-components` caching, and invalidates that cache only when module
+  bindings change
+- `typecore::module_path_requires_env_scoped_cache` now uses that env-owned
+  metadata instead of rescanning the environment every time
+- added `types::env::tests::test_module_path_requires_env_scoped_cache_tracks_active_aliases`
+  to lock the alias-cache invalidation behavior
+
+What this means:
+
+- the lazy qualified module-components path stayed behaviorally identical, but
+  its own cache-key bookkeeping got substantially cheaper on import-heavy local
+  alias stacks
+- the exact `Import.res` warmed repro improved from the pre-change `0.23s` to
+  about `0.16s` to `0.17s`, and the canonical corpus aggregate ratio moved
+  below `2.0x` for the first time in this worktree
+- the profile still shows the remaining cost clustered under
+  `includemod::modtypes_inner`, `lookup_module_type_from_unpack_expr`, and the
+  residual local module-type resolution/inclusion path rather than the old
+  repeated whole-signature copy cliff
+
+Next focus after this step:
+
+- keep pushing the env_lazy/source-of-truth architecture into the remaining
+  inclusion/unpack/local-module-type helpers without reintroducing the rejected
+  `typemod::resolve_path_to_sig_impl` `Pident` reroute
+- compare the remaining local `Pident` module-type forcing order against OCaml's
+  env/components split, especially around `lookup_module_type_from_unpack_expr`
+  and `includemod::modtypes_inner`
 
 What this means:
 
