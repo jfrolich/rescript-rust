@@ -89,7 +89,8 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     let exports = collect_exported_idents(&flattened);
     let preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
     let first = simplify_for_js_backend_once(&flattened, &preserved_export_bindings, true);
-    simplify_for_js_backend_once(&first, &preserved_export_bindings, false)
+    let second = simplify_for_js_backend_once(&first, &preserved_export_bindings, false);
+    simplify_direct_function_applications_like_lets_dce(&second)
 }
 
 fn simplify_for_js_backend_once(
@@ -419,62 +420,6 @@ fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
     aux(lam)
 }
 
-fn rebuild_let_wrapped_lambda(
-    bindings: Vec<(LetKind, Ident, Lambda)>,
-    lam: Lambda,
-) -> Lambda {
-    bindings
-        .into_iter()
-        .rev()
-        .fold(lam, |acc, (kind, id, value)| {
-            Lambda::let_(kind, id, value, acc)
-        })
-}
-
-fn reduce_direct_function_application_like_lets_dce(
-    func: Lambda,
-    args: Vec<Lambda>,
-    ap_info: &ApInfo,
-    ap_transformed_jsx: bool,
-) -> Lambda {
-    let mut bindings = Vec::new();
-    let mut direct_func = func;
-
-    while let Lambda::Llet(kind, id, value, body) = direct_func {
-        bindings.push((kind, id, *value));
-        direct_func = *body;
-    }
-
-    let reduced = match &direct_func {
-        Lambda::Lfunction(func)
-            if func.params.len() == args.len() && analysis::lfunction_can_be_inlined(func) =>
-        {
-            Some(beta_reduce::no_names_beta_reduce(
-                &func.params,
-                &func.body,
-                &args,
-            ))
-        }
-        _ => inlineable_direct_wrapper_function(&direct_func)
-            .filter(|func| {
-                func.params.len() == args.len() && analysis::lfunction_can_be_inlined(func)
-            })
-            .map(|func| beta_reduce::no_names_beta_reduce(&func.params, &func.body, &args)),
-    };
-
-    let lam = match reduced {
-        Some(reduced) => simplify_direct_function_applications_like_lets_dce(&reduced),
-        None => Lambda::Lapply(Apply {
-            ap_func: Box::new(direct_func),
-            ap_args: args,
-            ap_info: ap_info.clone(),
-            ap_transformed_jsx,
-        }),
-    };
-
-    rebuild_let_wrapped_lambda(bindings, lam)
-}
-
 fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
     match lam {
         Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
@@ -486,12 +431,25 @@ fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
                 .map(simplify_direct_function_applications_like_lets_dce)
                 .collect();
 
-            reduce_direct_function_application_like_lets_dce(
-                func,
-                args,
-                &apply.ap_info,
-                apply.ap_transformed_jsx,
-            )
+            match (&func, apply.ap_info.status) {
+                (Lambda::Lfunction(func), ApplyStatus::Na)
+                    if func.params.len() == args.len()
+                        && analysis::lfunction_can_be_inlined(func) =>
+                {
+                    let reduced = beta_reduce::no_names_beta_reduce(
+                        &func.params,
+                        &func.body,
+                        &args,
+                    );
+                    simplify_direct_function_applications_like_lets_dce(&reduced)
+                }
+                _ => Lambda::Lapply(Apply {
+                    ap_func: Box::new(func),
+                    ap_args: args,
+                    ap_info: apply.ap_info.clone(),
+                    ap_transformed_jsx: apply.ap_transformed_jsx,
+                }),
+            }
         }
         Lambda::Lfunction(func) => Lambda::function_(
             func.arity,
@@ -4014,6 +3972,65 @@ mod tests {
             simplified,
             Lambda::Lconst(Constant::Int { i: 0, .. })
         ));
+    }
+
+    #[test]
+    fn lets_dce_pass_beta_reduces_nested_curried_direct_function_applications() {
+        let x = Ident::create_local("x");
+        let extra = Ident::create_local("extra");
+
+        let lambda = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::function_(
+                    1,
+                    vec![x.clone()],
+                    Lambda::function_(
+                        1,
+                        vec![extra.clone()],
+                        Lambda::prim(
+                            Primitive::Paddint,
+                            vec![Lambda::var(x), Lambda::var(extra)],
+                            Location::none(),
+                        ),
+                        FunctionAttribute::default(),
+                    ),
+                    FunctionAttribute::default(),
+                )),
+                ap_args: vec![Lambda::const_(Constant::int(3))],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            })),
+            ap_args: vec![Lambda::const_(Constant::int(4))],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let simplified = simplify_for_js_backend(&lambda);
+        assert!(
+            matches!(
+                simplified,
+                Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Paddint,
+                    ref args,
+                    ..
+                }) if matches!(
+                    args.as_slice(),
+                    [
+                        Lambda::Lconst(Constant::Int { i: 3, .. }),
+                        Lambda::Lconst(Constant::Int { i: 4, .. }),
+                    ]
+                )
+            ),
+            "expected nested curried call to collapse to a direct integer add, got {simplified:?}"
+        );
     }
 
     #[test]

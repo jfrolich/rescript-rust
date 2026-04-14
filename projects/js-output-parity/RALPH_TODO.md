@@ -43,6 +43,70 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: narrow Rust's final lets-DCE-style direct-application cleanup
+  to the same scope OCaml uses, so the JS backend no longer beta-reduces
+  let-wrapped / wrapper-produced calls that `lam_pass_lets_dce.ml` would leave
+  intact
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`, because the mismatch lived in the final
+  post-lowering lambda simplification boundary before JS IR lowering:
+  OCaml's lets-DCE pass only beta-reduces syntactic direct `Lfunction`
+  applications, while Rust still had an extra helper that peeled
+  let-wrapped functions and direct wrapper shapes during the final backend
+  cleanup
+- OCaml reference:
+  `compiler/core/lam_compile_main.ml`, especially the final
+  `simplify_alias -> alpha_conversion -> simplify_lets` sequence;
+  `compiler/core/lam_pass_lets_dce.ml`;
+  `compiler/core/lam_pass_remove_alias.ml`; and
+  `compiler/core/lam_compile.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so
+    `simplify_for_js_backend(...)` now runs the second cleanup pass and then a
+    narrow `simplify_direct_function_applications_like_lets_dce(...)` sweep
+    instead of using the older Rust-only helper that also peeled let-wrapped
+    lambdas and direct wrapper functions
+  - constrained that final lets-DCE-style sweep to beta-reduce only
+    syntactic `Lambda::Lfunction` applications with `ApplyStatus::Na`,
+    matching OCaml's pass boundary more closely
+  - added focused regression coverage in
+    `lets_dce_pass_beta_reduces_nested_curried_direct_function_applications`
+    for the nested curried direct-call shape the final pass is still expected
+    to collapse
+- Verified focused guards for this slice:
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml lets_dce_pass_beta_reduces_nested_curried_direct_function_applications -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml beta_reduces_let_wrapped_returned_functions_across_backend_alias_passes -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml compile_effectful_underscore_binding_from_nested_js_function_calls_survives_shake -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/ari_regress_test.res`, diffing `/tmp/ari_regress_test.mjs`
+    against the checked-in snapshot
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/arity_deopt.res`, diffing `/tmp/arity_deopt.mjs` against
+    the checked-in snapshot
+  - authoritative guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/ari_regress_test.res` and
+    `tests/tests/src/arity_deopt.res` still differ after the pass-boundary
+    alignment, so this direct-application cleanup was not the root cause of
+    that remaining arity cluster
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    narrowing the final simplifier
+  - the authoritative wrapper baseline is unchanged, which means this
+    OCaml-aligned cleanup is parity-neutral on the current 657-file snapshot
+    set
+- Topline impact:
+  - JS snapshot parity: **485 / 657** -> **485 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **172** -> **172** (**no change**)
+- Keep this change because it removes a Rust-only backend simplification path
+  and better matches OCaml's lets-DCE scope; the remaining arity/output diffs
+  need a different backend fix rather than restoring the broader reducer.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: keep exported bindings that were originally call results
   materialized across the second backend alias-cleanup sweep so export coercion
   can preserve OCaml's declaration order instead of rebinding those constants
