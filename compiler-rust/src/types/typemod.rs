@@ -5152,7 +5152,6 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
     use crate::types::typedtree::ModuleTypeDesc as TypedMtyDesc;
     use crate::types::typedtree::TypedSignatureItemDesc as TypedSigDesc;
     use crate::types::typemod::path_from_longident;
-
     match &*mty.pmty_desc {
         PMtyDesc::Pmty_signature(sig_items) => {
             let mut items = Vec::new();
@@ -7915,7 +7914,6 @@ fn transl_modtype<'a>(
 ) -> TypeModResult<crate::types::typedtree::ModuleType> {
     use crate::parser::ast::ModuleTypeDesc as PMtyDesc;
     use crate::types::typedtree::{ModuleType as TMty, ModuleTypeDesc as TMtyDesc};
-
     let loc = smty.pmty_loc;
     let attrs = smty.pmty_attributes.clone();
 
@@ -10493,12 +10491,15 @@ fn type_structure_item<'a>(
             // additional identifiers.
             let mod_name_str = arena.get_string(mb.pmb_name.txt);
             let mod_id = tctx.type_ctx.create_ident(mod_name_str);
+            let parsed_mod_expr = arena.get_mod_expr(mb.pmb_expr);
 
             // Module binding: module M = ME
-            // Compute the semantic module type before type-checking the module
-            // expr so we can extend the environment with the right declaration,
-            // but only after reserving the binding ident above.
-            let semantic_mod_type = match &*arena.get_mod_expr(mb.pmb_expr).pmod_desc {
+            // Only preserve alias module types eagerly. Deriving semantic types
+            // for arbitrary module expressions before typing them can recurse
+            // through functor applications (e.g. Worker.WithMessageType(...))
+            // and diverge. For normal module bindings, derive the exported
+            // module type from the typed module expression below.
+            let semantic_mod_type = match &*parsed_mod_expr.pmod_desc {
                 // Match OCaml typemod: module aliases keep an alias semantic type
                 // (Mty_alias) instead of eagerly replacing it with the aliased
                 // signature. This is required so later Pmod_ident uses can receive
@@ -10518,25 +10519,17 @@ fn type_structure_item<'a>(
                         path,
                     ))
                 }
-                _ => lookup_module_type_from_parsed_module_expr(
-                    tctx,
-                    env,
-                    arena,
-                    arena.get_mod_expr(mb.pmb_expr),
-                ),
+                _ => None,
             };
 
-            let typed_mod = type_module_expr_with_alias(
-                tctx,
-                env,
-                arena,
-                arena.get_mod_expr(mb.pmb_expr),
-                true,
-            )?;
+            let typed_mod = type_module_expr_with_alias(tctx, env, arena, parsed_mod_expr, true)?;
 
             // Extend environment with the new module
-            // Use semantic_mod_type from Pmod_ident, or extract from typed structure
-            let final_mod_type = semantic_mod_type.or_else(|| {
+            // Preserve alias semantic type for Pmod_ident, otherwise derive the
+            // exported declaration from the typed module expression and use
+            // that for both the env update and emitted structure signature.
+            let mut decl_mod_type = semantic_mod_type
+                .or_else(|| {
                 let mut resolve_ident_sig =
                     |lid: &Located<LidentIdx>,
                      include_env: Option<&Env>|
@@ -10563,79 +10556,67 @@ fn type_structure_item<'a>(
                     Some(tctx.type_ctx),
                     &mut resolve_ident_sig,
                 )
-            });
+            })
+                .or_else(|| decl_module_type_from_typed_module_expr_for_sig(&typed_mod))
+                .unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(vec![]));
             let mut new_env = env.clone();
-            let item_sig_mod_type = if let Some(decl_mod_type) = final_mod_type {
-                let mut decl_mod_type = decl_mod_type;
-                anchor_local_module_aliases_to_owner(
-                    &mut decl_mod_type,
-                    &Path::pident(mod_id.clone()),
-                );
-                if let crate::types::decl::ModuleType::MtySignature(sig) = &decl_mod_type {
-                    let should_substitute_sig_paths = !matches!(
-                        &*arena.get_mod_expr(mb.pmb_expr).pmod_desc,
-                        ParsedModuleExprDesc::Pmod_structure(_)
+            anchor_local_module_aliases_to_owner(&mut decl_mod_type, &Path::pident(mod_id.clone()));
+            if let crate::types::decl::ModuleType::MtySignature(sig) = &decl_mod_type {
+                let should_substitute_sig_paths =
+                    !matches!(&*parsed_mod_expr.pmod_desc, ParsedModuleExprDesc::Pmod_structure(_));
+                if should_substitute_sig_paths {
+                    let sig =
+                        crate::types::typecore::copy_lookup_signature_for_subst(sig, tctx.type_ctx);
+                    crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                        &sig,
+                        &Path::pident(mod_id.clone()),
+                        tctx.type_ctx,
                     );
-                    if should_substitute_sig_paths {
-                        let sig = crate::types::typecore::copy_lookup_signature_for_subst(
-                            sig,
-                            tctx.type_ctx,
-                        );
-                        crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                            &sig,
-                            &Path::pident(mod_id.clone()),
-                            tctx.type_ctx,
-                        );
-                        decl_mod_type = crate::types::decl::ModuleType::MtySignature(sig);
-                    }
+                    decl_mod_type = crate::types::decl::ModuleType::MtySignature(sig);
                 }
-                // Match OCaml typemod.ml:
-                // Mtype.lower_nongen (Ident.binding_time id - 1) md.md_type
-                crate::types::ctype::lower_nongen_module_type(
-                    tctx.type_ctx,
-                    mod_id.binding_time() - 1,
-                    &decl_mod_type,
-                );
-                let localized_decl_mod_type = match &decl_mod_type {
-                    crate::types::decl::ModuleType::MtySignature(sig) => {
-                        if let ModuleExprDesc::Tmod_structure(structure) = &typed_mod.mod_desc {
-                            if !structure_has_dotted_alias_child_modules(structure) {
-                                decl_mod_type.clone()
-                            } else {
-                                let mut sig =
-                                    crate::types::typecore::copy_lookup_signature_for_subst(
-                                        sig,
-                                        tctx.type_ctx,
-                                    );
-                                localize_alias_child_module_sig_paths_in_structure_sig(
-                                    &mut sig,
-                                    structure,
-                                    &Path::pident(mod_id.clone()),
+            }
+            // Match OCaml typemod.ml:
+            // Mtype.lower_nongen (Ident.binding_time id - 1) md.md_type
+            crate::types::ctype::lower_nongen_module_type(
+                tctx.type_ctx,
+                mod_id.binding_time() - 1,
+                &decl_mod_type,
+            );
+            let localized_decl_mod_type = match &decl_mod_type {
+                crate::types::decl::ModuleType::MtySignature(sig) => {
+                    if let ModuleExprDesc::Tmod_structure(structure) = &typed_mod.mod_desc {
+                        if !structure_has_dotted_alias_child_modules(structure) {
+                            decl_mod_type.clone()
+                        } else {
+                            let mut sig =
+                                crate::types::typecore::copy_lookup_signature_for_subst(
+                                    sig,
                                     tctx.type_ctx,
                                 );
-                                crate::types::decl::ModuleType::MtySignature(sig)
-                            }
-                        } else {
-                            decl_mod_type.clone()
+                            localize_alias_child_module_sig_paths_in_structure_sig(
+                                &mut sig,
+                                structure,
+                                &Path::pident(mod_id.clone()),
+                                tctx.type_ctx,
+                            );
+                            crate::types::decl::ModuleType::MtySignature(sig)
                         }
+                    } else {
+                        decl_mod_type.clone()
                     }
-                    _ => decl_mod_type.clone(),
-                };
-                let item_sig_mod_type = localized_decl_mod_type.clone();
-                new_env.add_module(
-                    mod_id.clone(),
-                    crate::types::decl::ModuleDeclaration {
-                        md_type: localized_decl_mod_type,
-                        md_attributes: vec![],
-                        md_loc: crate::location::Location::none(),
-                        md_path: None,
-                    },
-                );
-                item_sig_mod_type
-            } else {
-                decl_module_type_from_typed_module_expr_for_sig(&typed_mod)
-                    .unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(vec![]))
+                }
+                _ => decl_mod_type.clone(),
             };
+            let item_sig_mod_type = localized_decl_mod_type.clone();
+            new_env.add_module(
+                mod_id.clone(),
+                crate::types::decl::ModuleDeclaration {
+                    md_type: localized_decl_mod_type,
+                    md_attributes: vec![],
+                    md_loc: crate::location::Location::none(),
+                    md_path: None,
+                },
+            );
             let item_sig = vec![crate::types::decl::SignatureItem::SigModule(
                 mod_id.clone(),
                 crate::types::decl::ModuleDeclaration {
