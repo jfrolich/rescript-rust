@@ -10,7 +10,7 @@ use crate::lambda::compat::{FieldDbgInfo, LetKind};
 use crate::lambda::compile_context::BoxedNullable;
 use crate::lambda::constant::Constant;
 use crate::lambda::free_variables::free_variables;
-use crate::lambda::primitive::Primitive;
+use crate::lambda::primitive::{Mutable, Primitive};
 use crate::lambda::{
     Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda, LambdaSwitch,
     TagInfo,
@@ -490,7 +490,8 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                     }
                 }
             }
-            let mut body = simplify_with_env(body, &body_env, body_exports.as_ref().unwrap_or(exports));
+            let mut body =
+                simplify_with_env(body, &body_env, body_exports.as_ref().unwrap_or(exports));
             if matches!(kind, LetKind::Strict | LetKind::StrictOpt) {
                 if let Some(init) = mutable_ref_init(&value) {
                     if let Ok(eliminated_body) = eliminate_non_escaping_ref_binding(id, &body) {
@@ -499,6 +500,11 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                         body = eliminated_body;
                     }
                 }
+            }
+            if binding_is_exported
+                && export_only_single_use_allocating_constant_candidate(id, &value, &body)
+            {
+                body = substitute_alias_use(&body, id, &value);
             }
             if kind == LetKind::Alias && !preserve_exported_eta_alias {
                 let use_info = alias_use_info(id, &body);
@@ -851,6 +857,291 @@ fn substitute_alias_use(lam: &Lambda, target: &Ident, replacement: &Lambda) -> L
             Box::new(substitute_alias_use(value, target, replacement)),
         ),
     }
+}
+
+fn export_only_single_use_allocating_constant_candidate(
+    id: &Ident,
+    value: &Lambda,
+    body: &Lambda,
+) -> bool {
+    if !matches!(value, Lambda::Lconst(Constant::Block { .. })) {
+        return false;
+    }
+
+    let use_info = alias_use_info(id, body);
+    use_info.times == 1 && !use_info.captured && used_only_in_module_export_payload(id, body)
+}
+
+fn used_only_in_module_export_payload(target: &Ident, lam: &Lambda) -> bool {
+    fn collect(
+        target: &Ident,
+        lam: &Lambda,
+        inside_export_payload: bool,
+        saw_use: &mut bool,
+        saw_non_export_use: &mut bool,
+    ) {
+        if *saw_non_export_use {
+            return;
+        }
+
+        match lam {
+            Lambda::Lvar(id) => {
+                if id.same(target) {
+                    *saw_use = true;
+                    if !inside_export_payload {
+                        *saw_non_export_use = true;
+                    }
+                }
+            }
+            Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
+            Lambda::Lapply(apply) => {
+                collect(
+                    target,
+                    &apply.ap_func,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+                for arg in &apply.ap_args {
+                    collect(
+                        target,
+                        arg,
+                        inside_export_payload,
+                        saw_use,
+                        saw_non_export_use,
+                    );
+                }
+            }
+            Lambda::Lfunction(func) => collect(
+                target,
+                &func.body,
+                inside_export_payload,
+                saw_use,
+                saw_non_export_use,
+            ),
+            Lambda::Llet(_, _, value, body) => {
+                collect(
+                    target,
+                    value,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+                collect(
+                    target,
+                    body,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+            }
+            Lambda::Lletrec(bindings, body) => {
+                for (_, binding) in bindings {
+                    collect(
+                        target,
+                        binding,
+                        inside_export_payload,
+                        saw_use,
+                        saw_non_export_use,
+                    );
+                }
+                collect(
+                    target,
+                    body,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+            }
+            Lambda::Lprim(info) => {
+                let payload_flag = matches!(
+                    info.primitive,
+                    Primitive::Pmakeblock(_, TagInfo::ModuleExport(_), Mutable::Immutable)
+                );
+                for arg in &info.args {
+                    collect(
+                        target,
+                        arg,
+                        inside_export_payload || payload_flag,
+                        saw_use,
+                        saw_non_export_use,
+                    );
+                }
+            }
+            Lambda::Lswitch(scrutinee, switch) => {
+                collect(
+                    target,
+                    scrutinee,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+                for (_, lam) in &switch.sw_consts {
+                    collect(
+                        target,
+                        lam,
+                        inside_export_payload,
+                        saw_use,
+                        saw_non_export_use,
+                    );
+                }
+                for (_, lam) in &switch.sw_blocks {
+                    collect(
+                        target,
+                        lam,
+                        inside_export_payload,
+                        saw_use,
+                        saw_non_export_use,
+                    );
+                }
+                if let Some(fallback) = &switch.sw_failaction {
+                    collect(
+                        target,
+                        fallback,
+                        inside_export_payload,
+                        saw_use,
+                        saw_non_export_use,
+                    );
+                }
+            }
+            Lambda::LstringSwitch(scrutinee, cases, default) => {
+                collect(
+                    target,
+                    scrutinee,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+                for (_, lam) in cases {
+                    collect(
+                        target,
+                        lam,
+                        inside_export_payload,
+                        saw_use,
+                        saw_non_export_use,
+                    );
+                }
+                if let Some(fallback) = default {
+                    collect(
+                        target,
+                        fallback,
+                        inside_export_payload,
+                        saw_use,
+                        saw_non_export_use,
+                    );
+                }
+            }
+            Lambda::LstaticRaise(_, args) => {
+                for arg in args {
+                    collect(
+                        target,
+                        arg,
+                        inside_export_payload,
+                        saw_use,
+                        saw_non_export_use,
+                    );
+                }
+            }
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                collect(
+                    target,
+                    body,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+                collect(
+                    target,
+                    handler,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                collect(
+                    target,
+                    cond,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+                collect(
+                    target,
+                    then_,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+                collect(
+                    target,
+                    else_,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                collect(
+                    target,
+                    first,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+                collect(
+                    target,
+                    second,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+            }
+            Lambda::Lfor(_, start, end, _, body) => {
+                collect(
+                    target,
+                    start,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+                collect(
+                    target,
+                    end,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+                collect(
+                    target,
+                    body,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+            }
+            Lambda::Lassign(id, value) => {
+                if id.same(target) {
+                    *saw_use = true;
+                    if !inside_export_payload {
+                        *saw_non_export_use = true;
+                    }
+                }
+                collect(
+                    target,
+                    value,
+                    inside_export_payload,
+                    saw_use,
+                    saw_non_export_use,
+                );
+            }
+        }
+    }
+
+    let mut saw_use = false;
+    let mut saw_non_export_use = false;
+    collect(target, lam, false, &mut saw_use, &mut saw_non_export_use);
+    saw_use && !saw_non_export_use
 }
 
 fn mutable_ref_init(lam: &Lambda) -> Option<Lambda> {
@@ -2184,7 +2475,10 @@ fn module_field_call_substitution_candidate(lam: &Lambda) -> bool {
             primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
             args,
             ..
-        }) => matches!(args.as_slice(), [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]),
+        }) => matches!(
+            args.as_slice(),
+            [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]
+        ),
         _ => false,
     }
 }
@@ -3113,6 +3407,95 @@ mod tests {
                 Lambda::Lconst(Constant::Int { i: 1, .. })
             ]
         ));
+    }
+
+    #[test]
+    fn simplifies_export_only_constant_block_payloads_before_export_coercion() {
+        let v = Ident::create_local("v");
+        let res = Ident::create_local("res");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![v.clone(), res.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(v.clone()), Lambda::var(res.clone())],
+            Location::none(),
+        );
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            v.clone(),
+            Lambda::const_(Constant::Block {
+                tag: 0,
+                tag_info: TagInfo::record(
+                    vec![
+                        ("x".to_string(), false),
+                        ("y".to_string(), false),
+                        ("z".to_string(), false),
+                    ],
+                    crate::parser::ast::MutableFlag::Immutable,
+                ),
+                elements: vec![
+                    Constant::int(3),
+                    Constant::int(4),
+                    Constant::JsUndefined { is_unit: false },
+                ],
+            }),
+            Lambda::let_(
+                LetKind::Strict,
+                res.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        crate::lambda::compat::FieldDbgInfo::Record {
+                            name: "x".to_string(),
+                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                        },
+                    ),
+                    vec![Lambda::var(v.clone())],
+                    Location::none(),
+                ),
+                export_block,
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        assert!(
+            find_binding_value(&simplified, &v).is_none(),
+            "expected the export-only constant block binding to disappear",
+        );
+
+        let (export_body, kept_res_binding) = match simplified {
+            Lambda::Llet(_, kept_binding, kept_value, body) => {
+                assert_eq!(kept_binding, res);
+                assert!(matches!(
+                    *kept_value,
+                    Lambda::Lconst(Constant::Int { i: 3, .. })
+                ));
+                (*body, true)
+            }
+            Lambda::Lprim(_) => (simplified, false),
+            other => panic!("expected the export block or a surviving `res` binding, got {other:?}"),
+        };
+
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(export_ids), _),
+            args,
+            ..
+        }) = export_body
+        else {
+            panic!("expected the export block to remain at the tail");
+        };
+        assert_eq!(export_ids, vec![v.clone(), res.clone()]);
+        assert!(matches!(&args[0], Lambda::Lconst(Constant::Block { .. })));
+        if kept_res_binding {
+            assert!(matches!(&args[1], Lambda::Lvar(id) if *id == res));
+        } else {
+            assert!(matches!(
+                &args[1],
+                Lambda::Lconst(Constant::Int { i: 3, .. })
+            ));
+        }
     }
 
     #[test]
@@ -4913,7 +5296,9 @@ mod tests {
                 };
                 assert!(func.attr.async_);
                 let Lambda::Llet(_, alias_id, alias_value, export_body) = *body else {
-                    panic!("expected the exported wrapper binding to stay materialized, got body: {body:?}");
+                    panic!(
+                        "expected the exported wrapper binding to stay materialized, got body: {body:?}"
+                    );
                 };
                 assert!(alias_id.same(&exported));
                 assert!(matches!(*alias_value, Lambda::Lvar(alias) if alias.same(&target)));
@@ -5651,6 +6036,9 @@ mod tests {
             finish.as_ref(),
             Lambda::Lconst(Constant::Int { i: 9, .. })
         ));
-        assert!(matches!(body.as_ref(), Lambda::Lconst(Constant::JsUndefined { .. })));
+        assert!(matches!(
+            body.as_ref(),
+            Lambda::Lconst(Constant::JsUndefined { .. })
+        ));
     }
 }

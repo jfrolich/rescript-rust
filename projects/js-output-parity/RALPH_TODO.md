@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 408 / 657 JS snapshots passing, 0 compile errors, 249 output diffs
+**Status:** 416 / 657 JS snapshots passing, 0 compile errors, 241 output diffs
 
 ## Goal
 
@@ -35,11 +35,68 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **408 / 657**
+- JS snapshot parity: **416 / 657**
 - Compile errors: **0**
-- Output diffs: **249**
+- Output diffs: **241**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the OCaml export-grouping behavior around
+  `Pmakeblock(..., ModuleExport, Immutable)` into
+  `compiler-rust/src/lambda/simplify.rs` so export-only single-use constant
+  blocks disappear before final export coercion instead of surviving as
+  Rust-only helper bindings that perturb declaration order and alias shape
+- Active backend focus for this slice is **Phase 2: Port Post-Lowering Lambda
+  Backend Stages** from `PLAN.md`; the remaining mismatch was already present
+  in grouped lambda / initial JSX, so this is not a printer-only fix
+- OCaml reference:
+  `compiler/core/lam_coercion.ml` and `compiler/core/lam_pass_lets_dce.ml`,
+  plus diagnosed artifacts `tests/tests/src/DotDotDot.lambda`,
+  `tests/tests/src/DisambiguateOptionalFields.lambda`,
+  `tests/tests/src/DotDotDot.01.initial.jsx`, and
+  `tests/tests/src/DisambiguateOptionalFields.01.initial.jsx`, which showed
+  OCaml already reaching the correct export order before JS passes
+- Rust change:
+  - taught `simplify_with_env(...)` to substitute exported single-use
+    `Constant::Block` bindings directly into immutable module-export payloads
+    when their only remaining use is inside
+    `Primitive::Pmakeblock(_, TagInfo::ModuleExport(_), Mutable::Immutable)`
+  - added the narrow `used_only_in_module_export_payload(...)` /
+    `export_only_single_use_allocating_constant_candidate(...)` checks so this
+    rewrite only applies to the OCaml-aligned export-only constant-block case
+  - added focused regression coverage in
+    `simplifies_export_only_constant_block_payloads_before_export_coercion`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml simplifies_export_only_constant_block_payloads_before_export_coercion -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml compile_deps_program_rebinds_exported_constants_after_surviving_function_bindings -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/DotDotDot.res`, diffing
+    `/tmp/DotDotDot.mjs` against the checked-in snapshot
+  - direct repro for `tests/tests/src/DisambiguateOptionalFields.res`, diffing
+    `/tmp/DisambiguateOptionalFields.mjs` against the checked-in snapshot
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/DisambiguateOptionalFields.res` now matches its
+    checked-in snapshot exactly; Rust had been preserving the exported record
+    binding long enough to emit `v` before `res`, while OCaml had already
+    collapsed that export-only constant block before final export grouping
+  - `tests/tests/src/DotDotDot.res` no longer differs on the leading export
+    declaration order; its remaining mismatch is narrower and is now the
+    surviving alias materialization for `MultipleDotDotDots.x`
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the export-grouping change
+- Topline impact:
+  - JS snapshot parity: **408 / 657** -> **416 / 657** (**+8**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **249** -> **241** (**-8**)
+- Keep this change because it aligns the Rust post-lowering export cleanup
+  with OCaml's grouped-lambda behavior for export-only constant blocks instead
+  of preserving Rust-only bindings into final JS lowering.
 
 Latest iteration on **2026-04-14**:
 
