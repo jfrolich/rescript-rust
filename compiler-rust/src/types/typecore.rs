@@ -15990,14 +15990,18 @@ impl Env {
                     }
                 }
                 Path::Pdot(parent, modtype_name, _) => {
-                    let (parent_sig, _resolved_name) =
-                        match resolve_path(env, parent, pers_env, ctx, visiting) {
-                            Some(x) => x,
-                            None => {
-                                visiting.remove(path);
-                                return None;
-                            }
-                        };
+                    let (_, parent_sig) = match resolve_module_signature_for_path(
+                        parent,
+                        env,
+                        pers_env,
+                        ctx,
+                    ) {
+                        Some(x) => x,
+                        None => {
+                            visiting.remove(path);
+                            return None;
+                        }
+                    };
                     parent_sig.iter().find_map(|sig_item| {
                         if let SignatureItem::SigModtype(id, mtd) = sig_item {
                             if id.name() == modtype_name.as_str() {
@@ -16087,14 +16091,18 @@ impl Env {
                     None
                 }
                 Path::Pdot(parent, submod_name, _) => {
-                    let (parent_sig, _resolved_name) =
-                        match resolve_path(env, parent, pers_env, ctx, visiting) {
-                            Some(x) => x,
-                            None => {
-                                visiting.remove(path);
-                                return None;
-                            }
-                        };
+                    let (_, parent_sig) = match resolve_module_signature_for_path(
+                        parent,
+                        env,
+                        pers_env,
+                        ctx,
+                    ) {
+                        Some(x) => x,
+                        None => {
+                            visiting.remove(path);
+                            return None;
+                        }
+                    };
                     for sig_item in &parent_sig {
                         if let SignatureItem::SigModule(id, sub_md, _) = sig_item {
                             if id.name() == submod_name.as_str() {

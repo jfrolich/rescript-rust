@@ -67,6 +67,50 @@ Detailed corpus baseline:
   exactly." The expectation is that removing Rust-only extra work is the real
   win.
 
+## Session Update: Shared Dotted Fallbacks Now Reuse env_lazy Parent Views
+
+Additional checkpoint from this worktree on `2026-04-14` after routing the
+shared dotted-path fallback in `typecore::Env::resolve_module_type` and
+`typemod::resolve_path_to_sig_impl` through
+`resolve_module_signature_for_path(parent, ...)` instead of recursively
+rebuilding/scanning raw parent signatures:
+
+- exact `Import.res` repro before/after the change:
+  - before: OCaml `0.04s`, Rust `0.30s`, Rust max RSS about `56.0MB`, Rust
+    peak footprint about `42.4MB`
+  - after: OCaml `0.06s`, Rust `0.30s`, Rust max RSS about `57.4MB`, Rust peak
+    footprint about `43.5MB`
+- canonical corpus benchmark before/after on the same command
+  (`python3 scripts/benchmark_typechecker_performance.py --warmup 0 --runs 1 --limit 40`):
+  - before: aggregate OCaml `4686.2ms`, aggregate Rust `9793.2ms`, ratio
+    `2.09x`, `Import.res` `158.5ms`, Rust faster-or-equal `2`
+  - after: aggregate OCaml `5513.7ms`, aggregate Rust `11325.7ms`, ratio
+    `2.05x`, `Import.res` `155.0ms`, Rust faster-or-equal `9`
+- full typedtree parity after the change: unchanged at `232/657`,
+  `43117` hunk mismatches
+
+What landed in this step:
+
+- `typecore::Env::resolve_module_type` no longer falls back from a dotted child
+  lookup to recursively resolved raw parent signatures first; its fallback now
+  asks the parent's env_lazy-qualified signature view, matching the OCaml
+  `find_module_descr` / `get_components` shape more closely
+- `typemod::resolve_path_to_sig_impl` now takes the same parent-signature
+  fallback through `resolve_module_signature_for_path(parent, ...)` before
+  reverting to the older recursive raw-signature path
+
+What this means:
+
+- the shared helper layer is more consistently using env_lazy-backed qualified
+  parent views as the source of truth for dotted fallback resolution
+- parity stayed flat, so this cleanup did not reintroduce the import-family
+  stamp drift from the rejected broader rollout
+- the performance signal was effectively noise-flat; this step is best treated
+  as architectural cleanup, not as a meaningful speedup
+- the next meaningful performance work still needs to remove more eager
+  whole-signature work from the local/module-alias-heavy paths, rather than only
+  cleaning up rare fallback scans
+
 ## Rejected Prototype
 
 - Attempted change: cache the path-qualified module signature produced for

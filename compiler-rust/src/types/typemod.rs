@@ -3061,7 +3061,19 @@ fn resolve_path_to_sig_impl<'b>(
                 }
             }
 
-            let parent_sig = resolve_path_to_sig_impl(parent, env, pers_env, ctx, visiting)?;
+            let parent_sig = if let Some(local_env) = env {
+                match crate::types::typecore::resolve_module_signature_for_path(
+                    parent,
+                    local_env,
+                    pers_env,
+                    ctx,
+                ) {
+                    Some((_, sig)) => sig,
+                    None => resolve_path_to_sig_impl(parent, env, pers_env, ctx, visiting)?,
+                }
+            } else {
+                resolve_path_to_sig_impl(parent, env, pers_env, ctx, visiting)?
+            };
             for sig_item in &parent_sig {
                 match sig_item {
                     SigItem::SigModule(id, md, _) if id.name() == name.as_str() => {
