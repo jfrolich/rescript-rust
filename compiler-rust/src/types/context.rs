@@ -201,6 +201,9 @@ pub struct TypeContext<'a> {
     /// Cached child-module access paths keyed by resolved parent access path.
     resolved_child_module_path_cache: RefCell<ahash::AHashMap<(Path, String), Path>>,
 
+    /// Cached full normalize_path results keyed by environment identity.
+    normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
 
@@ -314,6 +317,7 @@ impl<'a> TypeContext<'a> {
             resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
+            normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Vec::new()),
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
@@ -553,6 +557,30 @@ impl<'a> TypeContext<'a> {
         self.resolved_child_module_path_cache
             .borrow()
             .get(&(parent_path.clone(), child_name.to_string()))
+            .cloned()
+    }
+
+    /// Cache a normalized path for a specific environment identity.
+    pub(crate) fn register_normalized_path_full(
+        &self,
+        env_id: u64,
+        original_path: &Path,
+        normalized_path: Path,
+    ) {
+        self.normalized_path_full_cache
+            .borrow_mut()
+            .insert((env_id, original_path.clone()), normalized_path);
+    }
+
+    /// Look up a cached normalized path for a specific environment identity.
+    pub(crate) fn find_normalized_path_full(
+        &self,
+        env_id: u64,
+        original_path: &Path,
+    ) -> Option<Path> {
+        self.normalized_path_full_cache
+            .borrow()
+            .get(&(env_id, original_path.clone()))
             .cloned()
     }
 
