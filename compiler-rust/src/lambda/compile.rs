@@ -110,6 +110,48 @@ fn empty_switch_case_clause() -> CaseClause {
     }
 }
 
+fn stable_group_switch_cases<'a, T: Clone, F>(
+    filtered: Vec<(T, &'a Lambda)>,
+    merge_cases: F,
+) -> Vec<(T, &'a Lambda, bool)>
+where
+    F: Fn(&T, &T) -> bool,
+{
+    let mut groups: Vec<Vec<(T, &'a Lambda)>> = Vec::new();
+
+    // OCaml's Ext_list.stable_group walks from the tail and inserts each case
+    // into the first matching group so equal bodies can be coalesced even when
+    // they are separated by a different branch.
+    for (tag, lam) in filtered.into_iter().rev() {
+        let mut placed = false;
+        for group in &mut groups {
+            let Some((head_tag, head_lam)) = group.first() else {
+                continue;
+            };
+            if merge_cases(&tag, head_tag) && super::lambda_eq_approx(lam, head_lam) {
+                group.insert(0, (tag.clone(), lam));
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            groups.push(vec![(tag, lam)]);
+        }
+    }
+
+    groups.reverse();
+
+    let mut grouped = Vec::with_capacity(groups.iter().map(Vec::len).sum());
+    for group in groups {
+        let last_idx = group.len().saturating_sub(1);
+        for (idx, (tag, lam)) in group.into_iter().enumerate() {
+            grouped.push((tag, lam, idx == last_idx));
+        }
+    }
+
+    grouped
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ExternalModuleCacheKey {
     bundle: String,
@@ -162,27 +204,10 @@ impl LambdaCompiler {
             .filter(|(_, lam)| {
                 default.map_or(true, |default| !super::lambda_eq_approx(lam, default))
             })
+            .map(|(tag, lam)| (tag.clone(), lam))
             .collect();
 
-        let mut grouped = Vec::with_capacity(filtered.len());
-        let mut start = 0;
-        while start < filtered.len() {
-            let mut end = start + 1;
-            while end < filtered.len()
-                && merge_cases(&filtered[end - 1].0, &filtered[end].0)
-                && super::lambda_eq_approx(&filtered[end - 1].1, &filtered[end].1)
-            {
-                end += 1;
-            }
-
-            for idx in start..end {
-                let (tag, lam) = filtered[idx];
-                grouped.push((tag.clone(), lam, idx + 1 == end));
-            }
-            start = end;
-        }
-
-        grouped
+        stable_group_switch_cases(filtered, merge_cases)
     }
 
     fn grouped_switch_case_refs<'a, T: Clone, F>(
@@ -199,27 +224,10 @@ impl LambdaCompiler {
             .filter(|(_, lam)| {
                 default.map_or(true, |default| !super::lambda_eq_approx(lam, default))
             })
+            .map(|(tag, lam)| (tag.clone(), *lam))
             .collect();
 
-        let mut grouped = Vec::with_capacity(filtered.len());
-        let mut start = 0;
-        while start < filtered.len() {
-            let mut end = start + 1;
-            while end < filtered.len()
-                && merge_cases(&filtered[end - 1].0, &filtered[end].0)
-                && super::lambda_eq_approx(filtered[end - 1].1, filtered[end].1)
-            {
-                end += 1;
-            }
-
-            for idx in start..end {
-                let (tag, lam) = filtered[idx];
-                grouped.push((tag.clone(), *lam, idx + 1 == end));
-            }
-            start = end;
-        }
-
-        grouped
+        stable_group_switch_cases(filtered, merge_cases)
     }
 
     /// Create a new compiler.
@@ -13391,6 +13399,54 @@ mod tests {
     }
 
     #[test]
+    fn int_switch_expressions_group_non_adjacent_equal_cases_like_ocaml_stable_group() {
+        let mut compiler = LambdaCompiler::new();
+        let scrutinee = Ident::create_local("scrutinee");
+        let compiled = compiler.compile_expr(&Lambda::Lswitch(
+            Box::new(Lambda::var(scrutinee.clone())),
+            LambdaSwitch {
+                sw_consts_full: true,
+                sw_consts: vec![
+                    (0, Lambda::const_(Constant::int(2))),
+                    (1, Lambda::const_(Constant::int(1))),
+                    (2, Lambda::const_(Constant::int(2))),
+                ],
+                sw_blocks_full: false,
+                sw_blocks: vec![],
+                sw_failaction: None,
+                sw_names: None,
+            },
+        ));
+
+        let [declare, switch_stmt] = compiled.prelude.as_slice() else {
+            panic!("expected a declaration and switch statement");
+        };
+        let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc
+        else {
+            panic!("expected the switch temporary declaration");
+        };
+        let StatementDesc::IntSwitch(_, clauses, None) = &switch_stmt.desc else {
+            panic!("expected an exhaustive integer switch");
+        };
+
+        assert_eq!(
+            clauses.len(),
+            3,
+            "expected OCaml-style stable grouping to keep all tags while reordering groups"
+        );
+        assert_eq!(clauses[0].0, 1);
+        assert_switch_case_assigns_int_result(&clauses[0].1.body, result, 1);
+        assert_eq!(clauses[1].0, 0);
+        assert!(
+            clauses[1].1.body.is_empty(),
+            "expected the first equal-body case to fall through after stable grouping"
+        );
+        assert!(!clauses[1].1.should_break);
+        assert_eq!(clauses[2].0, 2);
+        assert_switch_case_assigns_int_result(&clauses[2].1.body, result, 2);
+    }
+
+    #[test]
     fn string_switch_effects_group_adjacent_equal_cases_and_drop_default_duplicates() {
         let mut compiler = LambdaCompiler::new();
         let scrutinee = Ident::create_local("scrutinee");
@@ -13446,6 +13502,50 @@ mod tests {
         assert!(clauses[1].clause.should_break);
         assert_effect_assignment_writes_int(&clauses[1].clause.body, &captured, 1);
         assert_effect_assignment_writes_int(default_block, &captured, 2);
+    }
+
+    #[test]
+    fn string_switch_effects_group_non_adjacent_equal_cases_like_ocaml_stable_group() {
+        let mut compiler = LambdaCompiler::new();
+        let scrutinee = Ident::create_local("scrutinee");
+        let captured = Ident::create_local("captured");
+        let block = compiler.compile_effect_block(&Lambda::LstringSwitch(
+            Box::new(Lambda::var(scrutinee.clone())),
+            vec![
+                (
+                    "A".to_string(),
+                    Lambda::Lassign(captured.clone(), Box::new(Lambda::const_(Constant::int(2)))),
+                ),
+                (
+                    "B".to_string(),
+                    Lambda::Lassign(captured.clone(), Box::new(Lambda::const_(Constant::int(1)))),
+                ),
+                (
+                    "C".to_string(),
+                    Lambda::Lassign(captured.clone(), Box::new(Lambda::const_(Constant::int(2)))),
+                ),
+            ],
+            None,
+        ));
+
+        let [switch_stmt] = block.as_slice() else {
+            panic!("expected a single string switch");
+        };
+        let StatementDesc::StringSwitch(_, clauses, None) = &switch_stmt.desc else {
+            panic!("expected an exhaustive string switch");
+        };
+
+        assert_eq!(clauses.len(), 3);
+        assert_eq!(clauses[0].tag_type, SwitchCaseTag::String("B".to_string()));
+        assert_effect_assignment_writes_int(&clauses[0].clause.body, &captured, 1);
+        assert_eq!(clauses[1].tag_type, SwitchCaseTag::String("A".to_string()));
+        assert!(
+            clauses[1].clause.body.is_empty(),
+            "expected the first equal-body case to fall through after stable grouping"
+        );
+        assert!(!clauses[1].clause.should_break);
+        assert_eq!(clauses[2].tag_type, SwitchCaseTag::String("C".to_string()));
+        assert_effect_assignment_writes_int(&clauses[2].clause.body, &captured, 2);
     }
 
     #[test]

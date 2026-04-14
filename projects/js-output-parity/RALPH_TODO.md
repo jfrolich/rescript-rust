@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 469 / 657 JS snapshots passing, 0 compile errors, 188 output diffs
+**Status:** 471 / 657 JS snapshots passing, 0 compile errors, 186 output diffs
 
 ## Goal
 
@@ -35,11 +35,72 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **469 / 657**
+- JS snapshot parity: **471 / 657**
 - Compile errors: **0**
-- Output diffs: **188**
+- Output diffs: **186**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port OCaml's stable switch-case grouping so lambda branches with
+  identical bodies are grouped even when they are separated by another case;
+  this fixes emitted case ordering like `B` then `A | C` instead of the Rust
+  backend's earlier left-to-right `A`, `B`, `C`
+- Active backend focus for this slice stays in **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`, because the mismatch lived in
+  `compiler/core/lam_compile.ml` during lambda-to-JS switch lowering rather
+  than in the printer: OCaml's `group_apply` relies on
+  `Ext_list.stable_group`, while Rust only merged adjacent equal cases
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `group_apply`; and
+  `compiler/ext/ext_list.ml`, especially `stable_group`, `group`, and `aux`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so both
+    `grouped_switch_cases(...)` and `grouped_switch_case_refs(...)` now use a
+    shared `stable_group_switch_cases(...)` helper that mirrors OCaml's
+    tail-to-head `stable_group` behavior instead of only merging adjacent equal
+    cases
+  - added focused regression coverage in
+    `int_switch_expressions_group_non_adjacent_equal_cases_like_ocaml_stable_group`
+    and
+    `string_switch_effects_group_non_adjacent_equal_cases_like_ocaml_stable_group`
+    while keeping the adjacent-grouping guards green
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml int_switch_expressions_group_non_adjacent_equal_cases_like_ocaml_stable_group -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml string_switch_effects_group_non_adjacent_equal_cases_like_ocaml_stable_group -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml int_switch_expressions_group_adjacent_equal_cases_and_drop_default_duplicates -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml string_switch_effects_group_adjacent_equal_cases_and_drop_default_duplicates -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/compare_test.res`, diffing the emitted
+    module against the checked-in snapshot to confirm the nested `switch (y)`
+    under `case "B"` now emits `case "B"` before the grouped `case "A"` /
+    `case "C"` fallthrough exactly like OCaml
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - direct repro for `tests/tests/src/UntaggedVariants.res`, diffing the
+    emitted module against the checked-in snapshot to confirm the file still has
+    broader untagged-switch drift outside this stable-grouping slice rather than
+    a regression in the newly patched case-group ordering
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/compare_test.res` is no longer in the authoritative diff
+    set; the Rust backend now matches OCaml's stable grouping of non-adjacent
+    equal switch bodies
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the switch-grouping port
+  - `tests/tests/src/UntaggedVariants.res` still differs, but its remaining
+    drift is now in broader untagged guard ordering and branch-shape lowering,
+    not in the specific stable-grouping bug fixed here
+- Topline impact:
+  - JS snapshot parity: **469 / 657** -> **471 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **188** -> **186** (**-2**)
+- Keep this change because it ports the real OCaml switch-grouping behavior from
+  `Lam_compile.group_apply` + `Ext_list.stable_group`; the parity gain comes
+  from matching OCaml's backend case ordering rather than from any printer-only
+  rewrite.
 
 Latest iteration on **2026-04-14**:
 
