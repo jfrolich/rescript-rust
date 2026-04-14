@@ -1111,9 +1111,9 @@ fn read_first_string(value: &OcamlValue) -> Option<String> {
 
 /// Read attributes from a CMI declaration.
 ///
-/// For typedtree parity we only need to preserve declaration-level attribute
-/// identity by name. The typedtree sexp printer intentionally prints decl attrs
-/// as `(name <payload>)`, so we do not need to reconstruct the full payload here.
+/// The JS backend relies on simple constructor `@as(...)` payloads from loaded
+/// interfaces, so preserve the payload forms the OCaml backend observes for
+/// null/undefined identifiers and simple string literals.
 fn read_attributes(value: &OcamlValue) -> Vec<Attribute> {
     value
         .as_list()
@@ -1122,8 +1122,7 @@ fn read_attributes(value: &OcamlValue) -> Vec<Attribute> {
             OcamlValue::Block(_, fields) if !fields.is_empty() => {
                 let attr_name = read_attribute_name(&fields[0]);
                 let payload = if fields.len() > 1 {
-                    let p = read_attribute_payload(&fields[1]);
-                    p
+                    read_attribute_payload(&fields[1])
                 } else {
                     AttributePayload::Empty
                 };
@@ -1147,9 +1146,15 @@ fn read_attribute_payload(value: &OcamlValue) -> AttributePayload {
     match value {
         // PStr(structure) — tag 0
         OcamlValue::Block(0, fields) if !fields.is_empty() => {
-            // Try to extract a simple string constant from a PStr payload
-            // PStr([{pstr_desc = Pstr_eval({pexp_desc = Pexp_constant(Pconst_string(s, _, _))}, _)}])
-            if let Some(s) = extract_str_payload_string(&fields[0]) {
+            let structure = &fields[0];
+            if let Some(name) = extract_ident_payload_name(structure) {
+                return match name.as_str() {
+                    "true" => AttributePayload::Bool(true),
+                    "false" => AttributePayload::Bool(false),
+                    _ => AttributePayload::Ident(name),
+                };
+            }
+            if let Some(s) = extract_str_payload_string(structure) {
                 AttributePayload::Str(s)
             } else {
                 AttributePayload::Empty
@@ -1159,30 +1164,66 @@ fn read_attribute_payload(value: &OcamlValue) -> AttributePayload {
     }
 }
 
-/// Try to extract a string from a PStr attribute payload.
-/// The payload structure varies but we try multiple patterns.
-fn extract_str_payload_string(structure: &OcamlValue) -> Option<String> {
-    // Walk the tree looking for any string value
-    fn find_string_in_value(v: &OcamlValue, depth: usize) -> Option<String> {
-        if depth > 8 {
+/// Try to extract an identifier-like payload from a marshaled PStr payload.
+///
+/// OCaml stores `@as(null)` / `@as(undefined)` inside the expression node as a
+/// nested `Block(0, [String("null")])` / `Block(0, [String("undefined")])`.
+fn extract_ident_payload_name(structure: &OcamlValue) -> Option<String> {
+    fn find_ident_in_value(v: &OcamlValue, depth: usize) -> Option<String> {
+        if depth > 12 {
             return None;
         }
         match v {
-            OcamlValue::String(s) => Some(s.clone()),
-            OcamlValue::Block(_, fields) => {
-                for f in fields.iter() {
-                    if let Some(s) = find_string_in_value(f, depth + 1) {
-                        return Some(s);
-                    }
+            OcamlValue::Block(0, fields)
+                if fields.len() == 1
+                    && matches!(
+                        fields[0],
+                        OcamlValue::String(ref name)
+                            if matches!(
+                                name.as_str(),
+                                "null" | "undefined" | "true" | "false"
+                            )
+                    ) =>
+            {
+                match &fields[0] {
+                    OcamlValue::String(name) => Some(name.clone()),
+                    _ => None,
                 }
-                None
             }
-            // Lists are represented as nested Block(0, [head, tail]) chains
-            // ending in Int(0) for nil
+            OcamlValue::Block(_, fields) => {
+                fields
+                    .iter()
+                    .find_map(|field| find_ident_in_value(field, depth + 1))
+            }
             _ => None,
         }
     }
-    find_string_in_value(structure, 0)
+    find_ident_in_value(structure, 0)
+}
+
+/// Try to extract a string constant from a PStr attribute payload.
+///
+/// For `@as("foo")`, the expression subtree contains a constant-string node
+/// encoded as `Block(2, [String("foo"), ...])`.
+fn extract_str_payload_string(structure: &OcamlValue) -> Option<String> {
+    fn find_string_constant(v: &OcamlValue, depth: usize) -> Option<String> {
+        if depth > 12 {
+            return None;
+        }
+        match v {
+            OcamlValue::Block(2, fields) if !fields.is_empty() => match &fields[0] {
+                OcamlValue::String(value) => Some(value.clone()),
+                _ => fields
+                    .iter()
+                    .find_map(|field| find_string_constant(field, depth + 1)),
+            },
+            OcamlValue::Block(_, fields) => fields
+                .iter()
+                .find_map(|field| find_string_constant(field, depth + 1)),
+            _ => None,
+        }
+    }
+    find_string_constant(structure, 0)
 }
 
 /// Read a Primitive.description.
@@ -1306,5 +1347,69 @@ fn read_unboxed_status(value: &OcamlValue) -> UnboxedStatus {
     UnboxedStatus {
         unboxed: fields[0].as_bool(),
         default: fields[1].as_bool(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn block(tag: u8, fields: Vec<OcamlValue>) -> OcamlValue {
+        OcamlValue::Block(tag, Arc::from(fields))
+    }
+
+    fn cmi_ident_pstr(name: &str) -> OcamlValue {
+        block(
+            0,
+            vec![block(0, vec![block(0, vec![OcamlValue::String(name.to_string())])])],
+        )
+    }
+
+    fn cmi_string_pstr(value: &str) -> OcamlValue {
+        block(
+            0,
+            vec![block(
+                0,
+                vec![block(
+                    1,
+                    vec![block(
+                        2,
+                        vec![
+                            OcamlValue::String(value.to_string()),
+                            block(0, vec![OcamlValue::String("*j".to_string())]),
+                        ],
+                    )],
+                )],
+            )],
+        )
+    }
+
+    #[test]
+    fn reads_cmi_null_ident_payload_as_ident_not_string() {
+        assert_eq!(
+            read_attribute_payload(&cmi_ident_pstr("null")),
+            AttributePayload::Ident("null".to_string())
+        );
+    }
+
+    #[test]
+    fn reads_cmi_undefined_ident_payload_as_ident_not_string() {
+        assert_eq!(
+            read_attribute_payload(&cmi_ident_pstr("undefined")),
+            AttributePayload::Ident("undefined".to_string())
+        );
+    }
+
+    #[test]
+    fn keeps_cmi_string_literal_payload_distinct_from_identifier_payload() {
+        assert_eq!(
+            read_attribute_payload(&cmi_string_pstr("null")),
+            AttributePayload::Str("null".to_string())
+        );
+        assert_eq!(
+            read_attribute_payload(&cmi_string_pstr("fulfilled")),
+            AttributePayload::Str("fulfilled".to_string())
+        );
     }
 }

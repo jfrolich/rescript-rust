@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 352 / 657 JS snapshots passing, 0 compile errors, 305 output diffs
+**Status:** 353 / 657 JS snapshots passing, 0 compile errors, 304 output diffs
 
 ## Goal
 
@@ -35,11 +35,65 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **352 / 657**
+- JS snapshot parity: **353 / 657**
 - Compile errors: **0**
-- Output diffs: **305**
+- Output diffs: **304**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: preserve OCaml’s `@as(null)` / `@as(undefined)` constructor
+  payload identity when loading runtime interfaces through
+  `compiler-rust/src/cmi/sig_reader.rs`, so downstream switch metadata in
+  `compiler-rust/src/raw_lambda/matching.rs` and `compiler-rust/src/lambda/compile.rs`
+  sees real nullish tags instead of the string literal payload text
+- OCaml reference: `compiler/ml/ast_untagged_variants.ml`,
+  `compiler/core/matching_polyfill.ml`, and `compiler/ml/typemod.ml`, where
+  `process_tag_type` distinguishes identifier payloads like `null` /
+  `undefined` from string payloads like `"fulfilled"` and carries that tag
+  metadata into constructor switch names
+- Rust change:
+  - replaced the CMI attribute reader’s old “first string wins” payload decode
+    with separate marshaled-PStr decoders for identifier-shaped payloads and
+    constant-string payloads
+  - now loads `@as(null)` / `@as(undefined)` from interfaces as
+    `AttributePayload::Ident(...)` instead of `AttributePayload::Str(...)`,
+    while keeping `@as("null")` and other quoted strings as string payloads
+  - added focused CMI-reader unit coverage to lock in the distinction between
+    identifier payloads and quoted string payloads
+- Added focused regression coverage in:
+  - `cmi::sig_reader::tests::reads_cmi_null_ident_payload_as_ident_not_string`
+  - `cmi::sig_reader::tests::reads_cmi_undefined_ident_payload_as_ident_not_string`
+  - `cmi::sig_reader::tests::keeps_cmi_string_literal_payload_distinct_from_identifier_payload`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml reads_cmi_null_ident_payload_as_ident_not_string -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml reads_cmi_undefined_ident_payload_as_ident_not_string -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml keeps_cmi_string_literal_payload_distinct_from_identifier_payload -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/untagged_variants_heuristic.res -o /tmp/untagged_variants_heuristic.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DictPatternMatchingOptimization.res -o /tmp/DictPatternMatchingOptimization.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/json_decorders.res -o /tmp/json_decorders.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/option_optimisation.res -o /tmp/option_optimisation.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/untagged_variants_heuristic.res` now matches its checked-in
+    `.mjs` snapshot exactly again; the diff corpus no longer contains
+    `untagged_variants_heuristic`
+  - the old `"null"` string-literal drift is gone from the authoritative diff
+    corpus; the remaining files in this cluster
+    (`DictPatternMatchingOptimization`, `json_decorders`, `option_optimisation`,
+    `Stdlib_JsonTests`, `Stdlib_NullableTests`) now differ for later backend
+    control-flow/cleanup reasons rather than incorrect nullish tag decoding
+  - `ExternalShadow` remains an exact guard-file match
+- Topline impact:
+  - JS snapshot parity: **353 / 657** (**+1**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **304** (**-1**)
+- Keep this change because it ports OCaml’s constructor-attribute semantics at
+  the interface-loading boundary instead of treating nullish tag mismatches as
+  printer or snapshot-text issues
 
 Latest iteration on **2026-04-14**:
 
