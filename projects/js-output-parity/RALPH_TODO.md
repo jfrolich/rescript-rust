@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 385 / 657 JS snapshots passing, 0 compile errors, 272 output diffs
+**Status:** 384 / 657 JS snapshots passing, 0 compile errors, 273 output diffs
 
 ## Goal
 
@@ -35,11 +35,63 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **385 / 657**
+- JS snapshot parity: **384 / 657**
 - Compile errors: **0**
-- Output diffs: **272**
+- Output diffs: **273**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: match OCaml's `Lfor` lowering in
+  `compiler-rust/src/lambda/compile.rs` so `for ... to (finish - 1)` and
+  `for ... to predint finish` emit the exclusive `J.Up` loop shape that
+  `compiler/core/lam_compile.ml` feeds into `js_dump.ml`, instead of keeping
+  the Rust-only inclusive `<= finish - 1` form in final JS
+- Active backend focus is **Phase 3: Port JS IR Lowering And Metadata** from
+  `PLAN.md`; this slice fixes `lam_compile.ml` `compile_for` lowering before
+  the JS-pass stage, without reopening typedtree or lambda parity work
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, where `Lfor ... Upto ...` rewrites
+  `Psubint(new_finish, 1)` and `Poffsetint(-1)` over `new_finish` to
+  `compile_for ... Up ...`, which `js_dump.ml` then prints as `< finish`
+  instead of `<= finish - 1`
+- Rust change:
+  - added `lower_ocaml_for_range_direction(...)` and routed `Lambda::Lfor`
+    lowering through it so `Psubint(..., 1)` and `Poffsetint(-1)` bounds emit
+    `ForDirection::Up`
+  - added focused regression coverage in
+    `lowers_upto_subint_one_finish_to_ocaml_exclusive_for_range` and
+    `lowers_upto_predint_finish_to_ocaml_exclusive_for_range`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml lowers_upto_ -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml test_print_for_range_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_for_loop.res -o /tmp/test_for_loop.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ../../packages/@rescript/darwin-arm64/bin/rescript.exe compiler-args src/for_loop_test.res`
+  - `timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/for_loop_test.ast -o /tmp/for_loop_test.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/for_loop_test.res` now emits the OCaml-style exclusive
+    loop headers such as `for (let i = 0; i < 7; ++i)` and
+    `for (let j = 0; j < 3; ++j)` instead of the Rust-only
+    `i <= 6` / `j <= 2` form; the remaining diff in that file is now on the
+    earlier closure/ref lowering (`inspect_3` boxing and capture shape), not
+    on loop-bound printing
+  - `temp/rust-parity/diffs/js_src_bs_poly_mutable_set_test.res.diff` drops
+    out of the current authoritative diff set after the same `Lfor` rewrite
+  - `tests/tests/src/test_for_loop.res` and
+    `tests/tests/src/ExternalShadow.res` remain exact snapshot matches after
+    the loop-lowering change
+- Topline impact:
+  - JS snapshot parity: **385 / 657** -> **384 / 657** (**-1**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **272** -> **273** (**+1**)
+- Keep this change because it ports the exact OCaml `lam_compile.ml`
+  `Lfor ... Upto ... (finish - 1)` => `Up` rewrite. The local parity
+  regression is an interaction with other still-misaligned loop-body lowering,
+  not a reason to preserve the Rust-only inclusive loop shape.
 
 Latest iteration on **2026-04-14**:
 

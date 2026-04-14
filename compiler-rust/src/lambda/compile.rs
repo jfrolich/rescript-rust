@@ -543,11 +543,8 @@ impl LambdaCompiler {
             }
             Lambda::Lfor(var, start, end, dir, body) => {
                 let start_expr = self.compile_expr(start).expr;
+                let (end, dir) = lower_ocaml_for_range_direction(dir, end);
                 let end_expr = self.compile_expr(end).expr;
-                let dir = match dir {
-                    crate::lambda::DirectionFlag::Upto => ForDirection::Upto,
-                    crate::lambda::DirectionFlag::Downto => ForDirection::Downto,
-                };
                 let body_block = self.compile_block(body);
                 let stmt = Statement::new(StatementDesc::ForRange(
                     Some(start_expr),
@@ -5113,6 +5110,40 @@ impl LambdaCompiler {
         let mut modules = self.collect_required_module_set(block).to_vec();
         ocaml_sort_modules(&mut modules);
         modules
+    }
+}
+
+fn lower_ocaml_for_range_direction<'a>(
+    direction: &crate::lambda::DirectionFlag,
+    finish: &'a Lambda,
+) -> (&'a Lambda, ForDirection) {
+    match (direction, finish) {
+        (
+            crate::lambda::DirectionFlag::Upto,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Psubint,
+                args,
+                ..
+            }),
+        ) => match args.as_slice() {
+            [new_finish, Lambda::Lconst(Constant::Int { i: 1, .. })] => {
+                (new_finish, ForDirection::Up)
+            }
+            _ => (finish, ForDirection::Upto),
+        },
+        (
+            crate::lambda::DirectionFlag::Upto,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Poffsetint(-1),
+                args,
+                ..
+            }),
+        ) => match args.as_slice() {
+            [new_finish] => (new_finish, ForDirection::Up),
+            _ => (finish, ForDirection::Upto),
+        },
+        (crate::lambda::DirectionFlag::Upto, _) => (finish, ForDirection::Upto),
+        (crate::lambda::DirectionFlag::Downto, _) => (finish, ForDirection::Downto),
     }
 }
 
@@ -10089,6 +10120,52 @@ mod tests {
         let lam = Lambda::const_(Constant::int(7));
         let program = compiler.compile_program(&lam);
         assert!(!program.block.is_empty());
+    }
+
+    #[test]
+    fn lowers_upto_subint_one_finish_to_ocaml_exclusive_for_range() {
+        let mut compiler = LambdaCompiler::new();
+        let i = Ident::create_local("i");
+        let xs = Ident::create_local("xs");
+        let lam = Lambda::for_(
+            i,
+            Lambda::const_(Constant::int(0)),
+            Lambda::prim(
+                Primitive::Psubint,
+                vec![Lambda::var(xs), Lambda::const_(Constant::int(1))],
+                Location::none(),
+            ),
+            crate::lambda::DirectionFlag::Upto,
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert_eq!(rendered.trim(), "for (let i = 0; i < xs; ++i) {}");
+    }
+
+    #[test]
+    fn lowers_upto_predint_finish_to_ocaml_exclusive_for_range() {
+        let mut compiler = LambdaCompiler::new();
+        let i = Ident::create_local("i");
+        let xs = Ident::create_local("xs");
+        let lam = Lambda::for_(
+            i,
+            Lambda::const_(Constant::int(0)),
+            Lambda::prim(
+                Primitive::Poffsetint(-1),
+                vec![Lambda::var(xs)],
+                Location::none(),
+            ),
+            crate::lambda::DirectionFlag::Upto,
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert_eq!(rendered.trim(), "for (let i = 0; i < xs; ++i) {}");
     }
 
     #[test]
