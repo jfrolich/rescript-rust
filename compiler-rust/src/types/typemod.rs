@@ -3752,11 +3752,20 @@ pub fn modtype_of_package<'b>(
         .map(|(lid, ty)| (flatten_package_constraint_path(lid, arena, ctx), *ty))
         .collect();
 
-    let base_mty = DeclMty::MtyIdent(package_path.clone());
-    let package_parent_path = match package_path {
-        Path::Pdot(parent, _, _) => Some(parent.as_ref().clone()),
-        _ => None,
+    let base_mty = match package_path {
+        Path::Pident(_) => env.lookup_modtype(package_path).ok()?.mtd_type.clone()?,
+        Path::Pdot(parent, modtype_name, _) => crate::types::typecore::lookup_modtype_in_resolved_path(
+            parent,
+            modtype_name,
+            env,
+            pers_env,
+            ctx,
+        )
+        .and_then(|(_, mtd)| mtd.mtd_type)
+        .or_else(|| env.lookup_modtype(package_path).ok()?.mtd_type.clone())?,
+        Path::Papply(_, _) => return None,
     };
+    let package_parent_path = parent_path_for_module_type(&base_mty);
     apply_package_constraints_to_module_type(
         env,
         &base_mty,
