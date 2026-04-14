@@ -43,6 +43,66 @@ reported:
 
 Latest iteration on **2026-04-14**:
 
+- Active slice: port the OCaml staticcatch fallthrough-return behavior for
+  nested handlers that immediately re-raise an outer staticcatch label, so
+  return-switch lowering can preserve the OCaml case ordering instead of
+  keeping the Rust-only eager empty-body return clauses first
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is still `Lam_compile` control-flow
+  lowering in the backend path, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml` and
+  `compiler/core/lam_compile_context.ml`, where nested `Lstaticcatch`
+  fallthrough handlers may wrap a switch whose immediate handler re-raises an
+  outer label while the enclosing return context still emits the outer handler
+  after the switch
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so
+    `uses_fallthrough_staticcatch_return(...)` recognizes the nested
+    staticraise-to-outer-label pattern instead of only the narrower
+    return-unit/single-branch case
+  - added
+    `lambda_contains_static_raise_to_label(...)`,
+    `active_fallthrough_return_handler(...)`, and
+    `reorder_fallthrough_return_clauses(...)` so return-switch lowering moves
+    empty-body fallthrough cases behind non-empty handled cases only when an
+    active fallthrough return handler is present
+  - applied that return-clause reordering in the named-string and integer
+    return-switch lowering paths
+  - added focused regression coverage in
+    `multi_case_staticcatch_wrapped_named_variant_return_switch_moves_fallthrough_cases_last`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml multi_case_staticcatch_wrapped_named_variant_return_switch_moves_fallthrough_cases_last -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_handler -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml staticcatch_wrapped_string_switches_use_the_handler_as_the_default_value -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/compare_test.res` using the exact
+    harness compiler args from `tests/tests/lib/bs`, diffing the emitted module
+    against the checked-in snapshot to keep the remaining one-hunk switch-order
+    drift isolated while validating the new control-flow rule
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - the Rust backend now has explicit coverage for the OCaml nested-staticcatch
+    re-raise path instead of relying on the older single-branch heuristic
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the control-flow lowering change
+  - `tests/tests/src/compare_test.res` still reproduces the same single-hunk
+    inner-switch ordering drift, so the remaining mismatch for that file is not
+    this staticcatch fallthrough rule
+  - the authoritative wrapper baseline is unchanged, which means this slice is
+    an OCaml-alignment cleanup that did not yet flip any checked-in JS snapshot
+- Topline impact:
+  - JS snapshot parity: **441 / 657** -> **441 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **216** -> **216** (**no change**)
+- Keep this change because it ports the OCaml staticcatch return-context rule
+  instead of preserving the Rust-only narrower fallthrough heuristic.
+
+Latest iteration on **2026-04-14**:
+
 - Active slice: port the missing OCaml external-call polyvariant marshalling so
   `@string`, `@int`, and payload polyvariant externals go through the
   `Js_of_lam_variant.eval*` argument-rewrite path instead of forwarding the raw
