@@ -18996,51 +18996,133 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
     .flatten()
 }
 
+fn rewrite_alias_pident_child_prefixes<'a>(
+    sig: &mut [crate::types::decl::SignatureItem],
+    target: &Path,
+    access_path: &Path,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) {
+    let child_names = sig
+        .iter()
+        .filter_map(|item| match item {
+            crate::types::decl::SignatureItem::SigModule(id, _, _) => {
+                Some(id.name().to_string())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for child_name in child_names {
+        let old_prefix = Path::pdot(target.clone(), child_name.clone());
+        let new_prefix = Path::pdot(access_path.clone(), child_name);
+        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(sig, &old_prefix, &new_prefix, ctx);
+        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+            sig,
+            &old_prefix,
+            &new_prefix,
+        );
+    }
+}
+
+fn build_qualified_signature_for_access_path<'a>(
+    env: &Env,
+    access_path: &Path,
+    mty: &crate::types::decl::ModuleType,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<crate::types::decl::Signature> {
+    let (sig, resolved_name) = env.resolve_module_type(mty, pers_env, ctx)?;
+    let mut sig = copy_lookup_signature_for_subst(&sig, ctx);
+    let skip_self_manifest_subst = Env::signature_has_package_self_manifests(&sig, ctx);
+    if matches!(mty, crate::types::decl::ModuleType::MtyAlias(..)) {
+        sig = strengthen_signature_for_module_access_path(ctx, access_path, &sig);
+    }
+    let (should_rebind_direct_type_family, allow_inferred_rebind_paths) =
+        direct_sig_type_family_rebind_options(mty, access_path);
+    if should_rebind_direct_type_family {
+        rebind_direct_sig_type_family_to_access_path(
+            ctx,
+            access_path,
+            &sig,
+            allow_inferred_rebind_paths,
+        );
+    }
+    if let Some(ref old_name) = resolved_name {
+        crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+            &sig,
+            old_name,
+            access_path,
+            ctx,
+        );
+        crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
+            &mut sig,
+            old_name,
+            access_path,
+        );
+    }
+    if let crate::types::decl::ModuleType::MtyAlias(_, target) = mty {
+        if !target.same(access_path) {
+            match target {
+                Path::Pdot(..) => {
+                    crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                        &sig,
+                        target,
+                        access_path,
+                        ctx,
+                    );
+                    crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+                        &mut sig,
+                        target,
+                        access_path,
+                    );
+                    rewrite_flattened_alias_head_prefixes(
+                        &mut sig,
+                        target,
+                        access_path,
+                        pers_env.as_ref(),
+                        ctx,
+                    );
+                }
+                Path::Pident(alias_id) => {
+                    crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                        &sig,
+                        alias_id.name(),
+                        access_path,
+                        ctx,
+                    );
+                    crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
+                        &mut sig,
+                        alias_id.name(),
+                        access_path,
+                    );
+                    rewrite_alias_pident_child_prefixes(&mut sig, target, access_path, ctx);
+                }
+                Path::Papply(_, _) => {}
+            }
+        }
+    }
+    if !skip_self_manifest_subst {
+        crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, access_path, ctx);
+        crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, access_path);
+    }
+    crate::types::ctype::force_generalize_module_sig_values(
+        ctx,
+        &crate::types::decl::ModuleType::MtySignature(sig.clone()),
+    );
+    Some(sig)
+}
+
 fn build_module_signature_for_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<(Path, crate::types::decl::Signature)> {
-    fn rewrite_alias_pident_child_prefixes<'a>(
-        sig: &mut [crate::types::decl::SignatureItem],
-        target: &Path,
-        access_path: &Path,
-        ctx: &'a crate::types::context::TypeContext<'a>,
-    ) {
-        let child_names = sig
-            .iter()
-            .filter_map(|item| match item {
-                crate::types::decl::SignatureItem::SigModule(id, _, _) => {
-                    Some(id.name().to_string())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        for child_name in child_names {
-            let old_prefix = Path::pdot(target.clone(), child_name.clone());
-            let new_prefix = Path::pdot(access_path.clone(), child_name);
-            crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                sig,
-                &old_prefix,
-                &new_prefix,
-                ctx,
-            );
-            crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
-                sig,
-                &old_prefix,
-                &new_prefix,
-            );
-        }
-    }
-
     let resolved = match module_path {
         Path::Pident(id) => {
             if let Ok(md) = env
                 .lookup_module(module_path)
                 .or_else(|_| env.find_module(id.name()))
             {
-                let (sig, resolved_name) = env.resolve_module_type(&md.md_type, pers_env, ctx)?;
                 let access_path = match env.find_module_with_origin(id.name()) {
                     Ok((origin_id, _, true)) if origin_id.same(id) => Path::pident(id.clone()),
                     _ => md
@@ -19048,95 +19130,8 @@ fn build_module_signature_for_path<'a>(
                         .clone()
                         .unwrap_or_else(|| Path::pident(id.clone())),
                 };
-                let mut sig = copy_lookup_signature_for_subst(&sig, ctx);
-                let skip_self_manifest_subst = Env::signature_has_package_self_manifests(&sig, ctx);
-                if matches!(&md.md_type, crate::types::decl::ModuleType::MtyAlias(..)) {
-                    sig = strengthen_signature_for_module_access_path(ctx, &access_path, &sig);
-                }
-                let (should_rebind_direct_type_family, allow_inferred_rebind_paths) =
-                    direct_sig_type_family_rebind_options(&md.md_type, &access_path);
-                if should_rebind_direct_type_family {
-                    rebind_direct_sig_type_family_to_access_path(
-                        ctx,
-                        &access_path,
-                        &sig,
-                        allow_inferred_rebind_paths,
-                    );
-                }
-                if let Some(ref old_name) = resolved_name {
-                    crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
-                        &sig,
-                        old_name,
-                        &access_path,
-                        ctx,
-                    );
-                    crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
-                        &mut sig,
-                        old_name,
-                        &access_path,
-                    );
-                }
-                if let crate::types::decl::ModuleType::MtyAlias(_, ref target) = md.md_type {
-                    if !target.same(&access_path) {
-                        match target {
-                            Path::Pdot(..) => {
-                                crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                                    &sig,
-                                    target,
-                                    &access_path,
-                                    ctx,
-                                );
-                                crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
-                                    &mut sig,
-                                    target,
-                                    &access_path,
-                                );
-                                rewrite_flattened_alias_head_prefixes(
-                                    &mut sig,
-                                    target,
-                                    &access_path,
-                                    pers_env.as_ref(),
-                                    ctx,
-                                );
-                            }
-                            Path::Pident(alias_id) => {
-                                crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
-                                    &sig,
-                                    alias_id.name(),
-                                    &access_path,
-                                    ctx,
-                                );
-                                crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
-                                    &mut sig,
-                                    alias_id.name(),
-                                    &access_path,
-                                );
-                                rewrite_alias_pident_child_prefixes(
-                                    &mut sig,
-                                    target,
-                                    &access_path,
-                                    ctx,
-                                );
-                            }
-                            Path::Papply(_, _) => {}
-                        }
-                    }
-                }
-                if !skip_self_manifest_subst {
-                    crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                        &sig,
-                        &access_path,
-                        ctx,
-                    );
-                    crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(
-                        &mut sig,
-                        &access_path,
-                    );
-                }
-                crate::types::ctype::force_generalize_module_sig_values(
-                    ctx,
-                    &crate::types::decl::ModuleType::MtySignature(sig.clone()),
-                );
+                let sig =
+                    build_qualified_signature_for_access_path(env, &access_path, &md.md_type, pers_env, ctx)?;
                 Some((access_path, sig))
             } else if let Some(pers) = pers_env.as_mut() {
                 if let Some(ps) = pers.find_pers_struct(id.name(), ctx) {
