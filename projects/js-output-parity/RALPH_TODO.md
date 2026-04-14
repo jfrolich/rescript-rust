@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 338 / 657 JS snapshots passing, 0 compile errors, 319 output diffs
+**Status:** 340 / 657 JS snapshots passing, 0 compile errors, 317 output diffs
 
 ## Goal
 
@@ -35,13 +35,55 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **338 / 657**
+- JS snapshot parity: **340 / 657**
 - Compile errors: **0**
-- Output diffs: **319**
+- Output diffs: **317**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed dead-binding emission rule in
+  `compiler/core/js_dump.ml`, specifically `variable_declaration` honoring
+  `ident_info.used_stats` by omitting `Dead_pure` bindings and lowering
+  `Dead_non_pure` bindings to plain effect statements
+- After rereading that OCaml dumper path, the Rust JS printer in
+  `compiler-rust/src/js_ir/printer.rs` now matches it more closely:
+  - variable declarations marked `UsedStats::DeadPure` are skipped entirely,
+    including top-level function-valued bindings that Rust previously still
+    emitted
+  - variable declarations marked `UsedStats::DeadNonPure` now print as their
+    initializer expression statement instead of forcing a `let` binding
+  - statement sequencing now skips separator newlines for non-emitting
+    statements, so removing dead bindings no longer leaves blank gaps in the
+    surrounding JS
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_dead_pure_variable_declaration_is_omitted_like_ocaml`,
+  `js_ir::printer::tests::test_print_dead_non_pure_variable_declaration_as_expression_like_ocaml`,
+  and
+  `js_ir::printer::tests::test_print_dead_pure_top_level_function_binding_is_omitted_like_ocaml`
+  while keeping
+  `js_ir::printer::tests::test_print_variable_declaration_omits_undefined_initializer`
+  green as the guard for the normal live-binding printer path
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_dead_pure_variable_declaration_is_omitted_like_ocaml -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_dead_non_pure_variable_declaration_as_expression_like_ocaml -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_dead_pure_top_level_function_binding_is_omitted_like_ocaml -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_variable_declaration_omits_undefined_initializer -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UncurriedAlways.res -o /tmp/UncurriedAlways.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/pipe_syntax.res -o /tmp/pipe_syntax.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/UncurriedAlways.res` and
+  `tests/tests/src/pipe_syntax.res` are now out of the diff corpus, while
+  `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
+- The authoritative JS snapshot baseline now reports **340 / 657** passing,
+  **0** compile errors, and **317** output diffs; this is a net **+2**
+  passing snapshots and **-2** output diffs from the previously recorded
+  **338 / 657**, **0** compile errors, **319** output diffs
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed object-literal key rule in

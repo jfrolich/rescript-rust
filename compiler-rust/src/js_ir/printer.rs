@@ -3,7 +3,7 @@
 //! This module provides functionality to convert the JavaScript IR
 //! into formatted JavaScript source code.
 
-use super::op::{BinOp, Kind, Number, PropertyName};
+use super::op::{BinOp, Kind, Number, PropertyName, UsedStats};
 use super::{
     Block, CaseClause, Delim, DepsProgram, Expression, ExpressionDesc, ForDirection, JsRawInfo,
     ModulePathResolver, Program, Statement, StatementDesc, StringClause, VIdent,
@@ -305,8 +305,12 @@ impl JsPrinter {
 
     /// Print statements
     pub fn print_statements(&mut self, stmts: &Block, top_level: bool) {
-        for (i, stmt) in stmts.iter().enumerate() {
-            if i > 0 {
+        let mut printed_any = false;
+        for stmt in stmts {
+            if !self.statement_prints_anything(stmt, top_level) {
+                continue;
+            }
+            if printed_any {
                 if top_level {
                     self.at_least_two_lines();
                 } else {
@@ -314,6 +318,7 @@ impl JsPrinter {
                 }
             }
             self.print_statement(stmt, top_level);
+            printed_any = true;
         }
     }
 
@@ -330,6 +335,26 @@ impl JsPrinter {
         self.print_statement_desc(&stmt.desc, top_level);
     }
 
+    fn statement_prints_anything(&self, stmt: &Statement, top_level: bool) -> bool {
+        stmt.comment.is_some() || self.statement_desc_prints_anything(&stmt.desc, top_level)
+    }
+
+    fn statement_desc_prints_anything(&self, desc: &StatementDesc, _top_level: bool) -> bool {
+        match desc {
+            StatementDesc::Block(stmts) => stmts.iter().any(|stmt| self.statement_prints_anything(stmt, false)),
+            StatementDesc::Variable(decl) => match decl.ident_info.used_stats {
+                UsedStats::DeadPure => false,
+                UsedStats::DeadNonPure => decl
+                    .value
+                    .as_ref()
+                    .is_some_and(|value| !matches!(value.desc, ExpressionDesc::Var(_))),
+                _ => true,
+            },
+            StatementDesc::Exp(expr) => !matches!(expr.desc, ExpressionDesc::Var(_)),
+            _ => true,
+        }
+    }
+
     /// Print a statement description
     fn print_statement_desc(&mut self, desc: &StatementDesc, top_level: bool) {
         match desc {
@@ -341,6 +366,17 @@ impl JsPrinter {
             }
 
             StatementDesc::Variable(decl) => {
+                match decl.ident_info.used_stats {
+                    UsedStats::DeadPure => return,
+                    UsedStats::DeadNonPure => {
+                        if let Some(value) = &decl.value {
+                            self.print_expression_statement(value);
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+
                 if top_level {
                     if let Some(Expression {
                         desc:
@@ -373,19 +409,7 @@ impl JsPrinter {
             }
 
             StatementDesc::Exp(expr) => {
-                // Skip pure variable expressions
-                if matches!(expr.desc, ExpressionDesc::Var(_)) {
-                    return;
-                }
-                let needs_paren = self.expr_needs_paren(expr);
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.print_expression(expr, 0);
-                if needs_paren {
-                    self.write_char(')');
-                }
-                self.semi();
+                self.print_expression_statement(expr);
             }
 
             StatementDesc::If(cond, then_block, else_block) => {
@@ -563,6 +587,23 @@ impl JsPrinter {
                 self.semi();
             }
         }
+    }
+
+    fn print_expression_statement(&mut self, expr: &Expression) {
+        // OCaml's js_dump suppresses dead pure bindings entirely and prints dead
+        // impure bindings as plain expression statements.
+        if matches!(expr.desc, ExpressionDesc::Var(_)) {
+            return;
+        }
+        let needs_paren = self.expr_needs_paren(expr);
+        if needs_paren {
+            self.write_char('(');
+        }
+        self.print_expression(expr, 0);
+        if needs_paren {
+            self.write_char(')');
+        }
+        self.semi();
     }
 
     /// Print a brace-enclosed block
@@ -2466,7 +2507,7 @@ pub fn print_block(block: &Block) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::js_ir::op::{ImportAttributes, MutableFlag};
+    use crate::js_ir::op::{IdentInfo, ImportAttributes, MutableFlag, UsedStats};
     use crate::js_ir::{CallInfo, Expression, ModuleId, ModulePathResolver, Statement};
     use crate::lambda::TagInfo;
     use std::path::Path;
@@ -3054,6 +3095,83 @@ mod tests {
         })]);
 
         assert_eq!(rendered, "let VS;");
+    }
+
+    #[test]
+    fn test_print_dead_pure_variable_declaration_is_omitted_like_ocaml() {
+        let mut dead_info = IdentInfo::default();
+        dead_info.used_stats = UsedStats::DeadPure;
+
+        let rendered = print_block(&vec![
+            Statement::variable(VariableDeclaration {
+                ident: Ident::create_local("dead"),
+                value: Some(Expression::array(
+                    vec![Expression::number(Number::int(1))],
+                    MutableFlag::Immutable,
+                )),
+                property: crate::lambda::compat::LetKind::Strict,
+                ident_info: dead_info,
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: Ident::create_local("alive"),
+                value: Some(Expression::number(Number::int(2))),
+                property: crate::lambda::compat::LetKind::Strict,
+                ident_info: Default::default(),
+            }),
+        ]);
+
+        assert_eq!(rendered, "let alive = 2;");
+    }
+
+    #[test]
+    fn test_print_dead_non_pure_variable_declaration_as_expression_like_ocaml() {
+        let mut dead_info = IdentInfo::default();
+        dead_info.used_stats = UsedStats::DeadNonPure;
+        let effect = Ident::create_local("effect");
+
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: Ident::create_local("dead"),
+            value: Some(Expression::call(
+                Expression::var(effect),
+                vec![],
+                CallInfo::default(),
+            )),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: dead_info,
+        })]);
+
+        assert_eq!(rendered, "effect();");
+    }
+
+    #[test]
+    fn test_print_dead_pure_top_level_function_binding_is_omitted_like_ocaml() {
+        let mut dead_info = IdentInfo::default();
+        dead_info.used_stats = UsedStats::DeadPure;
+
+        let rendered = print_block(&vec![
+            Statement::variable(VariableDeclaration {
+                ident: Ident::create_local("deadFn"),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![],
+                    body: vec![Statement::return_(Expression::number(Number::int(1)))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: crate::lambda::compat::LetKind::Strict,
+                ident_info: dead_info,
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: Ident::create_local("alive"),
+                value: Some(Expression::number(Number::int(2))),
+                property: crate::lambda::compat::LetKind::Strict,
+                ident_info: Default::default(),
+            }),
+        ]);
+
+        assert_eq!(rendered, "let alive = 2;");
     }
 
     #[test]
