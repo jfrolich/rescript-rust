@@ -621,11 +621,7 @@ fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
 
 fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) -> Lambda {
     match lam {
-        Lambda::Lvar(id) => env
-            .substitutions
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| lam.clone()),
+        Lambda::Lvar(id) => resolve_transitive_substitution(id, env).unwrap_or_else(|| lam.clone()),
         Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
         Lambda::Lapply(apply) => simplify_apply(apply, env, exports),
         Lambda::Lfunction(func) => {
@@ -845,6 +841,27 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             Lambda::Lassign(id.clone(), Box::new(simplify_with_env(value, env, exports)))
         }
     }
+}
+
+fn resolve_transitive_substitution(id: &Ident, env: &SimplifyEnv) -> Option<Lambda> {
+    fn resolve(id: &Ident, env: &SimplifyEnv, visiting: &mut HashSet<Ident>) -> Option<Lambda> {
+        if !visiting.insert(id.clone()) {
+            return Some(Lambda::var(id.clone()));
+        }
+
+        let resolved = match env.substitutions.get(id) {
+            Some(Lambda::Lvar(next)) => {
+                resolve(next, env, visiting).or_else(|| Some(Lambda::var(next.clone())))
+            }
+            Some(value) => Some(value.clone()),
+            None => None,
+        };
+
+        visiting.remove(id);
+        resolved
+    }
+
+    resolve(id, env, &mut HashSet::new())
 }
 
 #[derive(Clone, Copy, Default)]
@@ -4598,6 +4615,76 @@ mod tests {
         }) = &simplified
         else {
             panic!("expected the export block after alias cleanup");
+        };
+        assert!(matches!(
+            exports.as_slice(),
+            [id] if *id == exported
+        ));
+        assert!(matches!(
+            args.as_slice(),
+            [Lambda::Lconst(Constant::String { s, .. })] if s == "hello world"
+        ));
+        assert!(find_binding_value(&simplified, &exported).is_none());
+    }
+
+    #[test]
+    fn folds_transitive_string_alias_chains_like_ocaml_lets_dce() {
+        let a0 = Ident::create_local("a0");
+        let a1 = Ident::create_local("a1");
+        let a2 = Ident::create_local("a2");
+        let a3 = Ident::create_local("a3");
+        let exported = Ident::create_local("a4");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![exported.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(exported.clone())],
+            Location::none(),
+        );
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            a0.clone(),
+            Lambda::const_(Constant::string("hello ")),
+            Lambda::let_(
+                LetKind::Strict,
+                a1.clone(),
+                Lambda::var(a0),
+                Lambda::let_(
+                    LetKind::Strict,
+                    a2.clone(),
+                    Lambda::var(a1),
+                    Lambda::let_(
+                        LetKind::Strict,
+                        a3.clone(),
+                        Lambda::var(a2),
+                        Lambda::let_(
+                            LetKind::Strict,
+                            exported.clone(),
+                            Lambda::prim(
+                                Primitive::Pstringadd,
+                                vec![
+                                    Lambda::var(a3),
+                                    Lambda::const_(Constant::string("world")),
+                                ],
+                                Location::none(),
+                            ),
+                            export_block,
+                        ),
+                    ),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(exports), _),
+            args,
+            ..
+        }) = &simplified
+        else {
+            panic!("expected the export block after transitive alias cleanup");
         };
         assert!(matches!(
             exports.as_slice(),

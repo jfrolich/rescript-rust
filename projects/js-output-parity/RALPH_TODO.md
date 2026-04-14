@@ -43,6 +43,55 @@ reported:
 
 Latest iteration on **2026-04-14**:
 
+- Active slice: port OCaml's transitive alias-substitution behavior in
+  `Lam_pass_lets_dce` so JS-backend simplification follows alias chains all the
+  way to their final replacement instead of stopping after one hop
+- Active backend focus for this slice is **Phase 2: Port Post-Lowering Lambda
+  Backend Stages** from `PLAN.md`, because the behavior lives in the late
+  lambda simplifier before JS IR lowering: OCaml's alias case recursively
+  simplifies `Lvar` substitutions via the `subst` table, while the Rust
+  simplifier only looked up one substitution edge
+- OCaml reference:
+  `compiler/core/lam_pass_lets_dce.ml`, especially
+  `Llet ((Strict | Alias | StrictOpt), v, Lvar w, l2)` where OCaml records
+  `v -> simplif (Lam.var w)` instead of a single-hop `v -> w`
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so `Lambda::Lvar` now uses a
+    new `resolve_transitive_substitution(...)` helper that recursively follows
+    `env.substitutions` with cycle protection, matching OCaml's transitive
+    alias-resolution behavior
+  - added focused regression coverage in
+    `folds_transitive_string_alias_chains_like_ocaml_lets_dce`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml folds_string_alias_chains -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml folds_transitive_string_alias_chains_like_ocaml_lets_dce -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml keeps_multi_use_plain_string_bindings_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    broader guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - the authoritative wrapper baseline stayed unchanged at **471 / 657** with
+    **186** output diffs and **0** compile errors
+  - `tests/tests/src/alias_test.res`,
+    `tests/tests/src/inline_const.res`, and
+    `tests/tests/src/unified_ops_test.res` still differ in the wrapper output,
+    so the remaining string-concatenation drift is not caused by the missing
+    transitive alias lookup alone
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the simplifier change
+- Topline impact:
+  - JS snapshot parity: **471 / 657** -> **471 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **186** -> **186** (**no change**)
+- Keep this change because it ports the real OCaml simplifier behavior from
+  `Lam_pass_lets_dce.ml`; even without an immediate parity delta on the
+  canonical harness, Rust now matches OCaml's recursive alias-resolution rule
+  and has regression coverage for longer alias chains.
+
+Latest iteration on **2026-04-14**:
+
 - Active slice: port OCaml's stable switch-case grouping so lambda branches with
   identical bodies are grouped even when they are separated by another case;
   this fixes emitted case ordering like `B` then `A | C` instead of the Rust
