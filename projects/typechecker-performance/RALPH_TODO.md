@@ -1,7 +1,7 @@
 # Ralph TODO: Typechecker Performance
 
 **Last Updated:** 2026-04-14
-**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, dotted shared module-signature scraping now consults env_lazy-backed qualified views first, lazy child module/modtype qualification now comes from cached parent qualified views, and the broader env_lazy rollout is still incomplete
+**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, dotted shared module-signature scraping now consults env_lazy-backed qualified views first, lazy child module/modtype qualification now comes from cached parent qualified views, a broader `typemod`/`typecore` env_lazy rollout was attempted and reverted because it regressed import-family parity, and the broader env_lazy rollout is still incomplete
 
 ## Goal
 
@@ -250,6 +250,65 @@ What this means:
 - the remaining hot path is now clearer: repeated unpack/module-type comparison
   work in `includemod::modtypes_inner` plus the remaining qualification work
   reached through `resolve_type_through_modules`
+
+## Session Update: Rejected `typemod` / `typecore` EnvLazy Pident Rollout
+
+Attempted on `2026-04-14`:
+
+- make `typemod::resolve_path_to_sig_impl` consult
+  `typecore::resolve_module_signature_for_path` for additional `Pident`
+  module-path cases so shared module-type resolution would use the cached
+  qualified view as the source of truth
+- make `typecore::resolve_letmodule_direct_type_family_root` read direct type
+  families from `with_resolved_module_components_for_path` instead of copying a
+  raw signature first
+- also tried forcing `includemod::expand_module_type_in_env` through
+  `ctype::resolve_module_type_through_env` for all non-`Papply` paths
+
+What happened:
+
+- the `includemod` variant was pure overhead and regressed the exact
+  `Import.res` repro to about `0.40s` to `0.44s`; it should not be retried in
+  that shape
+- the narrower `typemod` + `typecore` variant improved the exact `Import.res`
+  repro to about `0.25s` and improved the canonical corpus benchmark to:
+  - Files tested: `657`
+  - Comparable files: `656`
+  - Rust faster or equal: `2`
+  - Rust slower: `654`
+  - Materially slower: `215`
+  - Rust failures: `1` (`src/ticker.res`: stack overflow)
+  - Aggregate OCaml total: `5070.8ms`
+  - Aggregate Rust total: `10809.9ms`
+  - Aggregate Rust / OCaml ratio: `2.13x`
+  - `Import.res` benchmark entry: OCaml `46.4ms`, Rust `252.0ms`, `5.44x`
+- but that same variant regressed typedtree parity in exactly the import-heavy
+  family we are using as a guard:
+  - focused import parity moved from `1/4`, `283` hunk mismatches to `1/4`,
+    `313` hunk mismatches
+  - full parity moved from `232/657`, `43117` hunk mismatches to `232/657`,
+    `43147` hunk mismatches
+
+Outcome:
+
+- all code for that broader rollout was reverted
+- current clean worktree measurements after the revert:
+  - exact `Import.res` repro: Rust back to about `0.28s`
+  - focused import parity: back to `1/4`, `283` hunk mismatches
+- likely root cause: routing `typemod`'s `Pident`-based module-signature
+  resolution through `resolve_module_signature_for_path` changes lazy forcing
+  and stamp allocation order in the import path, even though it helps runtime
+  performance
+
+What the next agent should do:
+
+- do not reintroduce the `typemod::resolve_path_to_sig_impl` `Pident`
+  pre-check in its current form
+- do not force `includemod::expand_module_type_in_env` through the env_lazy
+  path for every local identifier; that was all cost and no benefit
+- if revisiting shared module-type resolution, compare the OCaml
+  `EnvLazy.components_of_module_maker` forcing order more directly before
+  asking for cached qualified signatures from `typemod`
 
 ## Session Update: Route Dotted Shared Module-Type Scraping Through `env_lazy`
 
