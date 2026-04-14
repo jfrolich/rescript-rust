@@ -1,7 +1,7 @@
 # Ralph TODO: Typechecker Performance
 
 **Last Updated:** 2026-04-14
-**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`; broader perf gap still open
+**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, and `ctype` dotted child-module resolution now uses it; broader perf gap still open
 
 ## Goal
 
@@ -138,6 +138,59 @@ What this means:
 - the next session should push the same source-of-truth approach into the
   remaining whole-signature copy hotspots, then re-profile `mario_game`,
   JSX-heavy files, `gpr_1150`, and the `ticker.res` stack overflow
+
+## Session Update: `ctype` Dotted Module-Type Path
+
+Additional checkpoint from this worktree on `2026-04-14` after routing
+`ctype::resolve_module_type_through_env_path` through the shared env_lazy-backed
+detached-signature copy helpers for dotted child modules:
+
+- exact `Import.res` repro:
+  - OCaml: `0.07s` (`/usr/bin/time -lp`)
+  - Rust: `0.47s` (`/usr/bin/time -lp`)
+  - Rust max RSS: about `70.7MB`
+  - Rust peak footprint: about `56.8MB`
+- focused import parity: unchanged at `1/4`, `283` hunk mismatches
+- full typedtree parity: unchanged at `232/657`, `43117` hunk mismatches
+- canonical corpus benchmark:
+  - Files tested: `657`
+  - Comparable files: `656`
+  - Rust faster or equal: `4`
+  - Rust slower: `652`
+  - Materially slower: `227`
+  - Rust failures: `1` (`src/ticker.res`: stack overflow)
+  - Aggregate OCaml total: `4581.5ms`
+  - Aggregate Rust total: `10729.0ms`
+  - Aggregate Rust / OCaml ratio: `2.34x`
+  - `Import.res` benchmark entry: OCaml `41.5ms`, Rust `323.1ms`, `7.78x`
+
+Before/after for this specific change on the same benchmark command:
+
+- before: aggregate ratio `2.39x`, aggregate Rust total `10991.0ms`,
+  `Import.res` `328.6ms`
+- after: aggregate ratio `2.34x`, aggregate Rust total `10729.0ms`,
+  `Import.res` `323.1ms`
+
+What landed in this step:
+
+- `ctype::resolve_module_type_through_env_path` no longer resolves the parent
+  module type recursively just to recover alias information for `Pdot`
+  lookups
+- the dotted child-module `MtySignature` path now copies from
+  `typecore::copy_resolved_module_signature_for_path` /
+  `copy_module_signature_in_resolved_path`-style qualified views instead of
+  rebuilding a fresh child signature from the parent signature on every lookup
+- dotted modtype and non-signature child-module cases now reuse the already
+  resolved parent qualified signature from `typecore::resolve_module_signature_for_path`
+  for child substitution
+
+Next focus after this step:
+
+- push the same env_lazy-backed detached-signature source-of-truth into the
+  remaining manual child-substitution sites in `typemod` / shared module-type
+  resolution
+- keep prioritizing the module-signature-heavy cluster (`Import`, module alias
+  tests, Belt set/map tests, JSX-heavy files) before secondary cleanups
 
 ## Task List
 

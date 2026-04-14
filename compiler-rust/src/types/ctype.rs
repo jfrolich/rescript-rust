@@ -1047,84 +1047,93 @@ fn resolve_module_type_through_env_path<'a>(
             }
         }
         Path::Pdot(parent, name, _) => {
-            let parent_mty = resolve_module_type_through_env_path(ctx, env, parent, visiting)?;
-            let parent_alias_target = match &parent_mty {
-                super::decl::ModuleType::MtyAlias(_, target_path) => Some(target_path.clone()),
-                _ => None,
-            };
             let mut no_persistent_env = None;
-            crate::types::typecore::with_resolved_module_components_for_path(
+            let parent_alias_target = crate::types::typecore::module_alias_target_for_path(
                 parent,
                 env,
                 &mut no_persistent_env,
                 ctx,
-                |components| {
-                    if let Some((_, _, md)) = components.lookup_module(name) {
-                        return match &md.md_type {
-                            super::decl::ModuleType::MtySignature(sig) => {
-                                let copied_sig =
-                                    super::typecore::copy_lookup_signature_for_subst(sig, ctx);
-                                crate::cmi::persistent_env::substitute_type_paths_in_child_sig(
-                                    &copied_sig,
-                                    components.signature(),
-                                    components.access_path(),
+            );
+            let (resolved_parent_path, parent_sig) =
+                crate::types::typecore::resolve_module_signature_for_path(
+                    parent,
+                    env,
+                    &mut no_persistent_env,
+                    ctx,
+                )?;
+            if let Some((_, access_path, md)) = crate::types::typecore::lookup_module_in_resolved_path(
+                parent,
+                name,
+                env,
+                &mut no_persistent_env,
+                ctx,
+            ) {
+                match &md.md_type {
+                    super::decl::ModuleType::MtySignature(_) => {
+                        let preferred_child_path = parent_alias_target
+                            .as_ref()
+                            .map(|target_parent_path| {
+                                Path::pdot(target_parent_path.clone(), name.to_string())
+                            });
+                        crate::types::typecore::copy_resolved_module_signature_for_path(
+                            preferred_child_path.as_ref().unwrap_or(&access_path),
+                            env,
+                            &mut no_persistent_env,
+                            ctx,
+                        )
+                        .or_else(|| {
+                            preferred_child_path.as_ref().and_then(|_| {
+                                crate::types::typecore::copy_resolved_module_signature_for_path(
+                                    &access_path,
+                                    env,
+                                    &mut no_persistent_env,
                                     ctx,
-                                );
-                                let child_sig =
-                                    if let Some(target_parent_path) = parent_alias_target.as_ref() {
-                                        let child_target_path =
-                                            Path::pdot(target_parent_path.clone(), name);
-                                        strengthen_signature_for_module_access_path(
-                                            ctx,
-                                            env,
-                                            true,
-                                            &child_target_path,
-                                            &copied_sig,
-                                            0,
-                                        )
-                                    } else {
-                                        copied_sig
-                                    };
-                                Some(super::decl::ModuleType::MtySignature(child_sig))
-                            }
-                            other => {
-                                let mut child_mty = other.clone();
-                                crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
-                                    &mut child_mty,
-                                    components.signature(),
-                                    components.access_path(),
-                                    ctx,
-                                );
-                                if let Some(target_parent_path) = parent_alias_target.as_ref() {
-                                    let child_target_path =
-                                        Path::pdot(target_parent_path.clone(), name);
-                                    Some(strengthen_module_type_for_module_access_path(
-                                        ctx,
-                                        env,
-                                        true,
-                                        &child_target_path,
-                                        &child_mty,
-                                    ))
-                                } else {
-                                    Some(child_mty)
-                                }
-                            }
-                        };
+                                )
+                            })
+                        })
+                        .map(|(_, sig)| super::decl::ModuleType::MtySignature(sig))
                     }
-                    if let Some((_, mtd)) = components.lookup_modtype(name) {
-                        let mut child_mty = mtd.mtd_type.clone()?;
+                    other => {
+                        let mut child_mty = other.clone();
                         crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
                             &mut child_mty,
-                            components.signature(),
-                            components.access_path(),
+                            &parent_sig,
+                            &resolved_parent_path,
                             ctx,
                         );
-                        return Some(child_mty);
+                        if let Some(target_parent_path) = parent_alias_target.as_ref() {
+                            let child_target_path =
+                                Path::pdot(target_parent_path.clone(), name.to_string());
+                            Some(strengthen_module_type_for_module_access_path(
+                                ctx,
+                                env,
+                                true,
+                                &child_target_path,
+                                &child_mty,
+                            ))
+                        } else {
+                            Some(child_mty)
+                        }
                     }
-                    None
-                },
-            )
-            .flatten()
+                }
+            } else if let Some((_, mtd)) = crate::types::typecore::lookup_modtype_in_resolved_path(
+                parent,
+                name,
+                env,
+                &mut no_persistent_env,
+                ctx,
+            ) {
+                let mut child_mty = mtd.mtd_type.clone()?;
+                crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+                    &mut child_mty,
+                    &parent_sig,
+                    &resolved_parent_path,
+                    ctx,
+                );
+                Some(child_mty)
+            } else {
+                None
+            }
         }
         Path::Papply(_, _) => None,
     };
