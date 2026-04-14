@@ -89,7 +89,8 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     let exports = collect_exported_idents(&flattened);
     let preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
     let first = simplify_for_js_backend_once(&flattened, &preserved_export_bindings, true);
-    simplify_for_js_backend_once(&first, &preserved_export_bindings, false)
+    let second = simplify_for_js_backend_once(&first, &preserved_export_bindings, true);
+    simplify_direct_function_applications_like_lets_dce(&second)
 }
 
 fn simplify_for_js_backend_once(
@@ -417,6 +418,159 @@ fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
     }
 
     aux(lam)
+}
+
+fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
+    match lam {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
+        Lambda::Lapply(apply) => {
+            let func = simplify_direct_function_applications_like_lets_dce(&apply.ap_func);
+            let args: Vec<_> = apply
+                .ap_args
+                .iter()
+                .map(simplify_direct_function_applications_like_lets_dce)
+                .collect();
+
+            match &func {
+                Lambda::Lfunction(func)
+                    if func.params.len() == args.len()
+                        && analysis::lfunction_can_be_inlined(func) =>
+                {
+                    simplify_direct_function_applications_like_lets_dce(
+                        &beta_reduce::no_names_beta_reduce(&func.params, &func.body, &args),
+                    )
+                }
+                _ => Lambda::Lapply(Apply {
+                    ap_func: Box::new(func),
+                    ap_args: args,
+                    ap_info: apply.ap_info.clone(),
+                    ap_transformed_jsx: apply.ap_transformed_jsx,
+                }),
+            }
+        }
+        Lambda::Lfunction(func) => Lambda::function_(
+            func.arity,
+            func.params.clone(),
+            simplify_direct_function_applications_like_lets_dce(&func.body),
+            func.attr.clone(),
+        ),
+        Lambda::Llet(kind, id, value, body) => Lambda::let_(
+            *kind,
+            id.clone(),
+            simplify_direct_function_applications_like_lets_dce(value),
+            simplify_direct_function_applications_like_lets_dce(body),
+        ),
+        Lambda::Lletrec(bindings, body) => Lambda::letrec(
+            bindings
+                .iter()
+                .map(|(id, binding)| {
+                    (
+                        id.clone(),
+                        simplify_direct_function_applications_like_lets_dce(binding),
+                    )
+                })
+                .collect(),
+            simplify_direct_function_applications_like_lets_dce(body),
+        ),
+        Lambda::Lprim(info) => Lambda::prim(
+            info.primitive.clone(),
+            info.args
+                .iter()
+                .map(simplify_direct_function_applications_like_lets_dce)
+                .collect(),
+            info.loc.clone(),
+        ),
+        Lambda::Lswitch(scrutinee, switch) => Lambda::Lswitch(
+            Box::new(simplify_direct_function_applications_like_lets_dce(
+                scrutinee,
+            )),
+            LambdaSwitch {
+                sw_consts_full: switch.sw_consts_full,
+                sw_consts: switch
+                    .sw_consts
+                    .iter()
+                    .map(|(tag, lam)| {
+                        (
+                            *tag,
+                            simplify_direct_function_applications_like_lets_dce(lam),
+                        )
+                    })
+                    .collect(),
+                sw_blocks_full: switch.sw_blocks_full,
+                sw_blocks: switch
+                    .sw_blocks
+                    .iter()
+                    .map(|(tag, lam)| {
+                        (
+                            *tag,
+                            simplify_direct_function_applications_like_lets_dce(lam),
+                        )
+                    })
+                    .collect(),
+                sw_failaction: switch.sw_failaction.as_ref().map(|lam| {
+                    Box::new(simplify_direct_function_applications_like_lets_dce(lam))
+                }),
+                sw_names: switch.sw_names.clone(),
+            },
+        ),
+        Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
+            Box::new(simplify_direct_function_applications_like_lets_dce(
+                scrutinee,
+            )),
+            cases
+                .iter()
+                .map(|(tag, lam)| {
+                    (
+                        tag.clone(),
+                        simplify_direct_function_applications_like_lets_dce(lam),
+                    )
+                })
+                .collect(),
+            default.as_ref().map(|lam| {
+                Box::new(simplify_direct_function_applications_like_lets_dce(lam))
+            }),
+        ),
+        Lambda::LstaticRaise(id, args) => Lambda::LstaticRaise(
+            *id,
+            args.iter()
+                .map(simplify_direct_function_applications_like_lets_dce)
+                .collect(),
+        ),
+        Lambda::LstaticCatch(body, handler, recover) => Lambda::LstaticCatch(
+            Box::new(simplify_direct_function_applications_like_lets_dce(body)),
+            handler.clone(),
+            Box::new(simplify_direct_function_applications_like_lets_dce(recover)),
+        ),
+        Lambda::LtryWith(body, exn, handler) => Lambda::LtryWith(
+            Box::new(simplify_direct_function_applications_like_lets_dce(body)),
+            exn.clone(),
+            Box::new(simplify_direct_function_applications_like_lets_dce(handler)),
+        ),
+        Lambda::LifThenElse(cond, then_, else_) => Lambda::if_(
+            simplify_direct_function_applications_like_lets_dce(cond),
+            simplify_direct_function_applications_like_lets_dce(then_),
+            simplify_direct_function_applications_like_lets_dce(else_),
+        ),
+        Lambda::Lsequence(first, second) => Lambda::seq(
+            simplify_direct_function_applications_like_lets_dce(first),
+            simplify_direct_function_applications_like_lets_dce(second),
+        ),
+        Lambda::Lwhile(cond, body) => Lambda::Lwhile(
+            Box::new(simplify_direct_function_applications_like_lets_dce(cond)),
+            Box::new(simplify_direct_function_applications_like_lets_dce(body)),
+        ),
+        Lambda::Lfor(id, from, to, direction, body) => Lambda::Lfor(
+            id.clone(),
+            Box::new(simplify_direct_function_applications_like_lets_dce(from)),
+            Box::new(simplify_direct_function_applications_like_lets_dce(to)),
+            *direction,
+            Box::new(simplify_direct_function_applications_like_lets_dce(body)),
+        ),
+        Lambda::Lassign(id, value) => Lambda::Lassign(
+            id.clone(),
+            Box::new(simplify_direct_function_applications_like_lets_dce(value)),
+        ),
+    }
 }
 
 fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) -> Lambda {
@@ -3653,7 +3807,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_nested_direct_wrapper_application_with_intermediate_let_like_ocaml() {
+    fn beta_reduces_nested_direct_wrapper_applications_after_intermediate_let_cleanup() {
         let outer = Ident::create_local("outer");
         let ignored = Ident::create_local("ignored");
         let inner = Ident::create_local("inner");
@@ -3719,17 +3873,8 @@ mod tests {
         });
 
         let simplified = simplify_for_js_backend(&lambda);
-        let Lambda::Lapply(Apply { ap_func, .. }) = simplified else {
-            panic!("expected the second application to remain, got {simplified:?}");
-        };
-        let Lambda::Lfunction(func) = *ap_func else {
-            panic!(
-                "expected the returned wrapper to simplify to a direct function, got {ap_func:?}"
-            );
-        };
-        assert!(matches!(func.params.as_slice(), [param] if param.same(&inner)));
         assert!(matches!(
-            *func.body,
+            simplified,
             Lambda::Lconst(Constant::Int { i: 0, .. })
         ));
     }
@@ -5564,7 +5709,7 @@ mod tests {
     }
 
     #[test]
-    fn stops_after_one_beta_reduction_for_downarity_pjs_fn_make_calls() {
+    fn beta_reduces_downarity_pjs_fn_make_calls_past_the_outer_apply() {
         let x = Ident::create_local("x");
         let y = Ident::create_local("y");
         let z = Ident::create_local("z");
@@ -5612,50 +5757,17 @@ mod tests {
             ap_transformed_jsx: false,
         }));
 
-        let Lambda::Lapply(apply) = simplified else {
-            panic!("expected the outer application to remain after one beta-reduction");
-        };
-        assert!(matches!(
-            apply.ap_args.as_slice(),
-            [
-                Lambda::Lconst(Constant::Int { i: 2, .. }),
-                Lambda::Lconst(Constant::Int { i: 3, .. })
-            ]
-        ));
-        let Lambda::Lfunction(func) = apply.ap_func.as_ref() else {
-            panic!("expected the reduced wrapper to stay as a direct function");
-        };
-        assert_eq!(func.params.len(), 2);
-        let Lambda::Lprim(crate::lambda::PrimInfo {
-            primitive: Primitive::Paddint,
-            args,
-            ..
-        }) = func.body.as_ref()
-        else {
-            panic!("expected the remaining function body to stay as integer addition");
-        };
-        let [left, Lambda::Lvar(param_z)] = args.as_slice() else {
-            panic!("expected the trailing parameter to remain in the addition body");
-        };
-        assert_eq!(param_z.name(), "z");
-        let Lambda::Lprim(crate::lambda::PrimInfo {
-            primitive: Primitive::Paddint,
-            args,
-            ..
-        }) = left
-        else {
-            panic!("expected the leading addition to keep the partially applied constant");
-        };
         assert!(
             matches!(
-                args.as_slice(),
-                [Lambda::Lconst(Constant::Int { i: 1, .. }), Lambda::Lvar(_)]
-            ) && matches!(func.params.as_slice(), [param_y, _] if param_y.name() == "y")
+                simplified,
+                Lambda::Llet(_, _, _, _) | Lambda::Lprim(_) | Lambda::Lconst(_)
+            ) && !matches!(simplified, Lambda::Lapply(_)),
+            "expected the outer apply to disappear after the repeated alias and lets-dce passes, got {simplified:?}"
         );
     }
 
     #[test]
-    fn stops_after_one_beta_reduction_for_returned_pjs_fn_make_wrappers() {
+    fn beta_reduces_returned_pjs_fn_make_wrappers_across_backend_alias_passes() {
         let h = Ident::create_local("h");
         let x = Ident::create_local("x");
         let j = Ident::create_local("j");
@@ -5725,19 +5837,8 @@ mod tests {
         });
 
         let simplified = simplify_for_js_backend(&lambda);
-        let Lambda::Lapply(apply) = simplified else {
-            panic!("expected the outer application to remain after one beta-reduction");
-        };
         assert!(matches!(
-            apply.ap_args.as_slice(),
-            [Lambda::Lconst(Constant::String { s, .. })] if s.is_empty()
-        ));
-        let Lambda::Lfunction(func) = apply.ap_func.as_ref() else {
-            panic!("expected the returned wrapper to simplify to a direct function");
-        };
-        assert!(matches!(func.params.as_slice(), [param] if param.same(&f)));
-        assert!(matches!(
-            *func.body,
+            simplified,
             Lambda::Lconst(Constant::Int { i: 0, .. })
         ));
     }

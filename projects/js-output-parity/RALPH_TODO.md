@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 430 / 657 JS snapshots passing, 0 compile errors, 227 output diffs
+**Status:** 431 / 657 JS snapshots passing, 0 compile errors, 226 output diffs
 
 ## Goal
 
@@ -35,11 +35,78 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **430 / 657**
+- JS snapshot parity: **431 / 657**
 - Compile errors: **0**
-- Output diffs: **227**
+- Output diffs: **226**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the repeated OCaml backend alias/beta-reduction stages from
+  `compiler/core/lam_compile_main.ml`,
+  `compiler/core/lam_pass_remove_alias.ml`, and
+  `compiler/core/lam_pass_lets_dce.ml` so direct `Lfunction` applications
+  exposed by earlier simplification passes do not stop after the first returned
+  wrapper and survive as Rust-only emitted IIFEs in snapshot output
+- Active backend focus for this slice moves back to **Phase 2: Port Post-Lowering
+  Lambda Backend Stages** from `PLAN.md`; this is a backend lambda-pass parity
+  fix downstream of the already-green optimized lambda boundary, not a printer
+  rewrite
+- OCaml reference:
+  `compiler/core/lam_compile_main.ml`, where the backend runs
+  `Lam_pass_remove_alias.simplify_alias` multiple times before
+  `Lam_pass_lets_dce.simplify_lets`, plus
+  `compiler/core/lam_pass_remove_alias.ml` and
+  `compiler/core/lam_pass_lets_dce.ml`, where direct `Lapply` of `Lfunction`
+  values are beta-reduced again after earlier nested applications have exposed
+  them
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so the second backend
+    simplification pass still allows direct-function beta reduction, matching
+    the repeated OCaml `simplify_alias` structure instead of stopping after the
+    first wrapper application
+  - added a final
+    `simplify_direct_function_applications_like_lets_dce(...)` traversal in
+    `compiler-rust/src/lambda/simplify.rs` to mirror the later OCaml
+    `lam_pass_lets_dce` direct-`Lfunction` apply reduction that cleans up any
+    remaining returned wrappers
+  - aligned `compiler-rust/src/lambda/beta_reduce.rs` `no_names_beta_reduce`
+    with the OCaml binding order before reusing it from the lets-dce-style pass
+  - replaced the stale one-beta-reduction unit expectations in
+    `compiler-rust/src/lambda/simplify.rs` with regression tests that assert
+    the outer direct application disappears after the repeated backend alias and
+    lets-dce passes
+- Verified focused guards for this slice:
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml beta_reduces_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/ari_regress_test.res`, diffing the exact
+    test-harness AST compile output against the checked-in snapshot
+  - direct repro for `tests/tests/src/arity_deopt.res`, diffing the exact
+    test-harness AST compile output against the checked-in snapshot
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/arity_deopt.res` now matches its checked-in snapshot
+    exactly; Rust had been stopping after the first returned-wrapper
+    beta-reduction and leaving nested direct applications as emitted IIFEs
+    instead of rerunning the OCaml backend alias/dce reductions
+  - `tests/tests/src/ari_regress_test.res` is reduced to a single remaining
+    let-wrapped direct-call cleanup difference in the `x = gg(3, 5)(6)` path;
+    the earlier `g = f(3)(4)` returned-wrapper mismatch is gone
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the repeated alias-pass change, keeping this slice scoped away from the
+    import/export backend path
+- Topline impact:
+  - JS snapshot parity: **430 / 657** -> **431 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **227** -> **226** (**-1**)
+- Keep this change because it ports the repeated OCaml backend
+  `simplify_alias` / `simplify_lets` direct-function beta-reduction behavior
+  instead of preserving the Rust-only “stop after the first returned wrapper”
+  simplifier shortcut.
 
 Latest iteration on **2026-04-14**:
 

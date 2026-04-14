@@ -182,7 +182,7 @@ pub fn no_names_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) ->
 
     // Fall back to creating let bindings
     let mut result = body.clone();
-    for (param, arg) in params.iter().zip(args.iter()).rev() {
+    for (param, arg) in params.iter().zip(args.iter()) {
         result = refine_let(LetKind::Strict, param.clone(), arg.clone(), result);
     }
     result
