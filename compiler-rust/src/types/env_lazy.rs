@@ -8,6 +8,7 @@
 
 use ahash::AHashMap as HashMap;
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use crate::ident::Ident;
 
@@ -27,10 +28,19 @@ pub(crate) struct QualifiedModuleComponents {
     modtypes: HashMap<String, usize>,
     qualified_modules: RefCell<HashMap<String, (Ident, ModuleDeclaration)>>,
     qualified_modtypes: RefCell<HashMap<String, (Ident, ModtypeDeclaration)>>,
+    child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
 }
 
 impl QualifiedModuleComponents {
     pub(crate) fn new(access_path: Path, signature: Signature) -> Self {
+        Self::new_with_child_components(access_path, signature, HashMap::new())
+    }
+
+    pub(crate) fn new_with_child_components(
+        access_path: Path,
+        signature: Signature,
+        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+    ) -> Self {
         let mut values = HashMap::new();
         let mut types = HashMap::new();
         let mut modules = HashMap::new();
@@ -71,6 +81,7 @@ impl QualifiedModuleComponents {
             modtypes,
             qualified_modules: RefCell::new(HashMap::new()),
             qualified_modtypes: RefCell::new(HashMap::new()),
+            child_components,
         }
     }
 
@@ -108,6 +119,15 @@ impl QualifiedModuleComponents {
             SignatureItem::SigModule(id, md, _) => Some((runtime_pos, id, md)),
             _ => None,
         }
+    }
+
+    pub(crate) fn lookup_child_components(
+        &self,
+        name: &str,
+    ) -> Option<(usize, Arc<StoredModuleComponents>)> {
+        self.child_components
+            .get(name)
+            .map(|(runtime_pos, stored)| (*runtime_pos, stored.clone()))
     }
 
     pub(crate) fn lookup_qualified_module(
@@ -170,5 +190,147 @@ impl QualifiedModuleComponents {
             .borrow_mut()
             .insert(name.to_string(), (id.clone(), mtd.clone()));
         Some((id, mtd))
+    }
+}
+
+fn qualified_submodule_access_path(
+    parent_access_path: &Path,
+    module_name: &str,
+    runtime_pos: usize,
+    md: &ModuleDeclaration,
+) -> Path {
+    if parent_access_path.head().is_persistent() || parent_access_path.head().stamp() == 0 {
+        md.md_path
+            .clone()
+            .unwrap_or_else(|| Path::pdot(parent_access_path.clone(), module_name.to_string()))
+    } else {
+        Path::pdot_pos(
+            parent_access_path.clone(),
+            module_name.to_string(),
+            runtime_pos as i32,
+        )
+    }
+}
+
+fn build_local_module_components<'a>(
+    env: &super::env::Env,
+    access_path: &Path,
+    md: &ModuleDeclaration,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a super::context::TypeContext<'a>,
+) -> Option<QualifiedModuleComponents> {
+    let sig = crate::types::typecore::build_qualified_signature_for_access_path(
+        env,
+        access_path,
+        &md.md_type,
+        pers_env,
+        ctx,
+    )?;
+    let mut working_env = env.clone_preserve_id();
+    let mut child_components = HashMap::new();
+    let mut runtime_pos = 0usize;
+
+    for item in &sig {
+        match item {
+            SignatureItem::SigValue(_, desc) => {
+                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                    runtime_pos += 1;
+                }
+            }
+            SignatureItem::SigType(id, decl, rec_status) => {
+                let item = SignatureItem::SigType(id.clone(), decl.clone(), *rec_status);
+                crate::cmi::persistent_env::add_signature_to_env(
+                    std::slice::from_ref(&item),
+                    access_path,
+                    &mut working_env,
+                    ctx,
+                    false,
+                );
+            }
+            SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
+                runtime_pos += 1;
+            }
+            SignatureItem::SigModule(id, child_md, _) => {
+                let child_access_path =
+                    qualified_submodule_access_path(access_path, id.name(), runtime_pos, child_md);
+                let mut child_md = child_md.clone();
+                child_md.md_path = Some(child_access_path.clone());
+                working_env.add_module_with_component_path(
+                    id.clone(),
+                    child_md.clone(),
+                    child_access_path,
+                );
+                crate::cmi::persistent_env::register_types_by_stamp_recursive(&child_md.md_type, ctx);
+                if let Some(stored) = working_env.with_local_module_components(
+                    &Path::pident(id.clone()),
+                    |stored| Arc::new(stored.clone()),
+                ) {
+                    child_components.insert(id.name().to_string(), (runtime_pos, stored));
+                }
+                runtime_pos += 1;
+            }
+            SignatureItem::SigModtype(id, mtd) => {
+                let item = SignatureItem::SigModtype(id.clone(), mtd.clone());
+                crate::cmi::persistent_env::add_signature_to_env(
+                    std::slice::from_ref(&item),
+                    access_path,
+                    &mut working_env,
+                    ctx,
+                    false,
+                );
+            }
+            SignatureItem::SigClassType => {}
+        }
+    }
+
+    Some(QualifiedModuleComponents::new_with_child_components(
+        access_path.clone(),
+        sig,
+        child_components,
+    ))
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoredModuleComponents {
+    seed_env: Box<super::env::Env>,
+    access_path: Path,
+    module_decl: ModuleDeclaration,
+    cached: RefCell<Option<QualifiedModuleComponents>>,
+}
+
+impl StoredModuleComponents {
+    pub(crate) fn new(
+        seed_env: super::env::Env,
+        access_path: Path,
+        module_decl: ModuleDeclaration,
+    ) -> Self {
+        Self {
+            seed_env: Box::new(seed_env),
+            access_path,
+            module_decl,
+            cached: RefCell::new(None),
+        }
+    }
+
+    pub(crate) fn with_components<'a, R>(
+        &self,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'a super::context::TypeContext<'a>,
+        f: impl FnOnce(&QualifiedModuleComponents) -> R,
+    ) -> Option<R> {
+        if self.cached.borrow().is_none() {
+            let components = build_local_module_components(
+                self.seed_env.as_ref(),
+                &self.access_path,
+                &self.module_decl,
+                pers_env,
+                ctx,
+            )?;
+            *self.cached.borrow_mut() = Some(components);
+        }
+
+        let cached = self.cached.borrow();
+        let components = cached.as_ref()?;
+        Some(f(components))
     }
 }

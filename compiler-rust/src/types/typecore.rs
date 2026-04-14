@@ -18843,6 +18843,16 @@ fn build_module_components_from_parent_path<'a>(
         return None;
     };
 
+    if let Some(Some((_, stored))) =
+        with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
+            components.lookup_child_components(module_name.as_str())
+        })
+    {
+        if let Some(components) = stored.with_components(pers_env, ctx, |child| child.clone()) {
+            return Some(components);
+        }
+    }
+
     with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
         let (runtime_pos, _, md) = components.lookup_qualified_module(module_name.as_str(), ctx)?;
         let access_path = qualified_submodule_access_path(
@@ -18869,6 +18879,18 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
     let mut f = Some(f);
+    if let Some(result) = env
+        .with_local_module_components(module_path, |stored| {
+            stored.with_components(pers_env, ctx, |components| {
+                (f.take()
+                    .expect("qualified module components callback reused"))(components)
+            })
+        })
+        .flatten()
+    {
+        return Some(result);
+    }
+
     let module_key = module_components_cache_key(module_path, env);
     if let Some(module_key) = module_key.as_deref() {
         if let Some(result) = ctx.with_qualified_module_components(module_key, |components| {
@@ -19023,7 +19045,7 @@ fn rewrite_alias_pident_child_prefixes<'a>(
     }
 }
 
-fn build_qualified_signature_for_access_path<'a>(
+pub(crate) fn build_qualified_signature_for_access_path<'a>(
     env: &Env,
     access_path: &Path,
     mty: &crate::types::decl::ModuleType,

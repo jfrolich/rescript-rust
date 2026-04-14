@@ -668,7 +668,7 @@ fn read_cmj_pure(path: &FsPath) -> Option<bool> {
 /// Recursively register all types from a module type (and sub-modules) by stamp.
 /// This ensures that types referenced in function signatures can be expanded
 /// during type unification, even when the type comes from a deeply nested module.
-fn register_types_by_stamp_recursive(md_type: &ModuleType, ctx: &TypeContext<'_>) {
+pub(crate) fn register_types_by_stamp_recursive(md_type: &ModuleType, ctx: &TypeContext<'_>) {
     if let ModuleType::MtySignature(sig) = md_type {
         for item in sig {
             match item {

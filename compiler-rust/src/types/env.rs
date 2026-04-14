@@ -336,6 +336,10 @@ pub struct Env {
     /// Module bindings.
     modules: BindingTable<Arc<ModuleDeclaration>>,
 
+    /// Lazily-forced qualified component views for local module bindings.
+    /// This mirrors OCaml's `env.components` table for local `Pident` paths.
+    module_components: BindingTable<Arc<super::env_lazy::StoredModuleComponents>>,
+
     /// Module type bindings.
     modtypes: BindingTable<Arc<ModtypeDeclaration>>,
 
@@ -372,6 +376,7 @@ impl Clone for Env {
             constrs: self.constrs.clone(),
             labels: self.labels.clone(),
             modules: self.modules.clone(),
+            module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
             local_module_aliases_cache: RefCell::new(self.local_module_aliases_cache.borrow().clone()),
             module_path_requires_env_scoped_cache_cache: RefCell::new(
@@ -404,6 +409,7 @@ impl Env {
             constrs: BindingTable::new(),
             labels: BindingTable::new(),
             modules: BindingTable::new(),
+            module_components: BindingTable::new(),
             modtypes: BindingTable::new(),
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
@@ -430,6 +436,7 @@ impl Env {
             constrs: self.constrs.clone(),
             labels: self.labels.clone(),
             modules: self.modules.clone(),
+            module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
             local_module_aliases_cache: RefCell::new(self.local_module_aliases_cache.borrow().clone()),
             module_path_requires_env_scoped_cache_cache: RefCell::new(
@@ -826,13 +833,29 @@ impl Env {
     // Module Bindings
     // ========================================================================
 
-    /// Add a module binding.
-    pub fn add_module(&mut self, id: Ident, decl: ModuleDeclaration) {
+    pub(crate) fn add_module_with_component_path(
+        &mut self,
+        id: Ident,
+        decl: ModuleDeclaration,
+        component_path: Path,
+    ) {
+        let seed_env = self.clone_preserve_id();
+        let stored_components = Arc::new(super::env_lazy::StoredModuleComponents::new(
+            seed_env,
+            component_path,
+            decl.clone(),
+        ));
         self.bump_id();
         self.invalidate_module_alias_caches();
         let decl = Arc::new(decl);
         self.modules.add(id.clone(), decl.clone());
+        self.module_components.add(id.clone(), stored_components);
         self.summary = Arc::new(EnvSummary::Module(self.summary.clone(), id, decl));
+    }
+
+    /// Add a module binding.
+    pub fn add_module(&mut self, id: Ident, decl: ModuleDeclaration) {
+        self.add_module_with_component_path(id.clone(), decl, Path::pident(id));
     }
 
     /// Add a module binding from an opened module (lower priority than local bindings).
@@ -870,6 +893,18 @@ impl Env {
             .find_by_name_with_origin(name)
             .map(|(id, decl, is_local)| (id, decl.as_ref(), is_local))
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+    }
+
+    pub(crate) fn with_local_module_components<R>(
+        &self,
+        path: &Path,
+        f: impl FnOnce(&super::env_lazy::StoredModuleComponents) -> R,
+    ) -> Option<R> {
+        let Path::Pident(id) = path else {
+            return None;
+        };
+        let components = self.module_components.find_by_ident(id)?;
+        Some(f(components.as_ref()))
     }
 
     /// Find a module by path.
