@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 374 / 657 JS snapshots passing, 0 compile errors, 283 output diffs
+**Status:** 377 / 657 JS snapshots passing, 0 compile errors, 280 output diffs
 
 ## Goal
 
@@ -35,11 +35,66 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **374 / 657**
+- JS snapshot parity: **377 / 657**
 - Compile errors: **0**
-- Output diffs: **283**
+- Output diffs: **280**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: stop forcing named-variant switch scrutinees through a
+  synthetic `match` temp when OCaml's backend only reads the scrutinee once,
+  while also matching OCaml's `js_exp_make.triple_equal` folding for strict
+  comparisons on JS literals in `compiler-rust/src/lambda/compile.rs` and
+  `compiler-rust/src/js_ir/mod.rs`
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this slice fixes a backend control-flow / JS-IR construction drift without
+  reopening typedtree or lambda parity work
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, where `compile_switch` only introduces a
+    temp binding for the scrutinee in the mixed const+block dispatch path that
+    reuses the expression, not for single-use named-variant dispatch
+  - `compiler/core/js_exp_make.ml`, where `triple_equal` folds int-literal,
+    optional-block, and simple string-literal strict equality before later
+    `if`/`cond` simplification
+- Rust change:
+  - added `named_variant_switch_needs_bound_scrutinee(...)` and used it on the
+    named-variant expression / return / effect paths so single-use named
+    dispatches keep the original scrutinee instead of emitting `let match = …`
+  - extended `Expression::bin` strict-comparison folding to cover the same
+    OCaml `triple_equal` cases for int literals, optional blocks, simple
+    string literals, and existing nullish mismatches
+  - added focused regression coverage in
+    `named_variant_constant_return_switch_skips_redundant_match_temp`,
+    `test_strict_eq_int_literals_folds_true`,
+    `test_strict_eq_optional_blocks_compares_inner_values`, and
+    `test_strict_eq_simple_string_literals_fold_false`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml strict_eq_ -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml named_variant_constant_return_switch_skips_redundant_match_temp -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/VariantCoercion.res -o /tmp/VariantCoercion.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UntaggedVariants.res -o /tmp/UntaggedVariants.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/VariantCoercion.res` now matches its checked-in `.mjs`
+    snapshot exactly; the redundant `let match = 2;` and dead branch in `f1`
+    are gone
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the same backend change
+  - `tests/tests/src/UntaggedVariants.res` stays on its unrelated ordering /
+    object-vs-array / guard-shape diffs rather than regressing on this slice
+  - the authoritative wrapper still reports **0 compile errors**, so this
+    remains a pure backend-shaping fix
+- Topline impact:
+  - JS snapshot parity: **377 / 657** (**+3**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **280** (**-3**)
+- Keep this change because it matches OCaml's named-variant switch routing and
+  `js_exp_make` equality folding instead of preserving an extra Rust-only temp
+  binding in the final JS path
 
 Latest iteration on **2026-04-14**:
 

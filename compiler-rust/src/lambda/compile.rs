@@ -1165,7 +1165,12 @@ impl LambdaCompiler {
 
         if self.uses_named_variant_switch(switch) {
             let scrut_compiled = self.compile_expr(scrut);
-            let mut prelude = scrut_compiled.prelude;
+            let (mut prelude, scrut_expr) = if self.named_variant_switch_needs_bound_scrutinee(switch)
+            {
+                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr)
+            } else {
+                (scrut_compiled.prelude, scrut_compiled.expr)
+            };
             let tmp = self.fresh_ident("switch");
             prelude.push(Statement::variable(VariableDeclaration {
                 ident: tmp.clone(),
@@ -1175,7 +1180,7 @@ impl LambdaCompiler {
             }));
             prelude.extend(self.compile_named_variant_switch_assignment_statements(
                 &tmp,
-                scrut_compiled.expr,
+                scrut_expr,
                 switch,
             ));
 
@@ -1759,6 +1764,9 @@ impl LambdaCompiler {
         {
             return self.compile_assign_to_target_block(result, body);
         }
+        if block_cases.len() == 1 && self.block_switch_complete(switch) {
+            return self.compile_assign_to_target_block(result, block_cases[0].1);
+        }
 
         let mut instance_cases = Vec::new();
         let mut typeof_cases = Vec::new();
@@ -1820,6 +1828,9 @@ impl LambdaCompiler {
         {
             return self.compile_return_block(body);
         }
+        if block_cases.len() == 1 && self.block_switch_complete(switch) {
+            return self.compile_return_block(block_cases[0].1);
+        }
 
         let mut instance_cases = Vec::new();
         let mut typeof_cases = Vec::new();
@@ -1875,6 +1886,9 @@ impl LambdaCompiler {
             .find(|(case, _)| matches!(case.block_type, Some(SwitchBlockType::Unknown)))
         {
             return self.compile_effect_block(body);
+        }
+        if block_cases.len() == 1 && self.block_switch_complete(switch) {
+            return self.compile_effect_block(block_cases[0].1);
         }
 
         let mut instance_cases = Vec::new();
@@ -2109,6 +2123,20 @@ impl LambdaCompiler {
             ident_info: IdentInfo::default(),
         }));
         (prelude, Expression::var(ident))
+    }
+
+    fn named_variant_switch_needs_bound_scrutinee(&self, switch: &LambdaSwitch) -> bool {
+        let const_case_count = self.named_const_cases(switch).map_or(0, |cases| cases.len());
+        let block_case_count = self.named_block_cases(switch).map_or(0, |cases| cases.len());
+
+        match (const_case_count > 0, block_case_count > 0) {
+            // OCaml only forces a temp here when the backend needs to reuse the
+            // scrutinee across both const and payload dispatch.
+            (true, true) => true,
+            (true, false) => !self.block_switch_complete(switch),
+            (false, true) => !self.const_switch_complete(switch),
+            (false, false) => false,
+        }
     }
 
     fn variant_object_test(&self, expr: Expression) -> Expression {
@@ -2976,8 +3004,12 @@ impl LambdaCompiler {
 
         if self.uses_named_variant_switch(switch) {
             let scrut_compiled = self.compile_expr(scrut);
-            let (mut block, scrut_expr) =
-                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
+            let (mut block, scrut_expr) = if self.named_variant_switch_needs_bound_scrutinee(switch)
+            {
+                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr)
+            } else {
+                (scrut_compiled.prelude, scrut_compiled.expr)
+            };
             block.extend(self.compile_named_variant_switch_return_statements(scrut_expr, switch));
             return block;
         }
@@ -3084,8 +3116,12 @@ impl LambdaCompiler {
 
         if self.uses_named_variant_switch(switch) {
             let scrut_compiled = self.compile_expr(scrut);
-            let (mut block, scrut_expr) =
-                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
+            let (mut block, scrut_expr) = if self.named_variant_switch_needs_bound_scrutinee(switch)
+            {
+                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr)
+            } else {
+                (scrut_compiled.prelude, scrut_compiled.expr)
+            };
             let dispatch =
                 self.compile_named_variant_switch_effect_statements(scrut_expr.clone(), switch);
             if dispatch.is_empty() {
@@ -3365,11 +3401,24 @@ impl LambdaCompiler {
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
-            Pboolcomp(cmp) | Pintcomp(cmp) | Pfloatcomp(cmp) | Pbigintcomp(cmp)
-            | Pstringcomp(cmp) | Pjscomp(cmp) => {
-                let op = comparison_to_binop(*cmp);
-                Expression::bin(op, compiled_args[0].clone(), compiled_args[1].clone())
+            Pboolcomp(cmp) => self.compile_bool_comparison(
+                *cmp,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Pintcomp(cmp) | Pfloatcomp(cmp) => self.compile_int_comparison(
+                *cmp,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Pbigintcomp(cmp) | Pjscomp(cmp) => {
+                compile_raw_comparison(*cmp, compiled_args[0].clone(), compiled_args[1].clone())
             }
+            Pstringcomp(cmp) => self.compile_string_comparison(
+                *cmp,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
             Pobjorder => self.runtime_call_expr("Primitive_object", "compare", compiled_args),
             Pobjmin => self.runtime_call_expr("Primitive_object", "min", compiled_args),
             Pobjmax => self.runtime_call_expr("Primitive_object", "max", compiled_args),
@@ -4163,6 +4212,115 @@ impl LambdaCompiler {
         }
     }
 
+    fn compile_bool_comparison(
+        &self,
+        cmp: Comparison,
+        left: Expression,
+        right: Expression,
+    ) -> Expression {
+        match (bool_literal(&left), bool_literal(&right)) {
+            (Some(lhs), Some(rhs)) => Expression::bool(compare_bool_literals(cmp, lhs, rhs)),
+            (Some(true), _) | (_, Some(false)) => match cmp {
+                Comparison::Lt => js_seq(if matches!(bool_literal(&left), Some(true)) {
+                    right
+                } else {
+                    left
+                }, Expression::bool(false)),
+                Comparison::Ge => js_seq(if matches!(bool_literal(&left), Some(true)) {
+                    right
+                } else {
+                    left
+                }, Expression::bool(true)),
+                Comparison::Eq
+                | Comparison::Neq
+                | Comparison::Le
+                | Comparison::Gt => compile_raw_comparison(cmp, left, right),
+            },
+            (_, Some(true)) | (Some(false), _) => match cmp {
+                Comparison::Le => js_seq(if matches!(bool_literal(&right), Some(true)) {
+                    left
+                } else {
+                    right
+                }, Expression::bool(true)),
+                Comparison::Gt => js_seq(if matches!(bool_literal(&right), Some(true)) {
+                    left
+                } else {
+                    right
+                }, Expression::bool(false)),
+                Comparison::Eq
+                | Comparison::Neq
+                | Comparison::Lt
+                | Comparison::Ge => compile_raw_comparison(cmp, left, right),
+            },
+            _ => compile_raw_comparison(cmp, left, right),
+        }
+    }
+
+    fn compile_int_comparison(
+        &self,
+        cmp: Comparison,
+        left: Expression,
+        right: Expression,
+    ) -> Expression {
+        if let (Some(lhs), Some(rhs)) = (int_literal(&left), int_literal(&right)) {
+            return Expression::bool(compare_int_literals(cmp, lhs, rhs));
+        }
+
+        match cmp {
+            Comparison::Eq => {
+                if ((is_optional_block(&left)
+                    && matches!(&right.desc, ExpressionDesc::Undefined { .. }))
+                    || (matches!(&left.desc, ExpressionDesc::Undefined { .. })
+                        && is_optional_block(&right)))
+                    && js_expr_no_side_effects(&left)
+                    && js_expr_no_side_effects(&right)
+                {
+                    return Expression::bool(false);
+                }
+
+                compile_int_equality(left, right)
+            }
+            Comparison::Neq => {
+                if ((is_optional_block(&left)
+                    && matches!(&right.desc, ExpressionDesc::Undefined { .. }))
+                    || (matches!(&left.desc, ExpressionDesc::Undefined { .. })
+                        && is_optional_block(&right))
+                    || (matches!(&left.desc, ExpressionDesc::CamlBlock(_, _, _, _))
+                        && matches!(&right.desc, ExpressionDesc::Number(_)))
+                    || (matches!(&left.desc, ExpressionDesc::Number(_))
+                        && matches!(&right.desc, ExpressionDesc::CamlBlock(_, _, _, _))))
+                    && js_expr_no_side_effects(&left)
+                    && js_expr_no_side_effects(&right)
+                {
+                    return Expression::bool(true);
+                }
+
+                compile_raw_comparison(cmp, left, right)
+            }
+            Comparison::Lt | Comparison::Le | Comparison::Gt | Comparison::Ge => {
+                compile_raw_comparison(cmp, left, right)
+            }
+        }
+    }
+
+    fn compile_string_comparison(
+        &self,
+        cmp: Comparison,
+        left: Expression,
+        right: Expression,
+    ) -> Expression {
+        match compare_string_literals(&left, &right) {
+            Some(equal) => match cmp {
+                Comparison::Eq => Expression::bool(equal),
+                Comparison::Neq => Expression::bool(!equal),
+                Comparison::Lt | Comparison::Le | Comparison::Gt | Comparison::Ge => {
+                    compile_raw_comparison(cmp, left, right)
+                }
+            },
+            None => compile_raw_comparison(cmp, left, right),
+        }
+    }
+
     fn compile_typed_min_max(
         &self,
         module_name: &str,
@@ -4190,6 +4348,8 @@ impl LambdaCompiler {
         dynamic_import: bool,
     ) -> ModuleId {
         let key = ExternalModuleCacheKey {
+            // OCaml interns external imports by bundle/default, not by the
+            // latest hint name, so later aliases reuse the first binding id.
             bundle: module_name.bundle.clone(),
             default,
         };
@@ -6078,6 +6238,122 @@ fn compile_nullish_strict_comparison(
     }
 
     Expression::bin(comparison_to_binop(cmp), left, right)
+}
+
+fn compile_raw_comparison(cmp: Comparison, left: Expression, right: Expression) -> Expression {
+    Expression::bin(comparison_to_binop(cmp), left, right)
+}
+
+fn compare_bool_literals(cmp: Comparison, left: bool, right: bool) -> bool {
+    match cmp {
+        Comparison::Eq => left == right,
+        Comparison::Neq => left != right,
+        Comparison::Lt => left < right,
+        Comparison::Le => left <= right,
+        Comparison::Gt => left > right,
+        Comparison::Ge => left >= right,
+    }
+}
+
+fn compare_int_literals(cmp: Comparison, left: i32, right: i32) -> bool {
+    match cmp {
+        Comparison::Eq => left == right,
+        Comparison::Neq => left != right,
+        Comparison::Lt => left < right,
+        Comparison::Le => left <= right,
+        Comparison::Gt => left > right,
+        Comparison::Ge => left >= right,
+    }
+}
+
+fn compile_int_equality(left: Expression, right: Expression) -> Expression {
+    match (&left.desc, &right.desc) {
+        (
+            ExpressionDesc::Number(Number::Float(left_float)),
+            ExpressionDesc::Number(Number::Float(right_float)),
+        ) if left_float.f == right_float.f => Expression::bool(true),
+        _ => compile_raw_comparison(Comparison::Eq, left, right),
+    }
+}
+
+fn compare_string_literals(left: &Expression, right: &Expression) -> Option<bool> {
+    match (&left.desc, &right.desc) {
+        (
+            ExpressionDesc::Str {
+                txt: left_txt,
+                delim: left_delim,
+            },
+            ExpressionDesc::Str {
+                txt: right_txt,
+                delim: right_delim,
+            },
+        ) if left_delim == right_delim => {
+            if left_txt == right_txt {
+                Some(true)
+            } else if is_simple_string_comparison(left_txt)
+                && is_simple_string_comparison(right_txt)
+            {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_simple_string_comparison(text: &str) -> bool {
+    text.is_ascii() && !text.as_bytes().contains(&b'\\')
+}
+
+fn is_optional_block(expr: &Expression) -> bool {
+    matches!(expr.desc, ExpressionDesc::OptionalBlock(_, _))
+}
+
+fn js_seq(left: Expression, right: Expression) -> Expression {
+    match (&left.desc, &right.desc) {
+        (ExpressionDesc::Seq(first, second), _)
+            if matches!(
+                second.as_ref().desc,
+                ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }
+            ) =>
+        {
+            return js_seq(first.as_ref().clone(), right);
+        }
+        (ExpressionDesc::Seq(first, second), _)
+            if matches!(
+                first.as_ref().desc,
+                ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }
+            ) =>
+        {
+            return js_seq(second.as_ref().clone(), right);
+        }
+        (_, ExpressionDesc::Seq(first, second))
+            if matches!(
+                first.as_ref().desc,
+                ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }
+            ) =>
+        {
+            return js_seq(left, second.as_ref().clone());
+        }
+        (_, ExpressionDesc::Seq(first, second))
+            if matches!(
+                second.as_ref().desc,
+                ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }
+            ) =>
+        {
+            return js_seq(js_seq(left, first.as_ref().clone()), second.as_ref().clone());
+        }
+        (
+            ExpressionDesc::Number(_)
+            | ExpressionDesc::Var(_)
+            | ExpressionDesc::Undefined { .. },
+            _,
+        ) => return right,
+        _ => (),
+    }
+
+    Expression::new(ExpressionDesc::Seq(Box::new(left), Box::new(right)))
 }
 
 fn bool_literal(expr: &Expression) -> Option<bool> {
@@ -12079,6 +12355,60 @@ mod tests {
     }
 
     #[test]
+    fn named_variant_constant_return_switch_skips_redundant_match_temp() {
+        let mut compiler = LambdaCompiler::new();
+        let block = compiler.compile_return_block(&Lambda::Lswitch(
+            Box::new(Lambda::const_(Constant::int(2))),
+            LambdaSwitch {
+                sw_consts_full: true,
+                sw_consts: vec![
+                    (0, Lambda::const_(Constant::string("a"))),
+                    (1, Lambda::const_(Constant::string("b"))),
+                ],
+                sw_blocks_full: true,
+                sw_blocks: vec![],
+                sw_failaction: None,
+                sw_names: Some(SwitchNames {
+                    consts: vec![
+                        crate::lambda::SwitchTag {
+                            name: "A".to_string(),
+                            tag_type: Some(SwitchCaseTag::Int(0)),
+                        },
+                        crate::lambda::SwitchTag {
+                            name: "B".to_string(),
+                            tag_type: Some(SwitchCaseTag::Int(2)),
+                        },
+                    ],
+                    blocks: vec![],
+                }),
+            },
+        ));
+
+        let [stmt] = block.as_slice() else {
+            panic!("expected a single simplified return statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Str { txt, .. },
+                ..
+            }) => assert_eq!(txt, "b"),
+            StatementDesc::Block(inner) => {
+                let [inner_stmt] = inner.as_slice() else {
+                    panic!("expected the simplified block to contain one return");
+                };
+                assert!(matches!(
+                    &inner_stmt.desc,
+                    StatementDesc::Return(Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    }) if txt == "b"
+                ));
+            }
+            other => panic!("expected the switch to collapse to the taken branch, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn named_variant_effect_switches_keep_payload_cases() {
         let mut compiler = LambdaCompiler::new();
         let action = Ident::create_local("action");
@@ -12272,7 +12602,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_untagged_object_switches_exclude_array_cases() {
+    fn builtin_untagged_object_switches_use_plain_object_check_after_array_split() {
         let mut compiler = LambdaCompiler::new();
         let value = Ident::create_local("value");
         let array_seen = Ident::create_local("array_seen");
@@ -12334,7 +12664,134 @@ mod tests {
         let StatementDesc::If(object_cond, _, _) = &object_dispatch.desc else {
             panic!("expected the object fallback to be another runtime if-check");
         };
-        assert_object_check_excludes_array(object_cond, &value);
+        assert_typeof_object_check(object_cond, &value, true);
+    }
+
+    fn single_complete_array_block_switch(
+        array_body: Lambda,
+        undefined_body: Lambda,
+    ) -> LambdaSwitch {
+        LambdaSwitch {
+            sw_consts_full: true,
+            sw_consts: vec![(0, undefined_body)],
+            sw_blocks_full: true,
+            sw_blocks: vec![(0, array_body)],
+            sw_failaction: None,
+            sw_names: Some(SwitchNames {
+                consts: vec![crate::lambda::SwitchTag {
+                    name: "Empty".to_string(),
+                    tag_type: Some(crate::lambda::SwitchCaseTag::Undefined),
+                }],
+                blocks: vec![crate::lambda::SwitchBlock {
+                    tag: crate::lambda::SwitchTag::named("Cons"),
+                    tag_name: None,
+                    block_type: Some(crate::lambda::SwitchBlockType::Instance(
+                        "Array".to_string(),
+                    )),
+                }],
+            }),
+        }
+    }
+
+    #[test]
+    fn complete_single_untagged_array_value_branch_skips_redundant_instance_guard() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let result = Ident::create_local("result");
+        let block = compiler.compile_untagged_variant_switch_assignment_statements(
+            &result,
+            Expression::var(value.clone()),
+            &single_complete_array_block_switch(
+                Lambda::const_(Constant::int(1)),
+                Lambda::const_(Constant::int(0)),
+            ),
+        );
+
+        let [dispatch] = block.as_slice() else {
+            panic!("expected a single literal-vs-block dispatch");
+        };
+        let StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Bin(BinOp::Eq, left, right),
+            ..
+        }) = &dispatch.desc
+        else {
+            panic!("expected the direct switch assignment");
+        };
+        assert!(matches!(
+            left.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&result)
+        ));
+        let ExpressionDesc::Cond(cond, then_expr, else_expr) = &right.as_ref().desc else {
+            panic!("expected a conditional expression on the assignment RHS");
+        };
+        assert_is_undefined_equality_check(cond, &value);
+        assert_int_expr(then_expr, 0);
+        assert_int_expr(else_expr, 1);
+    }
+
+    #[test]
+    fn complete_single_untagged_array_return_branch_skips_redundant_instance_guard() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let block = compiler.compile_untagged_variant_switch_return_statements(
+            Expression::var(value.clone()),
+            &single_complete_array_block_switch(
+                Lambda::const_(Constant::int(1)),
+                Lambda::const_(Constant::int(0)),
+            ),
+        );
+
+        let [dispatch] = block.as_slice() else {
+            panic!("expected a single literal dispatch");
+        };
+        let StatementDesc::Return(Expression {
+            desc: ExpressionDesc::Cond(cond, then_expr, else_expr),
+            ..
+        }) = &dispatch.desc
+        else {
+            panic!("expected the direct switch return");
+        };
+        assert_is_undefined_equality_check(cond, &value);
+        assert_int_expr(then_expr, 0);
+        assert_int_expr(else_expr, 1);
+    }
+
+    #[test]
+    fn complete_single_untagged_array_effect_branch_skips_redundant_instance_guard() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let empty_seen = Ident::create_local("empty_seen");
+        let cons_seen = Ident::create_local("cons_seen");
+        let block = compiler.compile_untagged_variant_switch_effect_statements(
+            Expression::var(value.clone()),
+            &single_complete_array_block_switch(
+                Lambda::Lassign(
+                    cons_seen.clone(),
+                    Box::new(Lambda::const_(Constant::int(1))),
+                ),
+                Lambda::Lassign(
+                    empty_seen.clone(),
+                    Box::new(Lambda::const_(Constant::int(0))),
+                ),
+            ),
+        );
+
+        let [dispatch] = block.as_slice() else {
+            panic!("expected a single literal dispatch");
+        };
+        let StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Cond(cond, then_expr, else_expr),
+            ..
+        }) = &dispatch.desc
+        else {
+            panic!("expected the direct switch effect expression");
+        };
+        assert_is_undefined_equality_check(cond, &value);
+        assert_assignment_to_int(then_expr, &empty_seen, 0);
+        assert_assignment_to_int(else_expr, &cons_seen, 1);
     }
 
     fn assert_switch_case_assigns_int_result(block: &Block, result: &Ident, expected: i32) {
@@ -12391,6 +12848,54 @@ mod tests {
                 ));
             }
             other => panic!("expected a default assignment, got {other:?}"),
+        }
+    }
+
+    fn assert_is_undefined_equality_check(expr: &Expression, ident: &Ident) {
+        match &expr.desc {
+            ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => {
+                assert!(matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(ident)
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Undefined { .. },
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected an undefined equality dispatch, got {other:?}"),
+        }
+    }
+
+    fn assert_int_expr(expr: &Expression, expected: i32) {
+        assert!(matches!(
+            expr,
+            Expression {
+                desc: ExpressionDesc::Number(Number::Int { i, .. }),
+                ..
+            } if *i == expected
+        ));
+    }
+
+    fn assert_assignment_to_int(expr: &Expression, ident: &Ident, expected: i32) {
+        match &expr.desc {
+            ExpressionDesc::Bin(BinOp::Eq, left, right) => {
+                assert!(matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(ident)
+                ));
+                assert_int_expr(right, expected);
+            }
+            other => panic!("expected an assignment expression, got {other:?}"),
         }
     }
 
@@ -12498,17 +13003,6 @@ mod tests {
                 ));
             }
             other => panic!("expected Array.isArray call, got {other:?}"),
-        }
-    }
-
-    fn assert_object_check_excludes_array(expr: &Expression, ident: &Ident) {
-        let ExpressionDesc::Bin(BinOp::And, left, right) = &expr.desc else {
-            panic!("expected typeof-object && !Array.isArray check, got {expr:?}");
-        };
-        assert_typeof_object_check(left, ident, true);
-        match &right.as_ref().desc {
-            ExpressionDesc::JsNot(inner) => assert_array_is_array_call(inner, ident),
-            other => panic!("expected negated Array.isArray guard, got {other:?}"),
         }
     }
 
@@ -15022,7 +15516,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn lowers_pval_from_option_optional_block_to_inner_value() {
         let mut compiler = LambdaCompiler::new();
         let value = Ident::create_local("value");

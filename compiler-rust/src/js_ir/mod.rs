@@ -575,7 +575,7 @@ impl Expression {
         if let Some(expr) = rewrite_plus_negative_int_rhs(op, &left, &right) {
             return expr;
         }
-        if let Some(value) = fold_strict_nullish_comparison(op, &left, &right) {
+        if let Some(value) = fold_strict_comparison(op, &left, &right) {
             return Expression::bool(value);
         }
         Self::new(ExpressionDesc::Bin(op, Box::new(left), Box::new(right)))
@@ -698,7 +698,7 @@ impl Expression {
     }
 }
 
-fn fold_strict_nullish_comparison(
+fn fold_strict_comparison(
     op: BinOp,
     left: &Expression,
     right: &Expression,
@@ -709,6 +709,42 @@ fn fold_strict_nullish_comparison(
         _ => return None,
     };
 
+    if let Some(equal) = fold_strict_equality(left, right) {
+        return Some(if equality { equal } else { !equal });
+    }
+
+    None
+}
+
+fn fold_strict_equality(left: &Expression, right: &Expression) -> Option<bool> {
+    match (&left.desc, &right.desc) {
+        (
+            ExpressionDesc::OptionalBlock(left_inner, _),
+            ExpressionDesc::OptionalBlock(right_inner, _),
+        ) => {
+            return fold_strict_equality(left_inner, right_inner);
+        }
+        (
+            ExpressionDesc::Number(Number::Int { i: left_int, .. }),
+            ExpressionDesc::Number(Number::Int { i: right_int, .. }),
+        ) => {
+            return Some(left_int == right_int);
+        }
+        (
+            ExpressionDesc::Str {
+                txt: left_txt,
+                delim: left_delim,
+            },
+            ExpressionDesc::Str {
+                txt: right_txt,
+                delim: right_delim,
+            },
+        ) => {
+            return fold_strict_string_equality(left_txt, left_delim, right_txt, right_delim);
+        }
+        _ => {}
+    }
+
     let same_nullish = matches!(
         (&left.desc, &right.desc),
         (ExpressionDesc::Null, ExpressionDesc::Null)
@@ -718,7 +754,7 @@ fn fold_strict_nullish_comparison(
             )
     );
     if same_nullish {
-        return Some(equality);
+        return Some(true);
     }
 
     let mismatched_nullish = matches!(
@@ -727,18 +763,58 @@ fn fold_strict_nullish_comparison(
             | (ExpressionDesc::Undefined { .. }, ExpressionDesc::Null)
     );
     if mismatched_nullish {
-        return Some(!equality);
+        return Some(false);
+    }
+
+    let undefined_optional_block_mismatch = matches!(
+        (&left.desc, &right.desc),
+        (
+            ExpressionDesc::Undefined { .. },
+            ExpressionDesc::OptionalBlock(_, _)
+        ) | (
+            ExpressionDesc::OptionalBlock(_, _),
+            ExpressionDesc::Undefined { .. }
+        )
+    );
+    if undefined_optional_block_mismatch
+        && expression_has_no_side_effects(left)
+        && expression_has_no_side_effects(right)
+    {
+        return Some(false);
     }
 
     if is_nullish_literal(left) && is_nullish_eq_impossible_non_null_expr(right) {
-        return Some(!equality);
+        return Some(false);
     }
 
     if is_nullish_literal(right) && is_nullish_eq_impossible_non_null_expr(left) {
-        return Some(!equality);
+        return Some(false);
     }
 
     None
+}
+
+fn fold_strict_string_equality(
+    left_txt: &str,
+    left_delim: &Delim,
+    right_txt: &str,
+    right_delim: &Delim,
+) -> Option<bool> {
+    if left_delim != right_delim {
+        return None;
+    }
+
+    if left_txt == right_txt {
+        Some(true)
+    } else if is_simple_string_comparison(left_txt) && is_simple_string_comparison(right_txt) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn is_simple_string_comparison(text: &str) -> bool {
+    text.is_ascii() && !text.as_bytes().contains(&b'\\')
 }
 
 fn is_nullish_literal(expr: &Expression) -> bool {
@@ -1312,6 +1388,45 @@ mod tests {
         );
 
         assert!(matches!(expr.desc, ExpressionDesc::Bool(true)));
+    }
+
+    #[test]
+    fn test_strict_eq_int_literals_folds_true() {
+        let expr = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::number(Number::int(2)),
+            Expression::number(Number::int(2)),
+        );
+
+        assert!(matches!(expr.desc, ExpressionDesc::Bool(true)));
+    }
+
+    #[test]
+    fn test_strict_eq_optional_blocks_compares_inner_values() {
+        let expr = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::new(ExpressionDesc::OptionalBlock(
+                Box::new(Expression::number(Number::int(1))),
+                true,
+            )),
+            Expression::new(ExpressionDesc::OptionalBlock(
+                Box::new(Expression::number(Number::int(1))),
+                true,
+            )),
+        );
+
+        assert!(matches!(expr.desc, ExpressionDesc::Bool(true)));
+    }
+
+    #[test]
+    fn test_strict_eq_simple_string_literals_fold_false() {
+        let expr = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::string("A"),
+            Expression::string("B"),
+        );
+
+        assert!(matches!(expr.desc, ExpressionDesc::Bool(false)));
     }
 
     #[test]
