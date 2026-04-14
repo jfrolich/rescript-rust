@@ -4106,11 +4106,7 @@ impl LambdaCompiler {
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
-            Ppowint => to_int32(Expression::bin(
-                BinOp::Pow,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
-            )),
+            Ppowint => int32_pow(compiled_args[0].clone(), compiled_args[1].clone()),
             Ppowfloat => Expression::bin(
                 BinOp::Pow,
                 compiled_args[0].clone(),
@@ -7756,6 +7752,23 @@ fn int32_mul(left: Expression, right: Expression) -> Expression {
             None => to_int32(Expression::bin(BinOp::Mul, left, right)),
         },
         _ => to_int32(Expression::bin(BinOp::Mul, left, right)),
+    }
+}
+
+fn ocaml_int32_pow(base: i32, exponent: i32) -> i32 {
+    let result = (base as f64).powf(exponent as f64);
+    if result > i32::MAX as f64 || result < i32::MIN as f64 {
+        let wide = result.trunc() as i64;
+        ((wide & 0xFFFF_FFFF) as u32) as i32
+    } else {
+        result.trunc() as i32
+    }
+}
+
+fn int32_pow(left: Expression, right: Expression) -> Expression {
+    match (int_literal(&left), int_literal(&right)) {
+        (Some(lhs), Some(rhs)) => int_expr(ocaml_int32_pow(lhs, rhs)),
+        _ => to_int32(Expression::bin(BinOp::Pow, left, right)),
     }
 }
 
@@ -11828,6 +11841,38 @@ mod tests {
             !printed.contains("Math.pow"),
             "expected float pow lowering to avoid Math.pow, got {printed}"
         );
+    }
+
+    #[test]
+    fn compile_int_pow_folds_small_int_literals_like_ocaml_ext_int() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Ppowint,
+            vec![
+                Lambda::const_(Constant::int(2)),
+                Lambda::const_(Constant::int(2)),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_int_expr(&compiled.expr, 4);
+    }
+
+    #[test]
+    fn compile_int_pow_folds_overflowing_int_literals_like_ocaml_ext_int() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Ppowint,
+            vec![
+                Lambda::const_(Constant::int(2_147_483_647)),
+                Lambda::const_(Constant::int(2)),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_int_expr(&compiled.expr, 0);
     }
 
     #[test]

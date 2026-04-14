@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 476 / 657 JS snapshots passing, 0 compile errors, 181 output diffs
+**Status:** 478 / 657 JS snapshots passing, 0 compile errors, 179 output diffs
 
 ## Goal
 
@@ -35,11 +35,72 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **476 / 657**
+- JS snapshot parity: **478 / 657**
 - Compile errors: **0**
-- Output diffs: **181**
+- Output diffs: **179**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port OCaml's integer-power constant folding in
+  `Ext_int.int32_pow` / `Js_exp_make.int32_pow` so constant `Ppowint` nodes
+  lower directly to the same wrapped 32-bit literals OCaml emits instead of
+  surviving as raw `** | 0` expressions
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`, because the mismatch lived in integer-power
+  lowering after optimized lambda: OCaml's `lam_compile_primitive.ml` sends
+  `Ppowint` through `E.int32_pow`, which folds literal powers via
+  `Ext_int.int32_pow`, while Rust was still using a generic `to_int32(pow)`
+  fallback for all cases
+- OCaml reference:
+  `compiler/core/lam_compile_primitive.ml`, especially the `Ppowint` branch;
+  `compiler/core/js_exp_make.ml`, especially `int32_pow`; and
+  `compiler/ext/ext_int.ml`, especially `int32_pow`
+- Rust change:
+  - added `ocaml_int32_pow(...)` plus `int32_pow(...)` in
+    `compiler-rust/src/lambda/compile.rs` to mirror OCaml's float-based
+    constant folding and 32-bit wrap behavior for integer powers
+  - updated `Ppowint` lowering in `compiler-rust/src/lambda/compile.rs` to use
+    that helper instead of always emitting `to_int32(Expression::bin(Pow, ...))`
+  - added focused regression coverage in
+    `compile_int_pow_folds_small_int_literals_like_ocaml_ext_int` and
+    `compile_int_pow_folds_overflowing_int_literals_like_ocaml_ext_int`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_int_pow_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/unified_ops_test.res` using `rescript.exe compiler-args`,
+    diffing `/tmp/unified_ops_test.mjs` against the checked-in snapshot
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/exponentiation_test.res` using `rescript.exe compiler-args`,
+    diffing `/tmp/exponentiation_test.mjs` against the checked-in snapshot
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/int_overflow_test.res` using `rescript.exe compiler-args`,
+    diffing `/tmp/int_overflow_test.mjs` against the checked-in snapshot as an
+    unchanged neighbor guard
+  - direct guard repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    broader guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/unified_ops_test.res` is no longer in the authoritative
+    diff set
+  - `tests/tests/src/exponentiation_test.res` is no longer in the authoritative
+    diff set
+  - `tests/tests/src/int_overflow_test.res` still differs, and its remaining
+    drift is the separate wrapping-add / bitand shaping cluster around
+    `hash_variant`, not integer-power lowering
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the `int32_pow` port
+- Topline impact:
+  - JS snapshot parity: **476 / 657** -> **478 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **181** -> **179** (**-2**)
+- Keep this change because it ports the real OCaml backend behavior from
+  `lam_compile_primitive.ml` / `js_exp_make.ml` / `ext_int.ml`; the wrapper
+  gain comes from matching OCaml's integer-power lowering rather than from any
+  printer-only rewrite.
 
 Latest iteration on **2026-04-14**:
 
