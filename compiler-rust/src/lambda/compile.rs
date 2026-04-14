@@ -4470,6 +4470,8 @@ impl LambdaCompiler {
                 },
                 None,
             )),
+            FieldDbgInfo::PolyVarTag => poly_var_tag_access(target),
+            FieldDbgInfo::PolyVarContent => poly_var_value_access(target),
             FieldDbgInfo::VariantTag => Expression::new(ExpressionDesc::StaticIndex(
                 Box::new(target.clone()),
                 "TAG".to_string(),
@@ -7282,6 +7284,34 @@ fn is_type_number_expr(expr: Expression) -> Expression {
         Expression::new(ExpressionDesc::Typeof(Box::new(expr))),
         Expression::string("number"),
     )
+}
+
+fn poly_var_tag_access(target: &Expression) -> Expression {
+    match &target.desc {
+        ExpressionDesc::CamlBlock(items, _, _, _) if js_expr_no_side_effects(target) => items
+            .first()
+            .cloned()
+            .expect("polyvariant tag access expects a tag element"),
+        _ => Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(target.clone()),
+            "NAME".to_string(),
+            Some(0),
+        )),
+    }
+}
+
+fn poly_var_value_access(target: &Expression) -> Expression {
+    match &target.desc {
+        ExpressionDesc::CamlBlock(items, _, _, _) if js_expr_no_side_effects(target) => items
+            .get(1)
+            .cloned()
+            .expect("polyvariant value access expects a payload element"),
+        _ => Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(target.clone()),
+            "VAL".to_string(),
+            Some(1),
+        )),
+    }
 }
 
 fn is_type_object_expr(expr: Expression) -> Expression {
@@ -17783,6 +17813,81 @@ mod tests {
             } if id.same(&eq)
         ));
         assert_eq!(print_expression(&expr), "Eq");
+    }
+
+    #[test]
+    fn lowers_polyvar_pfield_to_named_static_access_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let variant = Ident::create_local("variant");
+        let tag = compiler.compile_field_access(
+            0,
+            &FieldDbgInfo::PolyVarTag,
+            &Expression::var(variant.clone()),
+        );
+        let value = compiler.compile_field_access(
+            1,
+            &FieldDbgInfo::PolyVarContent,
+            &Expression::var(variant.clone()),
+        );
+
+        match &tag.desc {
+            ExpressionDesc::StaticIndex(target, field, Some(index)) => {
+                assert_eq!(field, "NAME");
+                assert_eq!(*index, 0);
+                assert!(matches!(
+                    target.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&variant)
+                ));
+            }
+            other => panic!("expected polyvariant tag access to lower to `.NAME`, got {other:?}"),
+        }
+
+        match &value.desc {
+            ExpressionDesc::StaticIndex(target, field, Some(index)) => {
+                assert_eq!(field, "VAL");
+                assert_eq!(*index, 1);
+                assert!(matches!(
+                    target.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&variant)
+                ));
+            }
+            other => {
+                panic!("expected polyvariant payload access to lower to `.VAL`, got {other:?}")
+            }
+        }
+
+        assert_eq!(print_expression(&tag), "variant.NAME");
+        assert_eq!(print_expression(&value), "variant.VAL");
+    }
+
+    #[test]
+    fn lowers_polyvar_pfield_from_pure_caml_block_directly_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let payload = Ident::create_local("payload");
+        let block = Expression::new(ExpressionDesc::CamlBlock(
+            vec![Expression::string("Tag"), Expression::var(payload.clone())],
+            MutableFlag::Immutable,
+            Box::new(Expression::number(Number::int(0))),
+            TagInfo::PolyVar("Tag".to_string()),
+        ));
+        let tag = compiler.compile_field_access(0, &FieldDbgInfo::PolyVarTag, &block);
+        let value = compiler.compile_field_access(1, &FieldDbgInfo::PolyVarContent, &block);
+
+        assert_eq!(print_expression(&tag), "\"Tag\"");
+        assert!(matches!(
+            &value,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&payload)
+        ));
+        assert_eq!(print_expression(&value), "payload");
     }
 
     #[test]

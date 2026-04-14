@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 433 / 657 JS snapshots passing, 0 compile errors, 224 output diffs
+**Status:** 437 / 657 JS snapshots passing, 0 compile errors, 220 output diffs
 
 ## Goal
 
@@ -35,11 +35,63 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **433 / 657**
+- JS snapshot parity: **437 / 657**
 - Compile errors: **0**
-- Output diffs: **224**
+- Output diffs: **220**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the missing OCaml polyvariant field access lowering so
+  `Pfield` on `Fld_poly_var_tag` / `Fld_poly_var_content` uses named
+  `NAME` / `VAL` access instead of the generic Rust array-index fallback
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is still `Lam_compile` / field-access
+  lowering downstream of the already-green optimized lambda boundary
+- OCaml reference:
+  `compiler/core/js_of_lam_block.ml`, where `field` routes
+  `Fld_poly_var_tag` / `Fld_poly_var_content` to `E.poly_var_tag_access` and
+  `E.poly_var_value_access`, plus `compiler/core/js_exp_make.ml`, where those
+  helpers unwrap pure `Caml_block` values directly or fall back to named static
+  indices `NAME` / `VAL`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so
+    `FieldDbgInfo::PolyVarTag` and `FieldDbgInfo::PolyVarContent` no longer
+    drop into the generic `ArrayIndex` fallback inside `compile_field_access`
+  - added `poly_var_tag_access(...)` and `poly_var_value_access(...)` helpers
+    mirroring the OCaml direct-unwrapping behavior for pure `CamlBlock`
+    expressions and the named `.NAME` / `.VAL` fallback for general targets
+  - added focused regression coverage in
+    `lowers_polyvar_pfield_to_named_static_access_like_ocaml` and
+    `lowers_polyvar_pfield_from_pure_caml_block_directly_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_polyvar_pfield -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/more_poly_variant_test.res`, diffing the
+    exact emitted module against the checked-in snapshot
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/more_poly_variant_test.res` now matches its checked-in
+    snapshot exactly; Rust had been emitting `x[0]` / `x[1]` where the OCaml
+    backend emits `x.NAME` / `x.VAL`
+  - `tests/tests/src/int_poly_var.res` no longer appears in the failing diff
+    cache under the authoritative harness, so the polyvariant access drift
+    collapsed beyond the small direct repro file
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the polyvariant-access change
+  - remaining polyvariant-shaped snapshot diffs are now narrowed to
+    `big_polyvar_test`, `bs_poly_map_test`, and `poly_variant_test`
+- Topline impact:
+  - JS snapshot parity: **433 / 657** -> **437 / 657** (**+4**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **224** -> **220** (**-4**)
+- Keep this change because it ports the OCaml `Js_of_lam_block.field` /
+  `Js_exp_make.poly_var_*_access` behavior instead of preserving the Rust-only
+  array-index shortcut for polyvariant object fields.
 
 Latest iteration on **2026-04-14**:
 
