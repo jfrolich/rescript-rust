@@ -1,7 +1,7 @@
 # Ralph TODO: Typechecker Performance
 
 **Last Updated:** 2026-04-14
-**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, dotted shared module-signature scraping now consults env_lazy-backed qualified views first, lazy child module/modtype qualification now comes from cached parent qualified views, dotted alias/modtype expansion inside `typecore`'s shared `Env::resolve_module_type` helper now consults those cached child views before raw recursive signature scans, the env_lazy cache-key path now uses env-owned cached local-alias metadata instead of rebuilding it on every lookup, a broader `typemod`/`typecore` env_lazy rollout was attempted and reverted because it regressed import-family parity, an additional local-`Pident` env_lazy rollout through `typecore::resolve_letmodule_direct_type_family_root` and `typemod` signature-scraping helpers was also attempted and reverted after the same import-family stamp drift, and the broader env_lazy rollout is still incomplete
+**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, dotted shared module-signature scraping now consults env_lazy-backed qualified views first, lazy child module/modtype qualification now comes from cached parent qualified views, dotted alias/modtype expansion inside `typecore`'s shared `Env::resolve_module_type` helper now consults those cached child views before raw recursive signature scans, the env_lazy cache-key path now uses env-owned cached local-alias metadata instead of rebuilding it on every lookup, persistent-`Pident` module-signature scraping in the shared `typecore` / `typemod` helpers now also routes through the env_lazy-backed qualified view instead of reading raw `ps_sig` directly, a broader `typemod`/`typecore` env_lazy rollout was attempted and reverted because it regressed import-family parity, an additional local-`Pident` env_lazy rollout through `typecore::resolve_letmodule_direct_type_family_root` and `typemod` signature-scraping helpers was also attempted and reverted after the same import-family stamp drift, and the broader env_lazy rollout is still incomplete
 
 ## Goal
 
@@ -66,6 +66,61 @@ Detailed corpus baseline:
   should begin from "match the OCaml algorithm and lazy forcing behavior more
   exactly." The expectation is that removing Rust-only extra work is the real
   win.
+
+## Session Update: Persistent `Pident` Shared Helpers Now Use `env_lazy`
+
+Additional checkpoint from this worktree on `2026-04-14` after routing the
+remaining persistent-`Pident` module-signature scraping in the shared
+`typecore` / `typemod` helpers through
+`typecore::resolve_module_signature_for_path` /
+`with_resolved_module_components_for_path` instead of reading raw persistent
+`ps_sig` signatures directly:
+
+- exact `Import.res` repro after rebuilding `compiler-rust` and `rewatch`:
+  - OCaml: `0.07s` (`/usr/bin/time -lp`)
+  - Rust: cold rerun `0.21s`, then warmed reruns `0.04s`, `0.04s`
+  - Rust max RSS on warmed reruns: about `32.1MB`
+  - Rust peak footprint on warmed reruns: about `23.6MB`
+- authoritative canonical corpus benchmark:
+  - Files tested: `657`
+  - Comparable files: `657`
+  - Rust faster or equal: `1`
+  - Rust slower: `656`
+  - Materially slower: `216`
+  - OCaml failures: `0`
+  - Rust failures: `0`
+  - Aggregate OCaml total: `4662.6ms`
+  - Aggregate Rust total: `9670.3ms`
+  - Aggregate Rust / OCaml ratio: `2.07x`
+  - `Import.res` benchmark entry: OCaml `41.4ms`, Rust `39.4ms`, `0.95x`
+  - `Import.res` dropped out of the benchmark's top-40 slower-than-OCaml list
+- full typedtree parity after clearing `.parity-cache/tests/*` files and
+  rerunning `./scripts/test_typedtree_parity.sh`: unchanged at `232/657`,
+  `43117` hunk mismatches
+
+What landed in this step:
+
+- `typecore::Env::resolve_module_type` now resolves persistent module-path
+  fallbacks through `resolve_module_signature_for_path` instead of returning raw
+  `ps_sig` directly
+- `typemod::lookup_module_type_by_lid`,
+  `typemod::resolve_path_to_sig_impl`, and
+  `typemod::scrape_alias_module_type` now take the same persistent-`Pident`
+  path through the env_lazy-backed qualified signature view first
+- `typemod::apply_package_constraints_to_module_type` now rewrites
+  package-constraint signatures from the env_lazy-backed persistent qualified
+  view instead of first loading raw `ps_sig`
+
+What this means:
+
+- the env_lazy-backed qualified module view is now the source of truth for more
+  of the shared persistent module-resolution surface, not only the dotted-path
+  helpers
+- this keeps the change off the known-regressing local-`Pident` forcing-order
+  path while still removing one more class of raw-signature bypass
+- the broader corpus moved in the right direction again (`2.09x` -> `2.07x`,
+  materially slower files `218` -> `216`) and parity stayed flat, so this
+  rollout is safe to keep and build on
 
 ## Session Update: Package Constraints Rewrite From Shared Signatures
 

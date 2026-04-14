@@ -16076,16 +16076,19 @@ impl Env {
                         return result;
                     }
                     // Prefer local bindings first. If no local module binding exists,
-                    // also try loading a persistent module by name. Some signatures
-                    // carry non-persistent idents for external modules after
-                    // substitution/copying, and OCaml still resolves those through
-                    // the persistent environment.
-                    if let Some(pers) = pers_env.as_mut() {
-                        if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
-                            let result = Some((ps.ps_sig.clone(), Some(mod_name.to_string())));
-                            visiting.remove(path);
-                            return result;
-                        }
+                    // keep the persistent-path fallback on the same qualified-view
+                    // source of truth as the other hot callers instead of reading
+                    // raw ps_sig directly.
+                    let persistent_path = Path::pident(Ident::create_persistent(mod_name));
+                    if let Some((_, sig)) = resolve_module_signature_for_path(
+                        &persistent_path,
+                        env,
+                        pers_env,
+                        ctx,
+                    ) {
+                        let result = Some((sig, Some(mod_name.to_string())));
+                        visiting.remove(path);
+                        return result;
                     }
                     visiting.remove(path);
                     None

@@ -2896,11 +2896,14 @@ pub fn lookup_module_type_by_lid<'b>(
             if let Ok(md) = env.find_module(mod_name) {
                 return Some(md.md_type.clone());
             }
-            // Try persistent env
-            if let Some(pers) = pers_env.as_mut() {
-                if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
-                    return Some(DeclMty::MtySignature(ps.ps_sig.clone()));
-                }
+            let persistent_path = Path::pident(Ident::create_persistent(mod_name));
+            if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
+                &persistent_path,
+                env,
+                pers_env,
+                ctx,
+            ) {
+                return Some(DeclMty::MtySignature(sig));
             }
             None
         }
@@ -3020,6 +3023,21 @@ fn resolve_path_to_sig_impl<'b>(
                             visiting.remove(path);
                             return Some(sig);
                         }
+                    }
+                }
+
+                if id.is_persistent() || id.stamp() == 0 {
+                    let persistent_path = Path::pident(Ident::create_persistent(name));
+                    if let Some((_, sig)) =
+                        crate::types::typecore::resolve_module_signature_for_path(
+                            &persistent_path,
+                            local_env,
+                            pers_env,
+                            ctx,
+                        )
+                    {
+                        visiting.remove(path);
+                        return Some(sig);
                     }
                 }
             }
@@ -3590,22 +3608,27 @@ fn apply_package_constraints_to_module_type<'b>(
                         ctx,
                         visiting,
                     )
-                } else if let Some(ps_sig) = pers_env
-                    .as_mut()
-                    .and_then(|pers| pers.find_pers_struct(id.name(), ctx))
-                    .map(|ps| ps.ps_sig.clone())
-                {
-                    let (rewritten_sig, nested_modules) =
-                        rewrite_package_constraints_over_sig(&ps_sig, constraints);
-                    finish_rewritten_package_sig(
+                } else {
+                    let persistent_path = Path::pident(Ident::create_persistent(id.name()));
+                    crate::types::typecore::with_resolved_module_components_for_path(
+                        &persistent_path,
                         env,
-                        rewritten_sig,
-                        nested_modules,
                         pers_env,
                         ctx,
+                        |components| rewrite_package_constraints_over_sig(
+                            components.signature(),
+                            constraints,
+                        ),
                     )
-                } else {
-                    None
+                    .and_then(|(rewritten_sig, nested_modules)| {
+                        finish_rewritten_package_sig(
+                            env,
+                            rewritten_sig,
+                            nested_modules,
+                            pers_env,
+                            ctx,
+                        )
+                    })
                 }
             }
             Path::Pdot(parent, name, _) => {
@@ -4693,15 +4716,20 @@ fn scrape_alias_module_type<'b>(
                         }
                         other => Some(anchored(&Path::pident(id.clone()), other)),
                     }
-                } else if let Some(pers) = pers_env.as_mut() {
-                    pers.find_pers_struct(name, ctx).map(|ps| {
+                } else {
+                    let persistent_path = Path::pident(Ident::create_persistent(name));
+                    crate::types::typecore::resolve_module_signature_for_path(
+                        &persistent_path,
+                        env,
+                        pers_env,
+                        ctx,
+                    )
+                    .map(|(_, sig)| {
                         anchored(
-                            &Path::pident(id.clone()),
-                            &DeclMty::MtySignature(ps.ps_sig.clone()),
+                            &persistent_path,
+                            &DeclMty::MtySignature(sig),
                         )
                     })
-                } else {
-                    None
                 }
             }
             Path::Pdot(parent, submod, _) => {
