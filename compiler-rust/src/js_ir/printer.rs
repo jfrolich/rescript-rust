@@ -1416,9 +1416,12 @@ impl JsPrinter {
                 if *identity {
                     self.print_expression(e, level);
                 } else {
-                    // Would call runtime "some" function
+                    // Match OCaml's js_dump.ml by omitting the synthetic unit
+                    // argument so `Some(())` prints as `Primitive_option.some()`.
                     self.write("Primitive_option.some(");
-                    self.print_expression(e, 1);
+                    if !matches!(e.desc, ExpressionDesc::Undefined { is_unit: true }) {
+                        self.print_expression(e, 1);
+                    }
                     self.write_char(')');
                 }
             }
@@ -2988,6 +2991,24 @@ mod tests {
             CallInfo::default(),
         );
         assert_eq!(print_expression(&expr), "foo(undefined)");
+    }
+
+    #[test]
+    fn test_print_optional_block_omits_unit_undefined_argument() {
+        let expr = Expression::new(ExpressionDesc::OptionalBlock(
+            Box::new(Expression::undefined(true)),
+            false,
+        ));
+        assert_eq!(print_expression(&expr), "Primitive_option.some()");
+    }
+
+    #[test]
+    fn test_print_optional_block_keeps_plain_undefined_argument() {
+        let expr = Expression::new(ExpressionDesc::OptionalBlock(
+            Box::new(Expression::undefined(false)),
+            false,
+        ));
+        assert_eq!(print_expression(&expr), "Primitive_option.some(undefined)");
     }
 
     #[test]

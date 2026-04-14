@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 372 / 657 JS snapshots passing, 0 compile errors, 285 output diffs
+**Status:** 374 / 657 JS snapshots passing, 0 compile errors, 283 output diffs
 
 ## Goal
 
@@ -35,11 +35,60 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **372 / 657**
+- JS snapshot parity: **374 / 657**
 - Compile errors: **0**
-- Output diffs: **285**
+- Output diffs: **283**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: match OCaml's `Optional_block` dumping for unit payloads in
+  `compiler-rust/src/js_ir/printer.rs`
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this slice fixes a backend dump-shape drift in the JS path without reopening
+  typedtree or lambda parity work
+- OCaml reference:
+  `compiler/core/js_dump.ml`, where `Optional_block (e, identity)` prints
+  through `E.runtime_call Primitive_modules.option "some" [e]`, and the call
+  printer omits a single `Undefined {is_unit = true}` argument so `Some(())`
+  renders as `Primitive_option.some()`, while plain `undefined` still renders
+  as `Primitive_option.some(undefined)`
+- Rust change:
+  - changed `ExpressionDesc::OptionalBlock(..., false)` printing to omit the
+    synthetic unit-`undefined` payload just like OCaml while keeping plain
+    `undefined` explicit
+  - added focused printer coverage in
+    `test_print_optional_block_omits_unit_undefined_argument` and
+    `test_print_optional_block_keeps_plain_undefined_argument`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml test_print_optional_block_omits_unit_undefined_argument -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml test_print_optional_block_keeps_plain_undefined_argument -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `cd tests/tests/lib/bs && timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/js_null_test.ast -o /tmp/js_null_test.mjs`
+  - `cd tests/tests/lib/bs && timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/unit_undefined_test.ast -o /tmp/unit_undefined_test.mjs`
+  - `cd tests/tests/lib/bs && timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/option_repr_test.ast -o /tmp/option_repr_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/js_null_test.res` now matches its checked-in `.mjs`
+    snapshot exactly; the expected unit option literal prints as
+    `Primitive_option.some()`
+  - `tests/tests/src/unit_undefined_test.res` now matches its checked-in
+    `.mjs` snapshot exactly on the same unit-option encoding slice
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match, and
+    `tests/tests/src/option_repr_test.res` stays on its prior unrelated
+    control-flow / option-shape diffs rather than regressing on
+    `some(undefined)` printing
+  - the authoritative wrapper still reports **0 compile errors**, so this
+    remains a pure backend printing / JS-shape fix
+- Topline impact:
+  - JS snapshot parity: **374 / 657** (**+2**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **283** (**-2**)
+- Keep this change because it matches OCaml's `Optional_block` dump behavior
+  instead of forcing all unit option payloads through the plain
+  `some(undefined)` textual path
 
 Latest iteration on **2026-04-14**:
 
