@@ -11,9 +11,7 @@ use crate::ident::Ident;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
 use crate::lambda::constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 use crate::lambda::free_variables::free_variables;
-use crate::lambda::primitive::{
-    ExternalFfiSpec, ExternalReturnWrapper, Primitive,
-};
+use crate::lambda::primitive::{ExternalFfiSpec, ExternalReturnWrapper, Primitive};
 use crate::lambda::tag_info::TagInfo;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
@@ -318,17 +316,15 @@ impl LoweringContext {
                 ffi,
                 dynamic_import: _call_dynamic_import,
                 transformed_jsx,
-            } if is_object_create_call(&prim_name, &arg_types, &ffi) => {
-                Lambda::prim(
-                    Primitive::PjsObjectCreate(
-                        ffi.obj_params
-                            .clone()
-                            .expect("guarded object-create metadata"),
-                    ),
-                    args,
-                    loc,
-                )
-            }
+            } if is_object_create_call(&prim_name, &arg_types, &ffi) => Lambda::prim(
+                Primitive::PjsObjectCreate(
+                    ffi.obj_params
+                        .clone()
+                        .expect("guarded object-create metadata"),
+                ),
+                args,
+                loc,
+            ),
             Primitive::PjsCall {
                 prim_name,
                 arg_types,
@@ -963,7 +959,11 @@ fn pointer_constant_value(constant: &Constant) -> Option<&str> {
     }
 }
 
-fn is_object_create_call(prim_name: &str, _arg_types: &[crate::lambda::primitive::ExternalArgSpec], ffi: &ExternalFfiSpec) -> bool {
+fn is_object_create_call(
+    prim_name: &str,
+    _arg_types: &[crate::lambda::primitive::ExternalArgSpec],
+    ffi: &ExternalFfiSpec,
+) -> bool {
     prim_name.is_empty() && ffi.obj_params.is_some()
 }
 
@@ -1656,11 +1656,11 @@ pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lambda::FunctionAttribute;
+    use crate::lambda::InlineAttribute;
     use crate::lambda::compat::LetKind;
     use crate::lambda::constant::{ConstructorRuntimeTag, ConstructorTag, StringDelim};
     use crate::lambda::primitive::{ExternalFfiKind, JsRawInfo, Mutable};
-    use crate::lambda::FunctionAttribute;
-    use crate::lambda::InlineAttribute;
 
     #[test]
     fn lowers_unit_constructor_pointer_to_unit_constant() {
@@ -2354,7 +2354,7 @@ mod tests {
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
                 sw_names: Some(crate::lambda::SwitchNames {
-                    consts: vec!["A".to_string()],
+                    consts: vec![crate::lambda::SwitchTag::named("A")],
                     blocks: Vec::new(),
                 }),
             },
@@ -2570,7 +2570,10 @@ mod tests {
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
                 sw_names: Some(crate::lambda::SwitchNames {
-                    consts: vec!["A".to_string(), "B".to_string()],
+                    consts: vec![
+                        crate::lambda::SwitchTag::named("A"),
+                        crate::lambda::SwitchTag::named("B"),
+                    ],
                     blocks: Vec::new(),
                 }),
             },

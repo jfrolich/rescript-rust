@@ -11,6 +11,7 @@ use super::{
 };
 use crate::binary_ast::ppx::{JsExpClassification, classify_js_exp};
 use crate::ident::Ident;
+use crate::lambda::SwitchCaseTag;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
@@ -76,6 +77,50 @@ impl JsPrinter {
     fn write(&mut self, s: &str) {
         self.output.push_str(s);
         self.last_new_line = false;
+    }
+
+    fn expression_string_in_current_scope(&self, expr: &Expression, level: u8) -> String {
+        let mut printer = Self {
+            output: String::new(),
+            indent: 0,
+            last_new_line: false,
+            indent_str: self.indent_str,
+            name_scopes: self.name_scopes.clone(),
+            module_path_resolver: self.module_path_resolver.clone(),
+        };
+        printer.print_expression(expr, level);
+        printer.output
+    }
+
+    fn nullish_or_target<'a>(
+        &self,
+        left: &'a Expression,
+        right: &'a Expression,
+    ) -> Option<&'a Expression> {
+        fn strict_nullish_target(expr: &Expression) -> Option<(&Expression, bool)> {
+            let ExpressionDesc::Bin(BinOp::EqEqEq, tested, literal) = &expr.desc else {
+                return None;
+            };
+            match literal.as_ref().desc {
+                ExpressionDesc::Null => Some((tested.as_ref(), true)),
+                ExpressionDesc::Undefined { .. } => Some((tested.as_ref(), false)),
+                _ => None,
+            }
+        }
+
+        let (left_target, left_is_null) = strict_nullish_target(left)?;
+        let (right_target, right_is_null) = strict_nullish_target(right)?;
+        if left_is_null == right_is_null {
+            return None;
+        }
+
+        let left_rendered = self.expression_string_in_current_scope(left_target, 0);
+        let right_rendered = self.expression_string_in_current_scope(right_target, 0);
+        if left_rendered == right_rendered {
+            Some(left_target)
+        } else {
+            None
+        }
     }
 
     /// Write a character
@@ -825,11 +870,29 @@ impl JsPrinter {
         }
     }
 
-    /// Print a string case
+    fn print_switch_case_tag(&mut self, tag: &SwitchCaseTag) {
+        match tag {
+            SwitchCaseTag::String(value) => self.print_string(value),
+            SwitchCaseTag::Int(value) => {
+                write!(self.output, "{value}").unwrap();
+                self.last_new_line = false;
+            }
+            SwitchCaseTag::Float(value) => self.write(value),
+            SwitchCaseTag::BigInt(value) => {
+                self.write(value);
+                self.write("n");
+            }
+            SwitchCaseTag::Bool(value) => self.write(if *value { "true" } else { "false" }),
+            SwitchCaseTag::Null => self.write("null"),
+            SwitchCaseTag::Undefined => self.write("undefined"),
+        }
+    }
+
+    /// Print a literal switch case.
     fn print_string_case(&mut self, clause: &StringClause) {
         self.newline();
         self.write("case ");
-        self.print_string(&clause.tag_type);
+        self.print_switch_case_tag(&clause.tag_type);
         self.write(" :");
 
         if !clause.clause.body.is_empty() {
@@ -984,6 +1047,21 @@ impl JsPrinter {
                             return;
                         }
                         _ => {}
+                    }
+                }
+
+                if *op == BinOp::Or {
+                    if let Some(target) = self.nullish_or_target(left, right) {
+                        let needs_paren = level > 0;
+                        if needs_paren {
+                            self.write_char('(');
+                        }
+                        self.print_expression(target, 1);
+                        self.write(" == null");
+                        if needs_paren {
+                            self.write_char(')');
+                        }
+                        return;
                     }
                 }
 
@@ -1367,13 +1445,28 @@ impl JsPrinter {
                             );
                         }
                     }
-                    TagInfo::RecordInlined { name, fields, .. }
+                    TagInfo::RecordInlined {
+                        name,
+                        fields,
+                        attrs,
+                        ..
+                    }
                         if fields.len() == elements.len() =>
                     {
+                        let untagged = tag_info_has_untagged(attrs);
+                        let tag_name = tag_info_tag_name(attrs).unwrap_or("TAG");
+                        let tag_value = tag_info_runtime_tag(attrs)
+                            .unwrap_or_else(|| SwitchCaseTag::String(name.clone()));
                         self.print_object_literal(
                             level,
                             None,
-                            std::iter::once((None, None)).chain(elements.iter().zip(fields.iter()).filter_map(
+                            (if untagged {
+                                Vec::new()
+                            } else {
+                                vec![(None, None)]
+                            })
+                            .into_iter()
+                            .chain(elements.iter().zip(fields.iter()).filter_map(
                                 |(elem, (field_name, optional))| {
                                     if *optional && is_undefined_literal(elem) {
                                         None
@@ -1384,8 +1477,9 @@ impl JsPrinter {
                             )),
                             |this, prop| match prop {
                                 (None, None) => {
-                                    this.write("TAG: ");
-                                    this.print_string(name);
+                                    this.print_literal_property_name(tag_name);
+                                    this.write(": ");
+                                    this.print_switch_case_tag(&tag_value);
                                 }
                                 (Some(field_name), Some(elem)) => {
                                     this.print_literal_property_name(field_name);
@@ -1409,7 +1503,12 @@ impl JsPrinter {
                             },
                         );
                     }
-                    TagInfo::Constructor { name, .. } => {
+                    TagInfo::Constructor {
+                        name,
+                        num_nonconst,
+                        attrs,
+                        ..
+                    } => {
                         if name == "::" {
                             self.print_object_literal(
                                 level,
@@ -1429,31 +1528,47 @@ impl JsPrinter {
                                 },
                             );
                         } else {
-                            self.print_object_literal(
-                                level,
-                                None,
-                                std::iter::once((None, None)).chain(
-                                    elements
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, elem)| (Some(i), Some(elem))),
-                                ),
-                                |this, prop| match prop {
-                                    (None, None) => {
-                                        this.write("TAG: ");
-                                        this.print_string(name);
-                                    }
-                                    (Some(i), Some(elem)) => {
-                                        this.write("_");
-                                        this.write(&i.to_string());
-                                        this.write(": ");
-                                        this.print_expression(elem, 1);
-                                    }
-                                    _ => {
-                                        unreachable!("constructor literal properties stay aligned")
-                                    }
-                                },
-                            );
+                            let untagged = tag_info_has_untagged(attrs);
+                            if untagged && elements.len() == 1 {
+                                self.print_expression(&elements[0], level);
+                            } else {
+                                let tag_name = tag_info_tag_name(attrs).unwrap_or("TAG");
+                                let tag_value = tag_info_runtime_tag(attrs)
+                                    .unwrap_or_else(|| SwitchCaseTag::String(name.clone()));
+                                let include_tag = !untagged && *num_nonconst != 1;
+                                self.print_object_literal(
+                                    level,
+                                    None,
+                                    (if include_tag {
+                                        vec![(None, None)]
+                                    } else {
+                                        Vec::new()
+                                    })
+                                    .into_iter()
+                                    .chain(
+                                        elements
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(i, elem)| (Some(i), Some(elem))),
+                                    ),
+                                    |this, prop| match prop {
+                                        (None, None) => {
+                                            this.print_literal_property_name(tag_name);
+                                            this.write(": ");
+                                            this.print_switch_case_tag(&tag_value);
+                                        }
+                                        (Some(i), Some(elem)) => {
+                                            this.write("_");
+                                            this.write(&i.to_string());
+                                            this.write(": ");
+                                            this.print_expression(elem, 1);
+                                        }
+                                        _ => unreachable!(
+                                            "constructor literal properties stay aligned"
+                                        ),
+                                    },
+                                );
+                            }
                         }
                     }
                     TagInfo::PolyVar(name) => {
@@ -1856,6 +1971,56 @@ fn raw_js_expression_needs_paren(code: &str) -> bool {
             !raw_snippet_exp_simple_enough(code)
         }
     }
+}
+
+fn tag_info_has_untagged(attrs: &[crate::lambda::tag_info::Attribute]) -> bool {
+    attrs.iter().any(|attr| attr.name == "unboxed")
+}
+
+fn tag_info_tag_name(attrs: &[crate::lambda::tag_info::Attribute]) -> Option<&str> {
+    attrs.iter().find_map(|attr| {
+        if attr.name != "tag" {
+            return None;
+        }
+        match &attr.payload {
+            crate::lambda::tag_info::AttributePayload::Str(value) => Some(value.as_str()),
+            _ => None,
+        }
+    })
+}
+
+fn tag_info_runtime_tag(
+    attrs: &[crate::lambda::tag_info::Attribute],
+) -> Option<SwitchCaseTag> {
+    attrs.iter().find_map(|attr| {
+        if attr.name != "as" {
+            return None;
+        }
+        match &attr.payload {
+            crate::lambda::tag_info::AttributePayload::Str(value) => {
+                Some(SwitchCaseTag::String(value.clone()))
+            }
+            crate::lambda::tag_info::AttributePayload::Int(value) => {
+                Some(SwitchCaseTag::Int(*value))
+            }
+            crate::lambda::tag_info::AttributePayload::Float(value) => {
+                Some(SwitchCaseTag::Float(value.clone()))
+            }
+            crate::lambda::tag_info::AttributePayload::BigInt(value) => {
+                Some(SwitchCaseTag::BigInt(value.clone()))
+            }
+            crate::lambda::tag_info::AttributePayload::Bool(value) => {
+                Some(SwitchCaseTag::Bool(*value))
+            }
+            crate::lambda::tag_info::AttributePayload::Ident(value) if value == "null" => {
+                Some(SwitchCaseTag::Null)
+            }
+            crate::lambda::tag_info::AttributePayload::Ident(value) if value == "undefined" => {
+                Some(SwitchCaseTag::Undefined)
+            }
+            _ => None,
+        }
+    })
 }
 
 fn is_undefined_literal(expr: &Expression) -> bool {
@@ -2624,6 +2789,30 @@ mod tests {
             ),
         );
         assert_eq!(print_expression(&expr), "a || b || c");
+    }
+
+    #[test]
+    fn test_print_nullish_or_as_loose_null_check_like_ocaml() {
+        let value = Expression::var(Ident::create_local("x"));
+        let expr = Expression::bin(
+            BinOp::Or,
+            Expression::bin(BinOp::EqEqEq, value.clone(), Expression::null()),
+            Expression::bin(BinOp::EqEqEq, value.clone(), Expression::undefined(false)),
+        );
+
+        assert_eq!(print_expression(&expr), "x == null");
+    }
+
+    #[test]
+    fn test_print_nullish_or_as_loose_null_check_in_reverse_order_like_ocaml() {
+        let value = Expression::var(Ident::create_local("x"));
+        let expr = Expression::bin(
+            BinOp::Or,
+            Expression::bin(BinOp::EqEqEq, value.clone(), Expression::undefined(false)),
+            Expression::bin(BinOp::EqEqEq, value.clone(), Expression::null()),
+        );
+
+        assert_eq!(print_expression(&expr), "x == null");
     }
 
     #[test]
@@ -3745,7 +3934,7 @@ mod tests {
             Expression::var(Ident::create_local("tag")),
             vec![
                 StringClause {
-                    tag_type: "One".to_string(),
+                    tag_type: SwitchCaseTag::String("One".to_string()),
                     clause: CaseClause {
                         body: vec![Statement::return_(Expression::number(Number::int(1)))],
                         should_break: false,
@@ -3753,7 +3942,7 @@ mod tests {
                     },
                 },
                 StringClause {
-                    tag_type: "Two".to_string(),
+                    tag_type: SwitchCaseTag::String("Two".to_string()),
                     clause: CaseClause {
                         body: vec![],
                         should_break: false,

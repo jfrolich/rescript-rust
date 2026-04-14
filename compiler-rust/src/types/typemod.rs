@@ -9166,6 +9166,12 @@ fn type_structure_item<'a>(
                                 block_tag += 1;
                                 crate::types::ConstructorTag::CstrBlock(t)
                             };
+                            let mut combined_parser_attrs = tag_attrs.clone();
+                            combined_parser_attrs.extend(cstr.pcd_attributes.iter().cloned());
+                            let combined_typed_attrs =
+                                Attributes::from_vec(combined_parser_attrs.clone());
+                            let combined_decl_attrs =
+                                parser_attrs_to_decl_attrs(arena, &combined_typed_attrs);
 
                             // For inline records, create a synthetic type declaration and
                             // set cstr_args to [Tconstr(path, type_params)] matching OCaml's datarepr.ml
@@ -9186,7 +9192,7 @@ fn type_structure_item<'a>(
                                             tag: block_tag - 1, // use the tag just assigned
                                             name: cstr_name_str.to_string(),
                                             num_nonconsts,
-                                            attrs: vec![], // simplified - parser attrs vs types attrs
+                                            attrs: combined_decl_attrs.clone(),
                                         }
                                     };
                                     let inline_decl = crate::types::TypeDeclaration {
@@ -9226,11 +9232,7 @@ fn type_structure_item<'a>(
                                 cd_args: internal_cd_args,
                                 cd_res: internal_cd_res,
                                 cd_loc: arena.to_location(cstr.pcd_loc),
-                                cd_attributes: {
-                                    let mut attrs = tag_attrs.clone();
-                                    attrs.extend(cstr.pcd_attributes.iter().cloned());
-                                    parser_attrs_to_decl_attrs(arena, &Attributes::from_vec(attrs))
-                                },
+                                cd_attributes: combined_decl_attrs.clone(),
                             });
 
                             // Create typed tree constructor declaration
@@ -9243,11 +9245,7 @@ fn type_structure_item<'a>(
                                 cd_args: typed_tree_cd_args,
                                 cd_res: typed_cd_res,
                                 cd_loc: cstr.pcd_loc,
-                                cd_attributes: {
-                                    let mut attrs = tag_attrs.clone();
-                                    attrs.extend(cstr.pcd_attributes.iter().cloned());
-                                    Attributes::from_vec(attrs)
-                                },
+                                cd_attributes: combined_typed_attrs,
                             });
 
                             // Create constructor description for the environment
@@ -11614,9 +11612,7 @@ module M3: {
             .str_type
             .iter()
             .find_map(|item| match item {
-                crate::types::decl::SignatureItem::SigModule(id, md, _)
-                    if id.name() == "N'" =>
-                {
+                crate::types::decl::SignatureItem::SigModule(id, md, _) if id.name() == "N'" => {
                     Some(md)
                 }
                 _ => None,

@@ -127,13 +127,78 @@ pub struct LambdaSwitch {
     pub sw_names: Option<SwitchNames>,
 }
 
-/// Switch names for untagged variants
-#[derive(Debug, Clone)]
+/// Runtime literal carried by an OCaml/ReScript variant tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwitchCaseTag {
+    String(String),
+    Int(i32),
+    Float(String),
+    BigInt(String),
+    Bool(bool),
+    Null,
+    Undefined,
+}
+
+/// Runtime kind used for ReScript's untagged payload cases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwitchBlockType {
+    Int,
+    String,
+    Float,
+    BigInt,
+    Boolean,
+    Instance(String),
+    Function,
+    Object,
+    Unknown,
+}
+
+/// Runtime tag metadata for one constructor case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchTag {
+    /// Source constructor name.
+    pub name: String,
+    /// Optional `@as(...)` runtime literal.
+    pub tag_type: Option<SwitchCaseTag>,
+}
+
+impl SwitchTag {
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            tag_type: None,
+        }
+    }
+}
+
+/// Runtime metadata for one payload-carrying constructor case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchBlock {
+    /// Constructor tag metadata.
+    pub tag: SwitchTag,
+    /// Optional custom tag field name from `@tag(...)`.
+    pub tag_name: Option<String>,
+    /// Optional untagged runtime payload kind.
+    pub block_type: Option<SwitchBlockType>,
+}
+
+impl SwitchBlock {
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            tag: SwitchTag::named(name),
+            tag_name: None,
+            block_type: None,
+        }
+    }
+}
+
+/// Switch names and runtime metadata for tagged and untagged variants.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwitchNames {
     /// Nullary constructor names.
-    pub consts: Vec<String>,
+    pub consts: Vec<SwitchTag>,
     /// Constructor names for payload-carrying cases.
-    pub blocks: Vec<String>,
+    pub blocks: Vec<SwitchBlock>,
 }
 
 /// Lambda function definition

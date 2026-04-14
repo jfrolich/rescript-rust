@@ -24,6 +24,7 @@ use std::path::{Component, Path as FsPath, PathBuf};
 use crate::cmi::persistent_env::{CmjExportConstant, PersistentEnv};
 use crate::ident::Ident;
 use crate::lambda::tag_info::TagInfo;
+use crate::lambda::SwitchCaseTag;
 pub use op::{BinOp, IdentInfo, Kind, LengthObject, MutableFlag, Number, Property, PropertyName};
 pub use printer::{JsPrinter, print_block, print_deps_program, print_expression, print_program};
 
@@ -899,7 +900,7 @@ pub type IntClause = (i32, CaseClause);
 #[derive(Debug, Clone)]
 pub struct StringClause {
     /// Tag type (from Ast_untagged_variants)
-    pub tag_type: String,
+    pub tag_type: SwitchCaseTag,
     /// Case clause
     pub clause: CaseClause,
 }

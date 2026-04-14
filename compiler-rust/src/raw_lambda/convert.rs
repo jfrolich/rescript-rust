@@ -11,6 +11,7 @@ use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::context::IdGenerator;
 use crate::ident::{Ident, IdentFlags};
 use crate::js_ir::{Kind, ModuleId};
+use crate::lambda::Constant;
 use crate::lambda::compat::LetKind;
 use crate::lambda::constant::{
     ConstructorRuntimeTag, ConstructorTag as PointerConstructorTag, PointerInfo, StringDelim,
@@ -21,8 +22,9 @@ use crate::lambda::primitive::{
     ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel,
     ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, ImportAttributes, Mutable,
 };
-use crate::lambda::tag_info::TagInfo;
-use crate::lambda::Constant;
+use crate::lambda::tag_info::{
+    Attribute as TagAttribute, AttributePayload as TagAttributePayload, TagInfo,
+};
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
     Lambda, LambdaSwitch, Primitive, SetFieldDbgInfo,
@@ -36,6 +38,8 @@ use crate::raw_lambda::typeopt::{
     type_cannot_contain_undefined_no_env, type_is_builtin_object,
 };
 use crate::raw_lambda::{RawLambda, RawPrimInfo};
+use crate::types::ConstructorTag;
+use crate::types::SignatureItem;
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
 use crate::types::context::TypeContext;
 use crate::types::decl::{LabelDescription, RecordRepresentation, ValueKind};
@@ -46,8 +50,6 @@ use crate::types::typedtree::{
     Partial, Pattern, PatternDesc, RecordLabelDefinition, Structure, StructureItem,
     StructureItemDesc, ValueBinding,
 };
-use crate::types::ConstructorTag;
-use crate::types::SignatureItem;
 
 const PREDEF_MATCH_FAILURE_STAMP: i32 = 17;
 const PREDEF_ASSERT_FAILURE_STAMP: i32 = 27;
@@ -433,6 +435,34 @@ fn constructor_runtime_tag(
             _ => None,
         }
     })
+}
+
+fn lower_tag_info_attributes(attrs: &[crate::types::decl::Attribute]) -> Vec<TagAttribute> {
+    attrs.iter()
+        .map(|attr| TagAttribute {
+            name: attr.attr_name.txt.clone(),
+            payload: match &attr.attr_payload {
+                crate::types::decl::AttributePayload::Empty => TagAttributePayload::Empty,
+                crate::types::decl::AttributePayload::Str(value) => {
+                    TagAttributePayload::Str(value.clone())
+                }
+                crate::types::decl::AttributePayload::Int(value) => TagAttributePayload::Int(*value),
+                crate::types::decl::AttributePayload::Float(value) => {
+                    TagAttributePayload::Float(value.clone())
+                }
+                crate::types::decl::AttributePayload::BigInt(value) => {
+                    TagAttributePayload::BigInt(value.clone())
+                }
+                crate::types::decl::AttributePayload::Bool(value) => {
+                    TagAttributePayload::Bool(*value)
+                }
+                crate::types::decl::AttributePayload::Ident(value) => {
+                    TagAttributePayload::Ident(value.clone())
+                }
+                crate::types::decl::AttributePayload::Structure(_) => TagAttributePayload::Empty,
+            },
+        })
+        .collect()
 }
 
 fn raw_polyvariant_const(tag: &str) -> RawLambda {
@@ -2860,9 +2890,19 @@ impl<'a> RawLambdaConverter<'a> {
                 _ => TagInfo::Some,
             },
             ConstructorTag::CstrBlock(tag) => {
-                TagInfo::constructor(cstr.cstr_name.clone(), cstr.cstr_nonconsts, *tag)
+                TagInfo::Constructor {
+                    name: cstr.cstr_name.clone(),
+                    num_nonconst: cstr.cstr_nonconsts,
+                    tag: *tag,
+                    attrs: lower_tag_info_attributes(&cstr.cstr_attributes),
+                }
             }
-            _ => TagInfo::constructor(cstr.cstr_name.clone(), cstr.cstr_nonconsts, 0),
+            _ => TagInfo::Constructor {
+                name: cstr.cstr_name.clone(),
+                num_nonconst: cstr.cstr_nonconsts,
+                tag: 0,
+                attrs: lower_tag_info_attributes(&cstr.cstr_attributes),
+            },
         }
     }
 
@@ -3044,7 +3084,7 @@ impl<'a> RawLambdaConverter<'a> {
                     tag,
                     name,
                     num_nonconsts,
-                    ..
+                    attrs,
                 } => {
                     let tag_info = TagInfo::RecordInlined {
                         name,
@@ -3052,7 +3092,7 @@ impl<'a> RawLambdaConverter<'a> {
                         tag,
                         fields: fields_info,
                         mutable_flag,
-                        attrs: vec![],
+                        attrs: lower_tag_info_attributes(&attrs),
                     };
                     // OCaml: if mut = Mutable then raise Not_constant
                     if matches!(mutable_flag, ParserMutableFlag::Mutable) {
@@ -10417,14 +10457,14 @@ mod tests {
     use std::borrow::Cow;
 
     use crate::binary_ast::ffi_types::{
-        encode_ffi_type, Delim, ExternalSpec, FfiType, LamConstant, ReturnWrapper,
+        Delim, ExternalSpec, FfiType, LamConstant, ReturnWrapper, encode_ffi_type,
     };
     use crate::binary_ast::ppx;
     use crate::context::IdGenerator;
     use crate::parse_arena::ParseArena;
-    use crate::parser::module;
-    use crate::parser::ast::Attributes;
     use crate::parser::Parser;
+    use crate::parser::ast::Attributes;
+    use crate::parser::module;
     use crate::types::env::initial_env;
 
     #[test]
@@ -10575,11 +10615,7 @@ mod tests {
         let RawLambda::LstaticRaise(id, args) = else_.as_ref() else {
             return None;
         };
-        if args.is_empty() {
-            Some(*id)
-        } else {
-            None
-        }
+        if args.is_empty() { Some(*id) } else { None }
     }
 
     fn try_handler_exit_id(raw: &RawLambda) -> Option<i32> {
@@ -10589,11 +10625,7 @@ mod tests {
         let RawLambda::LstaticCatch(_, (id, params), _) = handler.as_ref() else {
             return None;
         };
-        if params.is_empty() {
-            Some(*id)
-        } else {
-            None
-        }
+        if params.is_empty() { Some(*id) } else { None }
     }
 
     fn simple_extension_try(
@@ -10992,7 +11024,8 @@ mod tests {
                 external_spec: ExternalSpec::JsModuleAsVar(
                     crate::binary_ast::ffi_types::ExternalModuleName {
                         bundle: "./myJson.json".to_string(),
-                        module_bind_name: crate::binary_ast::ffi_types::ModuleBindName::PhintNothing,
+                        module_bind_name:
+                            crate::binary_ast::ffi_types::ModuleBindName::PhintNothing,
                         import_attributes: Some(vec![
                             ("type".to_string(), "json".to_string()),
                             ("some-identifier".to_string(), "yep".to_string()),
@@ -11029,7 +11062,11 @@ external myJson: Js.Json.t = "default"
 "#;
         let mut parser = Parser::new("test.res", source);
         let structure = module::parse_structure(&mut parser);
-        assert!(!parser.has_errors(), "parse errors: {:?}", parser.take_diagnostics());
+        assert!(
+            !parser.has_errors(),
+            "parse errors: {:?}",
+            parser.take_diagnostics()
+        );
 
         let primitive = structure
             .iter()

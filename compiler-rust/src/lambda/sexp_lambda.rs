@@ -721,12 +721,12 @@ fn switch_names_sexp(names: &Option<crate::lambda::SwitchNames>) -> Sexp {
             Sexp::atom("Some"),
             Sexp::list({
                 let mut items = vec![Sexp::atom("consts")];
-                items.extend(n.consts.iter().map(|s| string(s)));
+                items.extend(n.consts.iter().map(|tag| string(&tag.name)));
                 items
             }),
             Sexp::list({
                 let mut items = vec![Sexp::atom("blocks")];
-                items.extend(n.blocks.iter().map(|s| string(s)));
+                items.extend(n.blocks.iter().map(|block| string(&block.tag.name)));
                 items
             }),
         ]),
@@ -736,14 +736,14 @@ fn switch_names_sexp(names: &Option<crate::lambda::SwitchNames>) -> Sexp {
 #[cfg(test)]
 mod tests {
     use super::{constant, escape_ocaml_string, switch_names_sexp};
-    use crate::lambda::SwitchNames;
+    use crate::lambda::{SwitchBlock, SwitchNames, SwitchTag};
     use crate::lambda::constant::{Constant, StringDelim};
 
     #[test]
     fn prints_switch_names_consts_and_blocks() {
         let names = Some(SwitchNames {
-            consts: vec!["Null".to_string()],
-            blocks: vec!["Boolean".to_string(), "String".to_string()],
+            consts: vec![SwitchTag::named("Null")],
+            blocks: vec![SwitchBlock::named("Boolean"), SwitchBlock::named("String")],
         });
 
         let printed = switch_names_sexp(&names).to_string();

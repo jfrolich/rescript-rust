@@ -63,11 +63,23 @@ pub enum TagInfo {
     },
 }
 
-/// Attribute (placeholder for now)
-#[derive(Debug, Clone, PartialEq)]
+/// Lowered constructor attribute payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttributePayload {
+    Empty,
+    Str(String),
+    Int(i32),
+    Float(String),
+    BigInt(String),
+    Bool(bool),
+    Ident(String),
+}
+
+/// Constructor attribute metadata used by later JS lowering/printing.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attribute {
     pub name: String,
-    pub payload: Option<String>,
+    pub payload: AttributePayload,
 }
 
 impl TagInfo {
