@@ -6098,7 +6098,7 @@ fn localize_exported_structure_module_type(
     };
 
     let mut no_persistent_env = None;
-    let resolved_sig = crate::types::typecore::resolve_module_signature_for_path(
+    let resolved_sig = crate::types::typecore::copy_resolved_module_signature_for_path(
         &path,
         env,
         &mut no_persistent_env,

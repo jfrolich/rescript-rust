@@ -1,7 +1,7 @@
 # Ralph TODO: Typechecker Performance
 
 **Last Updated:** 2026-04-14
-**Status:** env_lazy dotted module/module-type lookup checkpoint landed; broader perf gap still open
+**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`; broader perf gap still open
 
 ## Goal
 
@@ -91,67 +91,53 @@ Detailed investigation:
 
 ## Current Checkpoint
 
-Checkpoint measurements from this worktree after routing dotted
-module/module-type/type lookups through cached qualified module components on
-`2026-04-14`:
+Checkpoint measurements from this worktree after making detached whole-signature
+copies come from cached qualified module components in `typecore` /
+`typemod` on `2026-04-14`:
 
 - Full typedtree parity: Rust `657 passed`, OCaml `657 passed`, parity
   `232/657`, `43117` hunk mismatches
 - Focused import parity: `1/4` files match, `283` hunk mismatches
 - Authoritative `Import.res` repro:
-  - OCaml: `0.05s` (`/usr/bin/time -lp`)
-  - Rust: `0.34s` (`/usr/bin/time -lp`)
-  - Rust max RSS: about `73MB`
-  - Rust peak footprint: about `58MB`
+  - OCaml: `0.04s` (`/usr/bin/time -lp`)
+  - Rust: `0.32s` (`/usr/bin/time -lp`)
+  - Rust max RSS: about `71MB`
+  - Rust peak footprint: about `57MB`
 - Authoritative canonical corpus benchmark:
   - Files tested: `657`
   - Comparable files: `656`
-  - Rust faster or equal: `1`
-  - Rust slower: `655`
-  - Materially slower: `231`
+  - Rust faster or equal: `8`
+  - Rust slower: `648`
+  - Materially slower: `222`
   - Rust failures: `1` (`src/ticker.res`: stack overflow)
-  - Aggregate OCaml total: `4761.9ms`
-  - Aggregate Rust total: `11277.8ms`
-  - Aggregate Rust / OCaml ratio: `2.37x`
+  - Aggregate OCaml total: `5866.2ms`
+  - Aggregate Rust total: `12340.7ms`
+  - Aggregate Rust / OCaml ratio: `2.10x`
+  - `Import.res` benchmark entry: OCaml `49.5ms`, Rust `339.0ms`, `6.85x`
 
 What landed in this checkpoint:
 
-- `build_module_signature_for_path` no longer clones and scans a fresh parent
-  signature just to resolve `Pdot` child modules; it now reads the child module
-  directly from cached `QualifiedModuleComponents`
-- `ctype::resolve_module_type_through_env_path` now uses the cached qualified
-  parent components as the source of truth for dotted module/module-type lookup,
-  while preserving the required parent-child substitution step for functor and
-  other non-signature child module types
-- `ctype::resolve_type_item_through_env` now reads the target `SigType`
-  directly from cached qualified components instead of resolving and scanning a
-  copied whole signature
-- `typemod::lookup_module_path_by_lid`, `lookup_modtype_path_by_lid`, and
-  `lookup_module_type_by_lid` now route dotted lookups through the same cached
-  qualified components path instead of rebuilding parent signatures for each
-  child lookup
-- the intermediate functor regression in `defunctor_make_test.res` was fixed by
-  keeping child module-type substitution against the cached parent qualified
-  signature slice rather than dropping that step entirely
+- added `typecore::copy_resolved_module_signature_for_path` and
+  `typecore::copy_module_signature_in_resolved_path` so callers that still need
+  a detached mutable signature can copy from cached
+  `QualifiedModuleComponents` instead of rebuilding the qualified signature
+  pipeline from raw module types
+- `typemod::localize_exported_structure_module_type` now uses that
+  env_lazy-backed detached-signature copy path instead of re-resolving the raw
+  module path and rebuilding its signature view first
 
 What this means:
 
-- the qualified module-components path is now carrying dotted module,
-  module-type, and type lookup work in both `ctype` and `typemod`, not only
-  dotted value lookup
-- `Import.res` improved from the prior `0.65s` / `536MB` checkpoint to `0.34s`
-  / `73MB`, which is the strongest sign so far that moving child lookups onto
-  the OCaml-shaped lazy path is the right direction
-- the broader corpus also improved from `11795.0ms` (`2.60x`) to `11277.8ms`
-  (`2.37x`), and the `Import.res` entry in the benchmark dropped from `30.40x`
-  slower than OCaml earlier in this worktree to `7.74x`
-- parity stayed effectively flat at the checkpoint level, which means the new
-  speedup did not require a new serializer workaround or an import-specific
-  hack
-- the next session should keep pushing allocation-sharing improvements through
-  the same cached qualified view and then re-profile the residual clusters
-  (`mario_game`, JSX-heavy files, `gpr_1150`, and the `ticker.res` stack
-  overflow)
+- env_lazy is now backing both the cheap lookup path and a shared
+  detached-signature copy path for callers that still need a full signature
+- the import-family parity guard stayed at the prior checkpoint level, so this
+  speedup did not introduce new `Import*` / `DynamicImportModuleWithAlias`
+  stamp drift
+- the broader corpus aggregate ratio improved from `2.37x` to `2.10x`, and the
+  Rust-faster-or-equal count moved from `1` to `8`
+- the next session should push the same source-of-truth approach into the
+  remaining whole-signature copy hotspots, then re-profile `mario_game`,
+  JSX-heavy files, `gpr_1150`, and the `ticker.res` stack overflow
 
 ## Task List
 

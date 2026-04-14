@@ -18854,6 +18854,32 @@ pub(crate) fn lookup_module_in_resolved_path<'a>(
     .flatten()
 }
 
+pub(crate) fn copy_resolved_module_signature_for_path<'a>(
+    module_path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<(Path, crate::types::decl::Signature)> {
+    with_resolved_module_components_for_path(module_path, env, pers_env, ctx, |components| {
+        (
+            components.access_path().clone(),
+            copy_lookup_signature_for_subst(components.signature(), ctx),
+        )
+    })
+}
+
+pub(crate) fn copy_module_signature_in_resolved_path<'a>(
+    parent_module_path: &Path,
+    module_name: &str,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<(Path, crate::types::decl::Signature)> {
+    let (_, access_path, _) =
+        lookup_module_in_resolved_path(parent_module_path, module_name, env, pers_env, ctx)?;
+    copy_resolved_module_signature_for_path(&access_path, env, pers_env, ctx)
+}
+
 pub(crate) fn lookup_modtype_in_resolved_path<'a>(
     parent_module_path: &Path,
     modtype_name: &str,
