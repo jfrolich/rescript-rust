@@ -46,6 +46,12 @@ struct StaticHandler {
 }
 
 #[derive(Debug, Clone)]
+struct FallthroughReturnHandler {
+    label: i32,
+    bindings: Vec<Ident>,
+}
+
+#[derive(Debug, Clone)]
 struct TailLoopState {
     function: Ident,
     params: Vec<Ident>,
@@ -85,6 +91,8 @@ pub struct LambdaCompiler {
     cmj_constant_cache: HashMap<String, Option<HashMap<String, CmjExportConstant>>>,
     external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
     static_handlers: Vec<StaticHandler>,
+    fallthrough_return_handlers: Vec<FallthroughReturnHandler>,
+    return_unit_stack: Vec<bool>,
 }
 
 impl Default for LambdaCompiler {
@@ -172,6 +180,8 @@ impl LambdaCompiler {
             cmj_constant_cache: HashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
+            fallthrough_return_handlers: Vec::new(),
+            return_unit_stack: Vec::new(),
         }
     }
 
@@ -183,6 +193,8 @@ impl LambdaCompiler {
             cmj_constant_cache: HashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
+            fallthrough_return_handlers: Vec::new(),
+            return_unit_stack: Vec::new(),
         }
     }
 
@@ -389,7 +401,11 @@ impl LambdaCompiler {
                 let body = self
                     .try_compile_identity_module_return_expr(&func.body)
                     .map(|expr| vec![Statement::return_(expr)])
-                    .unwrap_or_else(|| self.compile_return_block(&func.body));
+                    .unwrap_or_else(|| {
+                        self.with_return_unit_context(func.attr.return_unit, |this| {
+                            this.compile_return_block(&func.body)
+                        })
+                    });
                 let expr = Expression::new(ExpressionDesc::Fun {
                     is_method: false,
                     params,
@@ -883,6 +899,38 @@ impl LambdaCompiler {
                 block.extend(self.compile_return_block(second));
                 block
             }
+            Lambda::LstaticRaise(id, args) => {
+                if let Some(block) = self.compile_fallthrough_static_raise_return_block(*id, args) {
+                    return block;
+                }
+                let compiled = self.compile_expr(lam);
+                let mut block = compiled.prelude;
+                if !block_terminates(&block) {
+                    block.push(Statement::return_(compiled.expr));
+                }
+                block
+            }
+            Lambda::LstaticCatch(body, (label, bindings), handler)
+                if self.uses_fallthrough_staticcatch_return(body, *label, bindings, handler) =>
+            {
+                let mut block: Block = bindings
+                    .iter()
+                    .map(|binding| Statement::variable(VariableDeclaration {
+                        ident: binding.clone(),
+                        value: None,
+                        property: LetKind::Variable,
+                        ident_info: IdentInfo::default(),
+                    }))
+                    .collect();
+                let body_block = self.with_fallthrough_return_handler(*label, bindings, |this| {
+                    this.compile_return_block(body)
+                });
+                block.extend(body_block);
+                if !block_terminates(&block) {
+                    block.extend(self.compile_return_block(handler));
+                }
+                block
+            }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 self.with_static_handler(*label, bindings, handler, |this| {
                     this.compile_return_block(body)
@@ -900,6 +948,93 @@ impl LambdaCompiler {
                 }
                 block
             }
+        }
+    }
+
+    fn with_fallthrough_return_handler<T>(
+        &mut self,
+        label: i32,
+        bindings: &[Ident],
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.fallthrough_return_handlers.push(FallthroughReturnHandler {
+            label,
+            bindings: bindings.to_vec(),
+        });
+        let result = f(self);
+        self.fallthrough_return_handlers.pop();
+        result
+    }
+
+    fn with_return_unit_context<T>(
+        &mut self,
+        return_unit: bool,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.return_unit_stack.push(return_unit);
+        let result = f(self);
+        self.return_unit_stack.pop();
+        result
+    }
+
+    fn compile_fallthrough_static_raise_return_block(
+        &mut self,
+        label: i32,
+        args: &[Lambda],
+    ) -> Option<Block> {
+        let bindings = self
+            .fallthrough_return_handlers
+            .iter()
+            .rev()
+            .find(|handler| handler.label == label)?
+            .bindings
+            .clone();
+        if bindings.len() != args.len() {
+            return None;
+        }
+
+        let mut block = Vec::new();
+        for (arg, binding) in args.iter().zip(&bindings) {
+            if matches!(arg, Lambda::Lvar(id) if id.same(binding)) {
+                continue;
+            }
+            block.extend(self.compile_assign_to_target_block(binding, arg));
+        }
+        Some(block)
+    }
+
+    fn uses_fallthrough_staticcatch_return(
+        &self,
+        body: &Lambda,
+        label: i32,
+        bindings: &[Ident],
+        handler: &Lambda,
+    ) -> bool {
+        if self.return_unit_stack.last().copied() != Some(true) {
+            return false;
+        }
+        if lambda_contains_static_raise(handler) {
+            return false;
+        }
+
+        match body {
+            Lambda::Lswitch(_, switch) => {
+                switch.sw_consts.len() + switch.sw_blocks.len() == 1
+                    && matches!(
+                        switch.sw_failaction.as_deref(),
+                        Some(Lambda::LstaticRaise(id, args))
+                            if *id == label && args.len() == bindings.len()
+                    )
+            }
+            Lambda::LstringSwitch(_, cases, default) => {
+                cases.len() == 1
+                    && matches!(
+                        default.as_deref(),
+                        Some(Lambda::LstaticRaise(id, args))
+                            if *id == label && args.len() == bindings.len()
+                    )
+            }
+            _ => false,
         }
     }
 
@@ -6434,6 +6569,69 @@ fn statement_terminates(stmt: &Statement) -> bool {
                     .all(|clause| block_terminates(&clause.clause.body))
         }
         _ => false,
+    }
+}
+
+fn lambda_contains_static_raise(lam: &Lambda) -> bool {
+    match lam {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lapply(apply) => {
+            lambda_contains_static_raise(&apply.ap_func)
+                || apply.ap_args.iter().any(lambda_contains_static_raise)
+        }
+        Lambda::Lfunction(func) => lambda_contains_static_raise(&func.body),
+        Lambda::Llet(_, _, value, body) => {
+            lambda_contains_static_raise(value) || lambda_contains_static_raise(body)
+        }
+        Lambda::Lletrec(bindings, body) => {
+            bindings
+                .iter()
+                .any(|(_, value)| lambda_contains_static_raise(value))
+                || lambda_contains_static_raise(body)
+        }
+        Lambda::Lprim(info) => info.args.iter().any(lambda_contains_static_raise),
+        Lambda::Lswitch(scrut, switch) => {
+            lambda_contains_static_raise(scrut)
+                || switch
+                    .sw_consts
+                    .iter()
+                    .any(|(_, body)| lambda_contains_static_raise(body))
+                || switch
+                    .sw_blocks
+                    .iter()
+                    .any(|(_, body)| lambda_contains_static_raise(body))
+                || switch
+                    .sw_failaction
+                    .as_deref()
+                    .is_some_and(lambda_contains_static_raise)
+        }
+        Lambda::LstringSwitch(scrut, cases, default) => {
+            lambda_contains_static_raise(scrut)
+                || cases.iter().any(|(_, body)| lambda_contains_static_raise(body))
+                || default.as_deref().is_some_and(lambda_contains_static_raise)
+        }
+        Lambda::LstaticRaise(_, _) => true,
+        Lambda::LstaticCatch(body, (_, _), handler)
+        | Lambda::LtryWith(body, _, handler) => {
+            lambda_contains_static_raise(body) || lambda_contains_static_raise(handler)
+        }
+        Lambda::Lsequence(first, second) => {
+            lambda_contains_static_raise(first) || lambda_contains_static_raise(second)
+        }
+        Lambda::Lwhile(cond, body) => {
+            lambda_contains_static_raise(cond) || lambda_contains_static_raise(body)
+        }
+        Lambda::Lfor(_, start, finish, _, body) => {
+            lambda_contains_static_raise(start)
+                || lambda_contains_static_raise(finish)
+                || lambda_contains_static_raise(body)
+        }
+        Lambda::Lassign(_, value) => lambda_contains_static_raise(value),
+        Lambda::LifThenElse(cond, then_, else_) => {
+            lambda_contains_static_raise(cond)
+                || lambda_contains_static_raise(then_)
+                || lambda_contains_static_raise(else_)
+        }
     }
 }
 
@@ -12229,6 +12427,58 @@ mod tests {
     }
 
     #[test]
+    fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_handler() {
+        let mut compiler = LambdaCompiler::new();
+        let action = Ident::create_local("action");
+        let block = compiler.with_return_unit_context(true, |compiler| {
+            compiler.compile_return_block(&Lambda::LstaticCatch(
+                Box::new(Lambda::Lswitch(
+                    Box::new(Lambda::var(action.clone())),
+                    LambdaSwitch {
+                        sw_consts_full: false,
+                        sw_consts: vec![(0, Lambda::const_(Constant::int(1)))],
+                        sw_blocks_full: true,
+                        sw_blocks: vec![],
+                        sw_failaction: Some(Box::new(Lambda::static_raise(7, Vec::new()))),
+                        sw_names: Some(SwitchNames {
+                            consts: vec![crate::lambda::SwitchTag::named("One")],
+                            blocks: vec![],
+                        }),
+                    },
+                )),
+                (7, vec![]),
+                Box::new(Lambda::const_(Constant::int(2))),
+            ))
+        });
+
+        let [if_stmt, handler_return] = block.as_slice() else {
+            panic!("expected an if statement followed by the handler return");
+        };
+        let (cond, then_block, else_block) = match &if_stmt.desc {
+            StatementDesc::If(cond, then_block, else_block) => (cond, then_block, else_block),
+            StatementDesc::Block(inner) => {
+                let [inner_if] = inner.as_slice() else {
+                    panic!("expected the staticcatch wrapper block to contain a single if");
+                };
+                let StatementDesc::If(cond, then_block, else_block) = &inner_if.desc else {
+                    panic!("expected the single-case staticcatch switch to lower to if/fallthrough");
+                };
+                (cond, then_block, else_block)
+            }
+            other => panic!(
+                "expected the single-case staticcatch switch to lower to if/fallthrough, got {other:?}"
+            ),
+        };
+        assert_string_equality_check(cond, Some(&action), None, "One");
+        assert!(else_block.is_empty(), "unexpected else block: {else_block:?}");
+        assert_switch_case_returns_int_result(then_block, 1);
+        match &handler_return.desc {
+            StatementDesc::Return(expr) => assert_int_expr(expr, 2),
+            other => panic!("expected the fallthrough handler return, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn nested_let_values_preserve_declaration_context_for_wrapped_string_switches() {
         let mut compiler = LambdaCompiler::new();
         let version = Ident::create_local("version");
@@ -13406,8 +13656,10 @@ mod tests {
     }
 
     fn assert_switch_default_assigns_int_result(block: &Block, result: &Ident, expected: i32) {
-        let [assign] = block.as_slice() else {
-            panic!("expected a single default assignment");
+        let assign = match block.as_slice() {
+            [assign] => assign,
+            [assign, break_stmt] if matches!(break_stmt.desc, StatementDesc::Break) => assign,
+            _ => panic!("expected a default assignment with an optional break"),
         };
         match &assign.desc {
             StatementDesc::Exp(Expression {

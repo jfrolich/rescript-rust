@@ -43,6 +43,69 @@ reported:
 
 Latest iteration on **2026-04-14**:
 
+- Active slice: port the OCaml single-exit `compile_staticcatch` pseudo-jump
+  path from `compiler/core/lam_compile.ml` into
+  `compiler-rust/src/lambda/compile.rs` so single-arm switch/string-switch
+  bodies whose default is `LstaticRaise` for the enclosing catch can fall
+  through to the handler in `return_unit` function bodies instead of forcing
+  Rust-only inverted early-return wrappers
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is a `Lam_compile` control-flow lowering
+  fix downstream of the already-green optimized lambda boundary
+- OCaml reference:
+  `compiler/core/lam_compile.ml` and
+  `compiler/core/lam_compile_context.ml`, where
+  `compile_staticcatch` takes the pseudo-jump branch for a single exit code in
+  `EffectCall (Maybe_tail_is_return ...)` context, declares the handler
+  bindings up front, compiles `LstaticRaise` as assignments only, and appends
+  the handler after the body
+- Rust change:
+  - added a narrow fallthrough-staticcatch path in
+    `compile_return_block(...)` / `compile_fallthrough_static_raise_return_block(...)`
+    for single-case `Lswitch` / `LstringSwitch` bodies whose default raises
+    the enclosing static-catch label
+  - restricted that path to `return_unit` function bodies and handlers without
+    nested `LstaticRaise`, which is the closest Rust analogue of OCaml's
+    `EffectCall (Maybe_tail_is_return ...)` guard and avoids over-applying the
+    pseudo-jump rewrite in general value-returning contexts
+  - added focused regression coverage in
+    `single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_handler`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml staticcatch_wrapped_string_switches_use_the_handler_as_the_default_value -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_handler -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/VariantPatternMatchingSpreads.res`,
+    diffing `/tmp/VariantPatternMatchingSpreads.mjs` against the checked-in
+    snapshot
+  - direct repro for
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res`, diffing
+    `/tmp/VariantPatternMatchingSpreadsWithPayloads.mjs` against the checked-in
+    snapshot
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/VariantPatternMatchingSpreads.res` now matches its
+    checked-in snapshot exactly; Rust had been lowering the default-to-exit
+    path as an inverted early-return wrapper instead of letting the single
+    matching branch return and then fall through to the handler like OCaml
+  - `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` now
+    matches the same `doWithB` fallthrough shape, but the file still differs
+    on the separate `lookup2` object-vs-string branch ordering cluster
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the staticcatch lowering change
+- Topline impact:
+  - JS snapshot parity: **416 / 657** -> **416 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **241** -> **241** (**no change**)
+- Keep this change because it ports the OCaml single-exit
+  `compile_staticcatch` pseudo-jump lowering for `return_unit` function bodies
+  instead of preserving the Rust-only inverted early-return wrapper shape on
+  the minimal variant-spread repro.
+
+Latest iteration on **2026-04-14**:
+
 - Active slice: port the OCaml export-grouping behavior around
   `Pmakeblock(..., ModuleExport, Immutable)` into
   `compiler-rust/src/lambda/simplify.rs` so export-only single-use constant
