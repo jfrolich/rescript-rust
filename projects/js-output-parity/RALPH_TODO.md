@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 346 / 657 JS snapshots passing, 0 compile errors, 311 output diffs
+**Status:** 348 / 657 JS snapshots passing, 0 compile errors, 309 output diffs
 
 ## Goal
 
@@ -35,11 +35,47 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **346 / 657**
+- JS snapshot parity: **348 / 657**
 - Compile errors: **0**
-- Output diffs: **311**
+- Output diffs: **309**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: rerun the JS-path lambda simplifier after named functor
+  application inlining in `compiler-rust/src/lambda/simplify.rs`
+- OCaml reference: `compiler/core/lam_pass_remove_alias.ml` together with the
+  downstream flattening pipeline in `compiler/core/js_pass_flatten.ml` and
+  `compiler/core/js_pass_flatten_and_mark_dead.ml`, where post-inline nested
+  lets are flattened again before later field-projection cleanup
+- Rust change: `simplify_for_js_backend` now runs a second
+  flatten-and-simplify cycle after the first pass so named functor inlining
+  can expose the same projected module fields that OCaml later collapses
+- Added focused regression coverage in
+  `lambda::simplify::tests::reruns_js_backend_simplify_after_functor_inlining_exposes_projected_module_fields`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release inlines_named_functor_applications_even_when_inline_heuristics_reject_them`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release reruns_js_backend_simplify_after_functor_inlining_exposes_projected_module_fields`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/functors.res -o /tmp/functors.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `functors` now matches its checked-in `.mjs` snapshot exactly
+  - `global_module_alias_test` drops out of the authoritative diff corpus as
+    the extra simplify pass removes the surviving nested-alias wrapper shape
+  - `functors_one_arg_at_a_time` remains in the diff corpus, so this cluster
+    still has a smaller follow-up case after the shared post-inline flattening
+    gap
+  - `ExternalShadow` remains an exact guard-file match
+- Topline impact:
+  - JS snapshot parity: **348 / 657** (**+2**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **309** (**-2**)
+- Keep this change because it is a verified OCaml-aligned backend cleanup and
+  it removes two real snapshot failures while narrowing the remaining functor
+  wrapper cluster to `functors_one_arg_at_a_time`
 
 Latest iteration on **2026-04-14**:
 

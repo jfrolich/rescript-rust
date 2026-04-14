@@ -73,6 +73,11 @@ impl SimplifyEnv {
 
 /// Simplify lowered lambda before JS IR lowering.
 pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
+    let first = simplify_for_js_backend_once(lam);
+    simplify_for_js_backend_once(&first)
+}
+
+fn simplify_for_js_backend_once(lam: &Lambda) -> Lambda {
     let flattened = deep_flatten_for_js_backend(lam);
     let exports = collect_exported_idents(&flattened);
     let env = SimplifyEnv {
@@ -3485,5 +3490,201 @@ mod tests {
         };
         assert!(id.same(&belt_list));
         assert!(!dynamic_import);
+    }
+
+    #[test]
+    fn reruns_js_backend_simplify_after_functor_inlining_exposes_projected_module_fields() {
+        let functor_id = Ident::create_local("F");
+        let x_param = Ident::create_local("X");
+        let y_param = Ident::create_local("Y");
+        let cow_id = Ident::create_local("cow");
+        let sheep_id = Ident::create_local("sheep");
+        let identity_param = Ident::create_local("x");
+        let arg0 = Ident::create_local("funarg");
+        let arg1 = Ident::create_local("funarg$1");
+        let first_apply = Ident::create_local("let");
+        let second_apply = Ident::create_local("let");
+        let loc = Location::none();
+
+        let functor_attr = FunctionAttribute {
+            is_a_functor: true,
+            ..FunctionAttribute::default()
+        };
+
+        let identity_fn = || {
+            Lambda::function_(
+                1,
+                vec![identity_param.clone()],
+                Lambda::var(identity_param.clone()),
+                FunctionAttribute::default(),
+            )
+        };
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            functor_id.clone(),
+            Lambda::function_(
+                1,
+                vec![x_param],
+                Lambda::function_(
+                    1,
+                    vec![y_param],
+                    Lambda::let_(
+                        LetKind::Strict,
+                        cow_id.clone(),
+                        identity_fn(),
+                        Lambda::let_(
+                            LetKind::Strict,
+                            sheep_id.clone(),
+                            identity_fn(),
+                            Lambda::prim(
+                                Primitive::Pmakeblock(
+                                    0,
+                                    TagInfo::module(vec!["cow".to_string(), "sheep".to_string()]),
+                                    Mutable::Immutable,
+                                ),
+                                vec![Lambda::var(cow_id.clone()), Lambda::var(sheep_id.clone())],
+                                loc.clone(),
+                            ),
+                        ),
+                    ),
+                    functor_attr.clone(),
+                ),
+                functor_attr.clone(),
+            ),
+            Lambda::function_(
+                1,
+                vec![arg0.clone()],
+                Lambda::let_(
+                    LetKind::Strict,
+                    first_apply.clone(),
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(functor_id)),
+                        ap_args: vec![Lambda::prim(
+                            Primitive::Pmakeblock(
+                                0,
+                                TagInfo::module(vec!["foo".to_string()]),
+                                Mutable::Immutable,
+                            ),
+                            vec![Lambda::prim(
+                                Primitive::Pfield(
+                                    1,
+                                    FieldDbgInfo::Module {
+                                        name: "foo".to_string(),
+                                    },
+                                ),
+                                vec![Lambda::var(arg0)],
+                                loc.clone(),
+                            )],
+                            loc.clone(),
+                        )],
+                        ap_info: ApInfo {
+                            loc: loc.clone(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    }),
+                    Lambda::function_(
+                        1,
+                        vec![arg1.clone()],
+                        Lambda::let_(
+                            LetKind::Strict,
+                            second_apply.clone(),
+                            Lambda::Lapply(Apply {
+                                ap_func: Box::new(Lambda::var(first_apply.clone())),
+                                ap_args: vec![Lambda::prim(
+                                    Primitive::Pmakeblock(
+                                        0,
+                                        TagInfo::module(vec!["foo".to_string()]),
+                                        Mutable::Immutable,
+                                    ),
+                                    vec![Lambda::prim(
+                                        Primitive::Pfield(
+                                            1,
+                                            FieldDbgInfo::Module {
+                                                name: "foo".to_string(),
+                                            },
+                                        ),
+                                        vec![Lambda::var(arg1)],
+                                        loc.clone(),
+                                    )],
+                                    loc.clone(),
+                                )],
+                                ap_info: ApInfo {
+                                    loc: loc.clone(),
+                                    inlined: InlineAttribute::Default,
+                                    status: ApplyStatus::Na,
+                                },
+                                ap_transformed_jsx: false,
+                            }),
+                            Lambda::prim(
+                                Primitive::Pmakeblock(
+                                    0,
+                                    TagInfo::module(vec!["sheep".to_string()]),
+                                    Mutable::Immutable,
+                                ),
+                                vec![Lambda::prim(
+                                    Primitive::Pfield(
+                                        1,
+                                        FieldDbgInfo::Module {
+                                            name: "sheep".to_string(),
+                                        },
+                                    ),
+                                    vec![Lambda::var(second_apply.clone())],
+                                    loc,
+                                )],
+                                Location::none(),
+                            ),
+                        ),
+                        functor_attr.clone(),
+                    ),
+                ),
+                functor_attr,
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        assert!(
+            !super::lambda_hits_variable(&first_apply, &simplified),
+            "the first functor application should inline away"
+        );
+        assert!(
+            !super::lambda_hits_variable(&second_apply, &simplified),
+            "the second functor application should flatten before field projection"
+        );
+
+        let outer_functor = match simplified {
+            Lambda::Lfunction(func) => func,
+            Lambda::Llet(_, _, _, body) => match *body {
+                Lambda::Lfunction(func) => func,
+                other => panic!("expected the simplified outer lambda function, got {other:?}"),
+            },
+            other => panic!("expected the simplified outer lambda function, got {other:?}"),
+        };
+        let Lambda::Lfunction(inner_functor) = *outer_functor.body else {
+            panic!("expected the outer functor to return the projected inner function");
+        };
+        let (kept_sheep, final_block) = match *inner_functor.body {
+            Lambda::Llet(_, first_id, _, sheep_binding) => match *sheep_binding {
+                Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Pmakeblock(_, TagInfo::Module(_), _),
+                    ..
+                }) => (first_id, sheep_binding),
+                Lambda::Llet(_, kept_sheep, _, final_block) => (kept_sheep, final_block),
+                other => panic!("expected the projected sheep binding, got {other:?}"),
+            },
+            other => panic!("expected the inner functor body to end in lets plus a module block, got {other:?}"),
+        };
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::Module(fields), _),
+            args,
+            ..
+        }) = *final_block
+        else {
+            panic!("expected the simplified inner function to finish with a module block");
+        };
+        assert_eq!(fields, vec!["sheep".to_string()]);
+        assert!(matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&kept_sheep)));
     }
 }
