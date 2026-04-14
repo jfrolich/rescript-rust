@@ -4482,23 +4482,45 @@ impl LambdaCompiler {
         }
     }
 
-    fn lower_external_arg_value(
+    fn external_arg_effect(&self, arg: &Expression) -> Option<Expression> {
+        if expression_has_no_side_effects(arg) {
+            None
+        } else {
+            Some(arg.clone())
+        }
+    }
+
+    fn fuse_external_effects(&self, effects: Vec<Expression>) -> Option<Expression> {
+        let mut effects = effects.into_iter();
+        let first = effects.next()?;
+        Some(effects.fold(first, js_seq))
+    }
+
+    fn add_external_effect(&self, effect: Option<Expression>, expr: Expression) -> Expression {
+        match effect {
+            Some(effect) => js_seq(effect, expr),
+            None => expr,
+        }
+    }
+
+    fn lower_external_arg_value_and_effect(
         &self,
         arg: Expression,
         arg_label: ExternalArgLabel,
         arg_type: &ExternalArgAttr,
-    ) -> Option<Expression> {
+    ) -> (Option<Expression>, Option<Expression>) {
         match arg_type {
-            ExternalArgAttr::ArgCst(_) => None,
+            ExternalArgAttr::ArgCst(_) => (None, None),
             ExternalArgAttr::ExternUnit => {
+                let effect = self.external_arg_effect(&arg);
                 if matches!(arg_label, ExternalArgLabel::Empty) {
-                    None
+                    (None, effect)
                 } else {
-                    Some(Expression::undefined(true))
+                    (Some(Expression::undefined(true)), effect)
                 }
             }
-            ExternalArgAttr::Ignore => None,
-            _ => Some(arg),
+            ExternalArgAttr::Ignore => (None, self.external_arg_effect(&arg)),
+            _ => (Some(arg), None),
         }
     }
 
@@ -4506,9 +4528,10 @@ impl LambdaCompiler {
         &self,
         arg_types: &[ExternalArgSpec],
         args: Vec<Expression>,
-    ) -> Vec<Expression> {
+    ) -> (Vec<Expression>, Option<Expression>) {
         let mut runtime_args = args.into_iter();
         let mut assembled = Vec::new();
+        let mut effects = Vec::new();
 
         for arg_spec in arg_types {
             match &arg_spec.arg_type {
@@ -4519,9 +4542,15 @@ impl LambdaCompiler {
                     let arg = runtime_args
                         .next()
                         .unwrap_or_else(|| Expression::undefined(false));
-                    if let Some(expr) =
-                        self.lower_external_arg_value(arg, arg_spec.arg_label, &arg_spec.arg_type)
-                    {
+                    let (value, effect) = self.lower_external_arg_value_and_effect(
+                        arg,
+                        arg_spec.arg_label,
+                        &arg_spec.arg_type,
+                    );
+                    if let Some(effect) = effect {
+                        effects.push(effect);
+                    }
+                    if let Some(expr) = value {
                         assembled.push(expr);
                     }
                 }
@@ -4529,7 +4558,10 @@ impl LambdaCompiler {
         }
 
         debug_assert!(runtime_args.next().is_none());
-        self.keep_non_undefined_external_args(arg_types, assembled)
+        (
+            self.keep_non_undefined_external_args(arg_types, assembled),
+            self.fuse_external_effects(effects),
+        )
     }
 
     fn keep_non_undefined_external_args(
@@ -4558,10 +4590,11 @@ impl LambdaCompiler {
         &self,
         arg_types: &[ExternalArgSpec],
         args: Vec<Expression>,
-    ) -> Vec<Expression> {
+    ) -> (Vec<Expression>, Option<Expression>) {
         let mut runtime_args = args.into_iter().peekable();
         let mut assembled = Vec::new();
         let mut needs_spread = false;
+        let mut effects = Vec::new();
 
         for arg_spec in arg_types {
             match &arg_spec.arg_type {
@@ -4584,19 +4617,31 @@ impl LambdaCompiler {
                             }
                             arg => {
                                 needs_spread = true;
-                                if let Some(expr) = self.lower_external_arg_value(
+                                let (value, effect) = self.lower_external_arg_value_and_effect(
                                     arg,
                                     arg_spec.arg_label,
                                     &arg_spec.arg_type,
-                                ) {
+                                );
+                                if let Some(effect) = effect {
+                                    effects.push(effect);
+                                }
+                                if let Some(expr) = value {
                                     assembled.push(expr);
                                 }
                             }
                         }
-                    } else if let Some(expr) =
-                        self.lower_external_arg_value(arg, arg_spec.arg_label, &arg_spec.arg_type)
-                    {
-                        assembled.push(expr);
+                    } else {
+                        let (value, effect) = self.lower_external_arg_value_and_effect(
+                            arg,
+                            arg_spec.arg_label,
+                            &arg_spec.arg_type,
+                        );
+                        if let Some(effect) = effect {
+                            effects.push(effect);
+                        }
+                        if let Some(expr) = value {
+                            assembled.push(expr);
+                        }
                     }
                 }
             }
@@ -4610,7 +4655,7 @@ impl LambdaCompiler {
             }
         }
 
-        assembled
+        (assembled, self.fuse_external_effects(effects))
     }
 
     fn assemble_external_args(
@@ -4618,7 +4663,7 @@ impl LambdaCompiler {
         arg_types: &[ExternalArgSpec],
         args: Vec<Expression>,
         splice: bool,
-    ) -> Vec<Expression> {
+    ) -> (Vec<Expression>, Option<Expression>) {
         if splice {
             self.assemble_external_args_with_splice(arg_types, args)
         } else {
@@ -4627,20 +4672,26 @@ impl LambdaCompiler {
     }
 
     fn compile_js_object_create(
-        &self,
+        &mut self,
         obj_params: &[ExternalObjSpec],
         args: Vec<Expression>,
         prelude: &mut Block,
     ) -> Expression {
         let mut runtime_args = args.into_iter();
         let mut props = Vec::new();
+        let mut effects = Vec::new();
         let mut optional_assignments = Vec::new();
 
         for obj_param in obj_params {
             match &obj_param.obj_arg_label {
                 ExternalObjLabel::Empty => {
                     if !matches!(obj_param.obj_arg_type, ExternalArgAttr::ArgCst(_)) {
-                        let _ = runtime_args.next();
+                        let arg = runtime_args
+                            .next()
+                            .unwrap_or_else(|| Expression::undefined(false));
+                        if let Some(effect) = self.external_arg_effect(&arg) {
+                            effects.push(effect);
+                        }
                     }
                 }
                 ExternalObjLabel::Label { name } => match &obj_param.obj_arg_type {
@@ -4654,11 +4705,15 @@ impl LambdaCompiler {
                         let arg = runtime_args
                             .next()
                             .unwrap_or_else(|| Expression::undefined(false));
-                        if let Some(value) = self.lower_external_arg_value(
+                        let (value, effect) = self.lower_external_arg_value_and_effect(
                             arg,
                             ExternalArgLabel::Label,
                             &obj_param.obj_arg_type,
-                        ) {
+                        );
+                        if let Some(effect) = effect {
+                            effects.push(effect);
+                        }
+                        if let Some(value) = value {
                             props.push((PropertyName::lit(name.clone()), value));
                         }
                     }
@@ -4684,12 +4739,17 @@ impl LambdaCompiler {
                         Expression::var(tmp)
                     };
 
-                    if let Some(value) = self.lower_external_arg_value(
+                    let (value, effect) = self.lower_external_arg_value_and_effect(
                         prepared.clone(),
                         ExternalArgLabel::Empty,
                         &obj_param.obj_arg_type,
-                    ) {
-                        optional_assignments.push((name.clone(), prepared, value));
+                    );
+                    if let Some(value) = value {
+                        optional_assignments.push((
+                            name.clone(),
+                            prepared,
+                            self.add_external_effect(effect, value),
+                        ));
                     }
                 }
             }
@@ -4697,14 +4757,19 @@ impl LambdaCompiler {
 
         debug_assert!(runtime_args.next().is_none());
 
+        let object = self.add_external_effect(
+            self.fuse_external_effects(effects),
+            Expression::new(ExpressionDesc::Object(None, props)),
+        );
+
         if optional_assignments.is_empty() {
-            return Expression::new(ExpressionDesc::Object(None, props));
+            return object;
         }
 
         let obj = self.fresh_ident("obj");
         prelude.push(Statement::variable(VariableDeclaration {
             ident: obj.clone(),
-            value: Some(Expression::new(ExpressionDesc::Object(None, props))),
+            value: Some(object),
             property: LetKind::Variable,
             ident_info: IdentInfo::default(),
         }));
@@ -4794,11 +4859,8 @@ impl LambdaCompiler {
                     }
                 }
 
-                Expression::call(
-                    target,
-                    self.assemble_external_args(arg_types, args, *splice),
-                    CallInfo::default(),
-                )
+                let (args, effect) = self.assemble_external_args(arg_types, args, *splice);
+                self.add_external_effect(effect, Expression::call(target, args, CallInfo::default()))
             }
             Some(ExternalSpec::JsNew {
                 name,
@@ -4806,15 +4868,17 @@ impl LambdaCompiler {
                 splice,
                 scopes,
                 ..
-            }) => Expression::new(ExpressionDesc::New(
-                Box::new(self.translate_scoped_module_value(
+            }) => {
+                let (args, effect) = self.assemble_external_args(arg_types, args, *splice);
+                let target = self.translate_scoped_module_value(
                     external_module_name.as_ref(),
                     name,
                     scopes,
                     dynamic_import,
-                )),
-                Some(self.assemble_external_args(arg_types, args, *splice)),
-            )),
+                );
+                let expr = Expression::new(ExpressionDesc::New(Box::new(target), Some(args)));
+                self.add_external_effect(effect, expr)
+            }
             Some(ExternalSpec::JsSend {
                 name,
                 splice,
@@ -4822,18 +4886,21 @@ impl LambdaCompiler {
                 ..
             }) => match args.split_first() {
                 Some((receiver, rest)) => {
-                    let rest_args = self.assemble_external_args(
+                    let (rest_args, effect) = self.assemble_external_args(
                         arg_types.get(1..).unwrap_or(&[]),
                         rest.to_vec(),
                         *splice,
                     );
-                    Expression::call(
-                        self.static_index(
-                            self.apply_scoped_access(receiver.clone(), js_send_scopes),
-                            name,
+                    self.add_external_effect(
+                        effect,
+                        Expression::call(
+                            self.static_index(
+                                self.apply_scoped_access(receiver.clone(), js_send_scopes),
+                                name,
+                            ),
+                            rest_args,
+                            CallInfo::default(),
                         ),
-                        rest_args,
-                        CallInfo::default(),
                     )
                 }
                 None => self.compile_plain_js_call(prim_name, args),
@@ -4842,21 +4909,22 @@ impl LambdaCompiler {
                 js_get_name,
                 js_get_scopes,
             }) => {
-                let assembled = self.assemble_external_args_no_splice(arg_types, args);
-                match assembled.as_slice() {
+                let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
+                let expr = match assembled.as_slice() {
                     [receiver] => self.static_index(
                         self.apply_scoped_access(receiver.clone(), js_get_scopes),
                         js_get_name,
                     ),
                     _ => self.compile_plain_js_call(prim_name, assembled),
-                }
+                };
+                self.add_external_effect(effect, expr)
             }
             Some(ExternalSpec::JsSet {
                 js_set_name,
                 js_set_scopes,
             }) => {
-                let assembled = self.assemble_external_args_no_splice(arg_types, args);
-                match assembled.as_slice() {
+                let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
+                let expr = match assembled.as_slice() {
                     [receiver, value] => Expression::bin(
                         BinOp::Eq,
                         self.static_index(
@@ -4866,25 +4934,27 @@ impl LambdaCompiler {
                         value.clone(),
                     ),
                     _ => self.compile_plain_js_call(prim_name, assembled),
-                }
+                };
+                self.add_external_effect(effect, expr)
             }
             Some(ExternalSpec::JsGetIndex {
                 js_get_index_scopes,
             }) => {
-                let assembled = self.assemble_external_args_no_splice(arg_types, args);
-                match assembled.as_slice() {
+                let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
+                let expr = match assembled.as_slice() {
                     [receiver, index] => Expression::new(ExpressionDesc::ArrayIndex(
                         Box::new(self.apply_scoped_access(receiver.clone(), js_get_index_scopes)),
                         Box::new(index.clone()),
                     )),
                     _ => self.compile_plain_js_call(prim_name, assembled),
-                }
+                };
+                self.add_external_effect(effect, expr)
             }
             Some(ExternalSpec::JsSetIndex {
                 js_set_index_scopes,
             }) => {
-                let assembled = self.assemble_external_args_no_splice(arg_types, args);
-                match assembled.as_slice() {
+                let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
+                let expr = match assembled.as_slice() {
                     [receiver, index, value] => Expression::bin(
                         BinOp::Eq,
                         Expression::new(ExpressionDesc::ArrayIndex(
@@ -4896,30 +4966,33 @@ impl LambdaCompiler {
                         value.clone(),
                     ),
                     _ => self.compile_plain_js_call(prim_name, assembled),
-                }
+                };
+                self.add_external_effect(effect, expr)
             }
             Some(ExternalSpec::JsModuleAsVar(module_name)) => {
                 let value = self.external_module_binding(module_name, false, dynamic_import);
-                let args = self.assemble_external_args_no_splice(arg_types, args);
-                if args.is_empty() {
+                let (args, effect) = self.assemble_external_args_no_splice(arg_types, args);
+                let expr = if args.is_empty() {
                     value
                 } else {
                     Expression::call(value, args, CallInfo::default())
-                }
+                };
+                self.add_external_effect(effect, expr)
             }
             Some(ExternalSpec::JsModuleAsFn {
                 external_module_name,
                 splice,
-            }) => Expression::call(
-                self.external_module_binding(external_module_name, false, dynamic_import),
-                self.assemble_external_args(arg_types, args, *splice),
-                CallInfo::default(),
-            ),
+            }) => {
+                let (args, effect) = self.assemble_external_args(arg_types, args, *splice);
+                let target = self.external_module_binding(external_module_name, false, dynamic_import);
+                let expr = Expression::call(target, args, CallInfo::default());
+                self.add_external_effect(effect, expr)
+            }
             Some(ExternalSpec::JsModuleAsClass(module_name)) => {
-                Expression::new(ExpressionDesc::New(
-                    Box::new(self.external_module_binding(module_name, false, dynamic_import)),
-                    Some(self.assemble_external_args_no_splice(arg_types, args)),
-                ))
+                let (args, effect) = self.assemble_external_args_no_splice(arg_types, args);
+                let target = self.external_module_binding(module_name, false, dynamic_import);
+                let expr = Expression::new(ExpressionDesc::New(Box::new(target), Some(args)));
+                self.add_external_effect(effect, expr)
             }
             _ => self.compile_plain_js_call(prim_name, args),
         }
@@ -15068,6 +15141,183 @@ mod tests {
             }
             other => panic!("expected an object literal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "somefn".to_string(),
+                arg_types: vec![
+                    ExternalArgSpec {
+                        arg_type: ExternalArgAttr::Ignore,
+                        arg_label: ExternalArgLabel::Empty,
+                    },
+                    ExternalArgSpec {
+                        arg_type: ExternalArgAttr::Nothing,
+                        arg_label: ExternalArgLabel::Empty,
+                    },
+                ],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsCall {
+                        name: "somefn".to_string(),
+                        external_module_name: None,
+                        splice: false,
+                        scopes: vec![],
+                        tagged_template: false,
+                    }),
+                    obj_params: None,
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![
+                Lambda::Lsequence(
+                    Box::new(Lambda::prim(
+                        Primitive::PrawJsCode(JsRawInfo {
+                            code: "sideEffect()".to_string(),
+                            is_stmt: false,
+                        }),
+                        vec![],
+                        Location::none(),
+                    )),
+                    Box::new(Lambda::const_(Constant::string("Float"))),
+                ),
+                Lambda::const_(Constant::int(3)),
+            ],
+            Location::none(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        assert!(
+            compiled.prelude.is_empty(),
+            "expected ignored-call effects to stay in the expression, got {:?}",
+            compiled.prelude
+        );
+        let ExpressionDesc::Seq(left, call) = &compiled.expr.desc else {
+            panic!("expected outer effect sequence, got {:?}", compiled.expr);
+        };
+        let ExpressionDesc::Seq(effect, kind) = &left.as_ref().desc else {
+            panic!("expected nested ignored-arg sequence, got {:?}", left);
+        };
+        assert!(matches!(
+            effect.as_ref(),
+            Expression {
+                desc: ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
+                    code,
+                    is_stmt: false,
+                }),
+                ..
+            } if code == "sideEffect()"
+        ));
+        assert!(matches!(
+            kind.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Str { txt, .. },
+                ..
+            } if txt == "Float"
+        ));
+        match &call.as_ref().desc {
+            ExpressionDesc::Call(func, args, _) => {
+                assert!(matches!(func.as_ref().desc, ExpressionDesc::Var(_)));
+                assert!(matches!(
+                    args.as_slice(),
+                    [Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
+                        ..
+                    }]
+                ));
+            }
+            other => panic!("expected a call expression, got {other:?}"),
+        };
+    }
+
+    #[test]
+    fn lowers_ignored_js_object_fields_to_ocaml_sequence_effects() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::prim(
+            Primitive::PjsObjectCreate(vec![
+                ExternalObjSpec {
+                    obj_arg_type: ExternalArgAttr::Ignore,
+                    obj_arg_label: ExternalObjLabel::Label {
+                        name: "kind".to_string(),
+                    },
+                },
+                ExternalObjSpec {
+                    obj_arg_type: ExternalArgAttr::Nothing,
+                    obj_arg_label: ExternalObjLabel::Label {
+                        name: "hi".to_string(),
+                    },
+                },
+            ]),
+            vec![
+                Lambda::Lsequence(
+                    Box::new(Lambda::prim(
+                        Primitive::PrawJsCode(JsRawInfo {
+                            code: "sideEffect()".to_string(),
+                            is_stmt: false,
+                        }),
+                        vec![],
+                        Location::none(),
+                    )),
+                    Box::new(Lambda::const_(Constant::string("Float"))),
+                ),
+                Lambda::const_(Constant::int(3)),
+            ],
+            Location::none(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        assert!(
+            compiled.prelude.is_empty(),
+            "expected ignored-object effects to stay in the expression, got {:?}",
+            compiled.prelude
+        );
+        let ExpressionDesc::Seq(left, object) = &compiled.expr.desc else {
+            panic!("expected outer effect sequence, got {:?}", compiled.expr);
+        };
+        assert!(matches!(
+            left.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Seq(effect, kind),
+                ..
+            } if matches!(
+                effect.as_ref(),
+                Expression {
+                    desc: ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
+                        code,
+                        is_stmt: false,
+                    }),
+                    ..
+                } if code == "sideEffect()"
+            ) && matches!(
+                kind.as_ref(),
+                Expression {
+                    desc: ExpressionDesc::Str { txt, .. },
+                    ..
+                } if txt == "Float"
+            )
+        ));
+        match &object.as_ref().desc {
+            ExpressionDesc::Object(_, props) => {
+                assert_eq!(props.len(), 1);
+                assert!(matches!(
+                    &props[0],
+                    (
+                        PropertyName::Lit(name),
+                        Expression {
+                            desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
+                            ..
+                        },
+                    ) if name == "hi"
+                ));
+            }
+            other => panic!("expected an object literal expression, got {other:?}"),
+        };
     }
 
     #[test]

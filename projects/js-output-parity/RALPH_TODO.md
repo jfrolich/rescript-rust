@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 396 / 657 JS snapshots passing, 0 compile errors, 261 output diffs
+**Status:** 398 / 657 JS snapshots passing, 0 compile errors, 259 output diffs
 
 ## Goal
 
@@ -35,11 +35,77 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **396 / 657**
+- JS snapshot parity: **398 / 657**
 - Compile errors: **0**
-- Output diffs: **261**
+- Output diffs: **259**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: match OCaml's `ocaml_to_js_eff` / `add_eff` composition in
+  `compiler-rust/src/lambda/compile.rs` so ignored and unit-elided external
+  arguments keep the whole compiled arg expression as the effect payload and
+  sequence it onto the final call/object value, instead of sinking side
+  effects into Rust-only standalone statements or dropping the final pure tail
+- Active backend focus is **Phase 3: Port JS IR Lowering And Metadata** from
+  `PLAN.md`; this slice fixes external-call and `@obj` lowering at the OCaml
+  `lam_compile_external_call.ml` / `lam_compile_external_obj.ml` boundary
+  before the JS-pass and printer stages, without reopening typedtree or
+  lambda parity work
+- OCaml reference:
+  - `compiler/core/lam_compile_external_call.ml`, where `ocaml_to_js_eff`
+    returns `Splice0` plus `[arg]` for `Ignore` / unlabeled `Extern_unit`
+    when the compiled arg is not side-effect-free, `assemble_args_no_splice`
+    and `assemble_args_has_splice` collect those whole-arg effects, and
+    `add_eff` wraps the final external expression with `E.seq`
+  - `compiler/core/lam_compile_external_obj.ml`, where `assemble_obj_args`
+    sequences collected object-arg effects into the object literal initializer
+    and folds per-field ignored/optional effects into the assignment RHS
+- Rust change:
+  - replaced the temporary prelude-based ignored-arg handling with OCaml-style
+    effect sequencing helpers that carry `Option<Expression>` effects through
+    external-arg assembly and reapply them via `js_seq(...)` at the returned
+    expression boundary
+  - routed `PjsCall`, `JsNew`, `JsSend`, `JsGet`/`JsSet`,
+    `JsGetIndex`/`JsSetIndex`, `JsModuleAsFn`, `JsModuleAsClass`, and
+    `@obj` creation through the new effect path so ignored / unit-elided args
+    preserve the full compiled arg expression rather than only isolated
+    impure fragments
+  - updated focused regression coverage in
+    `lowers_ignored_js_call_args_to_ocaml_sequence_effects` and
+    `lowers_ignored_js_object_fields_to_ocaml_sequence_effects`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml ignored_js_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact `compiler-args` repro for `tests/tests/src/bs_ignore_effect.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/bs_ignore_effect.mjs` against the
+    checked-in snapshot
+  - exact `compiler-args` repro for `tests/tests/src/ffi_js_test.res` from
+    `tests/tests/lib/bs`, diffing `/tmp/ffi_js_test.mjs` against the
+    checked-in snapshot
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bs_ignore_effect.res` now matches its checked-in
+    snapshot exactly; the Rust output keeps the OCaml comma-expression shape
+    for both the `config` object initializer and the ignored GADT external
+    arg, including the retained `"Float"` evaluation inside the ignored
+    argument sequence
+  - `tests/tests/src/ffi_js_test.res` now matches its checked-in snapshot
+    exactly; the side-effecting ignored `~kind` object field keeps the
+    OCaml-style `(u = u + 1 | 0, "Int", {...})` sequence instead of sinking
+    `"Int"` into a standalone statement
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the external-effect sequencing rewrite
+- Topline impact:
+  - JS snapshot parity: **396 / 657** -> **398 / 657** (**+2**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **261** -> **259** (**-2**)
+- Keep this change because it ports the exact OCaml
+  `lam_compile_external_call.ml` `ocaml_to_js_eff` / `add_eff` and
+  `lam_compile_external_obj.ml` `assemble_obj_args` effect model instead of
+  preserving Rust-only standalone statements for ignored externals.
 
 Latest iteration on **2026-04-14**:
 
