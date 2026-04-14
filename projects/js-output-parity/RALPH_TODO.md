@@ -41,6 +41,42 @@ reported:
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
+Latest iteration on **2026-04-14**:
+
+- Active slice: named functor application inlining on the JS-path lambda
+  simplifier in `compiler-rust/src/lambda/simplify.rs`
+- OCaml reference: `compiler/core/lam_pass_remove_alias.ml`, where named
+  functor applications inline after `Lam_analysis.lfunction_can_be_inlined`
+  without also requiring `ok_to_inline_fun_when_app`
+- Rust change:
+  `should_inline_named_function` now matches that OCaml rule by allowing
+  `func.attr.is_a_functor` to bypass the regular application heuristic while
+  still requiring matching arity and `lfunction_can_be_inlined`
+- Added focused regression coverage in
+  `lambda::simplify::tests::inlines_named_functor_applications_even_when_inline_heuristics_reject_them`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release inlines_named_functor_applications_even_when_inline_heuristics_reject_them`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release identity_module_block`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct `compiler-args` snapshot repros from `tests/tests/lib/bs` for
+    `global_module_alias_test.ast` and `functors.ast`
+  - direct guard repro for `tests/tests/src/ExternalShadow.res`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `global_module_alias_test` no longer emits the surviving `Make(Belt_List)`
+    call shape; the remaining diff is now the later alias/effect sequencing
+    around repeated `let U = (...)` bindings
+  - `functors` also moves past the direct functor-call lowering and now fails
+    on a smaller wrapper/field-projection shape around `cow` / `sheep`
+  - `ExternalShadow` remains an exact guard-file match
+- Topline impact:
+  - JS snapshot parity: **346 / 657** (no change)
+  - Compile errors: **0** (no change)
+  - Output diffs: **311** (no change)
+- Keep this change even with a flat baseline because it removes a verified
+  OCaml-aligned backend gap and exposes the next remaining root cause in the
+  same cluster
+
 Interpretation:
 
 - This iteration stays on the **Phase 3: Port JS IR Lowering And Metadata**

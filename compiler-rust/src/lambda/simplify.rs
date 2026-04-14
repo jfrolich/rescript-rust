@@ -1492,7 +1492,7 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
 fn should_inline_named_function(func: &LFunction, args: &[Lambda]) -> bool {
     func.params.len() == args.len()
         && analysis::lfunction_can_be_inlined(func)
-        && analysis::ok_to_inline_fun_when_app(func, args)
+        && (func.attr.is_a_functor || analysis::ok_to_inline_fun_when_app(func, args))
 }
 
 fn should_inline_direct_function(func: &LFunction, args: &[Lambda]) -> bool {
@@ -3447,5 +3447,43 @@ mod tests {
         };
         assert_eq!(func.params, vec![param]);
         assert!(func.attr.one_unit_arg);
+    }
+
+    #[test]
+    fn inlines_named_functor_applications_even_when_inline_heuristics_reject_them() {
+        let make = Ident::create_local("Make");
+        let module_param = Ident::create_local("U");
+        let belt_list = Ident::create_persistent("Belt_List");
+
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Strict,
+            make.clone(),
+            Lambda::function_(
+                1,
+                vec![module_param.clone()],
+                Lambda::var(module_param),
+                FunctionAttribute {
+                    inline: InlineAttribute::Never,
+                    is_a_functor: true,
+                    ..FunctionAttribute::default()
+                },
+            ),
+            Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::var(make)),
+                ap_args: vec![Lambda::global_module(belt_list.clone(), false)],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            }),
+        ));
+
+        let Lambda::LglobalModule(id, dynamic_import) = simplified else {
+            panic!("expected named functor application to inline to the module argument");
+        };
+        assert!(id.same(&belt_list));
+        assert!(!dynamic_import);
     }
 }
