@@ -7,8 +7,8 @@ use rescript::{build, cli, cmd, format, lock, watcher};
 
 fn main() -> Result<()> {
     // Set a larger stack size for Rayon worker threads. The --in-process mode
-    // uses source-fallback type checking which can recurse deeply for modules
-    // with many transitive dependencies.
+    // compiles modules with deep type-checker recursion, so a larger base
+    // stack reduces the chance of worker-thread stack overflow.
     rayon::ThreadPoolBuilder::new()
         .stack_size(64 * 1024 * 1024)
         .build_global()

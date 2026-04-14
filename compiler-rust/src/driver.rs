@@ -1591,6 +1591,7 @@ pub fn compile_source_in_process(
         .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
 
     // Type check
+    log::debug!("[compile_source_in_process] {} type-check start", module_name);
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
@@ -1609,8 +1610,10 @@ pub fn compile_source_in_process(
 
     tctx.set_persistent_env(pers_env);
 
+    log::debug!("[compile_source_in_process] {} type_structure start", module_name);
     let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+    log::debug!("[compile_source_in_process] {} type_structure done", module_name);
 
     // Apply interface constraints if a .resi was pre-registered.
     if has_interface {
@@ -1635,6 +1638,7 @@ pub fn compile_source_in_process(
         crate::types::includemod::simplify_signature(&typed_structure.str_type);
 
     // Lambda conversion
+    log::debug!("[compile_source_in_process] {} lambda start", module_name);
     let lambda_start_stamp = type_ctx
         .current_stamp()
         .max(max_lambda_input_stamp(&typed_structure));
@@ -1691,8 +1695,10 @@ pub fn compile_source_in_process(
     );
 
     // JS IR -> JS source
+    log::debug!("[compile_source_in_process] {} js-print start", module_name);
     let js =
         print_deps_program_with_directives(&program, Some(&module_path_resolver), &file_directives);
+    log::debug!("[compile_source_in_process] {} complete", module_name);
 
     // Register the module's published interface in the internal PersistentEnv
     // and extract the finalized PersStruct for the caller's registry.

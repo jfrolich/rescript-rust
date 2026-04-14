@@ -4235,6 +4235,9 @@ pub fn type_expect<'a>(
 ) -> TypeCoreResult<Expression> {
     use crate::parser::ast::ExpressionDesc as ED;
 
+    let _depth_guard = super::context::TypecheckerDepthGuard::enter()
+        .map_err(|msg| super::TypeCoreError::Other(msg))?;
+
     let loc = expr.pexp_loc.clone();
     let ctx = tctx.type_ctx;
     let exp_env_ref = ctx.store_typed_env(env);

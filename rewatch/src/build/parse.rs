@@ -267,7 +267,7 @@ pub fn generate_asts(
                                 &build_state.build_state.project_context,
                                 package,
                                 &module_name,
-                                &build_state.build_state.compiler_info.bsc_path,
+                                build_state.build_state.compiler_info.bsc_path.as_ref().expect("bsc_path required for file-based mode"),
                             ) {
                                 has_failure = true;
                                 stderr.push_str(&format!("{err}\n"));
@@ -425,7 +425,7 @@ fn generate_ast(
         )?;
 
         match Some(
-            Command::new(&build_state.compiler_info.bsc_path)
+            Command::new(build_state.compiler_info.bsc_path.as_ref().expect("bsc_path required for file-based mode"))
                 .current_dir(&build_path_abs)
                 .args(parser_args)
                 .output()

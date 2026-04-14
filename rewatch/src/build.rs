@@ -112,12 +112,18 @@ pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
     Ok(result)
 }
 
-pub fn get_compiler_info(project_context: &ProjectContext) -> Result<CompilerInfo> {
-    let bsc_path = helpers::get_bsc();
-    let bsc_hash = helpers::compute_file_hash(&bsc_path).ok_or(anyhow!(
-        "Failed to compute bsc hash for {}",
-        bsc_path.to_string_lossy()
-    ))?;
+pub fn get_compiler_info(project_context: &ProjectContext, build_mode: BuildMode) -> Result<CompilerInfo> {
+    let (bsc_path, bsc_hash) = if build_mode.is_in_process() {
+        // In --in-process mode, bsc is not needed
+        (None, None)
+    } else {
+        let path = helpers::get_bsc();
+        let hash = helpers::compute_file_hash(&path).ok_or(anyhow!(
+            "Failed to compute bsc hash for {}",
+            path.to_string_lossy()
+        ))?;
+        (Some(path), Some(hash))
+    };
     let runtime_path = compile::get_runtime_path(&project_context.current_config, project_context)?;
     Ok(CompilerInfo {
         bsc_path,
@@ -138,7 +144,7 @@ pub fn initialize_build(
     dump_typed_sexp: bool,
 ) -> Result<BuildCommandState> {
     let project_context = ProjectContext::new(path)?;
-    let compiler = get_compiler_info(&project_context)?;
+    let compiler = get_compiler_info(&project_context, build_mode)?;
 
     let timing_clean_start = Instant::now();
     let packages = packages::make(filter, &project_context, show_progress)?;

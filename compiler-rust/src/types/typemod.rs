@@ -7139,6 +7139,9 @@ fn type_module_expr_with_alias<'a>(
     mod_expr: &ParsedModuleExpr,
     alias: bool,
 ) -> TypeModResult<ModuleExpr> {
+    let _depth_guard = super::context::TypecheckerDepthGuard::enter()
+        .map_err(|msg| TypeModError::CoreError(TypeCoreError::Other(msg)))?;
+
     let loc = mod_expr.pmod_loc;
 
     match &*mod_expr.pmod_desc {
@@ -8180,6 +8183,9 @@ fn type_structure_item<'a>(
     arena: &'a ParseArena,
     item: &ParsedStructureItem,
 ) -> TypeModResult<(StructureItem, Vec<crate::types::decl::SignatureItem>, Env)> {
+    let _depth_guard = super::context::TypecheckerDepthGuard::enter()
+        .map_err(|msg| TypeModError::CoreError(TypeCoreError::Other(msg)))?;
+
     let loc = item.pstr_loc;
 
     match &*item.pstr_desc {
