@@ -10482,9 +10482,16 @@ fn type_structure_item<'a>(
         }
 
         ParsedStructureItemDesc::Pstr_module(mb) => {
+            // Match OCaml typemod.ml:1454: create the module ident before any
+            // body typing or semantic-module-type probing that might allocate
+            // additional identifiers.
+            let mod_name_str = arena.get_string(mb.pmb_name.txt);
+            let mod_id = tctx.type_ctx.create_ident(mod_name_str);
+
             // Module binding: module M = ME
-            // Compute the semantic module type BEFORE type-checking the module expr,
-            // so we can use it to extend the environment.
+            // Compute the semantic module type before type-checking the module
+            // expr so we can extend the environment with the right declaration,
+            // but only after reserving the binding ident above.
             let semantic_mod_type = match &*arena.get_mod_expr(mb.pmb_expr).pmod_desc {
                 // Match OCaml typemod: module aliases keep an alias semantic type
                 // (Mty_alias) instead of eagerly replacing it with the aliased
@@ -10512,12 +10519,6 @@ fn type_structure_item<'a>(
                     arena.get_mod_expr(mb.pmb_expr),
                 ),
             };
-
-            // Create module ident BEFORE typing body (matches OCaml typemod.ml:1454)
-            // This ensures binding_time < all internal idents, so
-            // lower_nongen(binding_time - 1) can reach internal non-generic Tvars.
-            let mod_name_str = arena.get_string(mb.pmb_name.txt);
-            let mod_id = tctx.type_ctx.create_ident(mod_name_str);
 
             let typed_mod = type_module_expr_with_alias(
                 tctx,
