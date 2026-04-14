@@ -1268,7 +1268,8 @@ fn close_matching_variant_rows_from_expected<'a>(
                 let impl_row = btype::row_repr(type_ctx, impl_row0);
                 let expected_row = btype::row_repr(type_ctx, expected_row0);
 
-                let mut expected_by_label: HashMap<String, RowField> = expected_row
+                let mut expected_by_label: HashMap<crate::types::asttypes::Label, RowField> =
+                    expected_row
                     .row_fields
                     .iter()
                     .map(|(label, field)| (label.clone(), field.clone()))

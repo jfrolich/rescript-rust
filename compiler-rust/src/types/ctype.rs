@@ -22,7 +22,7 @@
 //! Type errors are represented as `TypeError` with detailed information
 //! about what went wrong during unification or other operations.
 
-use super::asttypes::PrivateFlag;
+use super::asttypes::{Label, PrivateFlag};
 use super::btype::{self, iter_type_expr, row_fixed, row_more, row_repr, row_repr_ref};
 use super::context::TypeContext;
 use super::env::Env;
@@ -3522,10 +3522,10 @@ fn unify_types<'a>(
 // ============================================================================
 
 /// Sort row fields alphabetically by label, matching OCaml's `sort_row_fields`.
-type RowFieldEntryRef<'a> = (&'a String, &'a RowField);
+type RowFieldEntryRef<'a> = (&'a Label, &'a RowField);
 type RowPairRef<'a, 'b> = (&'a str, &'a RowField, &'b RowField);
 
-fn sort_row_fields<'a>(fields: &'a [(String, RowField)]) -> Vec<RowFieldEntryRef<'a>> {
+fn sort_row_fields<'a>(fields: &'a [(Label, RowField)]) -> Vec<RowFieldEntryRef<'a>> {
     let mut sorted: Vec<_> = fields.iter().map(|(label, field)| (label, field)).collect();
     sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
     sorted
@@ -3588,8 +3588,8 @@ fn merge_rf<'a, 'b>(
 /// Sorts both inputs, then uses sorted merge to partition into
 /// (r1_only, r2_only, pairs).
 fn merge_row_fields<'a, 'b>(
-    fi1: &'a [(String, RowField)],
-    fi2: &'b [(String, RowField)],
+    fi1: &'a [(Label, RowField)],
+    fi2: &'b [(Label, RowField)],
 ) -> (
     Vec<RowFieldEntryRef<'a>>,
     Vec<RowFieldEntryRef<'b>>,
@@ -3661,7 +3661,7 @@ fn unify_rows<'a>(
     let closed = row1.row_closed || row2.row_closed;
 
     let filter_row_fields =
-        |erase: bool, fields: &[RowFieldEntryRef<'_>]| -> Vec<(String, RowField)> {
+        |erase: bool, fields: &[RowFieldEntryRef<'_>]| -> Vec<(Label, RowField)> {
             let mut filtered = Vec::new();
             for (label, field) in fields.iter().copied() {
                 match super::btype::row_field_repr(ctx, field) {
@@ -7201,7 +7201,7 @@ pub fn normalize_all_types(ctx: &TypeContext<'_>) {
         match &*desc {
             TypeDesc::Tvariant(row) => {
                 let row = row_repr(ctx, row);
-                let mut fields: Vec<(String, RowField)> = row
+                let mut fields: Vec<(Label, RowField)> = row
                     .row_fields
                     .iter()
                     .map(|(label, field)| {
@@ -7271,7 +7271,7 @@ fn normalize_type_rec(ctx: &TypeContext<'_>, visited: &mut HashSet<TypeExprRef>,
             // over-sorting expression-level variants (they happen to sort correctly already
             // or their tests fail for other reasons).
             let row = row_repr(ctx, row);
-            let mut fields: Vec<(String, RowField)> = row
+            let mut fields: Vec<(Label, RowField)> = row
                 .row_fields
                 .iter()
                 .map(|(label, field)| {

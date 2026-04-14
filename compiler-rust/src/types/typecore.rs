@@ -107,12 +107,12 @@ fn ocaml_hashtbl_hash_string(s: &str) -> u32 {
 }
 
 /// Match OCaml `Hashtbl.create 17` + `Hashtbl.fold` traversal order.
-fn ocaml_hashtbl_fold_order(labels: &[String]) -> Vec<String> {
+fn ocaml_hashtbl_fold_order<S: AsRef<str> + Clone>(labels: &[S]) -> Vec<S> {
     let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); ocaml_hashtbl_power_2_above(16, 17)];
     let mut size = 0usize;
 
     for (entry_idx, label) in labels.iter().enumerate() {
-        let bucket_idx = (ocaml_hashtbl_hash_string(label) as usize) & (buckets.len() - 1);
+        let bucket_idx = (ocaml_hashtbl_hash_string(label.as_ref()) as usize) & (buckets.len() - 1);
         buckets[bucket_idx].insert(0, entry_idx);
         size += 1;
 
@@ -120,7 +120,7 @@ fn ocaml_hashtbl_fold_order(labels: &[String]) -> Vec<String> {
             let mut new_buckets = vec![Vec::new(); buckets.len() * 2];
             for bucket in &buckets {
                 for &idx in bucket {
-                    let new_idx = (ocaml_hashtbl_hash_string(&labels[idx]) as usize)
+                    let new_idx = (ocaml_hashtbl_hash_string(labels[idx].as_ref()) as usize)
                         & (new_buckets.len() - 1);
                     new_buckets[new_idx].push(idx);
                 }
@@ -1738,14 +1738,16 @@ fn transl_type_inner(
             // Polymorphic variant type: [> `A | `B of int ]
             let mut typed_rows = Vec::new();
             let mut row_name: Option<(Path, Vec<TypeExprRef>)> = None;
-            let mut row_field_map: HashMap<String, crate::types::type_expr::RowField> =
+            let mut row_field_map:
+                HashMap<crate::types::asttypes::Label, crate::types::type_expr::RowField> =
                 HashMap::new();
-            let mut row_field_insertions: Vec<String> = Vec::new();
+            let mut row_field_insertions: Vec<crate::types::asttypes::Label> = Vec::new();
 
             fn add_row_field(
-                row_field_map: &mut HashMap<String, crate::types::type_expr::RowField>,
-                row_field_insertions: &mut Vec<String>,
-                label: String,
+                row_field_map:
+                    &mut HashMap<crate::types::asttypes::Label, crate::types::type_expr::RowField>,
+                row_field_insertions: &mut Vec<crate::types::asttypes::Label>,
+                label: crate::types::asttypes::Label,
                 field: crate::types::type_expr::RowField,
             ) {
                 if !row_field_map.contains_key(&label) {
@@ -1769,7 +1771,9 @@ fn transl_type_inner(
                         row_name = None;
 
                         let is_reither = labels.as_ref().is_some_and(|present| {
-                            !present.iter().any(|present_lbl| present_lbl == &label.txt)
+                            !present
+                                .iter()
+                                .any(|present_lbl| present_lbl == label.txt.as_ref())
                         });
                         let row_field = if is_reither {
                             crate::types::type_expr::RowField::Reither {
@@ -1789,7 +1793,7 @@ fn transl_type_inner(
                         add_row_field(
                             &mut row_field_map,
                             &mut row_field_insertions,
-                            label.txt.to_string(),
+                            label.txt.to_string().into(),
                             row_field,
                         );
 
@@ -1840,7 +1844,7 @@ fn transl_type_inner(
                         if let Some(fields) = inherited_fields {
                             for (label_name, inherited_field) in fields {
                                 let is_reither = labels.as_ref().is_some_and(|present| {
-                                    !present.iter().any(|lbl| lbl == &label_name)
+                                    !present.iter().any(|lbl| lbl == label_name.as_str())
                                 });
                                 let resolved_field = if is_reither {
                                     match inherited_field {
@@ -2065,12 +2069,12 @@ fn build_or_pat(
     // Step 3: Build patterns and new row fields from the existing row fields
     // OCaml creates Reither fields for each Rpresent field
     let mut pats: Vec<(String, Option<Box<Pattern>>)> = Vec::new();
-    let mut fields: Vec<(String, RowField)> = Vec::new();
+    let mut fields: Vec<(crate::types::asttypes::Label, RowField)> = Vec::new();
 
     for (label, field) in &row0.row_fields {
         match crate::types::btype::row_field_repr(ctx, field) {
             RowField::Rpresent(None) => {
-                pats.push((label.clone(), None));
+                pats.push((label.to_string(), None));
                 fields.push((
                     label.clone(),
                     RowField::Reither {
@@ -2089,7 +2093,7 @@ fn build_or_pat(
                     tctx.type_ctx.store_typed_env(env),
                     Attributes::new(),
                 );
-                pats.push((label.clone(), Some(Box::new(arg_pat))));
+                pats.push((label.to_string(), Some(Box::new(arg_pat))));
                 fields.push((
                     label.clone(),
                     RowField::Reither {
@@ -3311,7 +3315,7 @@ fn build_as_type(
             };
             let row = crate::types::type_expr::RowDesc {
                 row_fields: vec![(
-                    label.clone(),
+                    label.clone().into(),
                     crate::types::type_expr::RowField::Rpresent(opt_ty),
                 )],
                 row_more: ctx.new_var(None),
@@ -3692,7 +3696,7 @@ fn type_pattern_variant(
     }
     let variant_ty = ctx.new_variant(crate::types::type_expr::RowDesc {
         row_fields: vec![(
-            label.to_string(),
+            label.to_string().into(),
             crate::types::type_expr::RowField::Reither {
                 constant: arg.is_none(),
                 types: row_arg_types,
@@ -8030,7 +8034,7 @@ fn reorder_variant_row_for_pat_type(
         .into_iter()
         .enumerate()
         .map(|(original_index, (label, field))| {
-            let label_order = order_index.get(&label).copied().unwrap_or(usize::MAX);
+            let label_order = order_index.get(label.as_str()).copied().unwrap_or(usize::MAX);
             (label_order, original_index, (label, field))
         })
         .collect::<Vec<_>>();
@@ -8383,8 +8387,8 @@ fn merge_variant_row_fields_single(
     let mut merged_fields = variant_row_data.row_fields.clone();
 
     let mut push_missing_field =
-        |fields: &mut Vec<(String, crate::types::type_expr::RowField)>,
-         tag: &String,
+        |fields: &mut Vec<(crate::types::asttypes::Label, crate::types::type_expr::RowField)>,
+         tag: &crate::types::asttypes::Label,
          field: &crate::types::type_expr::RowField| {
             if fields.iter().all(|(existing, _)| existing != tag) {
                 fields.push((tag.clone(), field.clone()));
@@ -8662,7 +8666,7 @@ fn close_open_variants_in_type_inner(
                 let all_covered = row_data
                     .row_fields
                     .iter()
-                    .all(|(tag, _)| matched_tags.contains(tag));
+                    .all(|(tag, _)| matched_tags.contains(tag.as_str()));
                 if all_covered {
                     let mut closed_row = row_data;
                     closed_row.row_closed = true;
@@ -9073,7 +9077,11 @@ fn normalize_wildcard_coverage_by_labels(
         let ty = TypeExprRef(wildcard_key);
         let desc = ctx.get_desc(ty);
         if let TypeDesc::Tvariant(row) = &*desc {
-            let mut labels: Vec<String> = row.row_fields.iter().map(|(l, _)| l.clone()).collect();
+            let mut labels: Vec<String> = row
+                .row_fields
+                .iter()
+                .map(|(l, _)| l.to_string())
+                .collect();
             labels.sort();
             wildcard_label_sets.push(labels);
         }
@@ -9089,7 +9097,11 @@ fn normalize_wildcard_coverage_by_labels(
         let ty = TypeExprRef(row_key);
         let desc = ctx.get_desc(ty);
         if let TypeDesc::Tvariant(row) = &*desc {
-            let mut labels: Vec<String> = row.row_fields.iter().map(|(l, _)| l.clone()).collect();
+            let mut labels: Vec<String> = row
+                .row_fields
+                .iter()
+                .map(|(l, _)| l.to_string())
+                .collect();
             labels.sort();
             for wildcard_labels in &wildcard_label_sets {
                 // Use subset matching: a wildcard row from an earlier case
@@ -10547,7 +10559,7 @@ fn type_variant(
         // Rpresent for variant expression types, including recursive payloads.
         let variant_ty = ctx.new_variant(crate::types::type_expr::RowDesc {
             row_fields: vec![(
-                label.to_string(),
+                label.to_string().into(),
                 crate::types::type_expr::RowField::Rpresent(Some(typed_arg.exp_type)),
             )],
             row_more: ctx.new_var(None),
@@ -10569,7 +10581,7 @@ fn type_variant(
     // Constant polymorphic variants (`#Tag`) use an explicit one-field open row.
     let variant_ty = ctx.new_variant(crate::types::type_expr::RowDesc {
         row_fields: vec![(
-            label.to_string(),
+            label.to_string().into(),
             crate::types::type_expr::RowField::Rpresent(None),
         )],
         row_more: ctx.new_var(None),

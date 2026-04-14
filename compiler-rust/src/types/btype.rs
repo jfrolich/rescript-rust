@@ -124,12 +124,16 @@ pub fn row_repr_ref<'a>(ctx: &'a TypeContext<'a>, row: &'a RowDesc) -> Cow<'a, R
     }
 }
 
-fn row_repr_aux(ctx: &TypeContext<'_>, ll: &[Vec<(String, RowField)>], row: &RowDesc) -> RowDesc {
+fn row_repr_aux(
+    ctx: &TypeContext<'_>,
+    ll: &[Vec<(crate::types::asttypes::Label, RowField)>],
+    row: &RowDesc,
+) -> RowDesc {
     let more = ctx.repr(row.row_more);
     match &*ctx.get_desc(more) {
         TypeDesc::Tvariant(inner_row) => {
             let f = &row.row_fields;
-            let new_ll: Vec<Vec<(String, RowField)>> = if f.is_empty() {
+            let new_ll: Vec<Vec<(crate::types::asttypes::Label, RowField)>> = if f.is_empty() {
                 ll.to_vec()
             } else {
                 let mut new_ll = vec![f.clone()];
