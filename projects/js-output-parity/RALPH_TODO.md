@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 432 / 657 JS snapshots passing, 0 compile errors, 225 output diffs
+**Status:** 433 / 657 JS snapshots passing, 0 compile errors, 224 output diffs
 
 ## Goal
 
@@ -35,11 +35,68 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **432 / 657**
+- JS snapshot parity: **433 / 657**
 - Compile errors: **0**
-- Output diffs: **225**
+- Output diffs: **224**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the missing OCaml backend primitive lowering for
+  `Pisint`, `Pis_poly_var_block`, and `Pisout` so JS predicate compilation does
+  not fall through to the Rust `undefined` fallback in emitted snapshots
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is a `Lam_compile` primitive-lowering fix
+  downstream of the already-green optimized lambda boundary, not a printer
+  rewrite
+- OCaml reference:
+  `compiler/core/lam_compile_primitive.ml`, where `Pisint`,
+  `Pis_poly_var_block`, and `Pisout` lower through `E.is_type_number`,
+  `E.is_type_object`, and `E.is_out`, plus `compiler/core/js_exp_make.ml`,
+  where `is_out` performs the range-specialized predicate rewrites
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` to lower
+    `Primitive::Pisint`, `Primitive::PisPolyVarBlock`, and
+    `Primitive::Pisout(offset)` instead of dropping through to
+    `Expression::undefined(false)`
+  - added helpers mirroring the OCaml backend predicate builders for
+    `typeof ... === "number"`, `typeof ... === "object"`, and the specialized
+    `is_out` range checks after `int32_offset`
+  - added focused regression coverage in
+    `lowers_pis_poly_var_block_to_typeof_object_check`,
+    `lowers_pisint_to_typeof_number_check`, and
+    `lowers_pisout_to_ocaml_range_check_shapes`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_pis -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/more_poly_variant_test.res`, diffing the
+    exact emitted module against the checked-in snapshot to confirm the missing
+    polyvariant predicate no longer compiles to `undefined`
+  - direct repro for `tests/tests/src/test_primitive.res`, diffing the exact
+    emitted module against the checked-in snapshot
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_primitive.res` now matches its checked-in snapshot
+    exactly; Rust had been compiling the missing backend predicate primitive to
+    `undefined`, which leaked into emitted JS
+  - `tests/tests/src/more_poly_variant_test.res` no longer emits
+    `if (undefined)` / `if (!undefined)` in the polyvariant predicate path; the
+    remaining diff is now a later runtime-shape/access mismatch
+    (`x[0]` / `x[1]` versus `x.NAME` / `x.VAL`)
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the primitive-lowering change
+- Topline impact:
+  - JS snapshot parity: **432 / 657** -> **433 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **225** -> **224** (**-1**)
+- Keep this change because it ports the OCaml
+  `Lam_compile_primitive` / `Js_exp_make` predicate lowering instead of
+  preserving the Rust-only missing-primitive `undefined` fallback in emitted
+  JS.
 
 Latest iteration on **2026-04-14**:
 

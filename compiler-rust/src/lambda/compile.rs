@@ -4081,6 +4081,12 @@ impl LambdaCompiler {
                     Box::new(Expression::undefined(false)),
                 ))
             }
+            Pisint => is_type_number_expr(compiled_args[0].clone()),
+            PisPolyVarBlock => is_type_object_expr(compiled_args[0].clone()),
+            Pisout(offset) => match compiled_args.as_slice() {
+                [range, value] => is_out_expr(int32_offset(value.clone(), *offset), range.clone()),
+                _ => Expression::undefined(false),
+            },
             Pmakearray => Expression::array(compiled_args, MutableFlag::Mutable),
             Pmakedict => match compiled_args.as_slice() {
                 [Expression {
@@ -7267,6 +7273,91 @@ fn int32_offset(expr: Expression, offset: i32) -> Expression {
         expr
     } else {
         int32_add(expr, int_expr(offset))
+    }
+}
+
+fn is_type_number_expr(expr: Expression) -> Expression {
+    Expression::bin(
+        BinOp::EqEqEq,
+        Expression::new(ExpressionDesc::Typeof(Box::new(expr))),
+        Expression::string("number"),
+    )
+}
+
+fn is_type_object_expr(expr: Expression) -> Expression {
+    Expression::bin(
+        BinOp::EqEqEq,
+        Expression::new(ExpressionDesc::Typeof(Box::new(expr))),
+        Expression::string("object"),
+    )
+}
+
+fn strict_eq_int(expr: Expression, value: i32) -> Expression {
+    Expression::bin(BinOp::EqEqEq, expr, int_expr(value))
+}
+
+fn range_exclusion_or(expr: Expression, upper: i32, lower: i32) -> Expression {
+    Expression::bin(
+        BinOp::Or,
+        Expression::bin(BinOp::Gt, expr.clone(), int_expr(upper)),
+        Expression::bin(BinOp::Lt, expr, int_expr(lower)),
+    )
+}
+
+fn is_out_expr(expr: Expression, range: Expression) -> Expression {
+    match (int_literal(&range), &expr.desc) {
+        (Some(1), ExpressionDesc::Var(_)) => Expression::not(Expression::bin(
+            BinOp::Or,
+            strict_eq_int(expr.clone(), 0),
+            strict_eq_int(expr.clone(), 1),
+        )),
+        (Some(1), ExpressionDesc::Bin(BinOp::Plus, left, right)) => match (&left.desc, &right.desc)
+        {
+            (ExpressionDesc::Number(Number::Int { i, .. }), ExpressionDesc::Var(_)) => {
+                Expression::not(Expression::bin(
+                    BinOp::Or,
+                    strict_eq_int(right.as_ref().clone(), i.wrapping_neg()),
+                    strict_eq_int(right.as_ref().clone(), 1i32.wrapping_sub(*i)),
+                ))
+            }
+            (ExpressionDesc::Var(_), ExpressionDesc::Number(Number::Int { i, .. })) => {
+                Expression::not(Expression::bin(
+                    BinOp::Or,
+                    strict_eq_int(left.as_ref().clone(), i.wrapping_neg()),
+                    strict_eq_int(left.as_ref().clone(), 1i32.wrapping_sub(*i)),
+                ))
+            }
+            _ => Expression::bin(BinOp::Gt, expr, range),
+        },
+        (Some(1), ExpressionDesc::Bin(BinOp::Minus, left, right)) => match (&left.desc, &right.desc)
+        {
+            (ExpressionDesc::Var(_), ExpressionDesc::Number(Number::Int { i, .. })) => {
+                Expression::not(Expression::bin(
+                    BinOp::Or,
+                    strict_eq_int(left.as_ref().clone(), i.wrapping_add(1)),
+                    strict_eq_int(left.as_ref().clone(), *i),
+                ))
+            }
+            _ => Expression::bin(BinOp::Gt, expr, range),
+        },
+        (Some(k), ExpressionDesc::Bin(BinOp::Minus, left, right)) => match (&left.desc, &right.desc)
+        {
+            (ExpressionDesc::Var(_), ExpressionDesc::Number(Number::Int { i, .. })) => {
+                range_exclusion_or(left.as_ref().clone(), i.wrapping_add(k), *i)
+            }
+            _ => Expression::bin(BinOp::Gt, expr, range),
+        },
+        (Some(k), ExpressionDesc::Var(_)) => range_exclusion_or(expr, k, 0),
+        (_, ExpressionDesc::Bin(BinOp::Bor, inner, zero))
+            if is_zero_int(zero.as_ref())
+                && matches!(
+                    inner.as_ref().desc,
+                    ExpressionDesc::Bin(BinOp::Plus | BinOp::Minus, _, _)
+                ) =>
+        {
+            is_out_expr(inner.as_ref().clone(), range)
+        }
+        _ => Expression::bin(BinOp::Gt, expr, range),
     }
 }
 
@@ -17076,6 +17167,87 @@ mod tests {
             }
             other => panic!("expected `cell.contents = cell.contents + 1 | 0`, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lowers_pis_poly_var_block_to_typeof_object_check() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PisPolyVarBlock,
+            vec![Lambda::var(value)],
+            Location::none(),
+        ));
+
+        assert!(
+            compiled.prelude.is_empty(),
+            "unexpected prelude:\n{}",
+            print_block(&compiled.prelude)
+        );
+        assert!(
+            print_expression(&compiled.expr) == "typeof value === \"object\"",
+            "rendered expression was:\n{}",
+            print_expression(&compiled.expr)
+        );
+    }
+
+    #[test]
+    fn lowers_pisint_to_typeof_number_check() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pisint,
+            vec![Lambda::var(value)],
+            Location::none(),
+        ));
+
+        assert!(
+            compiled.prelude.is_empty(),
+            "unexpected prelude:\n{}",
+            print_block(&compiled.prelude)
+        );
+        assert!(
+            print_expression(&compiled.expr) == "typeof value === \"number\"",
+            "rendered expression was:\n{}",
+            print_expression(&compiled.expr)
+        );
+    }
+
+    #[test]
+    fn lowers_pisout_to_ocaml_range_check_shapes() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let zero_offset = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pisout(0),
+            vec![Lambda::const_(Constant::int(1)), Lambda::var(value.clone())],
+            Location::none(),
+        ));
+        let one_offset = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pisout(1),
+            vec![Lambda::const_(Constant::int(1)), Lambda::var(value)],
+            Location::none(),
+        ));
+
+        assert!(
+            zero_offset.prelude.is_empty(),
+            "unexpected prelude:\n{}",
+            print_block(&zero_offset.prelude)
+        );
+        assert!(
+            one_offset.prelude.is_empty(),
+            "unexpected prelude:\n{}",
+            print_block(&one_offset.prelude)
+        );
+        assert!(
+            print_expression(&zero_offset.expr) == "value !== 0 && value !== 1",
+            "rendered expression was:\n{}",
+            print_expression(&zero_offset.expr)
+        );
+        assert!(
+            print_expression(&one_offset.expr) == "value !== -1 && value !== 0",
+            "rendered expression was:\n{}",
+            print_expression(&one_offset.expr)
+        );
     }
 
     #[test]
