@@ -7454,24 +7454,26 @@ fn substituted_caml_block_item(
 }
 
 fn is_simple_block_binding_item(expr: &Expression) -> bool {
-    matches!(
-        expr.desc,
+    match &expr.desc {
         ExpressionDesc::Var(_)
-            | ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
-            | ExpressionDesc::Bool(_)
-            | ExpressionDesc::Undefined { .. }
-    )
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Undefined { .. } => true,
+        ExpressionDesc::OptionalBlock(inner, true) => is_simple_block_binding_item(inner),
+        _ => false,
+    }
 }
 
 fn is_simple_substituted_index_value(expr: &Expression) -> bool {
-    matches!(
-        expr.desc,
+    match &expr.desc {
         ExpressionDesc::Var(_)
-            | ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
-            | ExpressionDesc::Undefined { .. }
-    )
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Undefined { .. } => true,
+        ExpressionDesc::OptionalBlock(inner, true) => is_simple_substituted_index_value(inner),
+        _ => false,
+    }
 }
 
 fn block_substitution_name(ident: &Ident, tag_info: &TagInfo, index: usize) -> String {
@@ -14728,6 +14730,101 @@ mod tests {
             }) if id.same(&eq) => {}
             other => panic!(
                 "expected the single-field module projection to inline to the field value, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn js_flatten_and_mark_dead_keeps_identity_optional_record_fields_inline() {
+        let record = Ident::create_local("x");
+        let deps = apply_js_flatten_and_mark_dead_pass(DepsProgram {
+            program: Program::new(
+                vec![Statement::variable(VariableDeclaration {
+                    ident: record.clone(),
+                    value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                        vec![
+                            Expression::undefined(false),
+                            Expression::new(ExpressionDesc::OptionalBlock(
+                                Box::new(Expression::string("test".to_string())),
+                                true,
+                            )),
+                            Expression::undefined(false),
+                            Expression::undefined(false),
+                            Expression::new(ExpressionDesc::OptionalBlock(
+                                Box::new(Expression::string("test".to_string())),
+                                true,
+                            )),
+                            Expression::undefined(false),
+                        ],
+                        MutableFlag::Immutable,
+                        Box::new(Expression::number(Number::int(0))),
+                        TagInfo::Record {
+                            fields: vec![
+                                ("id".to_string(), true),
+                                ("name".to_string(), true),
+                                ("title".to_string(), true),
+                                ("className".to_string(), true),
+                                ("x".to_string(), true),
+                                ("y".to_string(), true),
+                            ],
+                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                        },
+                    ))),
+                    property: LetKind::Strict,
+                    ident_info: IdentInfo::default(),
+                })],
+                vec![],
+            ),
+            modules: vec![],
+            side_effect: None,
+        });
+
+        let [record_stmt] = deps.program.block.as_slice() else {
+            panic!("expected the record binding to stay as a single declaration");
+        };
+        match &record_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&record));
+                assert!(matches!(
+                    items.as_slice(),
+                    [
+                        Expression {
+                            desc: ExpressionDesc::Undefined { .. },
+                            ..
+                        },
+                        Expression {
+                            desc: ExpressionDesc::OptionalBlock(_, true),
+                            ..
+                        },
+                        Expression {
+                            desc: ExpressionDesc::Undefined { .. },
+                            ..
+                        },
+                        Expression {
+                            desc: ExpressionDesc::Undefined { .. },
+                            ..
+                        },
+                        Expression {
+                            desc: ExpressionDesc::OptionalBlock(_, true),
+                            ..
+                        },
+                        Expression {
+                            desc: ExpressionDesc::Undefined { .. },
+                            ..
+                        }
+                    ]
+                ));
+            }
+            other => panic!(
+                "expected the optional record binding to remain inline, got {other:?}"
             ),
         }
     }

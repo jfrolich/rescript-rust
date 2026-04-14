@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 407 / 657 JS snapshots passing, 0 compile errors, 250 output diffs
+**Status:** 408 / 657 JS snapshots passing, 0 compile errors, 249 output diffs
 
 ## Goal
 
@@ -35,11 +35,64 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **407 / 657**
+- JS snapshot parity: **408 / 657**
 - Compile errors: **0**
-- Output diffs: **250**
+- Output diffs: **249**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the OCaml `Optional_block` identity handling in
+  `compiler/core/js_pass_flatten_and_mark_dead.ml` into
+  `compiler-rust/src/lambda/compile.rs` so JS-pass cleanup stops hoisting
+  constant optional record fields into helper lets like `x_name` / `x_x`
+  before printing
+- Active backend focus for this slice is **Phase 4: Port JS Passes** from
+  `PLAN.md`; this is a downstream JS cleanup fix after `Lam_compile` and does
+  not reopen typedtree or lambda parity work
+- OCaml reference:
+  `compiler/core/js_pass_flatten_and_mark_dead.ml`, where the
+  `subst_map` pass only needs helper bindings for non-simple immutable
+  `Caml_block` fields, while `compiler/core/js_dump.ml` prints
+  `Optional_block (e, true)` as just `e`
+- Rust change:
+  - taught `is_simple_block_binding_item(...)` and
+    `is_simple_substituted_index_value(...)` to treat
+    `ExpressionDesc::OptionalBlock(inner, true)` as simple when its printed
+    inner expression is simple, instead of inventing helper lets for values
+    the printer emits inline
+  - added focused regression coverage in
+    `js_flatten_and_mark_dead_keeps_identity_optional_record_fields_inline`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml js_flatten_and_mark_dead_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/DotDotDot.res`, diffing
+    `/tmp/DotDotDot.rust.mjs` against the checked-in snapshot
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.rust.mjs` against the checked-in snapshot as an
+    unchanged backend guard
+  - direct repro for `tests/tests/src/DisambiguateOptionalFields.res`, diffing
+    `/tmp/DisambiguateOptionalFields.rust.mjs` against the checked-in snapshot
+    to confirm the remaining diff there is still the separate binding-order
+    issue
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/DotDotDot.res` no longer emits the Rust-only helper lets
+    `x_name` / `x_x`; its remaining mismatch is now the separate
+    single-field-module hoist/order shape
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the JS-pass cleanup change
+  - `tests/tests/src/DisambiguateOptionalFields.res` is unchanged and still
+    only differs on declaration order, confirming this slice stayed scoped to
+    identity optional-field cleanup
+- Topline impact:
+  - JS snapshot parity: **407 / 657** -> **408 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **250** -> **249** (**-1**)
+- Keep this change because it aligns the Rust JS cleanup pass with OCaml's
+  identity-optional-block printing behavior instead of preserving Rust-only
+  helper bindings for optional record literals.
 
 Latest iteration on **2026-04-14**:
 
