@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 329 / 657 JS snapshots passing, 0 compile errors, 328 output diffs
+**Status:** 335 / 657 JS snapshots passing, 0 compile errors, 322 output diffs
 
 ## Goal
 
@@ -35,13 +35,53 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **329 / 657**
+- JS snapshot parity: **335 / 657**
 - Compile errors: **0**
-- Output diffs: **328**
+- Output diffs: **322**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 Interpretation:
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed function-body layout rule in
+  `compiler/core/js_dump.ml`, specifically the `P.brace_vgroup` plus
+  `function_body` path that still emits a blank indented line for named
+  functions whose body is semantically empty after eliding `return undefined`
+- After rereading that OCaml printer path, the Rust JS printer in
+  `compiler-rust/src/js_ir/printer.rs` now matches it more closely:
+  - named functions whose body lowers to an invisible `return undefined` now
+    print as:
+    `function f(x) {\n  \n}`
+    instead of collapsing to `function f(x) {\n  }`
+  - directive/body layout now keys off whether the body prints anything, so
+    invisible tail statements no longer pull the closing brace onto the
+    indented blank line
+- Added focused regression coverage in
+  `js_ir::printer::tests::test_print_named_function_with_undefined_body_keeps_blank_line_like_ocaml`
+  while keeping
+  `js_ir::printer::tests::test_print_arrow_function_with_undefined_body_uses_compact_empty_block`
+  green as the guard for the separate arrow-function rule
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_named_function_with_undefined_body_keeps_blank_line_like_ocaml -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_arrow_function_with_undefined_body_uses_compact_empty_block -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UncurriedPervasives.res -o /tmp/UncurriedPervasives.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UncurriedAlways.res -o /tmp/UncurriedAlways.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `tests/tests/src/UncurriedPervasives.res` now matches its checked-in `.mjs`
+  snapshot exactly again, `tests/tests/src/ExternalShadow.res` remains an
+  exact guard-file match, and `tests/tests/src/UncurriedAlways.res` now only
+  differs on its separate tuple-array lowering drift
+- The empty-body blank-line motif is much narrower now; only
+  `recursive_unbound_module_test` and `test_while_side_effect` still carry the
+  old `-  ` hunk shape in the refreshed diff corpus
+- The authoritative JS snapshot baseline now reports **335 / 657** passing,
+  **0** compile errors, and **322** output diffs; this is a net **+6**
+  passing snapshots and **-6** output diffs from the previously recorded
+  **329 / 657**, **0** compile errors, **328** output diffs
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed JS expression-construction

@@ -694,7 +694,20 @@ impl JsPrinter {
         directive: Option<&str>,
         this_binding: Option<&String>,
     ) {
+        let body_prints_any = function_body_prints_any(body);
         self.write(" {");
+        if this_binding.is_none() && directive.is_none() && !body_prints_any {
+            self.indent();
+            self.output.push('\n');
+            for _ in 0..self.indent {
+                self.output.push_str(self.indent_str);
+            }
+            self.output.push('\n');
+            self.last_new_line = true;
+            self.dedent();
+            self.write_char('}');
+            return;
+        }
         if this_binding.is_some() || !body.is_empty() || directive.is_some() {
             self.indent();
             if let Some(this_binding) = this_binding {
@@ -704,8 +717,8 @@ impl JsPrinter {
                 self.write(" = this");
                 self.semi();
             }
-            if directive.is_some() || !body.is_empty() {
-                self.print_function_directive(directive, !body.is_empty());
+            if directive.is_some() || body_prints_any {
+                self.print_function_directive(directive, body_prints_any);
                 self.print_function_body(body, return_unit);
             }
             self.dedent();
@@ -1831,6 +1844,16 @@ fn function_tail_statement_prints(stmt: &Statement) -> bool {
     )
 }
 
+fn function_body_prints_any(stmts: &Block) -> bool {
+    stmts.iter().enumerate().any(|(index, stmt)| {
+        if index + 1 == stmts.len() {
+            function_tail_statement_prints(stmt)
+        } else {
+            true
+        }
+    })
+}
+
 fn single_arrow_function_expr(body: &Block) -> Option<&Expression> {
     match body.as_slice() {
         [
@@ -2902,6 +2925,26 @@ mod tests {
         }));
 
         assert_eq!(rendered, "() => {}");
+    }
+
+    #[test]
+    fn test_print_named_function_with_undefined_body_keeps_blank_line_like_ocaml() {
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: Ident::create_local("n"),
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![Ident::create_local("prim")],
+                body: vec![Statement::return_(Expression::undefined(false))],
+                env: Default::default(),
+                return_unit: false,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert_eq!(rendered, "function n(prim) {\n  \n}");
     }
 
     #[test]
