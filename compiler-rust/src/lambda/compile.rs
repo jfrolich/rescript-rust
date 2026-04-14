@@ -4649,6 +4649,11 @@ impl LambdaCompiler {
             | FieldDbgInfo::RecordExtension { name } => Expression::new(
                 ExpressionDesc::StaticIndex(Box::new(target.clone()), name.clone(), None),
             ),
+            FieldDbgInfo::Extension => Expression::new(ExpressionDesc::StaticIndex(
+                Box::new(target.clone()),
+                format!("_{}", idx),
+                Some(idx),
+            )),
             FieldDbgInfo::Cons => Expression::new(ExpressionDesc::StaticIndex(
                 Box::new(target.clone()),
                 match idx {
@@ -18799,6 +18804,36 @@ mod tests {
         }
 
         assert_eq!(print_expression(&expr), "Js_promise2.$$catch");
+    }
+
+    #[test]
+    fn lowers_extension_pfield_to_named_payload_property_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let exn = Ident::create_local("exn");
+        let expr = compiler.compile_field_access(
+            1,
+            &FieldDbgInfo::Extension,
+            &Expression::var(exn.clone()),
+        );
+
+        match &expr.desc {
+            ExpressionDesc::StaticIndex(target, field, Some(index)) => {
+                assert_eq!(field, "_1");
+                assert_eq!(*index, 1);
+                assert!(matches!(
+                    target.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&exn)
+                ));
+            }
+            other => panic!(
+                "expected extension field access to lower to a named static index, got {other:?}"
+            ),
+        }
+
+        assert_eq!(print_expression(&expr), "exn._1");
     }
 
     #[test]

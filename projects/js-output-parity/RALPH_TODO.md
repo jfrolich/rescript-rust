@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 464 / 657 JS snapshots passing, 0 compile errors, 193 output diffs
+**Status:** 469 / 657 JS snapshots passing, 0 compile errors, 188 output diffs
 
 ## Goal
 
@@ -35,11 +35,63 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **464 / 657**
+- JS snapshot parity: **469 / 657**
 - Compile errors: **0**
-- Output diffs: **193**
+- Output diffs: **188**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the OCaml extension-field access path so exception payload
+  reads lower to named static properties like `exn._1` instead of numeric array
+  indexing like `exn[1]`
+- Active backend focus for this slice stays in **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`, because the mismatch lived in field lowering:
+  OCaml's backend sends `Fld_extension` through `E.extension_access`, while the
+  Rust JS path was still falling back to generic `ArrayIndex`
+- OCaml reference:
+  `compiler/core/js_of_lam_block.ml`, where `Fld_extension` calls
+  `E.extension_access e None i`; and `compiler/core/js_exp_make.ml`, where
+  `extension_access` lowers unnamed extension payload fields to
+  `Static_index (e, "_" ^ Int32.to_string pos, Some pos)`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so
+    `compile_field_access(...)` lowers `FieldDbgInfo::Extension` to
+    `ExpressionDesc::StaticIndex(target, format!("_{}", idx), Some(idx))`
+    instead of falling through to `ExpressionDesc::ArrayIndex`
+  - added focused regression coverage in
+    `lowers_extension_pfield_to_named_payload_property_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_extension_pfield_to_named_payload_property_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct repro for `tests/tests/src/array_safe_get.res`, diffing the emitted
+    module against the checked-in snapshot to confirm `msg._1` is exact again
+  - direct repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    backend guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/array_safe_get.res` is no longer in the authoritative diff
+    set
+  - `tests/tests/src/caml_compare_test.res` is no longer in the authoritative
+    diff set
+  - `tests/tests/src/exception_value_test.res` is no longer in the
+    authoritative diff set
+  - `tests/tests/src/stdlib/Stdlib_ErrorTests.res` is no longer in the
+    authoritative diff set
+  - `tests/tests/src/stdlib/Stdlib_IntTests.res` is no longer in the
+    authoritative diff set
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the extension-field port
+- Topline impact:
+  - JS snapshot parity: **464 / 657** -> **469 / 657** (**+5**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **193** -> **188** (**-5**)
+- Keep this change because it ports OCaml's real extension-field lowering from
+  `js_of_lam_block.ml` / `js_exp_make.ml`; the removed diffs are the direct
+  result of using named exception payload properties instead of the Rust-only
+  numeric-index shortcut.
 
 Latest iteration on **2026-04-14**:
 
