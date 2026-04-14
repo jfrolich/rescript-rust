@@ -233,7 +233,6 @@ pub fn propagate_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -
 /// - Pure and used 0-1 times: substituted
 /// - Otherwise: bound to let variables
 pub fn propagate_beta_reduce_with_map(
-    id_gen: &IdGenerator,
     stats: &StatsMap,
     params: &[Ident],
     body: &Lambda,
@@ -243,6 +242,8 @@ pub fn propagate_beta_reduce_with_map(
     if let Some(result) = simple_beta_reduce(params, body, args) {
         return result;
     }
+
+    let id_gen = IdGenerator::with_start_stamp(max_ident_stamp(params, body, args));
 
     // Categorize arguments
     let mut rest_bindings: Vec<(Ident, Lambda)> = Vec::new();
@@ -256,7 +257,7 @@ pub fn propagate_beta_reduce_with_map(
             }
             // Global modules need to be bound (for proper module loading)
             Lambda::LglobalModule(_, _) => {
-                let new_param = param.rename(id_gen);
+                let new_param = param.rename(&id_gen);
                 rest_bindings.push((new_param.clone(), arg.clone()));
                 substitution.insert(param.clone(), Lambda::var(new_param));
             }
@@ -271,12 +272,12 @@ pub fn propagate_beta_reduce_with_map(
                     }
                 }
                 // Bind to a new variable
-                let new_param = param.rename(id_gen);
-                rest_bindings.push((new_param.clone(), arg.clone()));
-                substitution.insert(param.clone(), Lambda::var(new_param));
+                    let new_param = param.rename(&id_gen);
+                    rest_bindings.push((new_param.clone(), arg.clone()));
+                    substitution.insert(param.clone(), Lambda::var(new_param));
+                }
             }
         }
-    }
 
     // Apply substitution to body
     let new_body = subst(&substitution, body);
@@ -546,7 +547,6 @@ mod tests {
 
     #[test]
     fn test_propagate_beta_reduce_with_map_const() {
-        let id_gen = IdGenerator::new();
         let x = Ident::create_local("x");
 
         // (fun x -> x + 1) 5
@@ -569,7 +569,7 @@ mod tests {
             },
         );
 
-        let result = propagate_beta_reduce_with_map(&id_gen, &stats, &params, &body, &args);
+        let result = propagate_beta_reduce_with_map(&stats, &params, &body, &args);
 
         // Should get direct primitive application
         match result {
@@ -585,7 +585,6 @@ mod tests {
 
     #[test]
     fn test_propagate_beta_reduce_with_map_pure_once() {
-        let id_gen = IdGenerator::new();
         let x = Ident::create_local("x");
         let y = Ident::create_local("y");
 
@@ -610,7 +609,7 @@ mod tests {
             },
         );
 
-        let result = propagate_beta_reduce_with_map(&id_gen, &stats, &params, &body, &args);
+        let result = propagate_beta_reduce_with_map(&stats, &params, &body, &args);
 
         // Should substitute y directly
         match result {

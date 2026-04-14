@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ident::Ident;
 use crate::lambda::analysis;
 use crate::lambda::beta_reduce;
+use crate::lambda::closure;
 use crate::lambda::compat::{FieldDbgInfo, LetKind};
 use crate::lambda::compile_context::BoxedNullable;
 use crate::lambda::constant::Constant;
@@ -441,6 +442,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             let value = simplify_with_env(value, env, exports);
             let mut body_env = env.without_ident(id);
             let binding_is_exported = lambda_exports_ident(body, id);
+            let mut body_exports = None;
             let preserve_exported_eta_alias =
                 binding_is_exported && preserve_exported_eta_alias_binding(original_value, &value);
             if let Some(block_info) = immutable_block_elements(&value) {
@@ -450,6 +452,12 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 body_env.optional_blocks.insert(id.clone(), optional_info);
             }
             if let Some(substitution) = substitution_candidate(*kind, original_value, &value) {
+                if binding_is_exported {
+                    if let Some(export_target) = exported_alias_target(&substitution) {
+                        let propagated = body_exports.get_or_insert_with(|| exports.clone());
+                        propagated.insert(export_target);
+                    }
+                }
                 if !env.preserved_export_bindings.contains(id) && !preserve_exported_eta_alias {
                     body_env.substitutions.insert(id.clone(), substitution);
                 }
@@ -462,7 +470,11 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                     }
                 }
             }
-            let body = simplify_with_env(body, &body_env, exports);
+            let body = simplify_with_env(
+                body,
+                &body_env,
+                body_exports.as_ref().unwrap_or(exports),
+            );
             if *kind == LetKind::Alias && !preserve_exported_eta_alias {
                 let use_info = alias_use_info(id, &body);
                 if use_info.times == 1 && !use_info.captured {
@@ -1475,9 +1487,8 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
             .any(|arg| lambda_hits_variable_through_env(id, arg, env))
         {
             if let Some(func) = env.functions.get(id) {
-                if should_inline_named_function(func, &args) {
-                    let reduced =
-                        beta_reduce::no_names_beta_reduce(&func.params, &func.body, &args);
+                if let Some(reduced) = reduce_named_function_application(id, func, &args, exports)
+                {
                     return simplify_with_env(&reduced, env, exports);
                 }
             }
@@ -1492,9 +1503,9 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
                 .any(|arg| lambda_hits_variable_through_env(id, arg, env))
             {
                 if let Some(func) = env.functions.get(id) {
-                    if should_inline_named_function(func, &args) {
-                        let reduced =
-                            beta_reduce::no_names_beta_reduce(&func.params, &func.body, &args);
+                    if let Some(reduced) =
+                        reduce_named_function_application(id, func, &args, exports)
+                    {
                         return simplify_with_env(&reduced, env, exports);
                     }
                 }
@@ -1532,10 +1543,39 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
     })
 }
 
-fn should_inline_named_function(func: &LFunction, args: &[Lambda]) -> bool {
-    func.params.len() == args.len()
-        && analysis::lfunction_can_be_inlined(func)
-        && (func.attr.is_a_functor || analysis::ok_to_inline_fun_when_app(func, args))
+fn reduce_named_function_application(
+    id: &Ident,
+    func: &LFunction,
+    args: &[Lambda],
+    exports: &HashSet<Ident>,
+) -> Option<Lambda> {
+    if func.params.len() != args.len() || !analysis::lfunction_can_be_inlined(func) {
+        return None;
+    }
+
+    if func.attr.is_a_functor {
+        return Some(beta_reduce::propagate_beta_reduce(
+            &func.params,
+            &func.body,
+            args,
+        ));
+    }
+
+    if !analysis::ok_to_inline_fun_when_app(func, args) {
+        return None;
+    }
+
+    let (is_closed, param_map) = closure::is_closed_with_map(exports, &func.params, &func.body);
+    if exports.contains(id) && !is_closed {
+        return None;
+    }
+
+    Some(beta_reduce::propagate_beta_reduce_with_map(
+        &param_map,
+        &func.params,
+        &func.body,
+        args,
+    ))
 }
 
 fn should_inline_direct_function(func: &LFunction, args: &[Lambda]) -> bool {
@@ -1891,6 +1931,13 @@ fn substitution_candidate(kind: LetKind, original_value: &Lambda, simplified_val
     }
 }
 
+fn exported_alias_target(value: &Lambda) -> Option<Ident> {
+    match value {
+        Lambda::Lvar(target) => Some(target.clone()),
+        _ => None,
+    }
+}
+
 impl BlockElement {
     fn as_simple_form(&self) -> Option<&Lambda> {
         match self {
@@ -1935,6 +1982,13 @@ fn collect_exported_idents_into(lam: &Lambda, exports: &mut HashSet<Ident>) {
         Lambda::Lprim(info) => {
             if let Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _) = &info.primitive {
                 exports.extend(ids.iter().cloned());
+                for (exported, arg) in ids.iter().zip(info.args.iter()) {
+                    if let Lambda::Lvar(target) = arg {
+                        if target.name() == exported.name() {
+                            exports.insert(target.clone());
+                        }
+                    }
+                }
             }
             for arg in &info.args {
                 collect_exported_idents_into(arg, exports);
@@ -2114,6 +2168,126 @@ mod tests {
     use crate::location::Location;
 
     use super::simplify_for_js_backend;
+
+    fn find_binding_value<'a>(lam: &'a Lambda, target: &Ident) -> Option<&'a Lambda> {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => None,
+            Lambda::Lapply(apply) => find_binding_value(&apply.ap_func, target).or_else(|| {
+                apply
+                    .ap_args
+                    .iter()
+                    .find_map(|arg| find_binding_value(arg, target))
+            }),
+            Lambda::Lfunction(func) => find_binding_value(&func.body, target),
+            Lambda::Llet(_, id, value, body) => {
+                if id.same(target) {
+                    Some(value.as_ref())
+                } else {
+                    find_binding_value(value, target).or_else(|| find_binding_value(body, target))
+                }
+            }
+            Lambda::Lletrec(bindings, body) => bindings
+                .iter()
+                .find_map(|(id, value)| {
+                    if id.same(target) {
+                        Some(value)
+                    } else {
+                        find_binding_value(value, target)
+                    }
+                })
+                .or_else(|| find_binding_value(body, target)),
+            Lambda::Lprim(info) => info
+                .args
+                .iter()
+                .find_map(|arg| find_binding_value(arg, target)),
+            Lambda::Lswitch(scrutinee, switch) => find_binding_value(scrutinee, target)
+                .or_else(|| {
+                    switch
+                        .sw_consts
+                        .iter()
+                        .find_map(|(_, lam)| find_binding_value(lam, target))
+                })
+                .or_else(|| {
+                    switch
+                        .sw_blocks
+                        .iter()
+                        .find_map(|(_, lam)| find_binding_value(lam, target))
+                })
+                .or_else(|| {
+                    switch
+                        .sw_failaction
+                        .as_deref()
+                        .and_then(|lam| find_binding_value(lam, target))
+                }),
+            Lambda::LstringSwitch(scrutinee, cases, default) => find_binding_value(scrutinee, target)
+                .or_else(|| cases.iter().find_map(|(_, lam)| find_binding_value(lam, target)))
+                .or_else(|| default.as_deref().and_then(|lam| find_binding_value(lam, target))),
+            Lambda::LstaticRaise(_, args) => args.iter().find_map(|arg| find_binding_value(arg, target)),
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                find_binding_value(body, target).or_else(|| find_binding_value(handler, target))
+            }
+            Lambda::LifThenElse(cond, then_, else_) => find_binding_value(cond, target)
+                .or_else(|| find_binding_value(then_, target))
+                .or_else(|| find_binding_value(else_, target)),
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                find_binding_value(first, target).or_else(|| find_binding_value(second, target))
+            }
+            Lambda::Lfor(_, start, end, _, body) => find_binding_value(start, target)
+                .or_else(|| find_binding_value(end, target))
+                .or_else(|| find_binding_value(body, target)),
+            Lambda::Lassign(_, value) => find_binding_value(value, target),
+        }
+    }
+
+    fn contains_apply_to(target: &Ident, lam: &Lambda) -> bool {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            Lambda::Lapply(apply) => matches!(apply.ap_func.as_ref(), Lambda::Lvar(id) if id.same(target))
+                || contains_apply_to(target, &apply.ap_func)
+                || apply.ap_args.iter().any(|arg| contains_apply_to(target, arg)),
+            Lambda::Lfunction(func) => contains_apply_to(target, &func.body),
+            Lambda::Llet(_, _, value, body) => {
+                contains_apply_to(target, value) || contains_apply_to(target, body)
+            }
+            Lambda::Lletrec(bindings, body) => {
+                bindings.iter().any(|(_, value)| contains_apply_to(target, value))
+                    || contains_apply_to(target, body)
+            }
+            Lambda::Lprim(info) => info.args.iter().any(|arg| contains_apply_to(target, arg)),
+            Lambda::Lswitch(scrutinee, switch) => contains_apply_to(target, scrutinee)
+                || switch
+                    .sw_consts
+                    .iter()
+                    .any(|(_, lam)| contains_apply_to(target, lam))
+                || switch
+                    .sw_blocks
+                    .iter()
+                    .any(|(_, lam)| contains_apply_to(target, lam))
+                || switch
+                    .sw_failaction
+                    .as_deref()
+                    .is_some_and(|lam| contains_apply_to(target, lam)),
+            Lambda::LstringSwitch(scrutinee, cases, default) => contains_apply_to(target, scrutinee)
+                || cases.iter().any(|(_, lam)| contains_apply_to(target, lam))
+                || default
+                    .as_deref()
+                    .is_some_and(|lam| contains_apply_to(target, lam)),
+            Lambda::LstaticRaise(_, args) => args.iter().any(|arg| contains_apply_to(target, arg)),
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                contains_apply_to(target, body) || contains_apply_to(target, handler)
+            }
+            Lambda::LifThenElse(cond, then_, else_) => contains_apply_to(target, cond)
+                || contains_apply_to(target, then_)
+                || contains_apply_to(target, else_),
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                contains_apply_to(target, first) || contains_apply_to(target, second)
+            }
+            Lambda::Lfor(_, start, end, _, body) => contains_apply_to(target, start)
+                || contains_apply_to(target, end)
+                || contains_apply_to(target, body),
+            Lambda::Lassign(_, value) => contains_apply_to(target, value),
+        }
+    }
 
     #[test]
     fn inlines_known_local_function_applications() {
@@ -3597,6 +3771,260 @@ mod tests {
         assert_eq!(fields, vec!["a".to_string(), "name".to_string()]);
         assert!(matches!(&args[0], Lambda::Lvar(id) if *id == shared));
         assert!(matches!(&args[1], Lambda::Lvar(id) if *id == projected));
+    }
+
+    #[test]
+    fn does_not_inline_exported_non_closed_function_applications() {
+        let closed_over = Ident::create_local("map");
+        let helper = Ident::create_local("xFromJs");
+        let helper_param = Ident::create_local("param");
+        let consumer = Ident::create_local("idx");
+        let consumer_param = Ident::create_local("v");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![helper.clone(), consumer.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(helper.clone()), Lambda::var(consumer.clone())],
+            Location::none(),
+        );
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            closed_over.clone(),
+            Lambda::prim(
+                Primitive::Paddint,
+                vec![Lambda::const_(Constant::int(1)), Lambda::const_(Constant::int(1))],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                helper.clone(),
+                Lambda::function_(
+                    1,
+                    vec![helper_param.clone()],
+                    Lambda::prim(
+                        Primitive::Paddint,
+                        vec![Lambda::var(helper_param), Lambda::var(closed_over.clone())],
+                        Location::none(),
+                    ),
+                    FunctionAttribute::default(),
+                ),
+                Lambda::let_(
+                    LetKind::Strict,
+                    consumer.clone(),
+                    Lambda::function_(
+                        1,
+                        vec![consumer_param.clone()],
+                        Lambda::prim(
+                            Primitive::Paddint,
+                            vec![
+                                Lambda::Lapply(Apply {
+                                    ap_func: Box::new(Lambda::var(helper.clone())),
+                                    ap_args: vec![Lambda::var(consumer_param.clone())],
+                                    ap_info: ApInfo {
+                                        loc: Location::none(),
+                                        inlined: InlineAttribute::Default,
+                                        status: ApplyStatus::Na,
+                                    },
+                                    ap_transformed_jsx: false,
+                                }),
+                                Lambda::var(consumer_param),
+                            ],
+                            Location::none(),
+                        ),
+                        FunctionAttribute::default(),
+                    ),
+                    export_block,
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let helper_value =
+            find_binding_value(&simplified, &helper).expect("expected exported helper binding");
+        assert!(matches!(helper_value, Lambda::Lfunction(_)));
+
+        let consumer_value =
+            find_binding_value(&simplified, &consumer).expect("expected consumer binding");
+        let Lambda::Lfunction(consumer_func) = consumer_value else {
+            panic!("expected consumer binding to remain a function");
+        };
+        assert!(
+            contains_apply_to(&helper, &consumer_func.body),
+            "exported non-closed helpers should stay materialized at call sites"
+        );
+    }
+
+    #[test]
+    fn still_inlines_exported_closed_function_applications() {
+        let helper = Ident::create_local("xToJs");
+        let helper_param = Ident::create_local("param");
+        let consumer = Ident::create_local("idx");
+        let consumer_param = Ident::create_local("v");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![helper.clone(), consumer.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(helper.clone()), Lambda::var(consumer.clone())],
+            Location::none(),
+        );
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            helper.clone(),
+            Lambda::function_(
+                1,
+                vec![helper_param.clone()],
+                Lambda::prim(
+                    Primitive::Paddint,
+                    vec![Lambda::var(helper_param), Lambda::const_(Constant::int(1))],
+                    Location::none(),
+                ),
+                FunctionAttribute::default(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                consumer.clone(),
+                Lambda::function_(
+                    1,
+                    vec![consumer_param.clone()],
+                    Lambda::prim(
+                        Primitive::Paddint,
+                        vec![
+                            Lambda::Lapply(Apply {
+                                ap_func: Box::new(Lambda::var(helper.clone())),
+                                ap_args: vec![Lambda::var(consumer_param.clone())],
+                                ap_info: ApInfo {
+                                    loc: Location::none(),
+                                    inlined: InlineAttribute::Default,
+                                    status: ApplyStatus::Na,
+                                },
+                                ap_transformed_jsx: false,
+                            }),
+                            Lambda::var(consumer_param),
+                        ],
+                        Location::none(),
+                    ),
+                    FunctionAttribute::default(),
+                ),
+                export_block,
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let helper_value =
+            find_binding_value(&simplified, &helper).expect("expected exported helper binding");
+        assert!(matches!(helper_value, Lambda::Lfunction(_)));
+
+        let consumer_value =
+            find_binding_value(&simplified, &consumer).expect("expected consumer binding");
+        let Lambda::Lfunction(consumer_func) = consumer_value else {
+            panic!("expected consumer binding to remain a function");
+        };
+        assert!(
+            !contains_apply_to(&helper, &consumer_func.body),
+            "exported closed helpers should still inline at call sites"
+        );
+    }
+
+    #[test]
+    fn does_not_inline_non_closed_helpers_reached_through_export_aliases() {
+        let closed_over = Ident::create_local("map");
+        let helper_impl = Ident::create_local("xFromJs");
+        let helper_alias = Ident::create_local("xFromJs");
+        let exported_helper = Ident::create_local("xFromJs");
+        let helper_param = Ident::create_local("param");
+        let consumer = Ident::create_local("idx");
+        let consumer_param = Ident::create_local("v");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![exported_helper.clone(), consumer.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(exported_helper.clone()), Lambda::var(consumer.clone())],
+            Location::none(),
+        );
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            closed_over.clone(),
+            Lambda::prim(
+                Primitive::Paddint,
+                vec![Lambda::const_(Constant::int(1)), Lambda::const_(Constant::int(1))],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                helper_impl.clone(),
+                Lambda::function_(
+                    1,
+                    vec![helper_param.clone()],
+                    Lambda::prim(
+                        Primitive::Paddint,
+                        vec![Lambda::var(helper_param), Lambda::var(closed_over.clone())],
+                        Location::none(),
+                    ),
+                    FunctionAttribute::default(),
+                ),
+                Lambda::let_(
+                    LetKind::Alias,
+                    helper_alias.clone(),
+                    Lambda::var(helper_impl.clone()),
+                    Lambda::let_(
+                        LetKind::Alias,
+                        exported_helper.clone(),
+                        Lambda::var(helper_alias),
+                        Lambda::let_(
+                            LetKind::Strict,
+                            consumer.clone(),
+                            Lambda::function_(
+                                1,
+                                vec![consumer_param.clone()],
+                                Lambda::prim(
+                                    Primitive::Paddint,
+                                    vec![
+                                        Lambda::Lapply(Apply {
+                                            ap_func: Box::new(Lambda::var(exported_helper.clone())),
+                                            ap_args: vec![Lambda::var(consumer_param.clone())],
+                                            ap_info: ApInfo {
+                                                loc: Location::none(),
+                                                inlined: InlineAttribute::Default,
+                                                status: ApplyStatus::Na,
+                                            },
+                                            ap_transformed_jsx: false,
+                                        }),
+                                        Lambda::var(consumer_param),
+                                    ],
+                                    Location::none(),
+                                ),
+                                FunctionAttribute::default(),
+                            ),
+                            export_block,
+                        ),
+                    ),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let helper_value =
+            find_binding_value(&simplified, &helper_impl).expect("expected helper implementation");
+        assert!(matches!(helper_value, Lambda::Lfunction(_)));
+
+        let consumer_value =
+            find_binding_value(&simplified, &consumer).expect("expected consumer binding");
+        let Lambda::Lfunction(consumer_func) = consumer_value else {
+            panic!("expected consumer binding to remain a function");
+        };
+        assert!(
+            contains_apply_to(&helper_impl, &consumer_func.body),
+            "non-closed helpers reached through exported aliases should stay materialized, got {simplified:?}"
+        );
     }
 
     #[test]

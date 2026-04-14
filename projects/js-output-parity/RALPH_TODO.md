@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 357 / 657 JS snapshots passing, 0 compile errors, 300 output diffs
+**Status:** 361 / 657 JS snapshots passing, 0 compile errors, 296 output diffs
 
 ## Goal
 
@@ -35,11 +35,68 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **357 / 657**
+- JS snapshot parity: **361 / 657**
 - Compile errors: **0**
-- Output diffs: **300**
+- Output diffs: **296**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: preserve OCaml’s export-aware named-function inlining through
+  exported same-name alias chains in
+  `compiler-rust/src/lambda/simplify.rs` and
+  `compiler-rust/src/lambda/beta_reduce.rs`
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this slice fixes a later JS-path simplify drift exposed by
+  `tests/tests/src/ast_abstract_test.res` without reopening typedtree or
+  lambda parity work
+- OCaml reference:
+  `compiler/core/lam_pass_collect.ml`,
+  `compiler/core/lam_pass_remove_alias.ml`,
+  `compiler/core/lam_beta_reduce.ml`, and
+  `compiler/core/lam_coercion.ml`, where function identity is copied onto
+  aliases before inlining, named applications use
+  `propagate_beta_reduce_with_map`, and same-name export aliases are treated as
+  the effective exported function identity
+- Rust change:
+  - switched named local-function inlining in the JS-path simplifier from the
+    plain no-names reducer to OCaml-style `propagate_beta_reduce` /
+    `propagate_beta_reduce_with_map`
+  - gated non-functor named inlining on
+    `closure::is_closed_with_map(...)` plus export membership, matching
+    OCaml’s “do not inline exported non-closed helpers” rule
+  - propagated exportedness through alias substitutions during simplify, and
+    through same-name `ModuleExport` payload variables on the second simplify
+    pass, so exported alias roots stay export-protected even after the alias
+    lets disappear
+- Added focused regression coverage in:
+  - `lambda::simplify::tests::does_not_inline_non_closed_helpers_reached_through_export_aliases`
+  - `lambda::simplify::tests::does_not_inline_exported_non_closed_function_applications`
+  - `lambda::simplify::tests::still_inlines_exported_closed_function_applications`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml does_not_inline_non_closed_helpers_reached_through_export_aliases -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml does_not_inline_exported_non_closed_function_applications -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml still_inlines_exported_closed_function_applications -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/ast_abstract_test.ast -o /tmp/ast_abstract_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/ast_abstract_test.res` now matches its checked-in
+    `.mjs` snapshot exactly; it no longer appears in the authoritative diff
+    corpus
+  - `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
+  - the wrapper stays at **0 compile errors** while the output-diff bucket
+    drops again, which confirms this was backend lowering drift rather than a
+    printer-only or compile-failure cluster
+- Topline impact:
+  - JS snapshot parity: **361 / 657** (**+4**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **296** (**-4**)
+- Keep this change because it follows OCaml’s alias/export bookkeeping in the
+  JS-path simplify stage instead of hiding the drift with snapshot-text
+  rewrites
 
 Latest iteration on **2026-04-14**:
 
