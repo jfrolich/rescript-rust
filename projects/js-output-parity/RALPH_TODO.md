@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 478 / 657 JS snapshots passing, 0 compile errors, 179 output diffs
+**Status:** 479 / 657 JS snapshots passing, 0 compile errors, 178 output diffs
 
 ## Goal
 
@@ -35,11 +35,56 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **478 / 657**
+- JS snapshot parity: **479 / 657**
 - Compile errors: **0**
-- Output diffs: **179**
+- Output diffs: **178**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port OCaml's `Js_exp_make.int32_band` lowering for integer
+  `land` so redundant left-hand `(... | 0)` truncation is removed before
+  emitting `&`, matching the backend shape OCaml prints in `hash_variant` and
+  similar masked-int paths
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`, because the mismatch lived in integer bitwise
+  lowering after optimized lambda: OCaml's `lam_compile_primitive.ml` routes
+  `Pandint` through `E.int32_band`, while Rust was still building a raw
+  `Band` node and preserving an extra `| 0` wrapper that OCaml strips
+- OCaml reference:
+  `compiler/core/lam_compile_primitive.ml`, especially the `Pandint` branch;
+  and `compiler/core/js_exp_make.ml`, especially `int32_band`
+- Rust change:
+  - added `int32_band(...)` in `compiler-rust/src/lambda/compile.rs` to mirror
+    OCaml's `Js_exp_make.int32_band` behavior of dropping a redundant
+    left-hand `(... | 0)` before emitting `Band`
+  - updated `Pandint` lowering in `compiler-rust/src/lambda/compile.rs` to use
+    that helper instead of always emitting a raw `Expression::bin(Band, ...)`
+  - added focused regression coverage in
+    `int32_band_drops_redundant_bor_on_left_operand`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml int32_band_drops_redundant_bor_on_left_operand -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/int_overflow_test.res` using `rescript.exe compiler-args`,
+    diffing `/tmp/int_overflow_test.mjs` against the checked-in snapshot
+  - direct guard repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    broader guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/int_overflow_test.res` is no longer in the authoritative
+    diff set
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the `int32_band` port
+- Topline impact:
+  - JS snapshot parity: **478 / 657** -> **479 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **179** -> **178** (**-1**)
+- Keep this change because it ports the real OCaml backend behavior from
+  `lam_compile_primitive.ml` / `js_exp_make.ml`; the wrapper gain comes from
+  matching integer bitwise lowering rather than from any printer-only rewrite.
 
 Latest iteration on **2026-04-14**:
 

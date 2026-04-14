@@ -4269,11 +4269,7 @@ impl LambdaCompiler {
             ),
             Pnotint => int_bnot(compiled_args[0].clone()),
             Pnotbigint => int_bnot(compiled_args[0].clone()),
-            Pandint => Expression::bin(
-                BinOp::Band,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
-            ),
+            Pandint => int32_band(compiled_args[0].clone(), compiled_args[1].clone()),
             Pandbigint => Expression::bin(
                 BinOp::Band,
                 compiled_args[0].clone(),
@@ -7843,6 +7839,15 @@ fn int32_bxor(left: Expression, right: Expression) -> Expression {
             int32_bxor(inner.as_ref().clone(), right)
         }
         _ => Expression::bin(BinOp::Bxor, left, right),
+    }
+}
+
+fn int32_band(left: Expression, right: Expression) -> Expression {
+    match &left.desc {
+        ExpressionDesc::Bin(BinOp::Bor, inner, zero) if is_zero_int(zero.as_ref()) => {
+            int32_band(inner.as_ref().clone(), right)
+        }
+        _ => Expression::bin(BinOp::Band, left, right),
     }
 }
 
@@ -18692,6 +18697,17 @@ mod tests {
             }
             other => panic!("expected bare logical shift, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn int32_band_drops_redundant_bor_on_left_operand() {
+        let value = Ident::create_local("value");
+        let expr = int32_band(
+            to_int32(Expression::bin(BinOp::Plus, Expression::var(value), int_expr(1))),
+            int_expr(0x7fff_ffff),
+        );
+
+        assert_eq!(print_expression(&expr), "value + 1 & 2147483647");
     }
 
     #[test]
