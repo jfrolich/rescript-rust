@@ -4047,7 +4047,10 @@ impl<'a> RawLambdaConverter<'a> {
             module_expr.mod_type.mty_desc,
             ModuleTypeDesc::Tmty_alias(_, _)
         ) {
-            self.note_possible_required_modules_from_module_expr(module_expr, false);
+            // OCaml lowers plain module aliases to Const_module_alias here.
+            // They stay compile-time-only unless a later dynamic import/pack
+            // path reifies the module reference, so static aliases must not
+            // contribute a required JS import on their own.
             return self.apply_coercion_raw(
                 self.loc(module_expr.mod_loc),
                 LetKind::Alias,
@@ -11483,6 +11486,39 @@ external myJson: Js.Json.t = "default"
         };
 
         assert!(possible_required_modules.contains(&expected));
+    }
+
+    #[test]
+    fn plain_module_aliases_do_not_record_possible_required_modules() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let side_effect = Ident::create_persistent("Side_effect");
+        let module_expr = crate::types::typedtree::ModuleExpr {
+            mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_ident(
+                crate::types::Path::Pident(side_effect.clone()),
+                crate::parse_arena::Located::mknoloc(crate::parse_arena::LidentIdx(0)),
+            ),
+            mod_loc: crate::parse_arena::LocIdx::default(),
+            mod_type: crate::types::typedtree::ModuleType {
+                mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_alias(
+                    crate::types::Path::Pident(side_effect),
+                    crate::parse_arena::Located::mknoloc(crate::parse_arena::LidentIdx(0)),
+                ),
+                mty_loc: crate::parse_arena::LocIdx::default(),
+                mty_attributes: Attributes::new(),
+            },
+            mod_env: EnvRef(0),
+            mod_attributes: Attributes::new(),
+        };
+
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let lowered = converter.convert_module_expr_raw(&module_expr, &None);
+        let possible_required_modules = converter.take_possible_required_modules();
+
+        assert!(matches!(lowered, RawLambda::Lconst(Constant::ModuleAlias)));
+        assert!(possible_required_modules.is_empty());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 367 / 657 JS snapshots passing, 0 compile errors, 290 output diffs
+**Status:** 373 / 657 JS snapshots passing, 0 compile errors, 284 output diffs
 
 ## Goal
 
@@ -35,11 +35,50 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **367 / 657**
+- JS snapshot parity: **373 / 657**
 - Compile errors: **0**
-- Output diffs: **290**
+- Output diffs: **284**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: stop treating plain static module aliases as possible required
+  JS modules in `compiler-rust/src/raw_lambda/convert.rs`
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this slice fixes another JS-backend dependency-metadata drift without
+  reopening typedtree or lambda parity work
+- OCaml reference:
+  `compiler/ml/translmod.ml`, where plain `Tmod_ident` aliases lower through
+  `Const_module_alias`, and `compiler/core/lam_convert.ml`, where
+  `may_depends` is populated only from real `Pgetglobal` module uses, not from
+  compile-time-only alias constants
+- Rust change:
+  - removed the static-alias
+    `note_possible_required_modules_from_module_expr(...)` bookkeeping from
+    `convert_module_expr_raw_with_coercion`
+  - added
+    `raw_lambda::convert::tests::plain_module_aliases_do_not_record_possible_required_modules`
+    to lock in the OCaml behavior
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml plain_module_aliases_do_not_record_possible_required_modules -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `cd tests/tests/lib/bs && timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/gpr_3852_alias.ast -o /tmp/gpr_3852_alias.mjs`
+  - `cd tests/tests/lib/bs && timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -bs-read-cmi -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/reasonReact.ast -o /tmp/reasonReact.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_3852_alias.res` now matches its checked-in `.mjs`
+    snapshot exactly; the bogus side-effect import and footer are gone
+  - `tests/tests/src/reasonReact.res` now matches its checked-in `.mjs`
+    snapshot exactly; the unused `ReasonReactRouter` import disappears
+  - `tests/tests/src/ExternalShadow.res` remains an exact guard-file match
+- Topline impact:
+  - JS snapshot parity: **367 / 657** (**+6**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **290** (**-6**)
+- Keep this change because it matches OCaml's static module-alias lowering
+  instead of forcing runtime imports from compile-time-only aliases
 
 Latest iteration on **2026-04-14**:
 
