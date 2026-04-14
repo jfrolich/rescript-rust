@@ -214,17 +214,7 @@ impl JsPrinter {
         *next = (*next).max(next_suffix);
     }
 
-    /// Get a unique name for an identifier
-    fn ident_name(&mut self, id: &Ident) -> String {
-        if id.stamp() == 0 {
-            return id.name().to_string();
-        }
-
-        if let Some(name) = self.lookup_visible_name(id) {
-            return name;
-        }
-
-        let base = convert_ident_name(id.name());
+    fn assign_scoped_ident_name(&mut self, id: &Ident, base: String) -> String {
         let next = self
             .current_name_scope_mut()
             .next_suffix
@@ -240,6 +230,28 @@ impl JsPrinter {
             .ident_names
             .insert(id.clone(), printed.clone());
         printed
+    }
+
+    /// Get a unique name for an identifier
+    fn ident_name(&mut self, id: &Ident) -> String {
+        if let Some(name) = self.lookup_visible_name(id) {
+            return name;
+        }
+
+        if id.stamp() == 0 {
+            return id.name().to_string();
+        }
+
+        self.assign_scoped_ident_name(id, convert_ident_name(id.name()))
+    }
+
+    fn module_ident_name(&mut self, id: &Ident) -> String {
+        if let Some(name) = self.lookup_visible_name(id) {
+            return name;
+        }
+
+        let base = convert_ident_name(id.name());
+        self.assign_scoped_ident_name(id, base)
     }
 
     /// Print a program
@@ -311,12 +323,12 @@ impl JsPrinter {
             self.write("import ");
             match &module.kind {
                 Kind::External { default: true, .. } => {
-                    let name = self.ident_name(&module.id);
+                    let name = self.module_ident_name(&module.id);
                     self.write(&name);
                 }
                 _ => {
                     self.write("* as ");
-                    let name = self.ident_name(&module.id);
+                    let name = self.module_ident_name(&module.id);
                     self.write(&name);
                 }
             }
@@ -1682,17 +1694,17 @@ impl JsPrinter {
                 self.write(&name);
             }
             VIdent::Qualified(module, None) => {
-                let mod_name = self.ident_name(&module.id);
+                let mod_name = self.module_ident_name(&module.id);
                 self.write(&mod_name);
             }
             VIdent::Qualified(module, Some(_))
                 if matches!(&module.kind, Kind::External { default: true, .. }) =>
             {
-                let mod_name = self.ident_name(&module.id);
+                let mod_name = self.module_ident_name(&module.id);
                 self.write(&mod_name);
             }
             VIdent::Qualified(module, Some(member)) => {
-                let mod_name = self.ident_name(&module.id);
+                let mod_name = self.module_ident_name(&module.id);
                 self.write(&mod_name);
                 match &module.kind {
                     Kind::Ml | Kind::Runtime => {
@@ -3487,6 +3499,87 @@ mod tests {
         assert!(rendered.contains(
             "import * as Js_dict from \"@rescript/runtime/lib/es6/Js_dict.js\";\n\nlet dict = {};"
         ));
+    }
+
+    #[test]
+    fn test_print_deps_program_scopes_module_import_aliases_across_runtime_and_external_modules() {
+        let runtime = ModuleId {
+            id: Ident::create_persistent("List"),
+            kind: Kind::Runtime,
+            dynamic_import: false,
+        };
+        let react_v = ModuleId {
+            id: Ident::create_local("List"),
+            kind: Kind::External {
+                name: "reactV".to_string(),
+                default: false,
+                import_attributes: None,
+            },
+            dynamic_import: false,
+        };
+        let react_x = ModuleId {
+            id: Ident::create_local("List"),
+            kind: Kind::External {
+                name: "reactX".to_string(),
+                default: false,
+                import_attributes: None,
+            },
+            dynamic_import: false,
+        };
+        let resolver = ModulePathResolver::from_compile_options(
+            None,
+            Some(Path::new("/tmp/module_aliases.mjs")),
+            None,
+            None,
+        );
+        let rendered = print_deps_program(
+            &DepsProgram {
+                program: Program::new(
+                    vec![
+                        Statement::variable(VariableDeclaration {
+                            ident: Ident::create_local("runtimeMember"),
+                            value: Some(Expression::qualified(
+                                runtime.clone(),
+                                Some("map".to_string()),
+                            )),
+                            property: crate::lambda::compat::LetKind::Strict,
+                            ident_info: Default::default(),
+                        }),
+                        Statement::variable(VariableDeclaration {
+                            ident: Ident::create_local("reactVMember"),
+                            value: Some(Expression::qualified(
+                                react_v.clone(),
+                                Some("ff".to_string()),
+                            )),
+                            property: crate::lambda::compat::LetKind::Strict,
+                            ident_info: Default::default(),
+                        }),
+                        Statement::variable(VariableDeclaration {
+                            ident: Ident::create_local("reactXMember"),
+                            value: Some(Expression::qualified(
+                                react_x.clone(),
+                                Some("ff2".to_string()),
+                            )),
+                            property: crate::lambda::compat::LetKind::Strict,
+                            ident_info: Default::default(),
+                        }),
+                    ],
+                    vec![],
+                ),
+                modules: vec![runtime, react_v, react_x],
+                side_effect: Some(String::new()),
+            },
+            Some(&resolver),
+        );
+
+        assert!(rendered.contains(
+            "import * as List from \"@rescript/runtime/lib/es6/List.js\";"
+        ));
+        assert!(rendered.contains("import * as List$1 from \"reactV\";"));
+        assert!(rendered.contains("import * as List$2 from \"reactX\";"));
+        assert!(rendered.contains("let runtimeMember = List.map;"));
+        assert!(rendered.contains("let reactVMember = List$1.ff;"));
+        assert!(rendered.contains("let reactXMember = List$2.ff2;"));
     }
 
     #[test]

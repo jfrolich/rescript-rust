@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 361 / 657 JS snapshots passing, 0 compile errors, 296 output diffs
+**Status:** 366 / 657 JS snapshots passing, 0 compile errors, 291 output diffs
 
 ## Goal
 
@@ -35,11 +35,70 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **361 / 657**
+- JS snapshot parity: **366 / 657**
 - Compile errors: **0**
-- Output diffs: **296**
+- Output diffs: **291**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: match OCaml's required-module identity, scoping, and final
+  import ordering for same-bundle default and namespace imports in
+  `compiler-rust/src/lambda/compile.rs` and
+  `compiler-rust/src/js_ir/printer.rs`
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this slice fixes a remaining import/export metadata drift on the JS backend
+  path without reopening typedtree or lambda parity work
+- OCaml reference:
+  `compiler/core/lam_module_ident.ml`,
+  `compiler/core/lam_compile_env.ml`,
+  `compiler/core/lam_compile_external_call.ml`,
+  `compiler/core/js_dump_import_export.ml`, and OCaml 5.3's
+  `stdlib/array.ml`, where external module identities are reused by
+  `(bundle, default)`, imported module aliases participate in scope allocation,
+  and required modules are deduplicated through `Lam_module_ident.Hash_set`
+  before one final `Array.sort`
+- Rust change:
+  - cache external `ModuleId`s by `(bundle, default)` so later hint-name
+    aliases reuse the first binding id instead of inventing a fresh import name
+  - scope imported module aliases in the printer just like other visible
+    identifiers, so runtime and external imports sharing a base name print as
+    stable `Foo`, `Foo$1`, `Foo$2` bindings
+  - replace the old stable-sort-over-`HashSet` required-module collection with
+    an OCaml-style module set plus one final OCaml `Array.sort` port, which
+    restores the checked-in ordering for mixed default/namespace imports from
+    the same bundle
+- Added focused regression coverage in:
+  - `lambda::compile::tests::external_module_ids_reuse_first_binding_for_same_bundle_and_default`
+  - `lambda::compile::tests::required_modules_match_ocaml_sort_across_same_name_import_pairs`
+  - `js_ir::printer::tests::test_print_deps_program_scopes_module_import_aliases_across_runtime_and_external_modules`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml external_module_ids_reuse_first_binding_for_same_bundle_and_default -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml required_modules_match_ocaml_sort_across_same_name_import_pairs -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml test_print_deps_program_scopes_module_import_aliases_across_runtime_and_external_modules -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/key_word_property.res -o /tmp/key_word_property.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/js_val.res -o /tmp/js_val.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/webpack_config.res -o /tmp/webpack_config.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/key_word_property.res` now matches its checked-in `.mjs`
+    snapshot exactly; the default-vs-namespace import pair now prints in the
+    same order as OCaml
+  - `tests/tests/src/js_val.res` and
+    `tests/tests/src/webpack_config.res` remain exact guard-file matches after
+    the import-ordering change
+  - the wrapper remains at **0 compile errors**, which confirms this slice was
+    pure backend metadata / printing drift rather than a compile-failure
+    regression
+- Topline impact:
+  - JS snapshot parity: **366 / 657** (**+5**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **291** (**-5**)
+- Keep this change because it matches OCaml's module identity and required
+  import ordering rules in the backend instead of patching emitted text after
+  the fact
 
 Latest iteration on **2026-04-14**:
 

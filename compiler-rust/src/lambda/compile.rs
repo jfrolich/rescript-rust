@@ -72,11 +72,18 @@ fn empty_switch_case_clause() -> CaseClause {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ExternalModuleCacheKey {
+    bundle: String,
+    default: bool,
+}
+
 /// Lambda compiler to JS IR.
 pub struct LambdaCompiler {
     id_gen: IdGenerator,
     module_path_resolver: Option<ModulePathResolver>,
     cmj_constant_cache: HashMap<String, Option<HashMap<String, CmjExportConstant>>>,
+    external_module_ids: HashMap<ExternalModuleCacheKey, ModuleId>,
     static_handlers: Vec<StaticHandler>,
 }
 
@@ -163,6 +170,7 @@ impl LambdaCompiler {
             id_gen: IdGenerator::new(),
             module_path_resolver: None,
             cmj_constant_cache: HashMap::new(),
+            external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
         }
     }
@@ -173,6 +181,7 @@ impl LambdaCompiler {
             id_gen: IdGenerator::new(),
             module_path_resolver,
             cmj_constant_cache: HashMap::new(),
+            external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
         }
     }
@@ -196,6 +205,7 @@ impl LambdaCompiler {
         lam: &Lambda,
         extra_possible_required_modules: &std::collections::HashSet<ModuleId>,
     ) -> DepsProgram {
+        self.external_module_ids.clear();
         let mut possible_required_modules = collect_possible_required_modules(lam);
         possible_required_modules.extend(extra_possible_required_modules.iter().cloned());
         let simplified = crate::lambda::simplify::simplify_for_js_backend(lam);
@@ -224,13 +234,14 @@ impl LambdaCompiler {
                 },
             ))),
         ));
-        let mut required_modules = self.collect_required_modules(&deps.program.block);
+        let mut required_modules = self.collect_required_module_set(&deps.program.block);
         populate_required_modules(
             self.module_path_resolver.as_ref(),
             &possible_required_modules,
             &mut required_modules,
         );
-        deps.modules = required_modules;
+        deps.modules = required_modules.to_vec();
+        ocaml_sort_modules(&mut deps.modules);
         if deps.side_effect.is_none() {
             deps.side_effect = required_module_side_effect_reason(
                 self.module_path_resolver.as_ref(),
@@ -4173,24 +4184,34 @@ impl LambdaCompiler {
     }
 
     fn external_module_id(
-        &self,
+        &mut self,
         module_name: &ExternalModuleName,
         default: bool,
         dynamic_import: bool,
     ) -> ModuleId {
-        ModuleId {
-            id: Ident::create_persistent(external_module_ident_name(module_name)),
+        let key = ExternalModuleCacheKey {
+            bundle: module_name.bundle.clone(),
+            default,
+        };
+        if let Some(module) = self.external_module_ids.get(&key) {
+            return module.clone();
+        }
+
+        let module = ModuleId {
+            id: self.id_gen.create(&external_module_ident_name(module_name)),
             kind: Kind::External {
                 name: module_name.bundle.clone(),
                 default,
                 import_attributes: external_module_import_attributes(module_name),
             },
             dynamic_import,
-        }
+        };
+        self.external_module_ids.insert(key, module.clone());
+        module
     }
 
     fn external_module_binding(
-        &self,
+        &mut self,
         module_name: &ExternalModuleName,
         default: bool,
         dynamic_import: bool,
@@ -4202,7 +4223,7 @@ impl LambdaCompiler {
     }
 
     fn translate_scoped_module_value(
-        &self,
+        &mut self,
         module_name: Option<&ExternalModuleName>,
         name: &str,
         scopes: &[String],
@@ -4538,7 +4559,7 @@ impl LambdaCompiler {
     }
 
     fn compile_js_call(
-        &self,
+        &mut self,
         prim_name: &str,
         arg_types: &[ExternalArgSpec],
         ffi: &crate::lambda::primitive::ExternalFfiSpec,
@@ -4903,11 +4924,15 @@ impl LambdaCompiler {
         Some(subst::subst(&subst, &handler.handler))
     }
 
+    fn collect_required_module_set(&self, block: &Block) -> OcamlModuleSet {
+        let mut modules = OcamlModuleSet::new();
+        collect_modules_from_block(block, &mut modules);
+        modules
+    }
+
     fn collect_required_modules(&self, block: &Block) -> Vec<ModuleId> {
-        let mut seen = std::collections::HashSet::new();
-        collect_modules_from_block(block, &mut seen);
-        let mut modules = seen.into_iter().collect::<Vec<_>>();
-        modules.sort_by(module_sort_cmp);
+        let mut modules = self.collect_required_module_set(block).to_vec();
+        ocaml_sort_modules(&mut modules);
         modules
     }
 }
@@ -4987,6 +5012,240 @@ fn module_sort_cmp(left: &ModuleId, right: &ModuleId) -> std::cmp::Ordering {
         .len()
         .cmp(&right_name.len())
         .then_with(|| left_name.cmp(right_name))
+}
+
+fn ocaml_hashtbl_power_2_above(mut x: usize, n: usize) -> usize {
+    while x < n {
+        x <<= 1;
+    }
+    x
+}
+
+fn ocaml_hash_mix_uint32(mut h: u32, mut d: u32) -> u32 {
+    d = d.wrapping_mul(0xcc9e2d51);
+    d = d.rotate_left(15);
+    d = d.wrapping_mul(0x1b873593);
+    h ^= d;
+    h = h.rotate_left(13);
+    h = h.wrapping_mul(5).wrapping_add(0xe6546b64);
+    h
+}
+
+fn ocaml_hash_final_mix(mut h: u32) -> u32 {
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85ebca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2ae35);
+    h ^= h >> 16;
+    h
+}
+
+fn ocaml_hashtbl_hash_string(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut h = 0u32;
+    let mut i = 0usize;
+
+    while i + 4 <= len {
+        let word = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+        h = ocaml_hash_mix_uint32(h, word);
+        i += 4;
+    }
+
+    let rem = len & 3;
+    if rem != 0 {
+        let mut word = 0u32;
+        if rem >= 3 {
+            word |= (bytes[i + 2] as u32) << 16;
+        }
+        if rem >= 2 {
+            word |= (bytes[i + 1] as u32) << 8;
+        }
+        word |= bytes[i] as u32;
+        h = ocaml_hash_mix_uint32(h, word);
+    }
+
+    h ^= len as u32;
+    ocaml_hash_final_mix(h) & 0x3fff_ffff
+}
+
+fn ocaml_hashtbl_hash_stamp_and_name(id: &Ident) -> u32 {
+    let stamp = id.stamp();
+    if stamp != 0 {
+        ocaml_hash_final_mix(ocaml_hash_mix_uint32(0, stamp as u32)) & 0x3fff_ffff
+    } else {
+        ocaml_hashtbl_hash_string(id.name())
+    }
+}
+
+fn ocaml_module_hash(module: &ModuleId) -> u32 {
+    match &module.kind {
+        Kind::External { name, .. } => ocaml_hashtbl_hash_string(name),
+        Kind::Runtime | Kind::Ml => ocaml_hashtbl_hash_stamp_and_name(&module.id),
+    }
+}
+
+fn ocaml_module_equal(left: &ModuleId, right: &ModuleId) -> bool {
+    match &left.kind {
+        Kind::External {
+            name: left_name,
+            default: left_default,
+            ..
+        } => {
+            matches!(
+                &right.kind,
+                Kind::External {
+                    name: right_name,
+                    default: right_default,
+                    ..
+                } if left_name == right_name && left_default == right_default
+            )
+        }
+        Kind::Runtime | Kind::Ml => left.id.same(&right.id),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OcamlModuleSet {
+    size: usize,
+    buckets: Vec<Vec<ModuleId>>,
+}
+
+impl OcamlModuleSet {
+    fn new() -> Self {
+        Self {
+            size: 0,
+            buckets: vec![Vec::new(); ocaml_hashtbl_power_2_above(16, 17)],
+        }
+    }
+
+    fn insert(&mut self, module: ModuleId) {
+        let bucket_idx = (ocaml_module_hash(&module) as usize) & (self.buckets.len() - 1);
+        if self.buckets[bucket_idx]
+            .iter()
+            .any(|existing| ocaml_module_equal(existing, &module))
+        {
+            return;
+        }
+
+        self.buckets[bucket_idx].insert(0, module);
+        self.size += 1;
+
+        if self.size > (self.buckets.len() << 1) {
+            self.resize();
+        }
+    }
+
+    fn resize(&mut self) {
+        let mut new_buckets = vec![Vec::new(); self.buckets.len() * 2];
+        for bucket in &self.buckets {
+            for module in bucket {
+                let bucket_idx = (ocaml_module_hash(module) as usize) & (new_buckets.len() - 1);
+                new_buckets[bucket_idx].push(module.clone());
+            }
+        }
+        self.buckets = new_buckets;
+    }
+
+    fn to_vec(&self) -> Vec<ModuleId> {
+        let mut ordered = Vec::with_capacity(self.size);
+        for bucket in &self.buckets {
+            for module in bucket {
+                ordered.push(module.clone());
+            }
+        }
+        ordered.reverse();
+        ordered
+    }
+}
+
+fn ocaml_sort_modules(modules: &mut [ModuleId]) {
+    fn maxson(modules: &[ModuleId], len: usize, index: usize) -> Option<usize> {
+        let left = index * 3 + 1;
+        let middle = left + 1;
+        let right = middle + 1;
+        if middle < len {
+            if module_sort_cmp(&modules[left], &modules[middle]).is_lt() {
+                if right < len && module_sort_cmp(&modules[middle], &modules[right]).is_lt() {
+                    Some(right)
+                } else {
+                    Some(middle)
+                }
+            } else if right < len && module_sort_cmp(&modules[left], &modules[right]).is_lt() {
+                Some(right)
+            } else {
+                Some(left)
+            }
+        } else if left < len {
+            Some(left)
+        } else {
+            None
+        }
+    }
+
+    fn trickledown(modules: &mut [ModuleId], len: usize, index: usize, entry: ModuleId) -> usize {
+        let Some(child) = maxson(modules, len, index) else {
+            return index;
+        };
+        if module_sort_cmp(&entry, &modules[child]).is_lt() {
+            modules[index] = modules[child].clone();
+            trickledown(modules, len, child, entry)
+        } else {
+            index
+        }
+    }
+
+    fn trickle(modules: &mut [ModuleId], len: usize, index: usize, entry: ModuleId) {
+        let bottom = trickledown(modules, len, index, entry.clone());
+        modules[bottom] = entry;
+    }
+
+    fn bubbledown(modules: &mut [ModuleId], len: usize, index: usize) -> usize {
+        let Some(child) = maxson(modules, len, index) else {
+            return index;
+        };
+        modules[index] = modules[child].clone();
+        bubbledown(modules, len, child)
+    }
+
+    fn bubble(modules: &mut [ModuleId], len: usize, index: usize) -> usize {
+        bubbledown(modules, len, index)
+    }
+
+    fn trickleup(modules: &mut [ModuleId], mut index: usize, entry: ModuleId) {
+        loop {
+            let parent = (index - 1) / 3;
+            debug_assert_ne!(index, parent);
+            if module_sort_cmp(&modules[parent], &entry).is_lt() {
+                modules[index] = modules[parent].clone();
+                if parent > 0 {
+                    index = parent;
+                    continue;
+                }
+                modules[0] = entry;
+                return;
+            }
+            modules[index] = entry;
+            return;
+        }
+    }
+
+    let len = modules.len();
+    if len < 2 {
+        return;
+    }
+
+    for index in (0..=((len + 1) / 3).saturating_sub(1)).rev() {
+        let entry = modules[index].clone();
+        trickle(modules, len, index, entry);
+    }
+    for index in (2..len).rev() {
+        let entry = modules[index].clone();
+        modules[index] = modules[0].clone();
+        let bubble_index = bubble(modules, index, 0);
+        trickleup(modules, bubble_index, entry);
+    }
+    modules.swap(0, 1);
 }
 
 fn collect_possible_required_modules(lam: &Lambda) -> std::collections::HashSet<ModuleId> {
@@ -5084,12 +5343,8 @@ fn collect_modules_from_lambda(lam: &Lambda, seen: &mut std::collections::HashSe
 fn populate_required_modules(
     module_path_resolver: Option<&ModulePathResolver>,
     extras: &std::collections::HashSet<ModuleId>,
-    modules: &mut Vec<ModuleId>,
+    modules: &mut OcamlModuleSet,
 ) {
-    let mut seen = modules
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
     for module in extras {
         if !module.dynamic_import
             && required_module_side_effect_reason(
@@ -5097,12 +5352,10 @@ fn populate_required_modules(
                 std::slice::from_ref(module),
             )
             .is_some()
-            && seen.insert(module.clone())
         {
-            modules.push(module.clone());
+            modules.insert(module.clone());
         }
     }
-    modules.sort_by(module_sort_cmp);
 }
 
 #[derive(Debug, Clone)]
@@ -9267,81 +9520,75 @@ fn runtime_module_id(module_name: &str) -> ModuleId {
     }
 }
 
-fn collect_modules_from_block(block: &Block, seen: &mut std::collections::HashSet<ModuleId>) {
+fn collect_modules_from_block(block: &Block, modules: &mut OcamlModuleSet) {
     for stmt in block {
-        collect_modules_from_statement(stmt, seen);
+        collect_modules_from_statement(stmt, modules);
     }
 }
 
-fn collect_modules_from_statement(
-    stmt: &Statement,
-    seen: &mut std::collections::HashSet<ModuleId>,
-) {
+fn collect_modules_from_statement(stmt: &Statement, modules: &mut OcamlModuleSet) {
     match &stmt.desc {
-        StatementDesc::Block(block) => collect_modules_from_block(block, seen),
+        StatementDesc::Block(block) => collect_modules_from_block(block, modules),
         StatementDesc::Variable(decl) => {
             if let Some(value) = &decl.value {
-                collect_modules_from_expression(value, seen);
+                collect_modules_from_expression(value, modules);
             }
         }
         StatementDesc::Exp(expr) | StatementDesc::Throw(expr) | StatementDesc::Return(expr) => {
-            collect_modules_from_expression(expr, seen)
+            collect_modules_from_expression(expr, modules)
         }
         StatementDesc::If(cond, then_block, else_block) => {
-            collect_modules_from_expression(cond, seen);
-            collect_modules_from_block(then_block, seen);
-            collect_modules_from_block(else_block, seen);
+            collect_modules_from_expression(cond, modules);
+            collect_modules_from_block(then_block, modules);
+            collect_modules_from_block(else_block, modules);
         }
         StatementDesc::While(cond, body) => {
-            collect_modules_from_expression(cond, seen);
-            collect_modules_from_block(body, seen);
+            collect_modules_from_expression(cond, modules);
+            collect_modules_from_block(body, modules);
         }
         StatementDesc::ForRange(init, finish, _, _, body) => {
             if let Some(init) = init {
-                collect_modules_from_expression(init, seen);
+                collect_modules_from_expression(init, modules);
             }
-            collect_modules_from_expression(finish, seen);
-            collect_modules_from_block(body, seen);
+            collect_modules_from_expression(finish, modules);
+            collect_modules_from_block(body, modules);
         }
         StatementDesc::IntSwitch(expr, clauses, default) => {
-            collect_modules_from_expression(expr, seen);
+            collect_modules_from_expression(expr, modules);
             for (_, clause) in clauses {
-                collect_modules_from_block(&clause.body, seen);
+                collect_modules_from_block(&clause.body, modules);
             }
             if let Some(default) = default {
-                collect_modules_from_block(default, seen);
+                collect_modules_from_block(default, modules);
             }
         }
         StatementDesc::StringSwitch(expr, clauses, default) => {
-            collect_modules_from_expression(expr, seen);
+            collect_modules_from_expression(expr, modules);
             for clause in clauses {
-                collect_modules_from_block(&clause.clause.body, seen);
+                collect_modules_from_block(&clause.clause.body, modules);
             }
             if let Some(default) = default {
-                collect_modules_from_block(default, seen);
+                collect_modules_from_block(default, modules);
             }
         }
         StatementDesc::Try(body, handler, finalizer) => {
-            collect_modules_from_block(body, seen);
+            collect_modules_from_block(body, modules);
             if let Some((_, handler_block)) = handler {
-                collect_modules_from_block(handler_block, seen);
+                collect_modules_from_block(handler_block, modules);
             }
             if let Some(finalizer_block) = finalizer {
-                collect_modules_from_block(finalizer_block, seen);
+                collect_modules_from_block(finalizer_block, modules);
             }
         }
         StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
     }
 }
 
-fn collect_modules_from_expression(
-    expr: &Expression,
-    seen: &mut std::collections::HashSet<ModuleId>,
-) {
+fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleSet) {
     match &expr.desc {
         ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, _)) => {
             if !module.dynamic_import {
-                seen.insert(module.clone());
+                modules.insert(module.clone());
             }
         }
         ExpressionDesc::Length(inner, _)
@@ -9351,12 +9598,12 @@ fn collect_modules_from_expression(
         | ExpressionDesc::JsBnot(inner)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::CamlBlockTag(inner, _) => collect_modules_from_expression(inner, seen),
+        | ExpressionDesc::CamlBlockTag(inner, _) => collect_modules_from_expression(inner, modules),
         ExpressionDesc::OptionalBlock(inner, identity) => {
             if !identity {
-                seen.insert(runtime_module_id("Primitive_option"));
+                modules.insert(runtime_module_id("Primitive_option"));
             }
-            collect_modules_from_expression(inner, seen);
+            collect_modules_from_expression(inner, modules);
         }
         ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::Seq(left, right)
@@ -9364,60 +9611,60 @@ fn collect_modules_from_expression(
         | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right)
         | ExpressionDesc::In(left, right) => {
-            collect_modules_from_expression(left, seen);
-            collect_modules_from_expression(right, seen);
+            collect_modules_from_expression(left, modules);
+            collect_modules_from_expression(right, modules);
         }
         ExpressionDesc::Cond(test, consequent, alternate) => {
-            collect_modules_from_expression(test, seen);
-            collect_modules_from_expression(consequent, seen);
-            collect_modules_from_expression(alternate, seen);
+            collect_modules_from_expression(test, modules);
+            collect_modules_from_expression(consequent, modules);
+            collect_modules_from_expression(alternate, modules);
         }
         ExpressionDesc::FlatCall(func, args) => {
-            collect_modules_from_expression(func, seen);
-            collect_modules_from_expression(args, seen);
+            collect_modules_from_expression(func, modules);
+            collect_modules_from_expression(args, modules);
         }
         ExpressionDesc::Call(func, args, _) => {
-            collect_modules_from_expression(func, seen);
+            collect_modules_from_expression(func, modules);
             for arg in args {
-                collect_modules_from_expression(arg, seen);
+                collect_modules_from_expression(arg, modules);
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            collect_modules_from_expression(tag, seen);
+            collect_modules_from_expression(tag, modules);
             for string in strings {
-                collect_modules_from_expression(string, seen);
+                collect_modules_from_expression(string, modules);
             }
             for value in values {
-                collect_modules_from_expression(value, seen);
+                collect_modules_from_expression(value, modules);
             }
         }
-        ExpressionDesc::StaticIndex(target, _, _) => collect_modules_from_expression(target, seen),
+        ExpressionDesc::StaticIndex(target, _, _) => collect_modules_from_expression(target, modules),
         ExpressionDesc::New(target, args) => {
-            collect_modules_from_expression(target, seen);
+            collect_modules_from_expression(target, modules);
             if let Some(args) = args {
                 for arg in args {
-                    collect_modules_from_expression(arg, seen);
+                    collect_modules_from_expression(arg, modules);
                 }
             }
         }
-        ExpressionDesc::Fun { body, .. } => collect_modules_from_block(body, seen),
+        ExpressionDesc::Fun { body, .. } => collect_modules_from_block(body, modules),
         ExpressionDesc::Array(items, _) => {
             for item in items {
-                collect_modules_from_expression(item, seen);
+                collect_modules_from_expression(item, modules);
             }
         }
         ExpressionDesc::CamlBlock(items, _, tag, _) => {
             for item in items {
-                collect_modules_from_expression(item, seen);
+                collect_modules_from_expression(item, modules);
             }
-            collect_modules_from_expression(tag, seen);
+            collect_modules_from_expression(tag, modules);
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {
-                collect_modules_from_expression(dup, seen);
+                collect_modules_from_expression(dup, modules);
             }
             for (_, value) in props {
-                collect_modules_from_expression(value, seen);
+                collect_modules_from_expression(value, modules);
             }
         }
         ExpressionDesc::Bool(_)
@@ -14225,6 +14472,82 @@ mod tests {
     }
 
     #[test]
+    fn required_modules_match_ocaml_sort_across_same_name_import_pairs() {
+        let compiler = LambdaCompiler::new();
+        let some_default = ModuleId {
+            id: Ident::create_local("SomeEs6Module"),
+            kind: Kind::External {
+                name: "some-es6-module".to_string(),
+                default: true,
+                import_attributes: None,
+            },
+            dynamic_import: false,
+        };
+        let some_namespace = ModuleId {
+            id: Ident::create_local("SomeEs6Module"),
+            kind: Kind::External {
+                name: "some-es6-module".to_string(),
+                default: false,
+                import_attributes: None,
+            },
+            dynamic_import: false,
+        };
+        let ome_default = ModuleId {
+            id: Ident::create_local("OmeEs6Module"),
+            kind: Kind::External {
+                name: "./ome-es6-module".to_string(),
+                default: true,
+                import_attributes: None,
+            },
+            dynamic_import: false,
+        };
+        let ome_namespace = ModuleId {
+            id: Ident::create_local("OmeEs6Module"),
+            kind: Kind::External {
+                name: "./ome-es6-module".to_string(),
+                default: false,
+                import_attributes: None,
+            },
+            dynamic_import: false,
+        };
+        let vscode = ModuleId {
+            id: Ident::create_local("Vscode"),
+            kind: Kind::External {
+                name: "vscode".to_string(),
+                default: false,
+                import_attributes: None,
+            },
+            dynamic_import: false,
+        };
+        let block = vec![
+            Statement::exp(Expression::qualified(some_default.clone(), None)),
+            Statement::exp(Expression::qualified(
+                some_namespace.clone(),
+                Some("default2".to_string()),
+            )),
+            Statement::exp(Expression::qualified(ome_default.clone(), None)),
+            Statement::exp(Expression::qualified(
+                ome_namespace.clone(),
+                Some("default2".to_string()),
+            )),
+            Statement::exp(Expression::qualified(vscode.clone(), Some("window".to_string()))),
+        ];
+
+        let modules = compiler.collect_required_modules(&block);
+
+        assert_eq!(
+            modules,
+            vec![
+                vscode,
+                some_namespace,
+                some_default,
+                ome_default,
+                ome_namespace,
+            ]
+        );
+    }
+
+    #[test]
     fn required_module_effect_reason_uses_external_module_name() {
         let reason = required_module_side_effect_reason(
             None,
@@ -14865,6 +15188,29 @@ mod tests {
             "import * as Primitive_option from \"@rescript/runtime/lib/es6/Primitive_option.js\";"
         ));
         assert!(rendered.contains("let wrapped = Primitive_option.some(value);"));
+    }
+
+    #[test]
+    fn external_module_ids_reuse_first_binding_for_same_bundle_and_default() {
+        let mut compiler = LambdaCompiler::new();
+        let plain = ExternalModuleName {
+            bundle: "x".to_string(),
+            module_bind_name: ExternalModuleBindName::Nothing,
+            import_attributes: None,
+        };
+        let hinted = ExternalModuleName {
+            bundle: "x".to_string(),
+            module_bind_name: ExternalModuleBindName::HintName("U".to_string()),
+            import_attributes: None,
+        };
+
+        let plain_module = compiler.external_module_id(&plain, false, false);
+        let hinted_module = compiler.external_module_id(&hinted, false, false);
+        let default_module = compiler.external_module_id(&plain, true, false);
+
+        assert_eq!(plain_module, hinted_module);
+        assert_eq!(plain_module.id.name(), "X");
+        assert!(!plain_module.id.same(&default_module.id));
     }
 
     #[test]
