@@ -2731,6 +2731,32 @@ impl LambdaCompiler {
                 Box::new(compiled_args[0].clone()),
                 LengthObject::Array,
             )),
+            Pstringrefs | Pstringrefu => {
+                self.runtime_call_expr("Primitive_string", "getChar", compiled_args)
+            }
+            Parrayrefu => match compiled_args.as_slice() {
+                [array, index] => Expression::new(ExpressionDesc::ArrayIndex(
+                    Box::new(array.clone()),
+                    Box::new(index.clone()),
+                )),
+                _ => Expression::undefined(false),
+            },
+            Parrayrefs => self.runtime_call_expr("Primitive_array", "get", compiled_args),
+            Parraysetu => match compiled_args.as_slice() {
+                [array, index, value] => Expression::new(ExpressionDesc::Seq(
+                    Box::new(Expression::bin(
+                        BinOp::Eq,
+                        Expression::new(ExpressionDesc::ArrayIndex(
+                            Box::new(array.clone()),
+                            Box::new(index.clone()),
+                        )),
+                        value.clone(),
+                    )),
+                    Box::new(Expression::undefined(false)),
+                )),
+                _ => Expression::undefined(false),
+            },
+            Parraysets => self.runtime_call_expr("Primitive_array", "set", compiled_args),
             Paddint => int32_add(compiled_args[0].clone(), compiled_args[1].clone()),
             Paddfloat => Expression::bin(
                 BinOp::Plus,
@@ -9049,6 +9075,129 @@ mod tests {
         assert_eq!(
             print_expression(&compiled.expr),
             "Primitive_string.compare(left, right)"
+        );
+    }
+
+    #[test]
+    fn compile_arrayrefu_uses_direct_array_index() {
+        let mut compiler = LambdaCompiler::new();
+        let array = Ident::create_local("arr");
+        let index = Ident::create_local("i");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Parrayrefu,
+            vec![Lambda::var(array), Lambda::var(index)],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "arr[i]");
+    }
+
+    #[test]
+    fn compile_arrayrefs_uses_primitive_array_get() {
+        let mut compiler = LambdaCompiler::new();
+        let array = Ident::create_local("arr");
+        let index = Ident::create_local("i");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Parrayrefs,
+            vec![Lambda::var(array), Lambda::var(index)],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "Primitive_array.get(arr, i)");
+    }
+
+    #[test]
+    fn compile_arraysetu_sequences_assignment_to_unit() {
+        let mut compiler = LambdaCompiler::new();
+        let array = Ident::create_local("arr");
+        let index = Ident::create_local("i");
+        let value = Ident::create_local("value");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Parraysetu,
+            vec![
+                Lambda::var(array.clone()),
+                Lambda::var(index.clone()),
+                Lambda::var(value.clone()),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        let ExpressionDesc::Seq(assign, tail) = &compiled.expr.desc else {
+            panic!("expected array set to lower to a seq");
+        };
+        let ExpressionDesc::Bin(BinOp::Eq, lhs, rhs) = &assign.desc else {
+            panic!("expected array set seq head to be an assignment");
+        };
+        let ExpressionDesc::ArrayIndex(target, position) = &lhs.desc else {
+            panic!("expected array set assignment lhs to be an array index");
+        };
+        assert!(matches!(
+            target.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&array)
+        ));
+        assert!(matches!(
+            position.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&index)
+        ));
+        assert!(matches!(
+            rhs.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&value)
+        ));
+        assert!(matches!(
+            tail.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Undefined { is_unit: false },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compile_arraysets_uses_primitive_array_set() {
+        let mut compiler = LambdaCompiler::new();
+        let array = Ident::create_local("arr");
+        let index = Ident::create_local("i");
+        let value = Ident::create_local("value");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Parraysets,
+            vec![Lambda::var(array), Lambda::var(index), Lambda::var(value)],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_array.set(arr, i, value)"
+        );
+    }
+
+    #[test]
+    fn compile_string_refs_use_primitive_string_get_char() {
+        let mut compiler = LambdaCompiler::new();
+        let string = Ident::create_local("str");
+        let index = Ident::create_local("i");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pstringrefs,
+            vec![Lambda::var(string), Lambda::var(index)],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_string.getChar(str, i)"
         );
     }
 

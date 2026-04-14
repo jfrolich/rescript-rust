@@ -44,6 +44,52 @@ reported:
 Interpretation:
 
 - Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration isolated one OCaml-backed primitive-lowering gap in
+  `compiler/core/lam_compile_primitive.ml` together with
+  `compiler/core/js_of_lam_array.ml`, specifically the backend handling for
+  `Pstringrefs` / `Pstringrefu`, `Parrayrefu`, `Parrayrefs`, `Parraysetu`,
+  and `Parraysets`
+- After rereading those OCaml lowering paths, the Rust JS backend in
+  `compiler-rust/src/lambda/compile.rs` now matches them more closely:
+  - unsafe array refs lower directly to `ExpressionDesc::ArrayIndex`
+    instead of falling through to `undefined`
+  - safe array refs and safe array sets lower through
+    `Primitive_array.get` / `Primitive_array.set`, matching OCaml's runtime
+    calls instead of the Rust fallback `undefined`
+  - string refs lower through `Primitive_string.getChar`, again matching the
+    OCaml backend instead of the Rust fallback `undefined`
+  - unsafe array sets now lower to `arr[i] = value` sequenced with
+    `undefined`, matching the existing OCaml `set_array` / `ensure_value_unit`
+    path more closely
+- Added focused regression coverage in
+  `compile_arrayrefu_uses_direct_array_index`,
+  `compile_arrayrefs_uses_primitive_array_get`,
+  `compile_arraysetu_sequences_assignment_to_unit`,
+  `compile_arraysets_uses_primitive_array_set`, and
+  `compile_string_refs_use_primitive_string_get_char`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_array -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_string_refs_use_primitive_string_get_char -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - project `compiler-args` snapshot repro for
+    `tests/tests/src/earger_curry_test.res` from `tests/tests/lib/bs`
+  - project `compiler-args` snapshot repro for
+    `tests/tests/src/bench.res` from `tests/tests/lib/bs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  `earger_curry_test`, `bench`, `bs_mutable_set_test`, and
+  `bs_poly_mutable_set_test` no longer contain the old
+  `a[i] -> undefined` / `remove(..., undefined)` backend drift in the
+  refreshed diff corpus; their remaining diffs have moved on to separate
+  loop-header, eta-wrapper, and mutable-accumulator shaping issues after this
+  primitive-lowering slice
+- The authoritative JS snapshot baseline remains **341 / 657** passing,
+  **0** compile errors, and **316** output diffs; this is a net **0** change
+  from the previously recorded baseline, and the OCaml-aligned change is kept
+  because it removes a real backend lowering gap even though the topline
+  stays flat
+
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`,
   and this iteration isolated one OCaml-backed operator-precedence rule in
   `compiler/core/js_op_util.ml`, specifically `op_prec` using equal
   left/right precedence for associative logical and bitwise operators instead
