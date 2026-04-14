@@ -1,7 +1,7 @@
 # Ralph TODO: Typechecker Performance
 
 **Last Updated:** 2026-04-14
-**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, dotted shared module-signature scraping now consults env_lazy-backed qualified views first, lazy child module/modtype qualification now comes from cached parent qualified views, dotted alias/modtype expansion inside `typecore`'s shared `Env::resolve_module_type` helper now consults those cached child views before raw recursive signature scans, the env_lazy cache-key path now uses env-owned cached local-alias metadata instead of rebuilding it on every lookup, a broader `typemod`/`typecore` env_lazy rollout was attempted and reverted because it regressed import-family parity, and the broader env_lazy rollout is still incomplete
+**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, dotted shared module-signature scraping now consults env_lazy-backed qualified views first, lazy child module/modtype qualification now comes from cached parent qualified views, dotted alias/modtype expansion inside `typecore`'s shared `Env::resolve_module_type` helper now consults those cached child views before raw recursive signature scans, the env_lazy cache-key path now uses env-owned cached local-alias metadata instead of rebuilding it on every lookup, a broader `typemod`/`typecore` env_lazy rollout was attempted and reverted because it regressed import-family parity, an additional local-`Pident` env_lazy rollout through `typecore::resolve_letmodule_direct_type_family_root` and `typemod` signature-scraping helpers was also attempted and reverted after the same import-family stamp drift, and the broader env_lazy rollout is still incomplete
 
 ## Goal
 
@@ -196,6 +196,40 @@ What this means:
 - the broader corpus still needs more work, but Rust's aggregate total and the
   materially-slower count both improved on the canonical benchmark even though
   the OCaml side sped up enough on the rerun that the ratio remained noisy
+
+## Session Update: Local `Pident` `env_lazy` Rollout Rejected
+
+Attempted on `2026-04-14`:
+
+- route local `Pident` signature scraping through env_lazy-backed qualified
+  views in `typemod`
+- route `typecore::resolve_letmodule_direct_type_family_root` through the same
+  env_lazy source of truth
+- try both a shared-signature variant and a detached-copy-from-qualified-view
+  variant
+
+Focused results for both variants:
+
+- exact `Import.res` repro after rebuild:
+  - OCaml: `0.07s` (`/usr/bin/time -lp`)
+  - Rust: `0.34s` to `0.35s` (`/usr/bin/time -lp`)
+  - Rust max RSS: about `54MB` to `60MB`
+  - Rust peak footprint: about `41MB` to `44MB`
+- focused import parity worsened from the current checkpoint's `283` hunk
+  mismatches to `313` hunk mismatches
+- the diff was dominated by identifier/stamp drift rather than a new structural
+  mismatch; the first divergence showed earlier `Pident "__Belt_List__/<stamp>"`
+  numbering, which means this local-`Pident` rollout still changes forcing /
+  allocation order in the import-family path
+
+Outcome:
+
+- reverted the experiment; no code from this session was kept
+- takeaway: simply switching local `Pident` module-path helpers over to the
+  existing env_lazy qualified view, even via detached signature copies, is not
+  yet parity-safe
+- next attempt needs a closer OCaml comparison for local module-path forcing
+  order before routing those helpers through env_lazy
 
 ## Session Update: `ctype` Dotted Module-Type Path
 
