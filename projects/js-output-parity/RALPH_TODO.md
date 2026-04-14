@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 384 / 657 JS snapshots passing, 0 compile errors, 273 output diffs
+**Status:** 385 / 657 JS snapshots passing, 0 compile errors, 272 output diffs
 
 ## Goal
 
@@ -35,11 +35,56 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **384 / 657**
+- JS snapshot parity: **385 / 657**
 - Compile errors: **0**
-- Output diffs: **273**
+- Output diffs: **272**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: match OCaml's `Js_output.append_output` / `Js_exp_make.seq`
+  composition in `compiler-rust/src/lambda/compile.rs` so nested effect
+  outputs are normalized through sequence cleanup instead of preserving raw
+  Rust-only `Seq(..., undefined)` tails
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this slice fixes backend sequence cleanup at the OCaml `js_output.ml` /
+  `js_exp_make.ml` boundary without reopening typedtree or lambda parity work
+- OCaml reference:
+  `compiler/core/js_output.ml`, where `append_output` combines expression
+  outputs with `E.seq e1 e2`, and `compiler/core/js_exp_make.ml`, where `seq`
+  recursively strips pure `Number _`, `Var _`, and `Undefined _` fragments
+  before building the final comma expression
+- Rust change:
+  - changed `append_effect_output(...)` to call `js_seq(...)` instead of
+    constructing raw `ExpressionDesc::Seq(...)` nodes
+  - added focused regression coverage in
+    `nested_effect_sequences_drop_intermediate_pignore_suffixes_when_appended_to_values`
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml nested_effect_sequences_drop_intermediate_pignore_suffixes_when_appended_to_values -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml lowers_expression_sequences_to_js_comma_expressions -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_for_loop.res -o /tmp/test_for_loop.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_for_loop.res` now matches its checked-in `.mjs`
+    snapshot exactly; the Rust-only
+    `(console.log("hi"), undefined, x.length)` finish expression is now the
+    OCaml-style `(console.log("hi"), x.length)`
+  - `tests/tests/src/test_while_side_effect.res` still differs, but the same
+    OCaml-aligned append rule removes the intermediate `undefined` commas from
+    both `while` conditions and cleanly isolates the remaining control-flow
+    lowering drift (`if (undefined)` and block-lifting)
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the sequence-cleanup change
+- Topline impact:
+  - JS snapshot parity: **385 / 657** (**+1**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **272** (**-1**)
+- Keep this change because it ports OCaml's `Js_output.append_output` /
+  `Js_exp_make.seq` composition rule directly instead of preserving raw
+  Rust-only comma-expression suffixes during output concatenation
 
 Latest iteration on **2026-04-14**:
 

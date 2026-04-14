@@ -1046,10 +1046,7 @@ impl LambdaCompiler {
             if second.prelude.is_empty() {
                 return Compiled {
                     prelude: vec![],
-                    expr: Expression::new(ExpressionDesc::Seq(
-                        Box::new(first.expr),
-                        Box::new(second.expr),
-                    )),
+                    expr: js_seq(first.expr, second.expr),
                 };
             }
         }
@@ -11346,6 +11343,66 @@ mod tests {
                 }
             }
             other => panic!("expected array literal output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_effect_sequences_drop_intermediate_pignore_suffixes_when_appended_to_values() {
+        let mut compiler = LambdaCompiler::new();
+        let callback = Ident::create_local("callback");
+        let value = Ident::create_local("value");
+        let call = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::var(callback.clone())),
+            ap_args: vec![],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+        let sequence = Lambda::Lsequence(
+            Box::new(Lambda::Lsequence(
+                Box::new(call),
+                Box::new(Lambda::prim(
+                    Primitive::Pignore,
+                    vec![Lambda::const_(Constant::int(3))],
+                    Location::none(),
+                )),
+            )),
+            Box::new(Lambda::var(value.clone())),
+        );
+
+        let compiled = compiler.compile_expr(&sequence);
+
+        assert!(
+            compiled.prelude.is_empty(),
+            "nested effect/value sequence unexpectedly produced prelude statements"
+        );
+        match &compiled.expr.desc {
+            ExpressionDesc::Seq(first, second) => {
+                assert!(matches!(
+                    first.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Call(func, args, _),
+                        ..
+                    } if args.is_empty() && matches!(
+                        func.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                            ..
+                        } if id.same(&callback)
+                    )
+                ));
+                assert!(matches!(
+                    second.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&value)
+                ));
+            }
+            other => panic!("expected cleaned sequence expression, got {other:?}"),
         }
     }
 
