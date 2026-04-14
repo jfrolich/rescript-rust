@@ -1277,7 +1277,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
 
 fn block_last_is_terminal(block: &Block) -> bool {
     matches!(
-        block.last().map(|stmt| &stmt.desc),
+        last_unwrapped_statement(block).map(|stmt| &stmt.desc),
         Some(StatementDesc::Return(_))
             | Some(StatementDesc::Throw(_))
             | Some(StatementDesc::Continue)
@@ -1285,9 +1285,7 @@ fn block_last_is_terminal(block: &Block) -> bool {
 }
 
 fn single_return_expr(block: &Block) -> Option<Expression> {
-    let [stmt] = block.as_slice() else {
-        return None;
-    };
+    let stmt = single_unwrapped_statement(block)?;
     match &stmt.desc {
         StatementDesc::Return(expr) => Some(expr.clone()),
         _ => None,
@@ -1295,9 +1293,7 @@ fn single_return_expr(block: &Block) -> Option<Expression> {
 }
 
 fn single_assignment_expr(block: &Block) -> Option<(Expression, Expression)> {
-    let [stmt] = block.as_slice() else {
-        return None;
-    };
+    let stmt = single_unwrapped_statement(block)?;
     let StatementDesc::Exp(expr) = &stmt.desc else {
         return None;
     };
@@ -1334,9 +1330,7 @@ fn same_assignment_target(lhs: &Expression, rhs: &Expression) -> bool {
 }
 
 fn single_exp_expr(block: &Block) -> Option<Expression> {
-    let [stmt] = block.as_slice() else {
-        return None;
-    };
+    let stmt = single_unwrapped_statement(block)?;
     let StatementDesc::Exp(expr) = &stmt.desc else {
         return None;
     };
@@ -1344,12 +1338,32 @@ fn single_exp_expr(block: &Block) -> Option<Expression> {
 }
 
 fn single_if_block(block: &Block) -> Option<(&Expression, &Block, &Block)> {
-    let [stmt] = block.as_slice() else {
-        return None;
-    };
+    let stmt = single_unwrapped_statement(block)?;
     match &stmt.desc {
         StatementDesc::If(cond, then_block, else_block) => Some((cond, then_block, else_block)),
         _ => None,
+    }
+}
+
+fn unwrap_single_block_statement(stmt: &Statement) -> &Statement {
+    match &stmt.desc {
+        StatementDesc::Block(block) if block.len() == 1 => unwrap_single_block_statement(&block[0]),
+        _ => stmt,
+    }
+}
+
+fn single_unwrapped_statement(block: &Block) -> Option<&Statement> {
+    let [stmt] = block.as_slice() else {
+        return None;
+    };
+    Some(unwrap_single_block_statement(stmt))
+}
+
+fn last_unwrapped_statement(block: &Block) -> Option<&Statement> {
+    let stmt = block.last()?;
+    match &stmt.desc {
+        StatementDesc::Block(inner) if inner.len() == 1 => last_unwrapped_statement(inner),
+        _ => Some(stmt),
     }
 }
 
@@ -1360,6 +1374,8 @@ fn negate_condition(cond: Expression) -> Expression {
 fn raw_bin_expression(op: BinOp, left: Expression, right: Expression) -> Expression {
     Expression::new(ExpressionDesc::Bin(op, Box::new(left), Box::new(right)))
 }
+
+const JS_SIMPLIFY_MAX_DEPTH: usize = 10;
 
 fn js_and_expression(left: Expression, right: Expression) -> Expression {
     simplify_and_expression(&left, &right)
@@ -1372,6 +1388,18 @@ fn js_or_expression(left: Expression, right: Expression) -> Expression {
 }
 
 fn simplify_and_expression(left: &Expression, right: &Expression) -> Option<Expression> {
+    simplify_and_expression_with_depth(left, right, 0)
+}
+
+fn simplify_and_expression_with_depth(
+    left: &Expression,
+    right: &Expression,
+    depth: usize,
+) -> Option<Expression> {
+    if depth > JS_SIMPLIFY_MAX_DEPTH {
+        return None;
+    }
+
     match (&left.desc, &right.desc) {
         (ExpressionDesc::Bool(false), _) | (_, ExpressionDesc::Bool(false)) => {
             return Some(Expression::bool(false));
@@ -1379,6 +1407,59 @@ fn simplify_and_expression(left: &Expression, right: &Expression) -> Option<Expr
         (ExpressionDesc::Bool(true), _) => return Some(right.clone()),
         (_, ExpressionDesc::Bool(true)) => return Some(left.clone()),
         _ => {}
+    }
+
+    if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
+        match (&left.desc, &right.desc) {
+            (ExpressionDesc::Bin(BinOp::And, left_a, left_b), _) => {
+                let simplified_left_a =
+                    simplify_and_expression_with_depth(left_a, right, depth + 1);
+                let simplified_left_b =
+                    simplify_and_expression_with_depth(left_b, right, depth + 1);
+                return match (simplified_left_a, simplified_left_b) {
+                    (None, None) => simplify_and_expression_with_depth(left_a, left_b, depth + 1)
+                        .and_then(|expr| simplify_and_force(&expr, right, depth + 1)),
+                    (Some(left_a), None) => simplify_and_force(&left_a, left_b, depth + 1),
+                    (None, Some(left_b)) => simplify_and_force(left_a, &left_b, depth + 1),
+                    (Some(left_a), Some(left_b)) => {
+                        simplify_and_force(&left_a, &left_b, depth + 1)
+                    }
+                };
+            }
+            (_, ExpressionDesc::Bin(BinOp::And, right_a, right_b)) => {
+                let combined =
+                    raw_bin_expression(BinOp::And, left.clone(), right_a.as_ref().clone());
+                return simplify_and_expression_with_depth(&combined, right_b, depth + 1);
+            }
+            (ExpressionDesc::Bin(BinOp::Or, left_a, left_b), _) => {
+                let simplified_left_a =
+                    simplify_and_expression_with_depth(left_a, right, depth + 1);
+                let simplified_left_b =
+                    simplify_and_expression_with_depth(left_b, right, depth + 1);
+                return match (simplified_left_a, simplified_left_b) {
+                    (Some(expr), None) if matches!(expr.desc, ExpressionDesc::Bool(false)) => {
+                        Some(raw_bin_expression(
+                            BinOp::And,
+                            left_b.as_ref().clone(),
+                            right.clone(),
+                        ))
+                    }
+                    (None, Some(expr)) if matches!(expr.desc, ExpressionDesc::Bool(false)) => {
+                        Some(raw_bin_expression(
+                            BinOp::And,
+                            left_a.as_ref().clone(),
+                            right.clone(),
+                        ))
+                    }
+                    (None, _) | (_, None) => simplify_or_expression_with_depth(left_a, left_b, depth + 1)
+                        .and_then(|expr| simplify_and_force(&expr, right, depth + 1)),
+                    (Some(left_a), Some(left_b)) => {
+                        simplify_or_force(&left_a, &left_b, depth + 1)
+                    }
+                };
+            }
+            _ => {}
+        }
     }
 
     if ocaml_eq_expression(left, right) {
@@ -1407,6 +1488,18 @@ fn simplify_and_expression(left: &Expression, right: &Expression) -> Option<Expr
 }
 
 fn simplify_or_expression(left: &Expression, right: &Expression) -> Option<Expression> {
+    simplify_or_expression_with_depth(left, right, 0)
+}
+
+fn simplify_or_expression_with_depth(
+    left: &Expression,
+    right: &Expression,
+    depth: usize,
+) -> Option<Expression> {
+    if depth > JS_SIMPLIFY_MAX_DEPTH {
+        return None;
+    }
+
     match (&left.desc, &right.desc) {
         (ExpressionDesc::Bool(true), _) | (_, ExpressionDesc::Bool(true)) => {
             return Some(Expression::bool(true));
@@ -1418,8 +1511,18 @@ fn simplify_or_expression(left: &Expression, right: &Expression) -> Option<Expre
 
     let left_not = push_negation(left.clone())?;
     let right_not = push_negation(right.clone())?;
-    let simplified = simplify_and_expression(&left_not, &right_not)?;
+    let simplified = simplify_and_expression_with_depth(&left_not, &right_not, depth + 1)?;
     push_negation(simplified)
+}
+
+fn simplify_and_force(left: &Expression, right: &Expression, depth: usize) -> Option<Expression> {
+    simplify_and_expression_with_depth(left, right, depth)
+        .or_else(|| Some(raw_bin_expression(BinOp::And, left.clone(), right.clone())))
+}
+
+fn simplify_or_force(left: &Expression, right: &Expression, depth: usize) -> Option<Expression> {
+    simplify_or_expression_with_depth(left, right, depth)
+        .or_else(|| Some(raw_bin_expression(BinOp::Or, left.clone(), right.clone())))
 }
 
 fn simplify_typeof_and_literal_and(typeof_expr: &Expression, other: &Expression) -> Option<Expression> {
@@ -2254,6 +2357,74 @@ mod tests {
     }
 
     #[test]
+    fn test_if_statement_merges_single_block_wrapped_nested_if_like_ocaml() {
+        let key = Ident::create_local("key");
+        let dispatch = Expression::bin(
+            BinOp::Or,
+            Expression::bin(
+                BinOp::EqEqEq,
+                Expression::var(key.clone()),
+                Expression::string("space"),
+            ),
+            Expression::bin(
+                BinOp::EqEqEq,
+                Expression::var(key.clone()),
+                Expression::string("a"),
+            ),
+        );
+
+        let stmt = Statement::if_(
+            dispatch,
+            vec![Statement::if_(
+                Expression::bin(
+                    BinOp::EqEqEq,
+                    Expression::var(key.clone()),
+                    Expression::string("space"),
+                ),
+                vec![Statement::return_(Expression::number(Number::int(1)))],
+                vec![],
+            )],
+            vec![],
+        );
+
+        let (test, then_block, else_block) = match &stmt.desc {
+            StatementDesc::If(test, then_block, else_block) => (test, then_block, else_block),
+            StatementDesc::Block(block) => single_if_block(block)
+                .unwrap_or_else(|| panic!("expected the nested if to collapse into a single if")),
+            other => panic!("expected the nested if to collapse into a single if, got {other:?}"),
+        };
+
+        assert!(else_block.is_empty());
+        assert!(matches!(
+            &test.desc,
+            ExpressionDesc::Bin(BinOp::EqEqEq, left, right)
+                if matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(id)),
+                        ..
+                    } if id.same(&key)
+                ) && matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    } if txt == "space"
+                )
+        ));
+        assert!(matches!(
+            then_block.as_slice(),
+            [Statement {
+                desc: StatementDesc::Return(Expression {
+                    desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                    ..
+                }),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
     fn test_js_and_simplifies_boolean_typeof_nullish_guards_like_ocaml() {
         let value = Ident::create_local("value");
         let typeof_boolean = Expression::bin(
@@ -2293,6 +2464,42 @@ mod tests {
         assert!(matches!(
             js_and_expression(typeof_boolean, not_equals_undefined).desc,
             ExpressionDesc::Bin(BinOp::EqEqEq, _, _)
+        ));
+    }
+
+    #[test]
+    fn test_js_and_simplifies_or_literal_membership_against_same_literal_like_ocaml() {
+        let key = Ident::create_local("key");
+        let space = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(key.clone()),
+            Expression::string("space"),
+        );
+        let letter_a = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(key.clone()),
+            Expression::string("a"),
+        );
+
+        let simplified =
+            js_and_expression(Expression::bin(BinOp::Or, space.clone(), letter_a), space.clone());
+
+        assert!(matches!(
+            simplified.desc,
+            ExpressionDesc::Bin(BinOp::EqEqEq, left, right)
+                if matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(id)),
+                        ..
+                    } if id.same(&key)
+                ) && matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    } if txt == "space"
+                )
         ));
     }
 

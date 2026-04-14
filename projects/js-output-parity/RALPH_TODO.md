@@ -43,6 +43,62 @@ reported:
 
 Latest iteration on **2026-04-14**:
 
+- Active slice: port the recursive OCaml `js_exp_make.ml` boolean
+  simplification and `js_stmt_make.ml` single-block `if_` flattening needed so
+  nested untagged-switch guards can collapse through single-statement block
+  wrappers instead of getting stuck as Rust-only nested `if` towers
+- Active backend focus for this slice is **Phase 4: Port JS Passes** from
+  `PLAN.md`; this stays downstream of the already-green optimized lambda
+  boundary and fixes JS-IR cleanup rather than reopening typedtree or lambda
+  parity
+- OCaml reference:
+  `compiler/core/js_exp_make.ml`, where `simplify_and_` / `simplify_or_`
+  recurse through nested `And` / `Or` trees with a depth limit and absorb
+  repeated literal-equality tests on the same variable, and
+  `compiler/core/js_stmt_make.ml`, where `block` flattens single nested blocks
+  so `if_` can keep merging nested guards
+- Rust change:
+  - taught `compiler-rust/src/js_ir/mod.rs` to unwrap single nested
+    `StatementDesc::Block` wrappers when checking for single returns,
+    assignments, expressions, and nested `if` statements, matching the OCaml
+    `block` helper behavior that keeps later `if_` merges visible
+  - replaced the one-step `js_and_expression` / `js_or_expression`
+    simplifier with a depth-limited recursive port of the OCaml
+    `simplify_and_` / `simplify_or_` structure for nested `And` / `Or`
+    expressions, while preserving the existing Rust-side literal/type guards
+  - added focused regression coverage in
+    `test_if_statement_merges_single_block_wrapped_nested_if_like_ocaml` and
+    `test_js_and_simplifies_or_literal_membership_against_same_literal_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_merges_single_block_wrapped_nested_if_like_ocaml -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml test_js_and_simplifies_or_literal_membership_against_same_literal_like_ocaml -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml test_js_and_simplifies_boolean_typeof_nullish_guards_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/LargeUnboxedVariantOptimization.res -o /tmp/LargeUnboxedVariantOptimization.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/LargeUnboxedVariantOptimization.res` now collapses the
+    original full literal-membership guard partway through the OCaml
+    `simplify_and_` path instead of preserving the whole Rust-only
+    `"space" || "z" || ... || "a"` tower, but the file still differs on the
+    remaining absorption step and on the later effect-position control-flow
+    shaping inside the `state.active` branch
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the JS-IR simplification changes, which keeps this slice scoped away from
+    the already-stable import/export path
+- Topline impact:
+  - JS snapshot parity: **426 / 657** -> **426 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **231** -> **231** (**no change**)
+- Keep this change because it ports the OCaml recursive `simplify_and_` /
+  `simplify_or_` shape and the single-block `if_` flattening behavior into the
+  Rust JS backend; the wrapper stays flat only because
+  `LargeUnboxedVariantOptimization` still needs the next downstream
+  absorption/effect-lowering step before the snapshot fully drops out.
+
+Latest iteration on **2026-04-14**:
+
 - Active slice: port the OCaml untagged-switch `compile_switch` fast path for
   zero explicit literal arms with equal literal/block defaults, and keep the
   downstream `Js_stmt_make.if_` / `Js_exp_make.econd` simplifications aligned
