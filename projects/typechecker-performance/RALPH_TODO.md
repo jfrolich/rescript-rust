@@ -1,7 +1,7 @@
 # Ralph TODO: Typechecker Performance
 
 **Last Updated:** 2026-04-14
-**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, and `ctype` dotted child-module resolution now uses it; broader perf gap still open
+**Status:** shared env_lazy-backed detached-signature copy path landed in `typecore` / `typemod`, `ctype` now skips one duplicate CMI signature rewrite, and the broader env_lazy rollout is still incomplete
 
 ## Goal
 
@@ -192,6 +192,65 @@ Next focus after this step:
 - keep prioritizing the module-signature-heavy cluster (`Import`, module alias
   tests, Belt set/map tests, JSX-heavy files) before secondary cleanups
 
+## Session Update: Remove Duplicate CMI Signature Rewrite
+
+Additional checkpoint from this worktree on `2026-04-14` after removing the
+second whole-signature qualification pass from
+`ctype::resolve_type_through_modules`:
+
+- `sample` on repeated `Import.res` compiles now shows the dominant stack under
+  `lookup_module_type_from_unpack_expr -> type_pack -> includemod::modtypes_inner`,
+  with repeated `resolve_type_through_modules ->
+  persistent_env::substitute_type_paths_in_sig`; it is no longer primarily
+  spending time in `copy_lookup_signature_for_subst`
+- focused import-family benchmark (`defunctor_make_test|Import`):
+  - Files tested: `5`
+  - Comparable files: `5`
+  - Aggregate OCaml total: `67.5ms`
+  - Aggregate Rust total: `324.2ms`
+  - Aggregate Rust / OCaml ratio: `4.80x`
+  - `Import.res` benchmark entry: OCaml `40.7ms`, Rust `274.4ms`, `6.74x`
+- exact `Import.res` repro:
+  - OCaml: `0.04s` (`/usr/bin/time -lp`)
+  - Rust: `0.40s` (`/usr/bin/time -lp`)
+  - Rust max RSS: about `70MB`
+  - Rust peak footprint: about `55MB`
+- focused import parity: unchanged at `1/4`, `283` hunk mismatches
+- full typedtree parity: unchanged at `232/657`, `43117` hunk mismatches
+- canonical corpus benchmark:
+  - Files tested: `657`
+  - Comparable files: `656`
+  - Rust faster or equal: `4`
+  - Rust slower: `652`
+  - Materially slower: `224`
+  - Rust failures: `1` (`src/ticker.res`: stack overflow)
+  - Aggregate OCaml total: `5855.5ms`
+  - Aggregate Rust total: `12137.5ms`
+  - Aggregate Rust / OCaml ratio: `2.07x`
+  - `Import.res` benchmark entry: OCaml `47.9ms`, Rust `282.6ms`, `5.90x`
+
+What landed in this step:
+
+- `ctype::resolve_type_through_modules` no longer reruns
+  `substitute_type_paths_in_sig` /
+  `substitute_sig_decl_paths_in_place` after
+  `resolve_module_signature_through_cmi` has already returned the qualified
+  signature view
+- this keeps the existing parity checkpoint while removing one redundant
+  whole-signature substitution pass from repeated type expansion through CMI
+  lookups
+
+What this means:
+
+- one more eager whole-signature rewrite was removed from the import-heavy hot
+  path without reopening the `Import*` / `DynamicImportModuleWithAlias` parity
+  drift
+- the corpus aggregate ratio improved modestly from `2.10x` to `2.07x`, which
+  is directionally correct but still far from the OCaml-shaped target
+- the remaining hot path is now clearer: repeated unpack/module-type comparison
+  work in `includemod::modtypes_inner` plus the remaining qualification work
+  reached through `resolve_type_through_modules`
+
 ## Task List
 
 - [ ] Keep `scripts/benchmark_typechecker_performance.py` authoritative for the
@@ -217,8 +276,10 @@ Next focus after this step:
   the lazy path is also allocation-efficient
 - [ ] Replace bandaid-style eager copies with a design that is structurally
   closer to OCaml's lazy `components_of_module_maker` path
+- [x] Remove the duplicate CMI-signature qualification pass from
+  `ctype::resolve_type_through_modules`
 - [x] Re-measure `Import.res` and capture new timing/memory numbers
-- [ ] Re-sample the compiler and confirm the hot path moved away from
+- [x] Re-sample the compiler and confirm the hot path moved away from
   `copy_lookup_signature_for_subst` / `copy_lookup_type_expr`
 - [ ] Land an OCaml-shaped cached module-components layer if the intermediate
   shared-helper step is still slower than OCaml

@@ -962,11 +962,6 @@ pub fn resolve_type_through_modules<'a>(
     let mut visiting = HashSet::new();
     let mut current_sig =
         resolve_module_signature_through_cmi(ctx, &load_paths, module_path, &mut visiting)?;
-    // Match OCaml Subst/Mtype behavior for module signatures loaded from cmi:
-    // rewrite intra-signature type/module references to qualified access paths
-    // (e.g. `componentLike` -> `Jsx.componentLike`, `element` -> `Jsx.element`).
-    crate::cmi::persistent_env::substitute_type_paths_in_sig(&current_sig, module_path, ctx);
-    crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut current_sig, module_path);
 
     // Register ALL types in the final signature by stamp for future lookups.
     // This is important because type manifests may reference sibling types
