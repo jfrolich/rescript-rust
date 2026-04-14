@@ -264,12 +264,12 @@ impl LambdaCompiler {
         for (export, value) in extracted.exports.into_iter().zip(extracted.values) {
             if let ExpressionDesc::Var(VIdent::Id(target)) = &value.desc {
                 if target.name() == export.name() {
-                    if declared.contains(target) {
-                        exports.push(target.clone());
-                        continue;
-                    }
                     if declared.contains(&export) {
                         exports.push(export);
+                        continue;
+                    }
+                    if declared.contains(target) {
+                        exports.push(target.clone());
                         continue;
                     }
                 }
@@ -5542,6 +5542,10 @@ fn resolve_export_alias(
     aliases: &HashMap<Ident, Ident>,
     declared: &HashSet<Ident>,
 ) -> Ident {
+    if declared.contains(export) {
+        return export.clone();
+    }
+
     let mut current = export.clone();
     let mut seen = HashSet::new();
 
@@ -10497,16 +10501,73 @@ mod tests {
         let [exported] = deps.program.exports.as_slice() else {
             panic!("expected a single export");
         };
-        assert!(exported.same(&rebound_export));
+        assert_eq!(exported.name(), rebound_export.name());
 
         let [stmt] = deps.program.block.as_slice() else {
             panic!("expected the rebound alias to stay as a real binding");
         };
         match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
-                assert!(ident.same(&rebound_export));
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(target)),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert_eq!(ident.name(), rebound_export.name());
+                assert!(target.same(&global));
             }
             other => panic!("expected the rebound export binding to remain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_and_resolve_keep_declared_same_name_export_aliases() {
+        let mut compiler = LambdaCompiler::new();
+        let target = Ident::create_local("broken");
+        let exported = Ident::create_local("broken");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: target.clone(),
+                value: Some(Expression::number(Number::int(1))),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::var(target.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(target.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+
+        let [first, second] = block.as_slice() else {
+            panic!("expected the original target and alias bindings to remain");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&target));
+            }
+            other => panic!("expected the original target binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&exported));
+            }
+            other => panic!("expected the exported alias binding second, got {other:?}"),
         }
     }
 

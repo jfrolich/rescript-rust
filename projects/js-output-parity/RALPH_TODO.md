@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 347 / 657 JS snapshots passing, 0 compile errors, 310 output diffs
+**Status:** 352 / 657 JS snapshots passing, 0 compile errors, 305 output diffs
 
 ## Goal
 
@@ -35,11 +35,59 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **347 / 657**
+- JS snapshot parity: **352 / 657**
 - Compile errors: **0**
-- Output diffs: **310**
+- Output diffs: **305**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: preserve OCaml-style same-name export aliases for eta-reduced
+  wrappers across the Rust-only second JS-path simplify pass and the final
+  export coercion in `compiler-rust/src/lambda/simplify.rs` and
+  `compiler-rust/src/lambda/compile.rs`
+- OCaml reference: `compiler/core/lam_pass_remove_alias.ml`,
+  `compiler/core/lam_pass_lets_dce.ml`, `compiler/core/lam_compile_main.ml`,
+  `compiler/core/js_shake.ml`, and `compiler/core/js_dump_import_export.ml`,
+  where export identity is tracked separately from payload simplification, JS
+  shaking keeps exported declarations alive, and ES module export printing uses
+  the chosen export ident rather than rewriting it back to a same-name target
+- Rust change:
+  - added `known_functions` tracking plus eta-reduction for direct wrapper
+    function values in the JS-path lambda simplifier so wrappers like
+    `x => broken(x)` fold to direct aliases
+  - taught the second simplify-pass pre-scan to keep exported bindings whose
+    original RHS was an eta-wrapper, preventing the later Rust-only pass from
+    substituting the just-reduced alias away again
+  - changed top-level export coercion to prefer an already-declared same-name
+    export alias over its target, and stopped the later alias-resolution helper
+    from walking away from export idents that are already materially declared
+- Added focused regression coverage in:
+  - `lambda::simplify::tests::eta_reduces_wrappers_around_known_async_functions_like_ocaml`
+  - `lambda::compile::tests::coerce_and_resolve_keep_declared_same_name_export_aliases`
+  - updated `lambda::compile::tests::compile_deps_program_keeps_same_name_export_aliases_for_unbound_globals`
+    to assert output-shape behavior instead of a specific internal stamp
+- Verified focused guards for this slice:
+  - `timeout 120 env RUSTFLAGS='--cap-lints allow' cargo test --manifest-path compiler-rust/Cargo.toml same_name_export -- --nocapture`
+  - `timeout 120 env RUSTFLAGS='--cap-lints allow' cargo test --manifest-path compiler-rust/Cargo.toml eta_reduces_wrappers_around_known_async_functions_like_ocaml -- --nocapture`
+  - `timeout 600 env RUSTFLAGS='--cap-lints allow' cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/async_inline.res -o /tmp/async_inline.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/pipe_syntax.res -o /tmp/pipe_syntax.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `async_inline` now matches its checked-in `.mjs` snapshot again; the
+    missing `broken$2 = broken$1` export alias shape is restored
+  - `pipe_syntax` remains an exact match after narrowing the second-pass
+    preservation rule, so the temporary alias-regression cluster is gone
+  - `ExternalShadow` remains an exact guard-file match
+- Topline impact:
+  - JS snapshot parity: **352 / 657** (**+5**)
+  - Compile errors: **0** (no change)
+  - Output diffs: **305** (**-5**)
+- Keep this change because it matches OCaml’s export-identity handling at the
+  JS backend boundary instead of papering over emitted text in the printer
 
 Latest iteration on **2026-04-14**:
 
