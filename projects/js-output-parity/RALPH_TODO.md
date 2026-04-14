@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-14
-**Status:** 471 / 657 JS snapshots passing, 0 compile errors, 186 output diffs
+**Status:** 472 / 657 JS snapshots passing, 0 compile errors, 185 output diffs
 
 ## Goal
 
@@ -35,11 +35,69 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **471 / 657**
+- JS snapshot parity: **472 / 657**
 - Compile errors: **0**
-- Output diffs: **186**
+- Output diffs: **185**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-14**:
+
+- Active slice: port the missing OCaml bigint primitive lowering in
+  `lam_compile_primitive.ml` so the Rust JS backend stops dropping bigint
+  arithmetic, bitwise, unary, and shift operators to `undefined`
+- Active backend focus for this slice is **Phase 3: Port JS IR Lowering And
+  Metadata** from `PLAN.md`, because the mismatch lives in
+  `compiler/core/lam_compile_primitive.ml` after optimized lambda rather than
+  in the printer: OCaml already lowers `Paddbigint`, `Psubbigint`,
+  `Pmulbigint`, `Pdivbigint`, `Pmodbigint`, `Ppowbigint`, `Pnegbigint`,
+  `Pnotbigint`, `Pandbigint`, `Porbigint`, `Pxorbigint`, `Plslbigint`, and
+  `Pasrbigint` to raw JS bigint operators, while Rust was still falling
+  through the generic backend fallback
+- OCaml reference:
+  `compiler/core/lam_compile_primitive.ml`, especially the bigint branches
+  lowering through `E.bigint_op`, `E.bigint_div`, `E.bigint_mod`, and
+  `E.int_bnot`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so the missing bigint
+    primitive family now lowers to the corresponding JS IR operators instead of
+    `undefined`
+  - added focused regression coverage in
+    `compile_bigint_arithmetic_primitives_use_raw_js_bigint_ops_like_ocaml`
+    and
+    `compile_bigint_bitwise_primitives_use_raw_js_bigint_ops_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml compile_bigint_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/bigint_test.res` using `rescript.exe compiler-args`,
+    diffing `/tmp/bigint_test.mjs` against the checked-in snapshot
+  - authoritative `tests/tests/lib/bs` repro for
+    `tests/tests/src/unified_ops_test.res` using `rescript.exe compiler-args`,
+    diffing `/tmp/unified_ops_test.authoritative.mjs` against the checked-in
+    snapshot
+  - direct guard repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot as an unchanged
+    broader guard
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/unified_ops_test.res` no longer drops bigint arithmetic,
+    bitwise, unary, or shift lowering; the remaining drift there has narrowed
+    to earlier non-bigint issues like string-concat folding and int
+    constant-folding for `pow1` / `pow_overflow`
+  - `tests/tests/src/bigint_test.res` no longer fails on the missing bigint
+    operator family around lines 158-166; its remaining drift is now in the
+    earlier bigint equality / conditional-shaping path, not missing operator
+    lowering
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match after
+    the bigint primitive port
+- Topline impact:
+  - JS snapshot parity: **471 / 657** -> **472 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **186** -> **185** (**-1**)
+- Keep this change because it ports the real OCaml backend behavior from
+  `lam_compile_primitive.ml`; the wrapper gain comes from restoring missing
+  bigint operator lowering rather than from any printer-only rewrite.
 
 Latest iteration on **2026-04-14**:
 

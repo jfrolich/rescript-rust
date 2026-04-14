@@ -4057,8 +4057,18 @@ impl LambdaCompiler {
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
+            Paddbigint => Expression::bin(
+                BinOp::Plus,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
             Psubint => int32_minus(compiled_args[0].clone(), compiled_args[1].clone()),
             Psubfloat => Expression::bin(
+                BinOp::Minus,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Psubbigint => Expression::bin(
                 BinOp::Minus,
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
@@ -4069,8 +4079,18 @@ impl LambdaCompiler {
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
+            Pmulbigint => Expression::bin(
+                BinOp::Mul,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
             Pdivint => int32_div(compiled_args[0].clone(), compiled_args[1].clone()),
             Pdivfloat => Expression::bin(
+                BinOp::Div,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Pdivbigint => Expression::bin(
                 BinOp::Div,
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
@@ -4081,12 +4101,22 @@ impl LambdaCompiler {
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
+            Pmodbigint => Expression::bin(
+                BinOp::Mod,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
             Ppowint => to_int32(Expression::bin(
                 BinOp::Pow,
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             )),
             Ppowfloat => Expression::bin(
+                BinOp::Pow,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Ppowbigint => Expression::bin(
                 BinOp::Pow,
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
@@ -4236,17 +4266,48 @@ impl LambdaCompiler {
             Pnot => Expression::not(compiled_args[0].clone()),
             Pnegint => int32_minus(int_expr(0), compiled_args[0].clone()),
             Pnegfloat => Expression::bin(BinOp::Minus, int_expr(0), compiled_args[0].clone()),
+            Pnegbigint => Expression::bin(
+                BinOp::Minus,
+                Expression::number(Number::bigint(true, "0")),
+                compiled_args[0].clone(),
+            ),
             Pnotint => int_bnot(compiled_args[0].clone()),
+            Pnotbigint => int_bnot(compiled_args[0].clone()),
             Pandint => Expression::bin(
                 BinOp::Band,
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
+            Pandbigint => Expression::bin(
+                BinOp::Band,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
             Porint => int32_bor(compiled_args[0].clone(), compiled_args[1].clone()),
+            Porbigint => Expression::bin(
+                BinOp::Bor,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
             Pxorint => int32_bxor(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pxorbigint => Expression::bin(
+                BinOp::Bxor,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
             Plslint => int32_lsl(compiled_args[0].clone(), compiled_args[1].clone()),
+            Plslbigint => Expression::bin(
+                BinOp::Lsl,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
             Plsrint => int32_lsr(compiled_args[0].clone(), compiled_args[1].clone()),
             Pasrint => Expression::bin(
+                BinOp::Asr,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Pasrbigint => Expression::bin(
                 BinOp::Asr,
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
@@ -12280,6 +12341,80 @@ mod tests {
 
         assert!(compiled.prelude.is_empty());
         assert_eq!(print_expression(&compiled.expr), "9n < 1n ? 9n : 1n");
+    }
+
+    #[test]
+    fn compile_bigint_arithmetic_primitives_use_raw_js_bigint_ops_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let lhs = Lambda::const_(Constant::BigInt {
+            negative: false,
+            value: "9".to_string(),
+        });
+        let rhs = Lambda::const_(Constant::BigInt {
+            negative: false,
+            value: "1".to_string(),
+        });
+
+        let add = compiler.compile_expr(&Lambda::prim(
+            Primitive::Paddbigint,
+            vec![lhs.clone(), rhs.clone()],
+            Location::none(),
+        ));
+        assert!(add.prelude.is_empty());
+        assert_eq!(print_expression(&add.expr), "9n + 1n");
+
+        let pow = compiler.compile_expr(&Lambda::prim(
+            Primitive::Ppowbigint,
+            vec![lhs.clone(), rhs.clone()],
+            Location::none(),
+        ));
+        assert!(pow.prelude.is_empty());
+        assert_eq!(print_expression(&pow.expr), "9n ** 1n");
+
+        let neg = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pnegbigint,
+            vec![lhs],
+            Location::none(),
+        ));
+        assert!(neg.prelude.is_empty());
+        assert_eq!(print_expression(&neg.expr), "0n - 9n");
+    }
+
+    #[test]
+    fn compile_bigint_bitwise_primitives_use_raw_js_bigint_ops_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let lhs = Lambda::const_(Constant::BigInt {
+            negative: false,
+            value: "9".to_string(),
+        });
+        let rhs = Lambda::const_(Constant::BigInt {
+            negative: false,
+            value: "1".to_string(),
+        });
+
+        let land = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pandbigint,
+            vec![lhs.clone(), rhs.clone()],
+            Location::none(),
+        ));
+        assert!(land.prelude.is_empty());
+        assert_eq!(print_expression(&land.expr), "9n & 1n");
+
+        let lsl = compiler.compile_expr(&Lambda::prim(
+            Primitive::Plslbigint,
+            vec![lhs.clone(), rhs.clone()],
+            Location::none(),
+        ));
+        assert!(lsl.prelude.is_empty());
+        assert_eq!(print_expression(&lsl.expr), "(9n << 1n)");
+
+        let lnot = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pnotbigint,
+            vec![lhs],
+            Location::none(),
+        ));
+        assert!(lnot.prelude.is_empty());
+        assert_eq!(print_expression(&lnot.expr), "~9n");
     }
 
     #[test]
