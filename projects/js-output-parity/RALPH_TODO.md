@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-15
-**Status:** 539 / 657 JS snapshots passing, 0 compile errors, 118 output diffs
+**Last Updated:** 2026-04-16
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 520 / 657 with 8 unrelated compile errors and 129 output diffs
 
 ## Goal
 
@@ -40,6 +40,67 @@ reported:
 - Output diffs: **118**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+## Current Worktree Warning
+
+Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
+worktree do **not** reproduce the project baseline above. They currently
+report:
+
+- JS snapshot parity: **520 / 657**
+- Compile errors: **8**
+- Output diffs: **129**
+
+Those 8 compile failures are not in the JS backend slice and include unrelated
+typechecker/runtime regressions such as:
+
+- `functor_ffi.res`: `CoreError(ExprTypeClash ...)`
+- `defunctor_make_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
+- `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
+- `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
+
+Do **not** replace the recorded project baseline with `520 / 657` unless the
+worktree is first restored to a stable state. For JS-output work, continue to
+use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
+baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: preserve OCaml's explicit nested `typeof` refinement guards in
+  JS IR statement merging instead of collapsing them into a stricter literal
+  equality too early
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this change is in `compiler-rust/src/js_ir/mod.rs`, not a
+  printer rewrite
+- OCaml reference:
+  `compiler/core/js_stmt_make.ml` and `compiler/core/js_exp_make.ml`,
+  specifically the nested-`if` merge path that should not erase an explicit
+  `typeof x === "..."` refinement guard before the final statement shape is
+  formed
+- Rust change:
+  - added `preserves_typeof_refinement_guard(...)` and used it to block the
+    nested-`if` shared-else merge in `simplify_if_statement(...)` when the
+    outer condition is a `typeof` test on the same variable and the inner
+    condition is the corresponding strict literal equality
+  - added focused regression coverage in
+    `test_if_statement_keeps_explicit_typeof_refinement_guards`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_keeps_explicit_typeof_refinement_guards -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` (blocked by unrelated worktree regressions listed above)
+- Focused outcome:
+  - `tests/tests/src/UntaggedVariants.res` now keeps the OCaml-aligned
+    `typeof match$3 === "string"` guard in `ComplexPattern.check`
+  - the remaining drift in that file is the earlier literal-membership collapse
+    around `match$1 === false`; the `typeof` refinement mismatch is gone
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the unchanged guard
+- Topline impact:
+  - local focused diff improved in `UntaggedVariants`
+  - full-project totals are currently **not comparable** because the present
+    worktree no longer reproduces the recorded clean baseline
 
 Latest iteration on **2026-04-15**:
 

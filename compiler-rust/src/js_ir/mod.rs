@@ -1421,9 +1421,10 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
     }
 
     if let Some((nested_cond, nested_then, nested_else)) = single_if_block(&then_) {
+        let preserve_refinement_guard = preserves_typeof_refinement_guard(&cond, nested_cond);
         // Keep empty shared fallthrough blocks intact here. They need function-tail
         // context to merge safely, otherwise later statements can change the meaning.
-        if !nested_else.is_empty() && ocaml_eq_block(nested_else, &else_) {
+        if !preserve_refinement_guard && !nested_else.is_empty() && ocaml_eq_block(nested_else, &else_) {
             return simplify_if_statement(
                 js_and_expression(cond, nested_cond.clone()),
                 nested_then.clone(),
@@ -1431,7 +1432,10 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
             );
         }
 
-        if !nested_then.is_empty() && ocaml_eq_block(nested_then, &else_) {
+        if !preserve_refinement_guard
+            && !nested_then.is_empty()
+            && ocaml_eq_block(nested_then, &else_)
+        {
             return simplify_if_statement(
                 js_and_expression(cond, Expression::not(nested_cond.clone())),
                 nested_else.clone(),
@@ -1553,6 +1557,21 @@ fn expression_stmt_is_trivial(expr: &Expression) -> bool {
 
 fn last_statement(block: &Block) -> Option<&Statement> {
     block.last()
+}
+
+fn preserves_typeof_refinement_guard(outer_cond: &Expression, inner_cond: &Expression) -> bool {
+    let Some((outer_vident, type_name)) = typeof_var_type_test(outer_cond) else {
+        return false;
+    };
+    let Some((inner_op, inner_vident, literal)) = strict_var_literal_comparison(inner_cond) else {
+        return false;
+    };
+    if inner_op != BinOp::EqEqEq || !same_vident(outer_vident, inner_vident) {
+        return false;
+    }
+
+    literal_matches_type_name(literal, type_name)
+        || (type_name == "object" && matches!(literal.desc, ExpressionDesc::Null))
 }
 
 fn negate_condition(cond: Expression) -> Expression {
@@ -2851,6 +2870,94 @@ mod tests {
             alternate.as_ref().desc,
             ExpressionDesc::Call(_, _, _)
         ));
+    }
+
+    #[test]
+    fn test_if_statement_keeps_explicit_typeof_refinement_guards() {
+        let value = Ident::create_local("value");
+        let outer_cond = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
+                value.clone(),
+            )))),
+            Expression::string("string"),
+        );
+        let inner_cond = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(value.clone()),
+            Expression::string("My name is"),
+        );
+        let success = Expression::call(
+            Expression::var(Ident::create_local("success")),
+            vec![],
+            CallInfo::default(),
+        );
+        let failure_expr = Expression::call(
+            Expression::var(Ident::create_local("failure")),
+            vec![],
+            CallInfo::default(),
+        );
+        let success_block = vec![
+            Statement::exp(success),
+            Statement::return_(Expression::undefined(true)),
+        ];
+        let failure_block = vec![
+            Statement::exp(failure_expr.clone()),
+            Statement::return_(Expression::undefined(true)),
+        ];
+
+        assert!(
+            preserves_typeof_refinement_guard(&outer_cond, &inner_cond),
+            "expected typeof refinement detection to trigger for {outer_cond:#?} / {inner_cond:#?}"
+        );
+
+        let stmt = Statement::if_(
+            outer_cond.clone(),
+            vec![Statement::new(StatementDesc::If(
+                inner_cond.clone(),
+                success_block,
+                failure_block.clone(),
+            ))],
+            failure_block,
+        );
+
+        let StatementDesc::If(test, then_block, else_block) = &stmt.desc else {
+            panic!("expected the explicit outer typeof guard to stay materialized");
+        };
+        assert!(
+            matches!(
+                &test.desc,
+                ExpressionDesc::Bin(
+                    BinOp::EqEqEq,
+                    left,
+                    right,
+                ) if matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Typeof(inner),
+                        ..
+                    } if matches!(
+                        inner.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(VIdent::Id(id)),
+                            ..
+                        } if id.same(&value)
+                    )
+                ) && matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    } if txt == "string"
+                )
+            ),
+            "outer guard changed unexpectedly: {stmt:#?}"
+        );
+        let Some((nested_test, _, nested_else)) = single_if_block(then_block) else {
+            panic!("expected the typeof branch to keep the nested literal refinement");
+        };
+        assert!(ocaml_eq_expression(nested_test, &inner_cond));
+        assert!(ocaml_eq_block(nested_else, else_block));
     }
 
     #[test]
