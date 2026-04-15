@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 491 / 657 JS snapshots passing, 0 compile errors, 166 output diffs
+**Status:** 494 / 657 JS snapshots passing, 0 compile errors, 163 output diffs
 
 ## Goal
 
@@ -35,11 +35,75 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **491 / 657**
+- JS snapshot parity: **494 / 657**
 - Compile errors: **0**
-- Output diffs: **166**
+- Output diffs: **163**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep sync component `props` wrappers materialized through the
+  post-lowering simplify pass instead of eta-reducing them down to the inner
+  `make` / `make$N` binding, while still letting async component wrappers
+  collapse to the underlying async `make` path that OCaml already uses
+- Active backend focus for this slice is **Phase 2: Port Post-Lowering Lambda
+  Backend Stages** from `PLAN.md`, because the remaining drift sat in the
+  downstream simplify/remove-alias boundary before JS IR lowering: the
+  optimized-lambda input already matched OCaml and still contained
+  `function props -> apply make props`, but Rust simplified that wrapper away
+  for sync components while OCaml carried the wrapper ownership through to final
+  JS
+- OCaml reference:
+  `compiler/core/lam_pass_remove_alias.ml`, especially the alias/eta-reduction
+  boundary that operates over the lowered lambda before JS compilation;
+  `compiler/core/lam_pass_alpha_conversion.ml`, especially the late wrapper
+  cleanup rules around `Pjs_fn_make`; and the exact `-drawlambda` output for
+  `tests/tests/src/jsx_preserve_test.res`, where both compilers still show the
+  sync component wrapper as `function props -> apply make props` before the JS
+  backend runs
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so eta reduction now keeps a
+    sync `props` wrapper when it is forwarding to a local make-like binding
+    (`make` / `make$N`) with the same arity and the callee is non-async and has
+    no raw directive
+  - kept the async case on the old collapse path, matching OCaml's
+    `async_jsx` snapshot where the final module field still points at the
+    underlying `async function make(...)`
+  - added focused regressions for both sides of the split:
+    `keeps_sync_component_props_wrappers_materialized_for_js_backend` and
+    `still_eta_reduces_async_component_props_wrappers`
+- Verified focused guards for this slice:
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml component_props_wrappers -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml js_flatten_and_mark_dead_ -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact AST-path release repro for `tests/tests/src/jsx_preserve_test.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/jsx_preserve_test.mjs` against the
+    checked-in snapshot
+  - exact AST-path release repro for `tests/tests/src/async_jsx.res` from
+    `tests/tests/lib/bs`, diffing `/tmp/async_jsx.mjs` against the checked-in
+    snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/jsx_preserve_test.res` now matches exactly: the final JS
+    keeps the sync component wrapper ownership, so the descriptive top-level
+    function retains the OCaml `props` parameter instead of exposing the inner
+    `make(param)` binding
+  - `tests/tests/src/async_jsx.res` also now matches exactly: the sync `Bar`
+    wrapper keeps `props`, while the async `Foo` component still takes the
+    OCaml-aligned underlying `async function make(...)` path
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+- Topline impact:
+  - JS snapshot parity: **491 / 657** -> **494 / 657** (**+3**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **166** -> **163** (**-3**)
+- Keep this change because it preserves the exact sync-vs-async component
+  wrapper split visible in the OCaml lowered lambda, removes the last remaining
+  preserve-mode ownership/parameter-name residue in the focused files, and
+  improves the authoritative 657-file baseline by three files.
 
 Latest iteration on **2026-04-15**:
 

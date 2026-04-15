@@ -2406,6 +2406,13 @@ fn js_function_arity(func: &LFunction) -> usize {
     }
 }
 
+fn make_like_binding_name(name: &str) -> bool {
+    name == "make"
+        || name
+            .strip_prefix("make$")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+}
+
 fn eta_wrapped_args_match_params(params: &[Ident], args: &[Lambda]) -> bool {
     params.len() == args.len()
         && params.iter().zip(args).all(|(param, arg)| match arg {
@@ -2451,6 +2458,16 @@ fn eta_reduce_function_value(func: &LFunction, env: &SimplifyEnv) -> Option<Lamb
                 .get(id)
                 .is_some_and(|known| js_function_arity(known) == func.params.len()) =>
         {
+            let Some(known) = env.known_functions.get(id) else {
+                unreachable!("guard above checked the known function map");
+            };
+            if matches!(func.params.as_slice(), [param] if param.name() == "props")
+                && make_like_binding_name(id.name())
+                && !known.attr.async_
+                && known.attr.directive.is_none()
+            {
+                return None;
+            }
             Some(Lambda::var(id.clone()))
         }
         _ if apply.ap_info.status != ApplyStatus::Na
@@ -7031,6 +7048,183 @@ mod tests {
                 primitive: Primitive::Pfield(0, FieldDbgInfo::Module { name }),
                 ..
             }) if name == "make"
+        ));
+    }
+
+    #[test]
+    fn keeps_sync_component_props_wrappers_materialized_for_js_backend() {
+        let make = Ident::create_local("make");
+        let component = Ident::create_local("Jsx_preserve_test$B");
+        let module_binding = Ident::create_local("B");
+        let param = Ident::create_local("param");
+        let props = Ident::create_local("props");
+
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Strict,
+            make.clone(),
+            Lambda::function_(
+                1,
+                vec![param.clone()],
+                Lambda::unit(),
+                FunctionAttribute::default(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                component.clone(),
+                Lambda::function_(
+                    1,
+                    vec![props.clone()],
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(make.clone())),
+                        ap_args: vec![Lambda::var(props.clone())],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Uncurry,
+                        },
+                        ap_transformed_jsx: false,
+                    }),
+                    FunctionAttribute::default(),
+                ),
+                Lambda::let_(
+                    LetKind::Strict,
+                    module_binding.clone(),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::Module(vec!["make".to_string()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(component.clone())],
+                        Location::none(),
+                    ),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::ModuleExport(vec![module_binding.clone()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(module_binding.clone())],
+                        Location::none(),
+                    ),
+                ),
+            ),
+        ));
+
+        let Lambda::Llet(_, kept_component, kept_component_value, body) = &simplified else {
+            panic!("expected the component wrapper binding first: {simplified:?}");
+        };
+        assert!(
+            kept_component.same(&component),
+            "unexpected component binding shape: {simplified:?}"
+        );
+        assert!(matches!(
+            kept_component_value.as_ref(),
+            Lambda::Lfunction(crate::lambda::LFunction { params, .. })
+                if matches!(params.as_slice(), [wrapped] if wrapped.same(&props))
+        ));
+        let Lambda::Llet(_, kept_module, module_value, _) = body.as_ref() else {
+            panic!("expected the module binding after the component wrapper: {simplified:?}");
+        };
+        assert!(kept_module.same(&module_binding));
+        assert!(matches!(
+            module_value.as_ref(),
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pmakeblock(_, TagInfo::Module(_), _),
+                args,
+                ..
+            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&component))
+        ));
+    }
+
+    #[test]
+    fn still_eta_reduces_async_component_props_wrappers() {
+        let make = Ident::create_local("make");
+        let component = Ident::create_local("Async_jsx$Foo");
+        let module_binding = Ident::create_local("Foo");
+        let param = Ident::create_local("param");
+        let props = Ident::create_local("props");
+
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Strict,
+            make.clone(),
+            Lambda::function_(
+                1,
+                vec![param],
+                Lambda::unit(),
+                FunctionAttribute {
+                    async_: true,
+                    ..FunctionAttribute::default()
+                },
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                component.clone(),
+                Lambda::function_(
+                    1,
+                    vec![props.clone()],
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(make.clone())),
+                        ap_args: vec![Lambda::var(props.clone())],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Uncurry,
+                        },
+                        ap_transformed_jsx: false,
+                    }),
+                    FunctionAttribute::default(),
+                ),
+                Lambda::let_(
+                    LetKind::Strict,
+                    module_binding.clone(),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::Module(vec!["make".to_string()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(component.clone())],
+                        Location::none(),
+                    ),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::ModuleExport(vec![module_binding.clone()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(module_binding.clone())],
+                        Location::none(),
+                    ),
+                ),
+            ),
+        ));
+
+        let Lambda::Llet(_, kept_make, kept_make_value, body) = &simplified else {
+            panic!("expected the async make binding first: {simplified:?}");
+        };
+        assert!(
+            kept_make.same(&make),
+            "unexpected async component shape: {simplified:?}"
+        );
+        assert!(matches!(
+            kept_make_value.as_ref(),
+            Lambda::Lfunction(crate::lambda::LFunction {
+                attr: FunctionAttribute { async_: true, .. },
+                ..
+            })
+        ));
+        let Lambda::Llet(_, kept_module, module_value, _) = body.as_ref() else {
+            panic!("expected the async module binding after make: {simplified:?}");
+        };
+        assert!(kept_module.same(&module_binding));
+        assert!(matches!(
+            module_value.as_ref(),
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pmakeblock(_, TagInfo::Module(_), _),
+                args,
+                ..
+            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&make))
         ));
     }
 
