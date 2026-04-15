@@ -2753,7 +2753,7 @@ fn decl_module_type_from_typed_module_expr_for_sig(
     }
 }
 
-fn decl_module_type_from_typed_module_expr_for_constraint_arg(
+pub(crate) fn decl_module_type_from_typed_module_expr_for_constraint_arg(
     mod_expr: &ModuleExpr,
 ) -> Option<crate::types::decl::ModuleType> {
     use crate::types::decl::AliasPresence;
@@ -5187,8 +5187,6 @@ pub fn lookup_module_type_from_parsed_module_expr<'a>(
         arena: &'a ParseArena,
         lid: &Located<LidentIdx>,
     ) -> Option<crate::types::decl::ModuleType> {
-        use crate::types::decl::ModuleType as DeclMty;
-
         let longident = arena.get_longident(lid.txt);
         let path = lookup_module_path_by_lid(
             longident,
@@ -5197,43 +5195,19 @@ pub fn lookup_module_type_from_parsed_module_expr<'a>(
             &mut tctx.persistent_env,
             tctx.type_ctx,
         )?;
-        let mut semantic_mty = lookup_module_type_by_lid(
+        let semantic_mty = lookup_module_type_by_lid(
             longident,
             arena,
             env,
             &mut tctx.persistent_env,
             tctx.type_ctx,
         )?;
-        let strengthen_path = match semantic_mty.clone() {
-            DeclMty::MtyAlias(_, alias_path) => {
-                let mut normalized = alias_path;
-                while let Some(next) = crate::types::typecore::alias_target_for_module_path(
-                    &normalized,
-                    env,
-                    &mut tctx.persistent_env,
-                    tctx.type_ctx,
-                ) {
-                    if next.same(&normalized) {
-                        break;
-                    }
-                    normalized = next;
-                }
-                semantic_mty = scrape_alias_module_type(
-                    &semantic_mty,
-                    env,
-                    &mut tctx.persistent_env,
-                    tctx.type_ctx,
-                )
-                .unwrap_or(semantic_mty);
-                env.normalize_path(&normalized)
-            }
-            _ => path,
-        };
-        Some(crate::types::ctype::strengthen_module_type_for_inclusion_path(
-            tctx.type_ctx,
+        Some(strengthen_semantic_ident_module_type(
             env,
-            &strengthen_path,
-            &semantic_mty,
+            &path,
+            semantic_mty,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
         ))
     }
 
@@ -5265,6 +5239,44 @@ pub fn lookup_module_type_from_parsed_module_expr<'a>(
             .insert(mod_expr.pmod_loc, semantic_mty.clone());
     }
     result
+}
+
+fn strengthen_semantic_ident_module_type<'a>(
+    env: &Env,
+    path: &Path,
+    semantic_mty: crate::types::decl::ModuleType,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> crate::types::decl::ModuleType {
+    use crate::types::decl::ModuleType as DeclMty;
+
+    let mut semantic_mty = semantic_mty;
+    let strengthen_path = match semantic_mty.clone() {
+        DeclMty::MtyAlias(_, alias_path) => {
+            let mut normalized = alias_path;
+            while let Some(next) = crate::types::typecore::alias_target_for_module_path(
+                &normalized,
+                env,
+                pers_env,
+                ctx,
+            ) {
+                if next.same(&normalized) {
+                    break;
+                }
+                normalized = next;
+            }
+            semantic_mty =
+                scrape_alias_module_type(&semantic_mty, env, pers_env, ctx).unwrap_or(semantic_mty);
+            env.normalize_path(&normalized)
+        }
+        _ => path.clone(),
+    };
+    crate::types::ctype::strengthen_module_type_for_inclusion_path(
+        ctx,
+        env,
+        &strengthen_path,
+        &semantic_mty,
+    )
 }
 
 /// Translate a parsed module type (signature) into a decl::ModuleType.
@@ -7057,6 +7069,18 @@ where
                 return Some(mty);
             }
             if let Some(env) = env {
+                if let Some(type_ctx) = type_ctx {
+                    if let Some(mty) = resolve_module_type_path_in_env(path, env, Some(type_ctx)) {
+                        let mut no_persistent_env = None;
+                        return Some(strengthen_semantic_ident_module_type(
+                            env,
+                            path,
+                            mty,
+                            &mut no_persistent_env,
+                            type_ctx,
+                        ));
+                    }
+                }
                 if let Some(mty) = resolve_module_type_path_in_env(path, env, type_ctx) {
                     return Some(mty);
                 }

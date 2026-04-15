@@ -4237,6 +4237,7 @@ fn type_exp<'a>(
     expr: &ParsedExpression,
     context: Option<TypeClashContext>,
 ) -> TypeCoreResult<Expression> {
+    let debug_type_package = std::env::var_os("RUST_DEBUG_TYPE_PACKAGE").is_some();
     let expected_ty = tctx.type_ctx.new_var(None);
     type_expect(tctx, env, expr, expected_ty, context)
 }
@@ -13769,20 +13770,20 @@ fn type_pack(
     )
     .unwrap_or(crate::types::decl::ModuleType::MtyIdent(pack_path.clone()));
     let package_mty = typed_module_type_for_unpack(tctx.arena, loc, &decl_package_mty);
-    let arg_mty = crate::types::typemod::lookup_module_type_from_parsed_module_expr(
-        tctx,
-        env,
-        tctx.arena,
-        module_expr,
-    )
-    .or_else(|| {
-        crate::types::typemod::extract_module_type_from_mod_expr_with_ctx(
+    let constraint_arg_mty =
+        crate::types::typemod::decl_module_type_from_typed_module_expr_for_constraint_arg(
             &typed_module,
-            Some(env),
-            ctx,
-        )
-    })
-    .or_else(|| crate::types::typemod::decl_module_type_from_typed(&typed_module.mod_type))
+        );
+    let arg_mty =
+        constraint_arg_mty
+        .clone()
+        .or_else(|| {
+            crate::types::typemod::extract_module_type_from_mod_expr_with_ctx(
+                &typed_module,
+                Some(env),
+                ctx,
+            )
+        })
     .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
     let package_coercion_key = if pack_args_rebuilt_from_path {
         packed_module_path.as_ref().map(|packed_module_path| PackageCoercionCacheKey {

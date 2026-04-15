@@ -32,6 +32,7 @@ use super::type_expr::{
 };
 use super::variance::{Variance, VarianceFlag};
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::ident::Ident;
 // ============================================================================
 // Type Errors
 // ============================================================================
@@ -278,9 +279,25 @@ fn find_newtype_level_for_path(ctx: &TypeContext<'_>, env: &Env, path: &Path) ->
     lookup_type_decl_for_path(ctx, env, path)
         .and_then(|decl| decl.type_newtype_level)
         .unwrap_or_else(|| {
-            let lev = path.head().binding_time();
+            let lev = path_binding_time(path);
             (lev, lev)
         })
+}
+
+fn path_root_is_persistent(path: &Path) -> bool {
+    match path {
+        Path::Pident(id) => id.is_persistent(),
+        Path::Pdot(parent, _, _) => path_root_is_persistent(parent),
+        Path::Papply(_, _) => false,
+    }
+}
+
+fn path_root_ident(path: &Path) -> Option<&Ident> {
+    match path {
+        Path::Pident(id) => Some(id),
+        Path::Pdot(parent, _, _) => path_root_ident(parent),
+        Path::Papply(_, _) => None,
+    }
 }
 
 fn decl_manifest_aliases_path(
@@ -693,7 +710,8 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
                 // eagerly, destroying the path form. Skipping here lets the
                 // general Tconstr/Tconstr expansion path handle it correctly
                 // through unify_after_expansion's relink logic.
-                let is_firstclass_module_pdot = matches!(&path, Path::Pdot(parent, _, _) if !parent.head().is_persistent())
+                let is_firstclass_module_pdot =
+                    matches!(&path, Path::Pdot(parent, _, _) if !path_root_is_persistent(parent))
                     && env.lookup_type(&path).ok().is_some_and(|decl| {
                         decl.type_manifest.is_some_and(|manifest| {
                             let m = ctx.repr(manifest);
@@ -979,11 +997,13 @@ pub fn resolve_type_through_modules<'a>(
                     let existing = ctx.find_type_decl_by_stamp(id.stamp());
                     existing
                         .as_ref()
-                        .is_none_or(|d| d.type_path.is_none() && module_path.head().is_persistent())
+                        .is_none_or(|d| d.type_path.is_none() && path_root_is_persistent(module_path))
                 };
                 if should_register {
                     let mut decl_for_stamp = decl.clone();
-                    if decl_for_stamp.type_path.is_none() && module_path.head().is_persistent() {
+                    if decl_for_stamp.type_path.is_none()
+                        && path_root_is_persistent(module_path)
+                    {
                         decl_for_stamp.type_path = Some(Path::pdot(module_path.clone(), id.name()));
                     }
                     ctx.register_type_decl_by_stamp(id.stamp(), decl_for_stamp);
@@ -1419,7 +1439,7 @@ fn resolve_type_item_through_env<'a>(
         // env_lazy-qualified module view. Keep that declaration graph shared
         // instead of re-copying it on every lookup.
         let resolved_decl = decl.clone();
-        let module_access_origin_is_persistent = qualified_module_path.head().is_persistent();
+        let module_access_origin_is_persistent = path_root_is_persistent(&qualified_module_path);
         // For alias modules, expansion should expose the alias target path
         // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
         let alias_target_for_strengthening = if strengthen_alias_types {
@@ -1604,7 +1624,7 @@ fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Opt
 fn normalize_path_through_local_aliases(env: &Env, path: &Path) -> Option<Path> {
     env.with_current_local_module_aliases(|aliases| {
         aliases.iter().find_map(|(alias_id, target_path)| {
-            let target_head = target_path.head();
+            let target_head = path_root_ident(target_path)?;
             let target_is_local = env
                 .find_module_with_origin(target_head.name())
                 .ok()
@@ -1668,10 +1688,13 @@ fn normalize_path_full_inner<'a>(
                 let target_is_local = match &md.md_type {
                     super::decl::ModuleType::MtyAlias(_, target)
                     | super::decl::ModuleType::MtyIdent(target) => {
-                        let head = target.head();
-                        env.find_module_with_origin(head.name()).ok().is_some_and(
-                            |(target_id, _, target_local)| target_local && target_id.same(head),
-                        )
+                        path_root_ident(target).is_some_and(|head| {
+                            env.find_module_with_origin(head.name()).ok().is_some_and(
+                                |(target_id, _, target_local)| {
+                                    target_local && target_id.same(head)
+                                },
+                            )
+                        })
                     }
                     _ => false,
                 };
@@ -1948,7 +1971,7 @@ fn try_expand_head_with_mode<'a>(
                 if matches!(mode, ExpandHeadMode::General) {
                     if let Some(decl_type_path) = decl.type_path.as_ref() {
                         if path_name.contains("__")
-                            && !path.head().is_persistent()
+                            && !path_root_is_persistent(&path)
                             && decl.type_params.len() == args.len()
                             && !decl_type_path.same(&path)
                         {
@@ -2040,7 +2063,7 @@ fn try_expand_head_with_mode<'a>(
             // over-expand local aliases (e.g. LayerStyleID.ID.t -> string) and
             // diverge from OCaml's identity/linking behavior.
             let allow_global_fallbacks =
-                path.head().is_persistent() && matches!(mode, ExpandHeadMode::General);
+                path_root_is_persistent(&path) && matches!(mode, ExpandHeadMode::General);
 
             // 2. Try stamp-based global store (for CMI types with non-zero stamps)
             if allow_global_fallbacks && let Some(stamp) = stamp {
@@ -2059,7 +2082,7 @@ fn try_expand_head_with_mode<'a>(
                     if matches!(mode, ExpandHeadMode::General)
                         && let Some(type_path) = store_decl.type_path.as_ref()
                     {
-                        let persistent_head = type_path.head().is_persistent();
+                        let persistent_head = path_root_is_persistent(type_path);
                         if persistent_head
                             && store_decl.type_params.len() == args.len()
                             && !type_path.same(&path)
@@ -3037,8 +3060,8 @@ fn unify_types<'a>(
                             .collect();
                         let p1_changed = !norm1.same(path1);
                         let p2_changed = !norm2.same(path2);
-                        let p1_persistent = path1.head().is_persistent();
-                        let p2_persistent = path2.head().is_persistent();
+                        let p1_persistent = path_root_is_persistent(path1);
+                        let p2_persistent = path_root_is_persistent(path2);
                         if p1_changed
                             && !p2_changed
                             && p1_persistent
@@ -3117,7 +3140,7 @@ fn unify_types<'a>(
                 {
                     if short_segs.len() >= 2
                         && long_segs[1..] == *short_segs
-                        && !short_path.head().is_persistent()
+                        && !path_root_is_persistent(short_path)
                         && args1.len() == args2.len()
                     {
                         let alias_matches = if let Some(env) = state.env() {
