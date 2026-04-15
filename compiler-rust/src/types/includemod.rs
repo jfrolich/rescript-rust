@@ -450,7 +450,7 @@ fn modtypes_inner<'a>(
 // Signature Inclusion
 // ============================================================================
 
-fn is_runtime_component(item: &SignatureItem) -> bool {
+pub fn is_runtime_component(item: &SignatureItem) -> bool {
     match item {
         SignatureItem::SigValue(_, desc) => !matches!(desc.val_kind, ValueKind::ValPrim(_)),
         SignatureItem::SigType(_, _, _)
