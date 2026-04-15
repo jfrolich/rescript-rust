@@ -1107,6 +1107,9 @@ impl LambdaCompiler {
                 if let Some(block) = self.compile_fallthrough_static_raise_return_block(*id, args) {
                     return block;
                 }
+                if let Some(handler) = self.resolve_static_raise(*id, args) {
+                    return self.compile_return_block(&handler);
+                }
                 let compiled = self.compile_expr(lam);
                 let mut block = compiled.prelude;
                 if !block_terminates(&block) {
@@ -1398,6 +1401,20 @@ impl LambdaCompiler {
             Lambda::Lsequence(first, second) => {
                 let mut block = self.compile_effect_block(first);
                 block.extend(self.compile_tail_loop_return_block(second, tail_loop));
+                block
+            }
+            Lambda::LstaticRaise(id, args) => {
+                if let Some(block) = self.compile_fallthrough_static_raise_return_block(*id, args) {
+                    return block;
+                }
+                if let Some(handler) = self.resolve_static_raise(*id, args) {
+                    return self.compile_tail_loop_return_block(&handler, tail_loop);
+                }
+                let compiled = self.compile_expr(lam);
+                let mut block = compiled.prelude;
+                if !block_terminates(&block) {
+                    block.push(Statement::return_(compiled.expr));
+                }
                 block
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
@@ -13851,6 +13868,52 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn nested_static_raises_in_return_position_keep_the_return_continuation() {
+        let mut compiler = LambdaCompiler::new();
+        let cond_a = Ident::create_local("condA");
+        let cond_b = Ident::create_local("condB");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::LstaticCatch(
+                Box::new(Lambda::if_(
+                    Lambda::var(cond_a),
+                    Lambda::const_(Constant::int(1)),
+                    Lambda::static_raise(2, Vec::new()),
+                )),
+                (2, vec![]),
+                Box::new(Lambda::if_(
+                    Lambda::var(cond_b),
+                    Lambda::const_(Constant::int(2)),
+                    Lambda::static_raise(1, Vec::new()),
+                )),
+            )),
+            (1, vec![]),
+            Box::new(Lambda::prim(
+                Primitive::Praise,
+                vec![Lambda::const_(Constant::string("boom"))],
+                Location::none(),
+            )),
+        ));
+
+        let rendered = print_block(&block);
+        assert!(
+            !rendered.contains("let ifres"),
+            "nested static raises lost the return continuation and reintroduced ifres temps:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("if (condA)") && rendered.contains("return 1;"),
+            "expected the first static-raise branch to stay in return position:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("if (condB)") && rendered.contains("return 2;"),
+            "expected the nested handler to stay in return position:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("throw \"boom\";"),
+            "expected the final handler to stay as the fallthrough throw:\n{rendered}"
+        );
     }
 
     #[test]

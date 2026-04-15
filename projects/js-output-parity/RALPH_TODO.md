@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 500 / 657 JS snapshots passing, 0 compile errors, 157 output diffs
+**Status:** 503 / 657 JS snapshots passing, 0 compile errors, 154 output diffs
 
 ## Goal
 
@@ -35,11 +35,75 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **500 / 657**
+- JS snapshot parity: **503 / 657**
 - Compile errors: **0**
-- Output diffs: **157**
+- Output diffs: **154**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep resolved `staticcatch` handlers in the surrounding
+  return continuation instead of re-entering generic expression lowering, so
+  nested `staticraise` chains stop manufacturing `let ifres` temps and fall
+  back to direct guard returns / throws like OCaml
+- Active backend focus for this slice is **Phase 3: Port JS IR Lowering And
+  Metadata** from `PLAN.md`, because the drift sat in Rust's
+  `lam_compile`-equivalent continuation threading after optimized-lambda
+  parity: the lambda dump for `tests/tests/src/variant.res` was already
+  OCaml-aligned and still contained the nested `Lstaticcatch` / `Lstaticraise`
+  chain for `fooExn`, but Rust's return-path lowering resolved those handlers
+  through `compile_expr`, which forced the nested handler bodies back through
+  value-position `ifres` temporaries before the final `return`
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_staticcatch` and the way
+  it keeps handler compilation in the active continuation (`EffectCall` /
+  `Assign`) instead of re-lowering `Lstaticraise` through a plain `NeedValue`
+  expression path
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so return-position
+    `LstaticRaise` lowering now resolves the target handler and immediately
+    re-enters `compile_return_block` instead of falling back to `compile_expr`
+  - applied the same continuation-preserving rule to
+    `compile_tail_loop_return_block`, which shares the same return-position
+    lowering boundary for self-tailcall functions
+  - added the focused regression
+    `nested_static_raises_in_return_position_keep_the_return_continuation`
+- Verified focused guards for this slice:
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_static_raises_in_return_position_keep_the_return_continuation -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_handler -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml multi_case_staticcatch_wrapped_named_variant_return_switch_moves_fallthrough_cases_last -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/variant.res`, diffing
+    `/tmp/variant.mjs` against the checked-in snapshot
+  - direct release repro for `tests/tests/src/test_static_catch_ident.res`,
+    diffing `/tmp/test_static_catch_ident.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/variant.res` no longer emits the nested
+    `let ifres; ... return ifres;` chain in `fooExn`; the remaining drift in
+    that file is now the separate `fooC` branch-polarity cleanup instead of
+    staticcatch handler continuation loss
+  - `tests/tests/src/test_static_catch_ident.res` now lowers the nested
+    `Scan_failure` / `"Failure"` handler cases as direct branch returns rather
+    than materializing an intermediate result temp before the final loop body
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+- Topline impact:
+  - JS snapshot parity: **500 / 657** -> **503 / 657** (**+3**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **157** -> **154** (**-3**)
+- The cached `ifres` / `return ifres` staticcatch-return motif shrank
+  materially after the authoritative rerun: diff files containing
+  `let ifres;`, `return ifres;`, or `let $$switch;` dropped from **37** to
+  **15**
+- Keep this change because it ports a real continuation rule from OCaml's
+  `lam_compile.ml` into Rust's return-path lowering, removes a broad
+  staticcatch-handler temp cluster after optimized lambda without perturbing
+  the stable `ExternalShadow` guard, and improves the authoritative 657-file
+  baseline by three files.
 
 Latest iteration on **2026-04-15**:
 
