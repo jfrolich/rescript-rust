@@ -17,7 +17,7 @@ use crate::lambda::{
 };
 use crate::location::Location;
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct SimplifyEnv {
     blocks: HashMap<Ident, ImmutableBlockInfo>,
     call_substitutions: HashMap<Ident, Lambda>,
@@ -132,14 +132,28 @@ impl SimplifyEnv {
         result
     }
 
-    fn across_capture_boundary(&self) -> Self {
-        let mut next = self.clone();
-        next.call_substitutions
-            .retain(|_, value| captured_substitution_allowed(value));
-        next.substitutions
-            .retain(|_, value| captured_substitution_allowed(value));
-        next
+    fn with_capture_boundary<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        // Save and remove substitutions that can't cross capture boundaries
+        let removed_call_subs = extract_non_capturable(&mut self.call_substitutions);
+        let removed_subs = extract_non_capturable(&mut self.substitutions);
+        let result = f(self);
+        // Restore removed substitutions
+        self.call_substitutions.extend(removed_call_subs);
+        self.substitutions.extend(removed_subs);
+        result
     }
+}
+
+fn extract_non_capturable(map: &mut HashMap<Ident, Lambda>) -> Vec<(Ident, Lambda)> {
+    let keys_to_remove: Vec<_> = map
+        .iter()
+        .filter(|(_, v)| !captured_substitution_allowed(v))
+        .map(|(k, _)| k.clone())
+        .collect();
+    keys_to_remove
+        .into_iter()
+        .filter_map(|k| map.remove(&k).map(|v| (k, v)))
+        .collect()
 }
 
 /// Simplify lowered lambda before JS IR lowering.
@@ -675,23 +689,21 @@ fn simplify_with_env(lam: &Lambda, env: &mut SimplifyEnv, exports: &HashSet<Iden
         Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
         Lambda::Lapply(apply) => simplify_apply(apply, env, exports),
         Lambda::Lfunction(func) => {
-            let mut body_env = env.across_capture_boundary();
-            let (simplified, body_env_for_eta) = body_env.with_shadowed_idents(func.params.iter(), |body_env| {
-                let simplified = Lambda::function_(
-                    func.arity,
-                    func.params.clone(),
-                    simplify_with_env(&func.body, body_env, exports),
-                    func.attr.clone(),
-                );
-                // eta_reduce_function_value needs the body env state
-                let eta = if let Lambda::Lfunction(f) = &simplified {
-                    eta_reduce_function_value(f, body_env)
-                } else {
-                    None
-                };
-                (simplified, eta)
-            });
-            body_env_for_eta.unwrap_or(simplified)
+            env.with_capture_boundary(|env| {
+                env.with_shadowed_idents(func.params.iter(), |body_env| {
+                    let simplified = Lambda::function_(
+                        func.arity,
+                        func.params.clone(),
+                        simplify_with_env(&func.body, body_env, exports),
+                        func.attr.clone(),
+                    );
+                    if let Lambda::Lfunction(f) = &simplified {
+                        eta_reduce_function_value(f, body_env).unwrap_or(simplified)
+                    } else {
+                        simplified
+                    }
+                })
+            })
         }
         Lambda::Llet(kind, id, value, body) => {
             let original_value = value.as_ref();
@@ -905,18 +917,18 @@ fn simplify_with_env(lam: &Lambda, env: &mut SimplifyEnv, exports: &HashSet<Iden
                 Lambda::seq(first, second)
             }
         }
-        Lambda::Lwhile(cond, body) => {
-            let mut capture_env = env.across_capture_boundary();
-            let cond = simplify_with_env(cond, &mut capture_env, exports);
-            let body = simplify_with_env(body, &mut capture_env, exports);
+        Lambda::Lwhile(cond, body) => env.with_capture_boundary(|env| {
+            let cond = simplify_with_env(cond, env, exports);
+            let body = simplify_with_env(body, env, exports);
             Lambda::Lwhile(Box::new(cond), Box::new(body))
-        }
+        }),
         Lambda::Lfor(id, from, to, direction, body) => {
-            let mut capture_env = env.across_capture_boundary();
             let from = simplify_with_env(from, env, exports);
             let to = simplify_with_env(to, env, exports);
-            let body = capture_env.with_shadowed_ident(id, |env| {
-                simplify_with_env(body, env, exports)
+            let body = env.with_capture_boundary(|env| {
+                env.with_shadowed_ident(id, |env| {
+                    simplify_with_env(body, env, exports)
+                })
             });
             Lambda::Lfor(id.clone(), Box::new(from), Box::new(to), *direction, Box::new(body))
         }
@@ -2537,12 +2549,14 @@ fn simplify_apply(apply: &Apply, env: &mut SimplifyEnv, exports: &HashSet<Ident>
         if let Some(reduced) =
             reduce_direct_wrapper_application_once(&apply.ap_func, &apply.ap_args)
         {
-            let mut followup_env = SimplifyEnv {
-                allow_direct_function_beta_reduce: false,
-                preserve_direct_wrapper_values: true,
-                ..env.clone()
-            };
-            return simplify_with_env(&reduced, &mut followup_env, exports);
+            let saved_beta = env.allow_direct_function_beta_reduce;
+            let saved_wrapper = env.preserve_direct_wrapper_values;
+            env.allow_direct_function_beta_reduce = false;
+            env.preserve_direct_wrapper_values = true;
+            let result = simplify_with_env(&reduced, env, exports);
+            env.allow_direct_function_beta_reduce = saved_beta;
+            env.preserve_direct_wrapper_values = saved_wrapper;
+            return result;
         }
     }
 
