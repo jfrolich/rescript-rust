@@ -46,7 +46,7 @@ use crate::types::decl::{LabelDescription, RecordRepresentation, ValueKind};
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, EnvRef, Expression, ExpressionDesc, FunctionParam,
-    FunctionParamPattern, MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc, ModuleTypeDesc,
+    FunctionParamPattern, MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc,
     Partial, Pattern, PatternDesc, RecordLabelDefinition, Structure, StructureItem,
     StructureItemDesc, ValueBinding,
 };
@@ -4043,14 +4043,12 @@ impl<'a> RawLambdaConverter<'a> {
         rootpath: &Option<crate::types::Path>,
         cc: &ModuleCoercion,
     ) -> RawLambda {
-        if matches!(
-            module_expr.mod_type.mty_desc,
-            ModuleTypeDesc::Tmty_alias(_, _)
-        ) {
+        if matches!(module_expr.mod_type, crate::types::decl::ModuleType::MtyAlias(_, _)) {
             // OCaml lowers plain module aliases to Const_module_alias here.
             // They stay compile-time-only unless a later dynamic import/pack
             // path reifies the module reference, so static aliases must not
             // contribute a required JS import on their own.
+            self.note_possible_required_modules_from_module_expr(module_expr, false);
             return self.apply_coercion_raw(
                 self.loc(module_expr.mod_loc),
                 LetKind::Alias,
@@ -4201,9 +4199,9 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleExprDesc::Tmod_constraint(inner, _, _, inner_cc) => {
                 let composed = Self::compose_coercions_raw(cc, inner_cc);
                 // If the composed coercion includes Tcoerce_alias and the inner
-                // module is an alias (Tmty_alias), use 0a + Alias to match OCaml.
+                // module is an alias (Mty_alias), use 0a + Alias to match OCaml.
                 if matches!(composed, ModuleCoercion::Tcoerce_alias(..))
-                    && matches!(inner.mod_type.mty_desc, ModuleTypeDesc::Tmty_alias(_, _))
+                    && matches!(inner.mod_type, crate::types::decl::ModuleType::MtyAlias(_, _))
                 {
                     self.note_possible_required_modules_from_module_expr(inner, dynamic_import);
                     return self.apply_coercion_raw(
@@ -4218,10 +4216,7 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleExprDesc::Tmod_ident(path, _) => {
                 // Check if this ident is an alias with Tcoerce_alias coercion.
                 if matches!(cc, ModuleCoercion::Tcoerce_alias(..))
-                    && matches!(
-                        module_expr.mod_type.mty_desc,
-                        ModuleTypeDesc::Tmty_alias(_, _)
-                    )
+                    && matches!(module_expr.mod_type, crate::types::decl::ModuleType::MtyAlias(_, _))
                 {
                     self.note_possible_required_modules_from_module_expr(
                         module_expr,
@@ -4316,23 +4311,25 @@ impl<'a> RawLambdaConverter<'a> {
         modl: &ModuleExpr,
         env: &crate::types::env::Env,
     ) -> Option<crate::types::decl::ModuleType> {
-        // Strategy 1: direct conversion from typedtree mod_type
-        if let Some(mty) = crate::types::typemod::decl_module_type_from_typed(&modl.mod_type) {
-            // If we got MtyIdent, try to resolve it to concrete type
-            if let crate::types::decl::ModuleType::MtyIdent(ref path) = mty {
-                if let Some(resolved) = self.scrape_modtype(env, &mty) {
-                    return Some(resolved);
-                }
+        // Strategy 1: direct semantic mod_type from the typedtree node.
+        let direct_mty = modl.mod_type.clone();
+        if let crate::types::decl::ModuleType::MtyIdent(_) = &direct_mty {
+            if let Some(resolved) = self.scrape_modtype(env, &direct_mty) {
+                return Some(resolved);
             }
-            return Some(mty);
+        }
+        if !matches!(
+            &direct_mty,
+            crate::types::decl::ModuleType::MtySignature(sig) if sig.is_empty()
+        ) {
+            return Some(direct_mty);
         }
 
         // Strategy 2: based on mod_desc
         match &modl.mod_desc {
             ModuleExprDesc::Tmod_constraint(inner, constraint_mty, _, _) => {
                 // Try the constraint's module type first
-                if let Some(mty) =
-                    crate::types::typemod::decl_module_type_from_typed(constraint_mty)
+                let mty = constraint_mty.clone();
                 {
                     // If it's concrete (not MtyIdent), use it directly
                     if !matches!(&mty, crate::types::decl::ModuleType::MtyIdent(_)) {
@@ -11471,7 +11468,10 @@ external myJson: Js.Json.t = "default"
                 crate::parse_arena::Located::mknoloc(crate::parse_arena::LidentIdx(0)),
             ),
             mod_loc: crate::parse_arena::LocIdx::default(),
-            mod_type: crate::types::typedtree::ModuleType::placeholder(),
+            mod_type: crate::types::decl::ModuleType::MtyAlias(
+                crate::types::decl::AliasPresence::MtaAbsent,
+                crate::types::Path::Pident(side_effect.clone()),
+            ),
             mod_env: EnvRef(0),
             mod_attributes: Attributes::new(),
         };
@@ -11597,7 +11597,10 @@ external myJson: Js.Json.t = "default"
                 crate::parse_arena::Located::mknoloc(crate::parse_arena::LidentIdx(0)),
             ),
             mod_loc: crate::parse_arena::LocIdx::default(),
-            mod_type: crate::types::typedtree::ModuleType::placeholder(),
+            mod_type: crate::types::decl::ModuleType::MtyAlias(
+                crate::types::decl::AliasPresence::MtaAbsent,
+                crate::types::Path::Pident(side_effect.clone()),
+            ),
             mod_env: EnvRef(0),
             mod_attributes: Attributes::new(),
         };

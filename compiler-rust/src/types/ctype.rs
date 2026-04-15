@@ -22,8 +22,8 @@
 //! Type errors are represented as `TypeError` with detailed information
 //! about what went wrong during unification or other operations.
 
-use super::asttypes::PrivateFlag;
-use super::btype::{self, iter_type_expr, row_fixed, row_more, row_repr};
+use super::asttypes::{Label, PrivateFlag};
+use super::btype::{self, iter_type_expr, row_fixed, row_more, row_repr, row_repr_ref};
 use super::context::TypeContext;
 use super::env::Env;
 use super::path::Path;
@@ -32,6 +32,7 @@ use super::type_expr::{
 };
 use super::variance::{Variance, VarianceFlag};
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::ident::Ident;
 // ============================================================================
 // Type Errors
 // ============================================================================
@@ -155,6 +156,9 @@ impl UnifyState {
 
     /// Set the environment snapshot for type alias expansion.
     pub fn set_env(&mut self, env: &Env) {
+        if self.env.as_ref().is_some_and(|current| current.id() == env.id()) {
+            return;
+        }
         self.env = Some(env.clone_preserve_id());
     }
 
@@ -275,9 +279,25 @@ fn find_newtype_level_for_path(ctx: &TypeContext<'_>, env: &Env, path: &Path) ->
     lookup_type_decl_for_path(ctx, env, path)
         .and_then(|decl| decl.type_newtype_level)
         .unwrap_or_else(|| {
-            let lev = path.head().binding_time();
+            let lev = path_binding_time(path);
             (lev, lev)
         })
+}
+
+fn path_root_is_persistent(path: &Path) -> bool {
+    match path {
+        Path::Pident(id) => id.is_persistent(),
+        Path::Pdot(parent, _, _) => path_root_is_persistent(parent),
+        Path::Papply(_, _) => false,
+    }
+}
+
+fn path_root_ident(path: &Path) -> Option<&Ident> {
+    match path {
+        Path::Pident(id) => Some(id),
+        Path::Pdot(parent, _, _) => path_root_ident(parent),
+        Path::Papply(_, _) => None,
+    }
 }
 
 fn decl_manifest_aliases_path(
@@ -690,7 +710,8 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
                 // eagerly, destroying the path form. Skipping here lets the
                 // general Tconstr/Tconstr expansion path handle it correctly
                 // through unify_after_expansion's relink logic.
-                let is_firstclass_module_pdot = matches!(&path, Path::Pdot(parent, _, _) if !parent.head().is_persistent())
+                let is_firstclass_module_pdot =
+                    matches!(&path, Path::Pdot(parent, _, _) if !path_root_is_persistent(parent))
                     && env.lookup_type(&path).ok().is_some_and(|decl| {
                         decl.type_manifest.is_some_and(|manifest| {
                             let m = ctx.repr(manifest);
@@ -856,7 +877,7 @@ fn find_cmi_file(load_paths: &[std::path::PathBuf], module_name: &str) -> Option
     None
 }
 
-fn resolve_module_signature_through_cmi<'a>(
+pub(crate) fn resolve_module_signature_through_cmi<'a>(
     ctx: &'a TypeContext<'a>,
     load_paths: &[std::path::PathBuf],
     module_path: &Path,
@@ -962,11 +983,6 @@ pub fn resolve_type_through_modules<'a>(
     let mut visiting = HashSet::new();
     let mut current_sig =
         resolve_module_signature_through_cmi(ctx, &load_paths, module_path, &mut visiting)?;
-    // Match OCaml Subst/Mtype behavior for module signatures loaded from cmi:
-    // rewrite intra-signature type/module references to qualified access paths
-    // (e.g. `componentLike` -> `Jsx.componentLike`, `element` -> `Jsx.element`).
-    crate::cmi::persistent_env::substitute_type_paths_in_sig(&current_sig, module_path, ctx);
-    crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut current_sig, module_path);
 
     // Register ALL types in the final signature by stamp for future lookups.
     // This is important because type manifests may reference sibling types
@@ -981,11 +997,13 @@ pub fn resolve_type_through_modules<'a>(
                     let existing = ctx.find_type_decl_by_stamp(id.stamp());
                     existing
                         .as_ref()
-                        .is_none_or(|d| d.type_path.is_none() && module_path.head().is_persistent())
+                        .is_none_or(|d| d.type_path.is_none() && path_root_is_persistent(module_path))
                 };
                 if should_register {
                     let mut decl_for_stamp = decl.clone();
-                    if decl_for_stamp.type_path.is_none() && module_path.head().is_persistent() {
+                    if decl_for_stamp.type_path.is_none()
+                        && path_root_is_persistent(module_path)
+                    {
                         decl_for_stamp.type_path = Some(Path::pdot(module_path.clone(), id.name()));
                     }
                     ctx.register_type_decl_by_stamp(id.stamp(), decl_for_stamp);
@@ -1012,8 +1030,6 @@ fn resolve_module_type_through_env_path<'a>(
     path: &Path,
     visiting: &mut HashSet<Path>,
 ) -> Option<super::decl::ModuleType> {
-    use super::decl::SignatureItem;
-
     // Keep visited paths for the entire alias-resolution chain; this mirrors
     // OCaml's cycle-safe alias scraping and prevents re-entering `Mty_ident`
     // loops through `resolve_signature_through_env_module_type`.
@@ -1036,73 +1052,81 @@ fn resolve_module_type_through_env_path<'a>(
                 if !id.is_persistent() {
                     return None;
                 }
-                let load_paths = ctx.load_paths();
-                if load_paths.is_empty() {
-                    None
-                } else {
-                    // Mirror OCaml's persistent-module lookup in Env.find_module:
-                    // if not found in local env, consult .cmi signatures.
-                    let mut cmi_visiting = HashSet::new();
-                    resolve_module_signature_through_cmi(ctx, &load_paths, path, &mut cmi_visiting)
+                let mut no_persistent_env = None;
+                crate::types::typecore::resolve_module_signature_for_path(
+                    path,
+                    env,
+                    &mut no_persistent_env,
+                    ctx,
+                )
+                .map(|(_, sig)| super::decl::ModuleType::MtySignature(sig))
+                .or_else(|| {
+                    let load_paths = ctx.load_paths();
+                    if load_paths.is_empty() {
+                        None
+                    } else {
+                        // Mirror OCaml Env.find_module: if not found in local env,
+                        // consult .cmi signatures. Prefer the env_lazy-backed path
+                        // above so persistent module lookups share the same
+                        // qualified-view source of truth as other hot callers.
+                        let mut cmi_visiting = HashSet::new();
+                        resolve_module_signature_through_cmi(
+                            ctx,
+                            &load_paths,
+                            path,
+                            &mut cmi_visiting,
+                        )
                         .map(super::decl::ModuleType::MtySignature)
-                }
+                    }
+                })
             }
         }
         Path::Pdot(parent, name, _) => {
-            let parent_mty = resolve_module_type_through_env_path(ctx, env, parent, visiting)?;
-            let parent_sig =
-                resolve_signature_through_env_module_type(ctx, env, &parent_mty, visiting)?;
-            let parent_alias_target = match &parent_mty {
-                super::decl::ModuleType::MtyAlias(_, target_path) => Some(target_path.clone()),
-                _ => None,
-            };
-            parent_sig.iter().find_map(|item| match item {
-                SignatureItem::SigModule(id, md, _) if id.name() == name => match &md.md_type {
-                    super::decl::ModuleType::MtySignature(sig) => {
-                        // Mirror OCaml Subst behavior for env-based nested module access:
-                        // child module signatures may reference parent-defined types/modules
-                        // using bare names (e.g. `subtype` inside `Stream.Writable`).
-                        // Rewrite those references through the parent module access path.
-                        //
-                        // IMPORTANT: deep-copy the signature before applying parent
-                        // substitutions to avoid modifying the original type expressions
-                        // in-place (which would corrupt the typed tree).  OCaml's lazy
-                        // `components_of_module_maker` naturally deep-copies via
-                        // `Subst.type_declaration`; we emulate that with copy_lookup.
-                        let copied_sig = super::typecore::copy_lookup_signature_for_subst(sig, ctx);
-                        crate::cmi::persistent_env::substitute_type_paths_in_child_sig(
-                            &copied_sig,
-                            &parent_sig,
-                            parent,
+            let mut no_persistent_env = None;
+            let parent_alias_target = crate::types::typecore::module_alias_target_for_path(
+                parent,
+                env,
+                &mut no_persistent_env,
+                ctx,
+            );
+            if let Some((_, access_path, md)) =
+                crate::types::typecore::lookup_module_in_resolved_path(
+                    parent,
+                    name,
+                    env,
+                    &mut no_persistent_env,
+                    ctx,
+                )
+            {
+                match &md.md_type {
+                    super::decl::ModuleType::MtySignature(_) => {
+                        let preferred_child_path =
+                            parent_alias_target.as_ref().map(|target_parent_path| {
+                                Path::pdot(target_parent_path.clone(), name.to_string())
+                            });
+                        crate::types::typecore::resolve_module_signature_for_path(
+                            preferred_child_path.as_ref().unwrap_or(&access_path),
+                            env,
+                            &mut no_persistent_env,
                             ctx,
-                        );
-                        let child_sig = if let Some(target_parent_path) =
-                            parent_alias_target.as_ref()
-                        {
-                            let child_target_path = Path::pdot(target_parent_path.clone(), name);
-                            strengthen_signature_for_module_access_path(
-                                ctx,
-                                env,
-                                true,
-                                &child_target_path,
-                                &copied_sig,
-                                0,
-                            )
-                        } else {
-                            copied_sig
-                        };
-                        Some(super::decl::ModuleType::MtySignature(child_sig))
+                        )
+                        .or_else(|| {
+                            preferred_child_path.as_ref().and_then(|_| {
+                                crate::types::typecore::resolve_module_signature_for_path(
+                                    &access_path,
+                                    env,
+                                    &mut no_persistent_env,
+                                    ctx,
+                                )
+                            })
+                        })
+                        .map(|(_, sig)| super::decl::ModuleType::MtySignature(sig))
                     }
                     other => {
-                        let mut child_mty = other.clone();
-                        crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
-                            &mut child_mty,
-                            &parent_sig,
-                            parent,
-                            ctx,
-                        );
+                        let child_mty = other.clone();
                         if let Some(target_parent_path) = parent_alias_target.as_ref() {
-                            let child_target_path = Path::pdot(target_parent_path.clone(), name);
+                            let child_target_path =
+                                Path::pdot(target_parent_path.clone(), name.to_string());
                             Some(strengthen_module_type_for_module_access_path(
                                 ctx,
                                 env,
@@ -1114,19 +1138,18 @@ fn resolve_module_type_through_env_path<'a>(
                             Some(child_mty)
                         }
                     }
-                },
-                SignatureItem::SigModtype(id, mtd) if id.name() == name => {
-                    let mut child_mty = mtd.mtd_type.clone()?;
-                    crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
-                        &mut child_mty,
-                        &parent_sig,
-                        parent,
-                        ctx,
-                    );
-                    Some(child_mty)
                 }
-                _ => None,
-            })
+            } else if let Some((_, mtd)) = crate::types::typecore::lookup_modtype_in_resolved_path(
+                parent,
+                name,
+                env,
+                &mut no_persistent_env,
+                ctx,
+            ) {
+                mtd.mtd_type.clone()
+            } else {
+                None
+            }
         }
         Path::Papply(_, _) => None,
     };
@@ -1152,10 +1175,20 @@ fn resolve_signature_through_env_module_type<'a>(
     use super::decl::ModuleType;
 
     match mty {
-        ModuleType::MtySignature(sig) => Some(
-            crate::types::typecore::copy_lookup_signature_for_subst(sig, ctx),
-        ),
+        // The env_lazy-backed signature view is already the qualified source of
+        // truth for this access path. Reusing it preserves the same sharing
+        // shape OCaml keeps in components_of_module_maker.
+        ModuleType::MtySignature(sig) => Some(sig.clone()),
         ModuleType::MtyAlias(_, path) | ModuleType::MtyIdent(path) => {
+            let mut no_persistent_env = None;
+            if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
+                path,
+                env,
+                &mut no_persistent_env,
+                ctx,
+            ) {
+                return Some(sig);
+            }
             let resolved = resolve_module_type_through_env_path(ctx, env, path, visiting)?;
             resolve_signature_through_env_module_type(ctx, env, &resolved, visiting)
         }
@@ -1347,6 +1380,38 @@ fn strengthen_signature_for_module_access_path<'a>(
 /// Resolve a type through local environment modules.
 /// For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
 /// follow aliases (MtyAlias/MtyIdent), and then find type t in its signature.
+fn lookup_raw_module_sig_type<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &super::env::Env,
+    module_path: &Path,
+    type_name: &str,
+) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
+    use super::decl::SignatureItem;
+
+    let mut visiting = HashSet::new();
+    let raw_sig = match module_path {
+        Path::Pident(id) => env
+            .lookup_module(module_path)
+            .or_else(|_| env.find_module(id.name()))
+            .ok()
+            .and_then(|md| match &md.md_type {
+                super::decl::ModuleType::MtySignature(sig) => Some(sig.clone()),
+                _ => None,
+            }),
+        _ => None,
+    }
+    .or_else(|| {
+        let resolved = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)?;
+        resolve_signature_through_env_module_type(ctx, env, &resolved, &mut visiting)
+    })?;
+    raw_sig.iter().find_map(|item| match item {
+        SignatureItem::SigType(id, decl, _) if id.name() == type_name => {
+            Some((id.clone(), decl.clone()))
+        }
+        _ => None,
+    })
+}
+
 fn resolve_type_item_through_env<'a>(
     ctx: &'a TypeContext<'a>,
     env: &super::env::Env,
@@ -1355,103 +1420,71 @@ fn resolve_type_item_through_env<'a>(
 ) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
     use super::decl::SignatureItem;
 
-    fn lookup_raw_module_sig_type(
-        env: &super::env::Env,
-        module_path: &Path,
-        type_name: &str,
-    ) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
-        let md = match module_path {
-            Path::Pident(id) => env
-                .lookup_module(module_path)
-                .or_else(|_| env.find_module(id.name()))
-                .ok()?,
-            _ => return None,
-        };
-        let super::decl::ModuleType::MtySignature(raw_sig) = &md.md_type else {
-            return None;
-        };
-        raw_sig.iter().find_map(|item| match item {
-            SignatureItem::SigType(id, decl, _) if id.name() == type_name => {
-                Some((id.clone(), decl.clone()))
-            }
-            _ => None,
-        })
-    }
-
     let (module_path, type_name) = match path {
         Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
         _ => return None,
     };
 
-    let mut visiting = HashSet::new();
-    let module_mty = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)?;
-    let module_sig =
-        resolve_signature_through_env_module_type(ctx, env, &module_mty, &mut visiting)?;
-    let module_access_origin_is_persistent = module_path.head().is_persistent()
-        || matches!(module_path, Path::Pident(_))
-            && env
-                .lookup_module(module_path)
-                .or_else(|_| match module_path {
-                    Path::Pident(id) => env.find_module(id.name()),
-                    _ => unreachable!(),
-                })
-                .ok()
-                .and_then(|md| md.md_path.as_ref())
-                .is_some_and(|path| path.head().is_persistent());
-    // For alias modules, expansion should expose the alias target path
-    // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
-    let alias_target_for_strengthening = if strengthen_alias_types {
-        match &module_mty {
+    let mut no_persistent_env = None;
+    if let Some((qualified_module_path, id, decl)) =
+        crate::types::typecore::lookup_type_in_resolved_path(
+            module_path,
+            type_name,
+            env,
+            &mut no_persistent_env,
+            ctx,
+        )
+    {
+        // `lookup_type_in_resolved_path` already reads from the cached
+        // env_lazy-qualified module view. Keep that declaration graph shared
+        // instead of re-copying it on every lookup.
+        let resolved_decl = decl.clone();
+        let module_access_origin_is_persistent = path_root_is_persistent(&qualified_module_path);
+        // For alias modules, expansion should expose the alias target path
+        // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
+        let alias_target_for_strengthening = if strengthen_alias_types {
             // Preserve local access paths like `L.t` / `V.t` instead of
             // collapsing them back to the alias target during expansion.
-            super::decl::ModuleType::MtyAlias(_, target_path)
-                if module_access_origin_is_persistent =>
-            {
-                Some(target_path.clone())
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-    // Match OCaml Env.components_of_module path lookup behavior: when resolving
-    // `M.t`, operate on a path-qualified copy of `M`'s signature so sibling
-    // references inside manifests are rewritten through the access path.
-    crate::cmi::persistent_env::substitute_type_paths_in_sig(&module_sig, module_path, ctx);
+            let mut no_persistent_env = None;
+            crate::types::typecore::module_alias_target_for_path(
+                module_path,
+                env,
+                &mut no_persistent_env,
+                ctx,
+            )
+            .filter(|_| module_access_origin_is_persistent)
+        } else {
+            None
+        };
 
-    for item in &module_sig {
-        if let SignatureItem::SigType(id, decl, _) = item {
-            if id.name() == type_name {
-                let queried_type_path = Path::pdot(module_path.clone(), type_name.to_string());
-                let self_manifest = decl.type_manifest.is_some_and(|manifest| {
-                    let manifest = ctx.repr(manifest);
-                    let manifest_desc = ctx.get_desc(manifest);
-                    matches!(
-                        &*manifest_desc,
-                        TypeDesc::Tconstr {
-                            path: manifest_path, ..
-                        } if manifest_path.same(&queried_type_path)
-                    )
-                });
-                if self_manifest {
-                    let raw_module_path = alias_target_for_strengthening
-                        .as_ref()
-                        .unwrap_or(module_path);
-                    if let Some((raw_id, raw_decl)) =
-                        lookup_raw_module_sig_type(env, raw_module_path, type_name)
-                    {
-                        return Some((raw_id, raw_decl));
-                    }
-                }
-                if let Some(target_path) = alias_target_for_strengthening.as_ref() {
-                    return Some((
-                        id.clone(),
-                        strengthen_type_decl_for_module_access_path(ctx, target_path, id, decl),
-                    ));
-                }
-                return Some((id.clone(), decl.clone()));
+        let queried_type_path = Path::pdot(qualified_module_path.clone(), type_name.to_string());
+        let self_manifest = resolved_decl.type_manifest.is_some_and(|manifest| {
+            let manifest = ctx.repr(manifest);
+            let manifest_desc = ctx.get_desc(manifest);
+            matches!(
+                &*manifest_desc,
+                TypeDesc::Tconstr {
+                    path: manifest_path, ..
+                } if manifest_path.same(&queried_type_path)
+            )
+        });
+        if self_manifest {
+            let raw_module_path = alias_target_for_strengthening
+                .as_ref()
+                .unwrap_or(module_path);
+            if let Some((raw_id, raw_decl)) =
+                lookup_raw_module_sig_type(ctx, env, raw_module_path, type_name)
+            {
+                return Some((raw_id, raw_decl));
             }
         }
+        if let Some(target_path) = alias_target_for_strengthening.as_ref() {
+            return Some((
+                id.clone(),
+                strengthen_type_decl_for_module_access_path(ctx, target_path, &id, &resolved_decl),
+            ));
+        }
+        return Some((id, resolved_decl));
     }
 
     // Fall back to CMI-based resolution if local env-based lookup didn't find
@@ -1469,17 +1502,41 @@ fn resolve_type_through_env<'a>(
     resolve_type_item_through_env(ctx, env, path, strengthen_alias_types).map(|(_, decl)| decl)
 }
 
-fn resolved_type_items_share_identity(
+pub(crate) fn resolved_type_items_share_identity(
     ctx: &TypeContext<'_>,
     env: &Env,
     path1: &Path,
     path2: &Path,
     arity: usize,
 ) -> bool {
-    let Some((id1, decl1)) = resolve_type_item_through_env(ctx, env, path1, false) else {
+    let canonicalize_local_direct_family = |path: &Path| -> Path {
+        match path {
+            Path::Pdot(parent, type_name, _) => match parent.as_ref() {
+                Path::Pident(module_id) => {
+                    let mut no_persistent_env = None;
+                    crate::types::typecore::resolve_letmodule_direct_type_family_root(
+                        ctx,
+                        env,
+                        &mut no_persistent_env,
+                        module_id,
+                        type_name,
+                        arity,
+                    )
+                    .map(|root| Path::pdot(root, type_name.clone()))
+                    .unwrap_or_else(|| path.clone())
+                }
+                _ => path.clone(),
+            },
+            _ => path.clone(),
+        }
+    };
+
+    let path1 = canonicalize_local_direct_family(path1);
+    let path2 = canonicalize_local_direct_family(path2);
+    let Some((id1, decl1)) = resolve_type_item_through_env(ctx, env, &path1, false) else {
         return false;
     };
-    let Some((id2, decl2)) = resolve_type_item_through_env(ctx, env, path2, false) else {
+    let Some((id2, decl2)) = resolve_type_item_through_env(ctx, env, &path2, false) else {
         return false;
     };
 
@@ -1487,6 +1544,45 @@ fn resolved_type_items_share_identity(
         && id1.stamp() == id2.stamp()
         && decl1.type_params.len() == arity
         && decl2.type_params.len() == arity
+        || match (path1, path2) {
+            (Path::Pdot(parent1, name1, _), Path::Pdot(parent2, name2, _))
+                if name1 == name2 =>
+            {
+                let raw_parent1 = {
+                    let mut no_persistent_env = None;
+                    crate::types::typecore::module_alias_target_for_path(
+                        parent1.as_ref(),
+                        env,
+                        &mut no_persistent_env,
+                        ctx,
+                    )
+                    .unwrap_or_else(|| parent1.as_ref().clone())
+                };
+                let raw_parent2 = {
+                    let mut no_persistent_env = None;
+                    crate::types::typecore::module_alias_target_for_path(
+                        parent2.as_ref(),
+                        env,
+                        &mut no_persistent_env,
+                        ctx,
+                    )
+                    .unwrap_or_else(|| parent2.as_ref().clone())
+                };
+                let raw1 = lookup_raw_module_sig_type(ctx, env, &raw_parent1, name1.as_str());
+                let raw2 = lookup_raw_module_sig_type(ctx, env, &raw_parent2, name2.as_str());
+                matches!(
+                    (raw1, raw2),
+                    (
+                        Some((raw_id1, raw_decl1)),
+                        Some((raw_id2, raw_decl2))
+                    ) if raw_id1.stamp() != 0
+                        && raw_id1.stamp() == raw_id2.stamp()
+                        && raw_decl1.type_params.len() == arity
+                        && raw_decl2.type_params.len() == arity
+                )
+            }
+            _ => false,
+        }
 }
 
 /// Normalize a path by following module aliases, using both the local env
@@ -1498,7 +1594,52 @@ fn resolved_type_items_share_identity(
 /// 2. Looks up the module at the path (checking env + CMI)
 /// 3. If the module is an alias (`MtyAlias`), follows it
 fn normalize_path_full<'a>(ctx: &'a TypeContext<'a>, env: &Env, path: &Path) -> Path {
-    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new())
+    let env_id = env.id();
+    if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
+        return cached;
+    }
+    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true);
+    ctx.register_normalized_path_full(env_id, path, normalized.clone());
+    normalized
+}
+
+fn normalize_path_forward_only<'a>(ctx: &'a TypeContext<'a>, env: &Env, path: &Path) -> Path {
+    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false)
+}
+
+fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
+    if path.same(old_prefix) {
+        return Some(new_prefix.clone());
+    }
+
+    match path {
+        Path::Pdot(parent, name, pos) => {
+            let rewritten_parent = rewrite_path_prefix(parent, old_prefix, new_prefix)?;
+            Some(Path::Pdot(Box::new(rewritten_parent), name.clone(), *pos))
+        }
+        Path::Pident(_) | Path::Papply(_, _) => None,
+    }
+}
+
+fn normalize_path_through_local_aliases(env: &Env, path: &Path) -> Option<Path> {
+    env.with_current_local_module_aliases(|aliases| {
+        aliases.iter().find_map(|(alias_id, target_path)| {
+            let target_head = path_root_ident(target_path)?;
+            let target_is_local = env
+                .find_module_with_origin(target_head.name())
+                .ok()
+                .is_some_and(|(origin_id, _, is_local)| is_local && origin_id.same(target_head));
+            if !target_is_local {
+                return None;
+            }
+            let alias_path = Path::pident(alias_id.clone());
+            if alias_path.same(path) {
+                return None;
+            }
+            rewrite_path_prefix(path, &target_path, &alias_path)
+                .filter(|rewritten| !rewritten.same(path))
+        })
+    })
 }
 
 fn normalize_path_full_inner<'a>(
@@ -1507,6 +1648,7 @@ fn normalize_path_full_inner<'a>(
     path: &Path,
     depth: usize,
     visiting: &mut HashSet<Path>,
+    allow_reverse_local_aliases: bool,
 ) -> Path {
     if depth > 20 {
         return path.clone();
@@ -1515,7 +1657,14 @@ fn normalize_path_full_inner<'a>(
     // First, recursively normalize the prefix for Pdot paths
     let path = match path {
         Path::Pdot(p, s, pos) => {
-            let p_norm = normalize_path_full_inner(ctx, env, p, depth + 1, visiting);
+            let p_norm = normalize_path_full_inner(
+                ctx,
+                env,
+                p,
+                depth + 1,
+                visiting,
+                allow_reverse_local_aliases,
+            );
             if p_norm == **p {
                 path.clone()
             } else {
@@ -1532,13 +1681,49 @@ fn normalize_path_full_inner<'a>(
         if id.is_persistent() {
             ctx.trigger_module_sig_rename(id.name());
         }
+        if env
+            .find_module_with_origin(id.name())
+            .ok()
+            .is_some_and(|(origin_id, md, is_local)| {
+                let target_is_local = match &md.md_type {
+                    super::decl::ModuleType::MtyAlias(_, target)
+                    | super::decl::ModuleType::MtyIdent(target) => {
+                        path_root_ident(target).is_some_and(|head| {
+                            env.find_module_with_origin(head.name()).ok().is_some_and(
+                                |(target_id, _, target_local)| {
+                                    target_local && target_id.same(head)
+                                },
+                            )
+                        })
+                    }
+                    _ => false,
+                };
+                is_local
+                    && origin_id.same(id)
+                    && target_is_local
+                    && matches!(
+                        md.md_type,
+                        super::decl::ModuleType::MtyAlias(..)
+                            | super::decl::ModuleType::MtyIdent(..)
+                    )
+            })
+        {
+            return path;
+        }
     }
 
     // Then check if the path itself is a module alias.
     // First try the simple env lookup (handles Pident and some Pdot paths).
     if let Ok(md) = env.lookup_module(&path) {
         if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
-            return normalize_path_full_inner(ctx, env, alias_path, depth + 1, visiting);
+            return normalize_path_full_inner(
+                ctx,
+                env,
+                alias_path,
+                depth + 1,
+                visiting,
+                allow_reverse_local_aliases,
+            );
         }
     }
 
@@ -1553,9 +1738,29 @@ fn normalize_path_full_inner<'a>(
             resolve_module_type_through_env_path(ctx, env, &path, &mut resolve_visiting)
         {
             if let super::decl::ModuleType::MtyAlias(_, alias_path) = &mty {
-                return normalize_path_full_inner(ctx, env, alias_path, depth + 1, visiting);
+                return normalize_path_full_inner(
+                    ctx,
+                    env,
+                    alias_path,
+                    depth + 1,
+                    visiting,
+                    allow_reverse_local_aliases,
+                );
             }
         }
+    }
+
+    if allow_reverse_local_aliases
+        && let Some(rewritten) = normalize_path_through_local_aliases(env, &path)
+    {
+        return normalize_path_full_inner(
+            ctx,
+            env,
+            &rewritten,
+            depth + 1,
+            visiting,
+            allow_reverse_local_aliases,
+        );
     }
 
     path
@@ -1578,10 +1783,17 @@ fn proper_abbrevs(
     }
 }
 
-fn try_expand_head<'a>(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExpandHeadMode {
+    General,
+    Unify,
+}
+
+fn try_expand_head_with_mode<'a>(
     ctx: &'a TypeContext<'a>,
     env: &Env,
     ty: TypeExprRef,
+    mode: ExpandHeadMode,
 ) -> Option<TypeExprRef> {
     let ty = ctx.repr(ty);
     let desc = ctx.get_desc(ty);
@@ -1749,22 +1961,29 @@ fn try_expand_head<'a>(
             // descending through the current environment's module signatures
             // before consulting global fallbacks.
             if matches!(&path, Path::Pdot(..))
-                && let Some(decl) = resolve_type_through_env(ctx, env, &path, true)
+                && let Some(decl) = resolve_type_through_env(
+                    ctx,
+                    env,
+                    &path,
+                    matches!(mode, ExpandHeadMode::General),
+                )
             {
-                if let Some(decl_type_path) = decl.type_path.as_ref() {
-                    if path_name.contains("__")
-                        && !path.head().is_persistent()
-                        && decl.type_params.len() == args.len()
-                        && !decl_type_path.same(&path)
-                    {
-                        let level = ctx.get_level(ty);
-                        let rewritten = ctx.new_type(TypeDesc::Tconstr {
-                            path: decl_type_path.clone(),
-                            args: args.clone(),
-                            abbrev: orig_abbrev,
-                        });
-                        ctx.set_level(rewritten, level);
-                        return Some(rewritten);
+                if matches!(mode, ExpandHeadMode::General) {
+                    if let Some(decl_type_path) = decl.type_path.as_ref() {
+                        if path_name.contains("__")
+                            && !path_root_is_persistent(&path)
+                            && decl.type_params.len() == args.len()
+                            && !decl_type_path.same(&path)
+                        {
+                            let level = ctx.get_level(ty);
+                            let rewritten = ctx.new_type(TypeDesc::Tconstr {
+                                path: decl_type_path.clone(),
+                                args: args.clone(),
+                                abbrev: orig_abbrev,
+                            });
+                            ctx.set_level(rewritten, level);
+                            return Some(rewritten);
+                        }
                     }
                 }
                 if let Some(manifest) = decl.type_manifest {
@@ -1789,7 +2008,10 @@ fn try_expand_head<'a>(
                     // synthetic manifests (`M.t<'a> = M.t<'a>`), keeping the old
                     // rewrite-to-target behavior avoids collapsing distinct
                     // instantiations onto a single cached copy.
-                    if synthetic_self_manifest && !args.is_empty() {
+                    if matches!(mode, ExpandHeadMode::General)
+                        && synthetic_self_manifest
+                        && !args.is_empty()
+                    {
                         let immediate_alias_target_path = match &path {
                             Path::Pdot(parent, type_name, pos) => {
                                 let mut visiting = HashSet::new();
@@ -1840,7 +2062,8 @@ fn try_expand_head<'a>(
             // For non-persistent heads, avoid global/path-store fallbacks that can
             // over-expand local aliases (e.g. LayerStyleID.ID.t -> string) and
             // diverge from OCaml's identity/linking behavior.
-            let allow_global_fallbacks = path.head().is_persistent();
+            let allow_global_fallbacks =
+                path_root_is_persistent(&path) && matches!(mode, ExpandHeadMode::General);
 
             // 2. Try stamp-based global store (for CMI types with non-zero stamps)
             if allow_global_fallbacks && let Some(stamp) = stamp {
@@ -1856,8 +2079,10 @@ fn try_expand_head<'a>(
                             }
                         }
                     }
-                    if let Some(type_path) = store_decl.type_path.as_ref() {
-                        let persistent_head = type_path.head().is_persistent();
+                    if matches!(mode, ExpandHeadMode::General)
+                        && let Some(type_path) = store_decl.type_path.as_ref()
+                    {
+                        let persistent_head = path_root_is_persistent(type_path);
                         if persistent_head
                             && store_decl.type_params.len() == args.len()
                             && !type_path.same(&path)
@@ -1908,27 +2133,47 @@ fn try_expand_head<'a>(
                 }
             }
 
-            // 4. Path normalization fallback (OCaml ctype.ml:1315).
-            // When all expansion attempts fail, try normalizing the path by
-            // following module aliases. If the normalized path differs, create
-            // a new Tconstr with the normalized path so the next expansion
-            // attempt can find the type declaration.
-            let path_norm = normalize_path_full(ctx, env, &path);
-            if path_norm != path {
-                let level = ctx.get_level(ty);
-                let normalized = ctx.new_type(TypeDesc::Tconstr {
-                    path: path_norm,
-                    args: args.clone(),
-                    abbrev: orig_abbrev,
-                });
-                ctx.set_level(normalized, level);
-                Some(normalized)
-            } else {
-                None
+            // 4. Path normalization fallback (OCaml ctype.ml:1370).
+            // `expand_abbrev_gen` does this for both `expand_head` and
+            // `expand_head_unif`, so keep unification on the same path instead
+            // of recovering later with Rust-only alias fallback work.
+            {
+                let path_norm = match mode {
+                    ExpandHeadMode::General => normalize_path_full(ctx, env, &path),
+                    ExpandHeadMode::Unify => normalize_path_forward_only(ctx, env, &path),
+                };
+                if path_norm != path {
+                    let level = ctx.get_level(ty);
+                    let normalized = ctx.new_type(TypeDesc::Tconstr {
+                        path: path_norm,
+                        args: args.clone(),
+                        abbrev: orig_abbrev,
+                    });
+                    ctx.set_level(normalized, level);
+                    Some(normalized)
+                } else {
+                    None
+                }
             }
         }
         _ => None,
     }
+}
+
+fn try_expand_head<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    ty: TypeExprRef,
+) -> Option<TypeExprRef> {
+    try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General)
+}
+
+fn try_expand_head_unif<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    ty: TypeExprRef,
+) -> Option<TypeExprRef> {
+    try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Unify)
 }
 
 /// Fully expand a type through all aliases until it can't be expanded further.
@@ -1945,6 +2190,19 @@ pub fn expand_head_once<'a>(
 /// Fully expand a type through all aliases until it can't be expanded further.
 /// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
 pub fn expand_head<'a>(ctx: &'a TypeContext<'a>, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+    expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General)
+}
+
+fn expand_head_unif<'a>(ctx: &'a TypeContext<'a>, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+    expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Unify)
+}
+
+fn expand_head_with_mode<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    ty: TypeExprRef,
+    mode: ExpandHeadMode,
+) -> TypeExprRef {
     let mut current = ctx.repr(ty);
     // Stack-allocated cycle detection for up to 20 iterations.
     // Linear scan is faster than HashSet for this small size.
@@ -1964,7 +2222,7 @@ pub fn expand_head<'a>(ctx: &'a TypeContext<'a>, env: &Env, ty: TypeExprRef) -> 
         }
         seen[seen_len] = current;
         seen_len += 1;
-        match try_expand_head(ctx, env, current) {
+        match try_expand_head_with_mode(ctx, env, current, mode) {
             Some(expanded) => {
                 let expanded = ctx.repr(expanded);
                 if expanded == current {
@@ -2385,20 +2643,6 @@ fn unify_after_expansion<'a>(
     t2: TypeExprRef,
     t2_expanded: TypeExprRef,
 ) -> TypeResult<()> {
-    let type_name = |r: TypeExprRef| {
-        let d = ctx.get_desc(ctx.repr(r));
-        match &*d {
-            TypeDesc::Tconstr { path, .. } => path.name(),
-            TypeDesc::Tlink(t) => {
-                let d2 = ctx.get_desc(ctx.repr(*t));
-                match &*d2 {
-                    TypeDesc::Tconstr { path, .. } => format!("Tlink->{}", path.name()),
-                    _ => format!("Tlink->{}", ctx.repr(*t).0),
-                }
-            }
-            _ => format!("<non-constr:{}>", ctx.repr(r).0),
-        }
-    };
     let t1_changed = t1_expanded != t1;
     let t2_changed = t2_expanded != t2;
     if !t1_changed && !t2_changed {
@@ -2417,6 +2661,17 @@ fn unify_after_expansion<'a>(
     let lhs = ctx.repr(lhs);
     let rhs = ctx.repr(rhs);
     if lhs == rhs {
+        if state.mode != crate::types::UnifyMode::Pattern {
+            let keep_expanded_repr = state.env().is_some_and(|env| {
+                should_keep_expanded_manifest_alias_repr(ctx, env, lhs, rhs, relink_target, swap)
+            });
+            if !keep_expanded_repr {
+                let to_ty = ctx.repr(relink_target);
+                if lhs != to_ty && !deep_occur(ctx, lhs, to_ty) {
+                    ctx.set_desc(lhs, TypeDesc::Tlink(to_ty));
+                }
+            }
+        }
         return Ok(());
     }
 
@@ -2453,6 +2708,11 @@ fn unify_after_expansion<'a>(
         drop(rhs_desc);
     }
 
+    let keep_expanded_repr = state.mode != crate::types::UnifyMode::Pattern
+        && state.env().is_some_and(|env| {
+            should_keep_expanded_manifest_alias_repr(ctx, env, lhs, rhs, relink_target, swap)
+        });
+
     let unify_result = unify(ctx, state, lhs, rhs);
     unify_result?;
 
@@ -2461,13 +2721,74 @@ fn unify_after_expansion<'a>(
         //   link_type t1' t2
         // where t1' is the selected expanded side and t2 is the selected
         // ORIGINAL opposite side.
-        let to_ty = ctx.repr(relink_target);
-        if lhs != to_ty && !deep_occur(ctx, lhs, to_ty) {
-            ctx.set_desc(lhs, TypeDesc::Tlink(to_ty));
+        if !keep_expanded_repr {
+            let to_ty = ctx.repr(relink_target);
+            if lhs != to_ty && !deep_occur(ctx, lhs, to_ty) {
+                ctx.set_desc(lhs, TypeDesc::Tlink(to_ty));
+            }
         }
     }
 
     Ok(())
+}
+
+fn should_keep_expanded_manifest_alias_repr(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    lhs: TypeExprRef,
+    rhs: TypeExprRef,
+    relink_target: TypeExprRef,
+    swap: bool,
+) -> bool {
+    let (lhs_path, lhs_args_len) = {
+        let lhs_desc = ctx.get_desc(ctx.repr(lhs));
+        match &*lhs_desc {
+            TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.len()),
+            _ => return false,
+        }
+    };
+    let rhs_path = {
+        let rhs_desc = ctx.get_desc(ctx.repr(rhs));
+        match &*rhs_desc {
+            TypeDesc::Tconstr { path, args, .. } if args.len() == lhs_args_len => path.clone(),
+            _ => return false,
+        }
+    };
+    let relink_path = {
+        let relink_desc = ctx.get_desc(ctx.repr(relink_target));
+        match &*relink_desc {
+            TypeDesc::Tconstr { path, .. } => path.clone(),
+            _ => return false,
+        }
+    };
+    let lhs_has_nested_parent =
+        matches!(&lhs_path, Path::Pdot(parent, _, _) if matches!(parent.as_ref(), Path::Pdot(..)));
+    let expected_alias_name = if swap { "t" } else { "cmp" };
+    if !lhs_has_nested_parent || relink_path.last() != expected_alias_name {
+        return false;
+    }
+
+    let Some((_id, decl)) = resolve_type_item_through_env(ctx, env, &relink_path, false) else {
+        return false;
+    };
+    let Some(manifest) = decl.type_manifest else {
+        return false;
+    };
+    let manifest_path = {
+        let manifest_desc = ctx.get_desc(ctx.repr(manifest));
+        match &*manifest_desc {
+            TypeDesc::Tconstr { path, args, .. } if args.len() == lhs_args_len => path.clone(),
+            _ => return false,
+        }
+    };
+
+    let same_family = |left: &Path, right: &Path| {
+        left.same(right) || flattened_alias_paths_equivalent(ctx, env, left, right, lhs_args_len)
+    };
+
+    same_family(&manifest_path, &lhs_path)
+        && same_family(&lhs_path, &rhs_path)
+        && !same_family(&relink_path, &lhs_path)
 }
 
 fn has_cached_expansion(ctx: &TypeContext<'_>, path: &Path, mut memo: AbbrevMemoRef) -> bool {
@@ -2536,21 +2857,16 @@ fn unify_types<'a>(
         }
     }
 
-    // OCaml unify2 (ctype.ml:2283-2292): before structural unification,
-    // update levels of both sides. This triggers expansion+linking for
-    // Tconstr types whose binding time exceeds the target level,
-    // normalizing module-alias paths (e.g., U.t → list).
+    // Match OCaml update-level behavior before structural matching.
     if let Some(env) = state.env() {
         let lv1 = ctx.get_level(t1);
         let lv2 = ctx.get_level(t2);
         let lv = std::cmp::min(lv1, lv2);
-        // Use repr to get current representatives, since update_level_expand
-        // may modify them via link_type.
         update_level_expand(ctx, env, lv, t2);
         update_level_expand(ctx, env, lv, t1);
     }
 
-    // Re-repr after update_level_expand may have linked types
+    // Re-repr after update_level_expand may have linked types.
     let t1 = ctx.repr(t1);
     let t2 = ctx.repr(t2);
     if t1 == t2 {
@@ -2706,6 +3022,15 @@ fn unify_types<'a>(
             },
         ) => {
             if !path1.same(path2) {
+                if let Some(env) = state.env() {
+                    let exp1 = expand_head_unif(ctx, env, t1);
+                    let exp2 = expand_head_unif(ctx, env, t2);
+                    if exp1 != t1 || exp2 != t2 {
+                        drop(desc1);
+                        drop(desc2);
+                        return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
+                    }
+                }
                 let p1 = path1.name();
                 let p2 = path2.name();
                 if p1 == p2 && args1.len() == args2.len() {
@@ -2735,9 +3060,13 @@ fn unify_types<'a>(
                             .collect();
                         let p1_changed = !norm1.same(path1);
                         let p2_changed = !norm2.same(path2);
-                        let p1_persistent = path1.head().is_persistent();
-                        let p2_persistent = path2.head().is_persistent();
-                        if p1_changed && !p2_changed && !p1_persistent && p2_persistent {
+                        let p1_persistent = path_root_is_persistent(path1);
+                        let p2_persistent = path_root_is_persistent(path2);
+                        if p1_changed
+                            && !p2_changed
+                            && p1_persistent
+                            && p2_persistent
+                        {
                             drop(desc1);
                             drop(desc2);
                             link_type(ctx, t2, t1);
@@ -2745,10 +3074,45 @@ fn unify_types<'a>(
                                 unify(ctx, state, a, b)?;
                             }
                             return Ok(());
-                        } else if p2_changed && !p1_changed && !p2_persistent && p1_persistent {
+                        } else if p2_changed
+                            && !p1_changed
+                            && p1_persistent
+                            && p2_persistent
+                        {
                             drop(desc1);
                             drop(desc2);
                             link_type(ctx, t1, t2);
+                            for (a, b) in pairs {
+                                unify(ctx, state, a, b)?;
+                            }
+                            return Ok(());
+                        }
+                        // When a local target path normalizes through a current
+                        // letmodule alias (e.g. Int32Array.t -> Array.t), keep
+                        // the unchanged alias path as the representative so the
+                        // typedtree matches OCaml's local-alias spelling.
+                        if p1_changed
+                            && !p2_changed
+                            && !p1_persistent
+                            && !p2_persistent
+                            && norm1.same(path2)
+                        {
+                            drop(desc1);
+                            drop(desc2);
+                            link_type(ctx, t1, t2);
+                            for (a, b) in pairs {
+                                unify(ctx, state, a, b)?;
+                            }
+                            return Ok(());
+                        } else if p2_changed
+                            && !p1_changed
+                            && !p1_persistent
+                            && !p2_persistent
+                            && norm2.same(path1)
+                        {
+                            drop(desc1);
+                            drop(desc2);
+                            link_type(ctx, t2, t1);
                             for (a, b) in pairs {
                                 unify(ctx, state, a, b)?;
                             }
@@ -2776,7 +3140,7 @@ fn unify_types<'a>(
                 {
                     if short_segs.len() >= 2
                         && long_segs[1..] == *short_segs
-                        && !short_path.head().is_persistent()
+                        && !path_root_is_persistent(short_path)
                         && args1.len() == args2.len()
                     {
                         let alias_matches = if let Some(env) = state.env() {
@@ -2943,14 +3307,6 @@ fn unify_types<'a>(
                                 return unify(ctx, state, expanded_t1, t2);
                             }
                         }
-                    }
-                }
-
-                if let Some(env) = state.env() {
-                    let exp1 = expand_head(ctx, env, t1);
-                    let exp2 = expand_head(ctx, env, t2);
-                    if exp1 != t1 || exp2 != t2 {
-                        return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                     }
                 }
 
@@ -3417,8 +3773,11 @@ fn unify_types<'a>(
 // ============================================================================
 
 /// Sort row fields alphabetically by label, matching OCaml's `sort_row_fields`.
-fn sort_row_fields(fields: &[(String, RowField)]) -> Vec<(String, RowField)> {
-    let mut sorted = fields.to_vec();
+type RowFieldEntryRef<'a> = (&'a Label, &'a RowField);
+type RowPairRef<'a, 'b> = (&'a str, &'a RowField, &'b RowField);
+
+fn sort_row_fields<'a>(fields: &'a [(Label, RowField)]) -> Vec<RowFieldEntryRef<'a>> {
+    let mut sorted: Vec<_> = fields.iter().map(|(label, field)| (label, field)).collect();
     sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
     sorted
 }
@@ -3428,17 +3787,17 @@ fn sort_row_fields(fields: &[(String, RowField)]) -> Vec<(String, RowField)> {
 /// - r1: fields only in fi1 (sorted)
 /// - r2: fields only in fi2 (sorted)
 /// - pairs: matched fields from both sides
-fn merge_rf(
-    fi1: &[(String, RowField)],
-    fi2: &[(String, RowField)],
+fn merge_rf<'a, 'b>(
+    fi1: &[RowFieldEntryRef<'a>],
+    fi2: &[RowFieldEntryRef<'b>],
 ) -> (
-    Vec<(String, RowField)>,
-    Vec<(String, RowField)>,
-    Vec<(String, RowField, RowField)>,
+    Vec<RowFieldEntryRef<'a>>,
+    Vec<RowFieldEntryRef<'b>>,
+    Vec<RowPairRef<'a, 'b>>,
 ) {
-    let mut r1: Vec<(String, RowField)> = Vec::new();
-    let mut r2: Vec<(String, RowField)> = Vec::new();
-    let mut pairs: Vec<(String, RowField, RowField)> = Vec::new();
+    let mut r1 = Vec::new();
+    let mut r2 = Vec::new();
+    let mut pairs = Vec::new();
 
     let mut i1 = 0;
     let mut i2 = 0;
@@ -3447,24 +3806,24 @@ fn merge_rf(
         let (l1, f1) = &fi1[i1];
         let (l2, f2) = &fi2[i2];
         if l1 == l2 {
-            pairs.push((l1.clone(), f1.clone(), f2.clone()));
+            pairs.push((l1.as_str(), *f1, *f2));
             i1 += 1;
             i2 += 1;
         } else if l1 < l2 {
-            r1.push((l1.clone(), f1.clone()));
+            r1.push((*l1, *f1));
             i1 += 1;
         } else {
-            r2.push((l2.clone(), f2.clone()));
+            r2.push((*l2, *f2));
             i2 += 1;
         }
     }
     // Remaining elements
     while i1 < fi1.len() {
-        r1.push(fi1[i1].clone());
+        r1.push(fi1[i1]);
         i1 += 1;
     }
     while i2 < fi2.len() {
-        r2.push(fi2[i2].clone());
+        r2.push(fi2[i2]);
         i2 += 1;
     }
 
@@ -3479,25 +3838,39 @@ fn merge_rf(
 /// Merge row fields matching OCaml's `merge_row_fields`.
 /// Sorts both inputs, then uses sorted merge to partition into
 /// (r1_only, r2_only, pairs).
-fn merge_row_fields(
-    fi1: &[(String, RowField)],
-    fi2: &[(String, RowField)],
+fn merge_row_fields<'a, 'b>(
+    fi1: &'a [(Label, RowField)],
+    fi2: &'b [(Label, RowField)],
 ) -> (
-    Vec<(String, RowField)>,
-    Vec<(String, RowField)>,
-    Vec<(String, RowField, RowField)>,
+    Vec<RowFieldEntryRef<'a>>,
+    Vec<RowFieldEntryRef<'b>>,
+    Vec<RowPairRef<'a, 'b>>,
 ) {
     // Match OCaml's fast paths
     if fi1.is_empty() || fi2.is_empty() {
-        return (fi1.to_vec(), fi2.to_vec(), Vec::new());
+        return (
+            fi1.iter().map(|(label, field)| (label, field)).collect(),
+            fi2.iter().map(|(label, field)| (label, field)).collect(),
+            Vec::new(),
+        );
     }
     if fi1.len() == 1 && fi2.iter().all(|(l, _)| l != &fi1[0].0) {
-        return (fi1.to_vec(), fi2.to_vec(), Vec::new());
+        return (
+            fi1.iter().map(|(label, field)| (label, field)).collect(),
+            fi2.iter().map(|(label, field)| (label, field)).collect(),
+            Vec::new(),
+        );
     }
     if fi2.len() == 1 && fi1.iter().all(|(l, _)| l != &fi2[0].0) {
-        return (fi1.to_vec(), fi2.to_vec(), Vec::new());
+        return (
+            fi1.iter().map(|(label, field)| (label, field)).collect(),
+            fi2.iter().map(|(label, field)| (label, field)).collect(),
+            Vec::new(),
+        );
     }
-    merge_rf(&sort_row_fields(fi1), &sort_row_fields(fi2))
+    let sorted1 = sort_row_fields(fi1);
+    let sorted2 = sort_row_fields(fi2);
+    merge_rf(&sorted1, &sorted2)
 }
 
 /// Unify two row types (for polymorphic variants).
@@ -3510,8 +3883,10 @@ fn unify_rows<'a>(
     row1: &RowDesc,
     row2: &RowDesc,
 ) -> TypeResult<()> {
-    let row1 = row_repr(ctx, row1);
-    let row2 = row_repr(ctx, row2);
+    let row1 = row_repr_ref(ctx, row1);
+    let row2 = row_repr_ref(ctx, row2);
+    let row1 = row1.as_ref();
+    let row2 = row2.as_ref();
 
     let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
 
@@ -3537,9 +3912,9 @@ fn unify_rows<'a>(
     let closed = row1.row_closed || row2.row_closed;
 
     let filter_row_fields =
-        |erase: bool, fields: &[(String, RowField)]| -> Vec<(String, RowField)> {
+        |erase: bool, fields: &[RowFieldEntryRef<'_>]| -> Vec<(Label, RowField)> {
             let mut filtered = Vec::new();
-            for (label, field) in fields {
+            for (label, field) in fields.iter().copied() {
                 match super::btype::row_field_repr(ctx, field) {
                     RowField::Rabsent => {}
                     RowField::Reither {
@@ -3554,10 +3929,10 @@ fn unify_rows<'a>(
             }
             filtered
         };
-    let empty = |fields: &[(String, RowField)]| {
-        fields
-            .iter()
-            .all(|(_, f)| matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent))
+    let empty = |fields: &[RowFieldEntryRef<'_>]| {
+        fields.iter().copied().all(|(_, f)| {
+            matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent)
+        })
     };
 
     if closed {
@@ -3601,13 +3976,16 @@ fn unify_rows<'a>(
     let set_more = |ctx: &'a TypeContext<'a>,
                     state: &mut UnifyState,
                     row: &RowDesc,
-                    rest: &[(String, RowField)]|
+                    rest: &[RowFieldEntryRef<'_>]|
      -> TypeResult<()> {
         let row_is_fixed = row_fixed(ctx, row);
         let rest = if closed {
             filter_row_fields(row.row_closed, rest)
         } else {
-            rest.to_vec()
+            rest.iter()
+                .copied()
+                .map(|(label, field)| (label.clone(), field.clone()))
+                .collect()
         };
         if (!rest.is_empty() && (row.row_closed || row_is_fixed))
             || (closed && row_is_fixed && !row.row_closed)
@@ -5249,7 +5627,8 @@ fn copy_sep_inner(
         }
         TypeDesc::Tunivar(name) => TypeDesc::Tunivar(name),
         TypeDesc::Tvariant(row0) => {
-            let row = row_repr(ctx, &row0);
+            let row = row_repr_ref(ctx, &row0);
+            let row = row.as_ref();
             let more = ctx.repr(row.row_more);
             let keep = super::btype::is_tvar(ctx, more) && ctx.get_level(more) != GENERIC_LEVEL;
             let more_copy = copy_sep_inner(
@@ -5753,7 +6132,8 @@ pub fn copy_type_deep(
         TypeDesc::Tvariant(row) => {
             let placeholder = ctx.new_var(None);
             cache.insert(ty, placeholder);
-            let row = row_repr(ctx, row);
+            let row = row_repr_ref(ctx, row);
+            let row = row.as_ref();
             let new_row_more = copy_type_deep(ctx, row.row_more, cache);
             let new_row_fields: Vec<_> = row
                 .row_fields
@@ -6518,7 +6898,8 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
     // already-registered variant copy directly.
     if ctx.get_level(ty) == GENERIC_LEVEL {
         if let TypeDesc::Tvariant(row0) = &*ctx.get_desc(ty) {
-            let row = row_repr(ctx, row0);
+            let row = row_repr_ref(ctx, row0);
+            let row = row.as_ref();
             let more = ctx.repr(row.row_more);
             if let Some(marker) = cache.row_more_markers.get(&more).copied() {
                 cache.nodes.insert(ty, marker.variant);
@@ -6723,8 +7104,6 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
                         } else {
                             found_ty
                         });
-                        let found_ty_level = ctx.get_level(found_ty);
-                        let found_source_level = ctx.get_level(found_source);
                         let stale_local_generic_hit = is_local_nonpersistent
                             && found_cached.is_none()
                             && ctx.get_level(found_source) == GENERIC_LEVEL;
@@ -6796,7 +7175,8 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
                 CopyAction::Variant(row) => {
                     // OCaml Ctype.copy uses copy_row with keep/fixed semantics
                     // derived from row_more, not a plain structural field copy.
-                    let row = row_repr(ctx, &row);
+                    let row = row_repr_ref(ctx, &row);
+                    let row = row.as_ref();
                     let more = ctx.repr(row.row_more);
                     let more_level = ctx.get_level(more);
                     let keep = super::btype::is_tvar(ctx, more) && more_level != GENERIC_LEVEL;
@@ -7070,7 +7450,7 @@ pub fn normalize_all_types(ctx: &TypeContext<'_>) {
         match &*desc {
             TypeDesc::Tvariant(row) => {
                 let row = row_repr(ctx, row);
-                let mut fields: Vec<(String, RowField)> = row
+                let mut fields: Vec<(Label, RowField)> = row
                     .row_fields
                     .iter()
                     .map(|(label, field)| {
@@ -7140,7 +7520,7 @@ fn normalize_type_rec(ctx: &TypeContext<'_>, visited: &mut HashSet<TypeExprRef>,
             // over-sorting expression-level variants (they happen to sort correctly already
             // or their tests fail for other reasons).
             let row = row_repr(ctx, row);
-            let mut fields: Vec<(String, RowField)> = row
+            let mut fields: Vec<(Label, RowField)> = row
                 .row_fields
                 .iter()
                 .map(|(label, field)| {

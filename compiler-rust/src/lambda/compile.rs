@@ -602,35 +602,20 @@ impl LambdaCompiler {
             }
             Lambda::LifThenElse(cond, then_, else_) => {
                 let cond_compiled = self.compile_expr(cond);
-                let then_compiled = self.compile_expr(then_);
-                let else_compiled = self.compile_expr(else_);
                 let mut prelude = cond_compiled.prelude;
-                if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
-                    Compiled {
-                        prelude,
-                        expr: Expression::cond(
-                            cond_compiled.expr,
-                            then_compiled.expr,
-                            else_compiled.expr,
-                        ),
-                    }
-                } else {
-                    let tmp = self.fresh_ident("ifres");
-                    prelude.push(Statement::variable(VariableDeclaration {
-                        ident: tmp.clone(),
-                        value: None,
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    }));
-                    prelude.push(Statement::if_(
-                        cond_compiled.expr,
-                        self.compile_assign_to_target_block(&tmp, then_),
-                        self.compile_assign_to_target_block(&tmp, else_),
-                    ));
-                    Compiled {
-                        prelude,
-                        expr: Expression::var(tmp),
-                    }
+                let tmp = self.fresh_ident("ifres");
+                let then_block = self.compile_assign_to_target_block(&tmp, then_);
+                let else_block = self.compile_assign_to_target_block(&tmp, else_);
+                prelude.extend(self.compile_declared_if_block(
+                    LetKind::Strict,
+                    &tmp,
+                    cond_compiled.expr,
+                    then_block,
+                    else_block,
+                ));
+                Compiled {
+                    prelude,
+                    expr: Expression::var(tmp),
                 }
             }
             Lambda::Lsequence(a, b) => {
@@ -3858,25 +3843,32 @@ impl LambdaCompiler {
         else_: &Lambda,
     ) -> Block {
         let cond_compiled = self.compile_expr(cond);
-        let then_compiled = self.compile_expr(then_);
-        let else_compiled = self.compile_expr(else_);
-
-        if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
-            let mut block = cond_compiled.prelude;
-            block.push(Statement::exp(Expression::bin(
-                BinOp::Eq,
-                Expression::var(result.clone()),
-                Expression::cond(cond_compiled.expr, then_compiled.expr, else_compiled.expr),
-            )));
-            return block;
-        }
+        let then_block = self.compile_assign_to_target_block(result, then_);
+        let else_block = self.compile_assign_to_target_block(result, else_);
 
         let mut block = cond_compiled.prelude;
-        block.push(Statement::if_(
-            cond_compiled.expr,
-            self.compile_assign_to_target_block(result, then_),
-            self.compile_assign_to_target_block(result, else_),
-        ));
+        match (
+            self.take_single_result_assignment(result, then_block),
+            self.take_single_result_assignment(result, else_block),
+        ) {
+            (Ok(then_expr), Ok(else_expr)) => {
+                block.push(self.result_assignment(
+                    result,
+                    Expression::cond(cond_compiled.expr, then_expr, else_expr),
+                ));
+            }
+            (then_result, else_result) => {
+                let then_block = match then_result {
+                    Ok(expr) => vec![self.result_assignment(result, expr)],
+                    Err(block) => block,
+                };
+                let else_block = match else_result {
+                    Ok(expr) => vec![self.result_assignment(result, expr)],
+                    Err(block) => block,
+                };
+                block.push(Statement::if_(cond_compiled.expr, then_block, else_block));
+            }
+        }
         block
     }
 
@@ -3888,71 +3880,133 @@ impl LambdaCompiler {
         then_block: Block,
         else_block: Block,
     ) -> Block {
-        if let (Some(then_expr), Some(else_expr)) = (
-            self.single_result_assignment(id, &then_block),
-            self.single_result_assignment(id, &else_block),
+        match (
+            self.take_single_result_assignment(id, then_block),
+            self.take_single_result_assignment(id, else_block),
         ) {
-            return vec![Statement::variable(VariableDeclaration {
-                ident: id.clone(),
-                value: Some(Expression::cond(cond, then_expr, else_expr)),
-                property: kind,
-                ident_info: IdentInfo::default(),
-            })];
-        }
+            (Ok(then_expr), Ok(else_expr)) => {
+                vec![Statement::variable(VariableDeclaration {
+                    ident: id.clone(),
+                    value: Some(Expression::cond(cond, then_expr, else_expr)),
+                    property: kind,
+                    ident_info: IdentInfo::default(),
+                })]
+            }
+            (then_result, else_result) => {
+                let then_block = match then_result {
+                    Ok(expr) => vec![self.result_assignment(id, expr)],
+                    Err(block) => block,
+                };
+                let else_block = match else_result {
+                    Ok(expr) => vec![self.result_assignment(id, expr)],
+                    Err(block) => block,
+                };
 
-        vec![
-            Statement::variable(VariableDeclaration {
-                ident: id.clone(),
-                value: None,
-                property: kind,
-                ident_info: IdentInfo::default(),
-            }),
-            Statement::if_(cond, then_block, else_block),
-        ]
+                vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: id.clone(),
+                        value: None,
+                        property: kind,
+                        ident_info: IdentInfo::default(),
+                    }),
+                    Statement::if_(cond, then_block, else_block),
+                ]
+            }
+        }
     }
 
-    fn single_result_assignment(&self, id: &Ident, block: &Block) -> Option<Expression> {
+    fn take_single_result_assignment(
+        &self,
+        id: &Ident,
+        block: Block,
+    ) -> Result<Expression, Block> {
         let [stmt] = block.as_slice() else {
-            return None;
+            return Err(block);
         };
         let StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Bin(BinOp::Eq, lhs, rhs),
+            desc: ExpressionDesc::Bin(BinOp::Eq, lhs, ..),
             ..
         }) = &stmt.desc
         else {
-            return None;
+            return Err(block);
         };
         let ExpressionDesc::Var(crate::js_ir::VIdent::Id(target)) = &lhs.desc else {
-            return None;
+            return Err(block);
         };
         if !target.same(id) {
-            return None;
+            return Err(block);
         }
 
-        Some((**rhs).clone())
+        let stmt = block.into_iter().next().expect("single-statement block");
+        let Statement {
+            desc: StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Bin(BinOp::Eq, _, rhs),
+                ..
+            }),
+            ..
+        } = stmt
+        else {
+            unreachable!("validated single assignment shape")
+        };
+        Ok(*rhs)
+    }
+
+    fn result_assignment(&self, id: &Ident, expr: Expression) -> Statement {
+        Statement::exp(Expression::bin(
+            BinOp::Eq,
+            Expression::var(id.clone()),
+            expr,
+        ))
+    }
+
+    fn take_single_return_expr(&self, block: Block) -> Result<Expression, Block> {
+        let [stmt] = block.as_slice() else {
+            return Err(block);
+        };
+        if !matches!(stmt.desc, StatementDesc::Return(_)) {
+            return Err(block);
+        }
+
+        let stmt = block.into_iter().next().expect("single-statement block");
+        let Statement {
+            desc: StatementDesc::Return(expr),
+            ..
+        } = stmt
+        else {
+            unreachable!("validated single return shape")
+        };
+        Ok(expr)
     }
 
     fn compile_if_return_block(&mut self, cond: &Lambda, then_: &Lambda, else_: &Lambda) -> Block {
         let cond_compiled = self.compile_expr(cond);
-        let then_compiled = self.compile_expr(then_);
-        let else_compiled = self.compile_expr(else_);
-
-        if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
-            let mut block = cond_compiled.prelude;
-            block.push(Statement::return_(Expression::cond(
-                cond_compiled.expr,
-                then_compiled.expr,
-                else_compiled.expr,
-            )));
-            return block;
-        }
+        let then_block = self.compile_return_block(then_);
+        let else_block = self.compile_return_block(else_);
 
         let mut block = cond_compiled.prelude;
-        block.push(Statement::if_(
-            cond_compiled.expr,
-            self.compile_return_block(then_),
-            self.compile_return_block(else_),
-        ));
+        match (
+            self.take_single_return_expr(then_block),
+            self.take_single_return_expr(else_block),
+        ) {
+            (Ok(then_expr), Ok(else_expr)) => {
+                block.push(Statement::return_(Expression::cond(
+                    cond_compiled.expr,
+                    then_expr,
+                    else_expr,
+                )));
+            }
+            (then_result, else_result) => {
+                let then_block = match then_result {
+                    Ok(expr) => vec![Statement::return_(expr)],
+                    Err(block) => block,
+                };
+                let else_block = match else_result {
+                    Ok(expr) => vec![Statement::return_(expr)],
+                    Err(block) => block,
+                };
+                block.push(Statement::if_(cond_compiled.expr, then_block, else_block));
+            }
+        }
         block
     }
 

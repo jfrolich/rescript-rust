@@ -5,6 +5,7 @@
 
 use crate::location::Location;
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 
 /// Constant values in the AST.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -107,7 +108,7 @@ pub enum ClosedFlag {
 }
 
 /// A label (field name, method name, etc.).
-pub type Label = String;
+pub type Label = SmolStr;
 
 /// Arity of a function (None means unknown).
 pub type Arity = Option<i32>;

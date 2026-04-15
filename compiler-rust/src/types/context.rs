@@ -86,6 +86,18 @@ impl Deref for TypeDescSnapshot {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct QualifiedModuleComponentsCacheKey {
+    path: Path,
+    env_id: Option<u64>,
+}
+
+impl QualifiedModuleComponentsCacheKey {
+    pub(crate) fn new(path: Path, env_id: Option<u64>) -> Self {
+        Self { path, env_id }
+    }
+}
+
 /// Type checking context.
 ///
 /// This context is created for each type checking session (typically one
@@ -184,6 +196,30 @@ pub struct TypeContext<'a> {
     /// Prevents repeated calls to resolve_module_signature_for_path from
     /// creating fresh type copies via copy_lookup_signature_for_subst.
     resolved_module_sig_cache: RefCell<ahash::AHashMap<String, (Path, super::decl::Signature)>>,
+
+    /// Cached qualified module-component views keyed by access-path semantics.
+    /// This is the Rust analogue of OCaml's lazy `components_of_module_maker`.
+    qualified_module_components_cache:
+        RefCell<
+            ahash::AHashMap<
+                QualifiedModuleComponentsCacheKey,
+                super::env_lazy::QualifiedModuleComponents,
+            >,
+        >,
+
+    /// Cached dotted value lookups keyed by resolved module access path.
+    resolved_module_value_cache:
+        RefCell<ahash::AHashMap<(Path, String), (Path, super::decl::ValueDescription)>>,
+
+    /// Cached dotted type lookups keyed by resolved module access path.
+    resolved_module_type_cache:
+        RefCell<ahash::AHashMap<(Path, String), (Path, Ident, super::decl::TypeDeclaration)>>,
+
+    /// Cached child-module access paths keyed by resolved parent access path.
+    resolved_child_module_path_cache: RefCell<ahash::AHashMap<(Path, String), Path>>,
+
+    /// Cached full normalize_path results keyed by environment identity.
+    normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
 
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
@@ -294,6 +330,11 @@ impl<'a> TypeContext<'a> {
             type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
             resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
+            qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
+            resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
+            resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
+            resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
+            normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Vec::new()),
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
@@ -435,6 +476,129 @@ impl<'a> TypeContext<'a> {
     /// Look up a cached resolved module signature.
     pub fn find_resolved_module_sig(&self, path: &str) -> Option<(Path, super::decl::Signature)> {
         self.resolved_module_sig_cache.borrow().get(path).cloned()
+    }
+
+    /// Cache a lazily-built qualified module-components view.
+    pub(crate) fn register_qualified_module_components(
+        &self,
+        key: QualifiedModuleComponentsCacheKey,
+        components: super::env_lazy::QualifiedModuleComponents,
+    ) {
+        self.qualified_module_components_cache
+            .borrow_mut()
+            .insert(key, components);
+    }
+
+    /// Borrow a cached qualified module-components view.
+    pub(crate) fn with_qualified_module_components<R>(
+        &self,
+        key: &QualifiedModuleComponentsCacheKey,
+        f: impl FnOnce(&super::env_lazy::QualifiedModuleComponents) -> R,
+    ) -> Option<R> {
+        let cache = self.qualified_module_components_cache.borrow();
+        let components = cache.get(key)?;
+        Some(f(components))
+    }
+
+    /// Cache a dotted value lookup for a resolved module access path.
+    pub(crate) fn register_resolved_module_value(
+        &self,
+        module_path: &Path,
+        value_name: &str,
+        path: Path,
+        desc: super::decl::ValueDescription,
+    ) {
+        self.resolved_module_value_cache.borrow_mut().insert(
+            (module_path.clone(), value_name.to_string()),
+            (path, desc),
+        );
+    }
+
+    /// Look up a cached dotted value lookup for a resolved module access path.
+    pub(crate) fn find_resolved_module_value(
+        &self,
+        module_path: &Path,
+        value_name: &str,
+    ) -> Option<(Path, super::decl::ValueDescription)> {
+        self.resolved_module_value_cache
+            .borrow()
+            .get(&(module_path.clone(), value_name.to_string()))
+            .cloned()
+    }
+
+    /// Cache a dotted type lookup for a resolved module access path.
+    pub(crate) fn register_resolved_module_type(
+        &self,
+        module_path: &Path,
+        type_name: &str,
+        access_path: Path,
+        id: Ident,
+        decl: super::decl::TypeDeclaration,
+    ) {
+        self.resolved_module_type_cache.borrow_mut().insert(
+            (module_path.clone(), type_name.to_string()),
+            (access_path, id, decl),
+        );
+    }
+
+    /// Look up a cached dotted type lookup for a resolved module access path.
+    pub(crate) fn find_resolved_module_type(
+        &self,
+        module_path: &Path,
+        type_name: &str,
+    ) -> Option<(Path, Ident, super::decl::TypeDeclaration)> {
+        self.resolved_module_type_cache
+            .borrow()
+            .get(&(module_path.clone(), type_name.to_string()))
+            .cloned()
+    }
+
+    /// Cache a resolved child-module access path.
+    pub(crate) fn register_resolved_child_module_path(
+        &self,
+        parent_path: &Path,
+        child_name: &str,
+        child_path: Path,
+    ) {
+        self.resolved_child_module_path_cache
+            .borrow_mut()
+            .insert((parent_path.clone(), child_name.to_string()), child_path);
+    }
+
+    /// Look up a cached resolved child-module access path.
+    pub(crate) fn find_resolved_child_module_path(
+        &self,
+        parent_path: &Path,
+        child_name: &str,
+    ) -> Option<Path> {
+        self.resolved_child_module_path_cache
+            .borrow()
+            .get(&(parent_path.clone(), child_name.to_string()))
+            .cloned()
+    }
+
+    /// Cache a normalized path for a specific environment identity.
+    pub(crate) fn register_normalized_path_full(
+        &self,
+        env_id: u64,
+        original_path: &Path,
+        normalized_path: Path,
+    ) {
+        self.normalized_path_full_cache
+            .borrow_mut()
+            .insert((env_id, original_path.clone()), normalized_path);
+    }
+
+    /// Look up a cached normalized path for a specific environment identity.
+    pub(crate) fn find_normalized_path_full(
+        &self,
+        env_id: u64,
+        original_path: &Path,
+    ) -> Option<Path> {
+        self.normalized_path_full_cache
+            .borrow()
+            .get(&(env_id, original_path.clone()))
+            .cloned()
     }
 
     /// Set load paths for resolving CMI files.

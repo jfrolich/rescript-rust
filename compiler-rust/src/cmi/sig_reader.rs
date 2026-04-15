@@ -726,12 +726,12 @@ impl<'a> SigReadContext<'a> {
     fn read_row_desc(&mut self, value: &OcamlValue) -> RowDesc {
         let fields = &value.as_block().1;
 
-        let row_fields: Vec<(String, RowField)> = fields[0]
+        let row_fields: Vec<(crate::types::asttypes::Label, RowField)> = fields[0]
             .as_list()
             .iter()
             .map(|pair| {
                 let (_, pf) = pair.as_block();
-                let label = pf[0].as_string().to_string();
+                let label = crate::types::asttypes::Label::from(pf[0].as_string());
                 let rf = self.read_row_field(&pf[1]);
                 (label, rf)
             })
