@@ -6,7 +6,6 @@
     "CREDITS.md",
     "LICENSE",
     "README.md",
-    "cli/bsc.js",
     "cli/common/args.js",
     "cli/common/bins.js",
     "cli/common/minisocket.js",

@@ -4048,7 +4048,6 @@ impl<'a> RawLambdaConverter<'a> {
             // They stay compile-time-only unless a later dynamic import/pack
             // path reifies the module reference, so static aliases must not
             // contribute a required JS import on their own.
-            self.note_possible_required_modules_from_module_expr(module_expr, false);
             return self.apply_coercion_raw(
                 self.loc(module_expr.mod_loc),
                 LetKind::Alias,
@@ -11501,14 +11500,10 @@ external myJson: Js.Json.t = "default"
                 crate::parse_arena::Located::mknoloc(crate::parse_arena::LidentIdx(0)),
             ),
             mod_loc: crate::parse_arena::LocIdx::default(),
-            mod_type: crate::types::typedtree::ModuleType {
-                mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_alias(
-                    crate::types::Path::Pident(side_effect),
-                    crate::parse_arena::Located::mknoloc(crate::parse_arena::LidentIdx(0)),
-                ),
-                mty_loc: crate::parse_arena::LocIdx::default(),
-                mty_attributes: Attributes::new(),
-            },
+            mod_type: crate::types::decl::ModuleType::MtyAlias(
+                crate::types::decl::AliasPresence::MtaPresent,
+                crate::types::Path::Pident(side_effect),
+            ),
             mod_env: EnvRef(0),
             mod_attributes: Attributes::new(),
         };
