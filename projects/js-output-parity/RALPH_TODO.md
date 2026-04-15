@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 524 / 657 JS snapshots passing, 0 compile errors, 133 output diffs
+**Status:** 525 / 657 JS snapshots passing, 0 compile errors, 132 output diffs
 
 ## Goal
 
@@ -35,11 +35,67 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **524 / 657**
+- JS snapshot parity: **525 / 657**
 - Compile errors: **0**
-- Output diffs: **133**
+- Output diffs: **132**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: match OCaml-style unit-function nested-`if` tail printing in
+  `compiler-rust/src/js_ir/printer.rs`, so shared fallthrough tails become an
+  explicit outer `else` only when the snapshot shape requires it, while the
+  pure `return undefined` case still collapses to `outer && inner`
+- Active backend focus for this slice is **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; this is downstream `js_dump`-style printer behavior in
+  `compiler-rust/src/js_ir/printer.rs`, not typedtree, lambda, or JS-pass work
+- OCaml reference:
+  `compiler/core/js_dump.ml`, specifically the unit-returning function-body
+  / tail-statement emission paths that decide when nested `if` bodies can be
+  flattened and when the shared tail must stay explicit
+- Rust change:
+  - added a focused function-body printer rewrite for
+    `[if outer { if inner { ... } }, tail_stmt, return undefined]` so Rust
+    emits `if (outer) { if (inner) { ... } tail_stmt; return; } else { tail_stmt; return; }`
+    instead of incorrectly collapsing to `if (outer && inner) ... else ...`
+  - kept the existing `outer && inner` collapse only for the pure
+    `else { return undefined }` tail case, which preserves the desired
+    `LargeUnboxedVariantOptimization` shape
+  - added focused regression coverage in
+    `test_print_unit_function_tail_merges_nested_if_when_outer_else_is_return_undefined`
+    and
+    `test_print_unit_function_body_merges_shared_tail_into_nested_if_else`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_unit_function_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for
+    `tests/tests/src/LargeUnboxedVariantOptimization.res`, diffing
+    `/tmp/LargeUnboxedVariantOptimization.mjs` against the checked-in snapshot
+  - direct release repro for
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res`, diffing
+    `/tmp/VariantPatternMatchingSpreadsWithPayloads.mjs` against the checked-in
+    snapshot
+  - direct release guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/LargeUnboxedVariantOptimization.res` and
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` are now
+    exact snapshot matches together, which closes the nested unit-function
+    fallthrough/explicit-else printer cluster this slice was targeting
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the broader unchanged guard
+  - the full authoritative sweep in this worktree now reports **525 / 657**
+    passing, **0** compile errors, and **132** output diffs
+- Topline impact:
+  - JS snapshot parity: **524 / 657** -> **525 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **133** -> **132** (**-1**)
+- Keep this change because it matches the remaining OCaml-aligned snapshot
+  shape for unit-returning nested `if` bodies instead of applying a broader
+  Rust-only condition merge, and the authoritative harness confirms the change
+  improves parity without opening new compile or snapshot regressions.
 
 Latest iteration on **2026-04-15**:
 
