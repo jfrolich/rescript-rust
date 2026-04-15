@@ -265,22 +265,24 @@ function JsOutput({ code }) {
   }
 
   return (
-    <Editor
-      language="javascript"
-      value={code}
-      theme="vs-dark"
-      options={{
-        readOnly: true,
-        minimap: { enabled: false },
-        fontSize: 13,
-        fontFamily: "'Cascadia Code', 'Fira Code', 'Consolas', monospace",
-        lineNumbers: "on",
-        scrollBeyondLastLine: false,
-        automaticLayout: true,
-        padding: { top: 8 },
-        renderLineHighlight: "none",
-        domReadOnly: true,
-      }}
-    />
+    <div className="js-output">
+      <Editor
+        language="javascript"
+        value={code}
+        theme="vs-dark"
+        options={{
+          readOnly: true,
+          minimap: { enabled: false },
+          fontSize: 13,
+          fontFamily: "'Cascadia Code', 'Fira Code', 'Consolas', monospace",
+          lineNumbers: "on",
+          scrollBeyondLastLine: false,
+          automaticLayout: true,
+          padding: { top: 8 },
+          renderLineHighlight: "none",
+          domReadOnly: true,
+        }}
+      />
+    </div>
   );
 }

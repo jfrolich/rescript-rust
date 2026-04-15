@@ -125,6 +125,14 @@ h1 {
   overflow: hidden;
 }
 
+/* Tabs.Root must fill the output pane and be a flex column */
+.output-pane > div {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
 /* Base UI Tabs styling */
 .tabs-list {
   display: flex;
@@ -173,10 +181,21 @@ h1 {
   font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
   font-size: 13px;
   line-height: 1.5;
+  min-height: 0;
 }
 
 .tabs-panel[data-hidden] {
   display: none;
+}
+
+/* Monaco editor inside the JS panel needs explicit height */
+.tabs-panel .js-output {
+  height: 100%;
+}
+
+.tabs-panel > section,
+.tabs-panel > div {
+  height: 100%;
 }
 
 /* Tree viewer */
