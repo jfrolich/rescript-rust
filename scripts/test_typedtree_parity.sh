@@ -184,7 +184,52 @@ fi
 TEMP_DIR=$(mktemp -d)
 CACHE_DIR="$PROJECT_ROOT/.parity-cache"
 mkdir -p "$CACHE_DIR/tests/diffs" "$CACHE_DIR/tests/ocaml" "$CACHE_DIR/tests/rust"
-trap "cp -r $TEMP_DIR/diffs/* $CACHE_DIR/tests/diffs/ 2>/dev/null; rm -rf $TEMP_DIR" EXIT
+BUILD_LOCK_DIR="$CACHE_DIR/typedtree-build.lock"
+BUILD_LOCK_HELD=false
+
+copy_cached_diffs() {
+    cp -r "$TEMP_DIR"/diffs/* "$CACHE_DIR/tests/diffs/" 2>/dev/null || true
+}
+
+release_build_lock() {
+    if [[ "$BUILD_LOCK_HELD" != "true" ]]; then
+        return
+    fi
+    rm -f "$BUILD_LOCK_DIR/pid" 2>/dev/null || true
+    rmdir "$BUILD_LOCK_DIR" 2>/dev/null || true
+    BUILD_LOCK_HELD=false
+}
+
+cleanup() {
+    copy_cached_diffs
+    release_build_lock
+    find "$TEMP_DIR" -type f -delete 2>/dev/null || true
+    find "$TEMP_DIR" -depth -type d -empty -delete 2>/dev/null || true
+}
+
+acquire_build_lock() {
+    local waited=false
+    while ! mkdir "$BUILD_LOCK_DIR" 2>/dev/null; do
+        if [[ -f "$BUILD_LOCK_DIR/pid" ]]; then
+            local lock_pid
+            lock_pid=$(cat "$BUILD_LOCK_DIR/pid" 2>/dev/null || true)
+            if [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+                rm -f "$BUILD_LOCK_DIR/pid" 2>/dev/null || true
+                rmdir "$BUILD_LOCK_DIR" 2>/dev/null || true
+                continue
+            fi
+        fi
+        if [[ "$waited" != "true" ]]; then
+            echo "Another typedtree parity run is building shared artifacts; waiting for the build lock..."
+            waited=true
+        fi
+        sleep 0.2
+    done
+    echo "$$" > "$BUILD_LOCK_DIR/pid"
+    BUILD_LOCK_HELD=true
+}
+
+trap cleanup EXIT
 
 if [[ "$TELLA_MODE" == "true" ]]; then
     echo -e "${BOLD}Typed Tree Parity Test (tella-fusion)${RESET}"
@@ -215,6 +260,7 @@ echo ""
 
 # Step 1: Build with rewatch to ensure all dependencies are compiled
 echo -e "${BOLD}Step 1: Building project with rewatch...${RESET}"
+acquire_build_lock
 cd "$BUILD_DIR"
 if [[ "$TELLA_MODE" == "true" ]]; then
     # Build with OCaml bsc to ensure all .ast artifacts exist.
@@ -232,6 +278,7 @@ else
     fi
 fi
 cd "$PROJECT_ROOT"
+release_build_lock
 echo ""
 
 # Find test files based on arguments
