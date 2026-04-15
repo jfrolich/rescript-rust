@@ -1105,6 +1105,8 @@ pub struct CompilerOptions {
     pub output_path: Option<PathBuf>,
     /// JSX version from CLI `-bs-jsx` (e.g. 4). When set, enables JSX PPX rewrite.
     pub jsx_version: Option<i32>,
+    /// Preserve transformed JSX syntax in the final JS dumper.
+    pub jsx_preserve: bool,
     /// Enable debug-mode JS emission (like OCaml's -bs-g / Js_config.debug).
     pub debug: bool,
 }
@@ -1125,6 +1127,14 @@ pub(crate) fn debug_for_structure(
     arena: &crate::parse_arena::ParseArena,
 ) -> bool {
     options.debug || structure_has_config_string(structure, "-bs-g", arena)
+}
+
+pub(crate) fn jsx_preserve_for_structure(
+    structure: &Structure,
+    options: &CompilerOptions,
+    arena: &crate::parse_arena::ParseArena,
+) -> bool {
+    options.jsx_preserve || structure_has_config_string(structure, "-bs-jsx-preserve", arena)
 }
 
 /// Compile ReScript source to JavaScript.
@@ -1149,6 +1159,7 @@ pub fn compile_source_to_js_with_options(
     }
     let file_directives = extract_file_directives_from_structure(&structure, parser.arena())?;
     let debug = debug_for_structure(&structure, options, parser.arena());
+    let jsx_preserve = jsx_preserve_for_structure(&structure, options, parser.arena());
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
@@ -1339,8 +1350,10 @@ pub fn compile_source_to_js_with_options(
             }
         }
     }
-    let mut compiler =
-        LambdaCompiler::with_module_path_resolver(Some(module_path_resolver.clone()));
+    let mut compiler = LambdaCompiler::with_module_path_resolver_and_jsx_preserve(
+        Some(module_path_resolver.clone()),
+        jsx_preserve,
+    );
     let program = compiler.compile_deps_program_with_possible_required_modules(
         &lowered_lambda,
         &possible_required_modules,
@@ -1352,6 +1365,7 @@ pub fn compile_source_to_js_with_options(
         Some(&module_path_resolver),
         &file_directives,
         debug,
+        jsx_preserve,
     );
 
     // The CLI compiler is a short-lived process. Skipping teardown for the

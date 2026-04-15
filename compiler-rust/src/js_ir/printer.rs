@@ -38,6 +38,8 @@ pub struct JsPrinter {
     module_path_resolver: Option<ModulePathResolver>,
     /// Matches OCaml's `!Js_config.debug` toggle in the dumper.
     debug: bool,
+    /// Matches OCaml's `!Js_config.jsx_preserve` guard in the dumper.
+    jsx_preserve: bool,
 }
 
 impl Default for JsPrinter {
@@ -57,12 +59,13 @@ impl JsPrinter {
             name_scopes: vec![NameScope::default()],
             module_path_resolver: None,
             debug: false,
+            jsx_preserve: false,
         }
     }
 
     /// Create a new printer with module import resolution context.
     pub fn with_module_path_resolver(module_path_resolver: Option<&ModulePathResolver>) -> Self {
-        Self::with_module_path_resolver_and_debug(module_path_resolver, false)
+        Self::with_module_path_resolver_and_options(module_path_resolver, false, false)
     }
 
     /// Create a new printer with module import resolution context and debug mode.
@@ -70,9 +73,19 @@ impl JsPrinter {
         module_path_resolver: Option<&ModulePathResolver>,
         debug: bool,
     ) -> Self {
+        Self::with_module_path_resolver_and_options(module_path_resolver, debug, false)
+    }
+
+    /// Create a new printer with module import resolution context and dumper options.
+    pub fn with_module_path_resolver_and_options(
+        module_path_resolver: Option<&ModulePathResolver>,
+        debug: bool,
+        jsx_preserve: bool,
+    ) -> Self {
         let mut printer = Self::new();
         printer.module_path_resolver = module_path_resolver.cloned();
         printer.debug = debug;
+        printer.jsx_preserve = jsx_preserve;
         printer
     }
 
@@ -101,6 +114,7 @@ impl JsPrinter {
             name_scopes: self.name_scopes.clone(),
             module_path_resolver: self.module_path_resolver.clone(),
             debug: self.debug,
+            jsx_preserve: self.jsx_preserve,
         };
         printer.print_expression(expr, level);
         printer.output
@@ -1300,6 +1314,10 @@ impl JsPrinter {
         info: &CallInfo,
         level: u8,
     ) -> bool {
+        if !self.jsx_preserve {
+            return false;
+        }
+
         let Some(fn_name) = self.transformed_jsx_call_name(func, info) else {
             return false;
         };
@@ -3098,7 +3116,7 @@ pub fn print_deps_program(
     program: &DepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,
 ) -> String {
-    print_deps_program_with_directives(program, module_path_resolver, &[], false)
+    print_deps_program_with_directives(program, module_path_resolver, &[], false, false)
 }
 
 pub fn print_deps_program_with_directives(
@@ -3106,8 +3124,10 @@ pub fn print_deps_program_with_directives(
     module_path_resolver: Option<&ModulePathResolver>,
     directives: &[String],
     debug: bool,
+    jsx_preserve: bool,
 ) -> String {
-    let mut printer = JsPrinter::with_module_path_resolver_and_debug(module_path_resolver, debug);
+    let mut printer =
+        JsPrinter::with_module_path_resolver_and_options(module_path_resolver, debug, jsx_preserve);
     printer.print_deps_program_with_directives(program, directives);
     printer.into_output()
 }
@@ -3128,6 +3148,13 @@ fn print_expression_with_level(expr: &Expression, level: u8) -> String {
 #[cfg(test)]
 fn print_expression_with_debug(expr: &Expression, debug: bool) -> String {
     let mut printer = JsPrinter::with_module_path_resolver_and_debug(None, debug);
+    printer.print_expression(expr, 0);
+    printer.into_output()
+}
+
+#[cfg(test)]
+fn print_expression_with_jsx_preserve(expr: &Expression, jsx_preserve: bool) -> String {
+    let mut printer = JsPrinter::with_module_path_resolver_and_options(None, false, jsx_preserve);
     printer.print_expression(expr, 0);
     printer.into_output()
 }
@@ -3530,7 +3557,28 @@ mod tests {
             },
         );
 
-        assert_eq!(print_expression(&expr), "<Foo.make />");
+        assert_eq!(print_expression_with_jsx_preserve(&expr, true), "<Foo.make />");
+    }
+
+    #[test]
+    fn test_print_transformed_jsx_requires_jsx_preserve_flag_like_ocaml() {
+        let expr = Expression::call(
+            Expression::qualified(jsx_runtime_module(), Some("jsx".to_string())),
+            vec![
+                Expression::new(ExpressionDesc::StaticIndex(
+                    Box::new(Expression::var(Ident::create_persistent("Foo"))),
+                    "make".to_string(),
+                    None,
+                )),
+                Expression::new(ExpressionDesc::Object(None, vec![])),
+            ],
+            CallInfo {
+                call_transformed_jsx: true,
+                ..CallInfo::default()
+            },
+        );
+
+        assert_eq!(print_expression(&expr), "JsxRuntime.jsx(Foo.make, {})");
     }
 
     #[test]
@@ -3568,7 +3616,7 @@ mod tests {
         );
 
         assert_eq!(
-            print_expression(&expr),
+            print_expression_with_jsx_preserve(&expr, true),
             "<div>\n  <strong />\n  {\"Hello, world!\"}\n</div>"
         );
     }
@@ -3621,7 +3669,7 @@ mod tests {
         );
 
         assert_eq!(
-            print_expression(&expr),
+            print_expression_with_jsx_preserve(&expr, true),
             "<div>\n  <strong />\n  {\"Hello, world!\"}\n</div>"
         );
     }
@@ -3654,7 +3702,7 @@ mod tests {
         );
 
         assert_eq!(
-            print_expression(&expr),
+            print_expression_with_jsx_preserve(&expr, true),
             "<input\n  key={\"barry-key\"} \n  {...newrecord} \n  type={\"text\"}\n/>"
         );
     }
@@ -4258,6 +4306,7 @@ mod tests {
                 "first directive;".to_string(),
                 "second directive;".to_string(),
             ],
+            false,
             false,
         );
 

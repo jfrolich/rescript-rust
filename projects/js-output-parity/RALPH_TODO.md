@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 489 / 657 JS snapshots passing, 0 compile errors, 168 output diffs
+**Status:** 491 / 657 JS snapshots passing, 0 compile errors, 166 output diffs
 
 ## Goal
 
@@ -35,11 +35,74 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **489 / 657**
+- JS snapshot parity: **491 / 657**
 - Compile errors: **0**
-- Output diffs: **168**
+- Output diffs: **166**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: respect OCaml's global `jsx_preserve` guard end-to-end so
+  transformed JSX only stays preserved in the final backend for files that
+  actually enable `-bs-jsx-preserve`, instead of preserving JSX syntax or
+  module `.make` tag projections in ordinary `-bs-jsx` files
+- Active backend focus for this slice spans **Phase 4: Port JS Passes** and
+  **Phase 5: Byte-Exact Dumping** from `PLAN.md`, because OCaml applies the
+  same `!Js_config.jsx_preserve` guard in both
+  `js_pass_flatten_and_mark_dead.ml` and `js_dump.ml`: the JS pass should only
+  preserve `.make` reads when preserve mode is on, and the dumper should only
+  print JSX syntax when preserve mode is on
+- OCaml reference:
+  `compiler/core/js_dump.ml`, especially the transformed-JSX `Call` branch
+  guarded by `when !Js_config.jsx_preserve`; and
+  `compiler/core/js_pass_flatten_and_mark_dead.ml`, especially the
+  `Some {expression_desc = J.Var (Id {name = "make"})} when !Js_config.jsx_preserve`
+  projection-preservation guard
+- Rust change:
+  - updated `compiler-rust/src/driver.rs` and
+    `compiler-rust/src/bin/bsc.rs` to detect `-bs-jsx-preserve` from source
+    config and CLI flags, and thread that backend mode through final JS codegen
+  - updated `compiler-rust/src/js_ir/printer.rs` so transformed JSX printing
+    is gated by `jsx_preserve`, matching OCaml instead of printing JSX syntax
+    whenever `call_transformed_jsx` was set
+  - updated `compiler-rust/src/lambda/compile.rs` so the
+    `js_flatten_and_mark_dead` pass only preserves transformed-JSX component
+    `.make` projections when `jsx_preserve` is enabled; in non-preserve mode it
+    now inlines the single-field module projection back to the component value
+    like OCaml
+  - added focused regressions for both sides of the guard:
+    `test_print_transformed_jsx_requires_jsx_preserve_flag_like_ocaml` and
+    `js_flatten_and_mark_dead_does_not_preserve_component_make_reads_without_jsx_preserve`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_transformed_jsx -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml js_flatten_and_mark_dead_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/ExternalArity.res`, diffing
+    `/tmp/ExternalArity.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - ordinary `-bs-jsx` files no longer emit preserved JSX syntax or preserved
+    module `.make` tag projections just because the transformed-JSX bit was set
+  - `tests/tests/src/ExternalArity.res` now matches again instead of printing
+    `<ReactIntl.FormattedMessage ... />`
+  - `tests/tests/src/jsx_optional_props_test.res` now matches again instead of
+    keeping `ComponentWithOptionalProps.make` alive in the runtime call target
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - `tests/tests/src/async_jsx.res` still differs, which is expected because it
+    is a real preserve-mode file and its remaining drift is the separate
+    wrapper/function naming cluster rather than the global preserve guard
+- Topline impact:
+  - JS snapshot parity: **489 / 657** -> **491 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **168** -> **166** (**-2**)
+- Keep this change because it ports OCaml's `jsx_preserve` boundary directly in
+  both the JS pass and the dumper, removes two concrete false-positive
+  preserve-JSX diffs without touching real preserve-mode files, and improves
+  the authoritative baseline with a clearly OCaml-aligned backend rule.
 
 Latest iteration on **2026-04-15**:
 

@@ -89,6 +89,7 @@ struct Options {
     runtime_path: Option<PathBuf>,
     open_modules: Vec<String>,
     jsx_version: Option<i32>,
+    jsx_preserve: bool,
 }
 
 fn main() {
@@ -179,6 +180,7 @@ fn run() -> Result<()> {
                         opts.jsx_version = val.parse::<i32>().ok();
                     }
                 }
+                "-bs-jsx-preserve" => opts.jsx_preserve = true,
                 "-w" | "-warn-error" | "-color" | "-bs-package-name" | "-bs-jsx-mode" | "-pp"
                 | "-ppx" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
@@ -239,6 +241,7 @@ fn run() -> Result<()> {
         source_filename: Some(source_path.to_string_lossy().into_owned()),
         output_path: opts.output.clone(),
         jsx_version: opts.jsx_version,
+        jsx_preserve: opts.jsx_preserve,
         debug: opts.debug,
     };
 

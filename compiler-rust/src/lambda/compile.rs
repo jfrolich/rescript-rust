@@ -172,6 +172,7 @@ struct ExternalModuleCacheKey {
 pub struct LambdaCompiler {
     id_gen: IdGenerator,
     module_path_resolver: Option<ModulePathResolver>,
+    jsx_preserve: bool,
     cmj_constant_cache: HashMap<String, Option<HashMap<String, CmjExportConstant>>>,
     external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
     static_handlers: Vec<StaticHandler>,
@@ -245,6 +246,7 @@ impl LambdaCompiler {
         Self {
             id_gen: IdGenerator::new(),
             module_path_resolver: None,
+            jsx_preserve: false,
             cmj_constant_cache: HashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
@@ -255,9 +257,18 @@ impl LambdaCompiler {
 
     /// Create a compiler with module import resolution context.
     pub fn with_module_path_resolver(module_path_resolver: Option<ModulePathResolver>) -> Self {
+        Self::with_module_path_resolver_and_jsx_preserve(module_path_resolver, false)
+    }
+
+    /// Create a compiler with module import resolution context and JSX-preserve mode.
+    pub fn with_module_path_resolver_and_jsx_preserve(
+        module_path_resolver: Option<ModulePathResolver>,
+        jsx_preserve: bool,
+    ) -> Self {
         Self {
             id_gen: IdGenerator::new(),
             module_path_resolver,
+            jsx_preserve,
             cmj_constant_cache: HashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
@@ -313,6 +324,7 @@ impl LambdaCompiler {
                     side_effect,
                 },
             ))),
+            self.jsx_preserve,
         ));
         let mut required_modules = self.collect_required_module_set(&deps.program.block);
         populate_required_modules(
@@ -8059,15 +8071,20 @@ fn apply_js_flatten_pass(mut deps: DepsProgram) -> DepsProgram {
     deps
 }
 
-fn apply_js_flatten_and_mark_dead_pass(mut deps: DepsProgram) -> DepsProgram {
+fn apply_js_flatten_and_mark_dead_pass(mut deps: DepsProgram, jsx_preserve: bool) -> DepsProgram {
     let id_gen = IdGenerator::with_start_stamp(max_ident_stamp_in_program(&deps.program));
-    deps.program = flatten_and_mark_dead_program(deps.program, &id_gen);
+    deps.program = flatten_and_mark_dead_program(deps.program, &id_gen, jsx_preserve);
     deps
 }
 
-fn flatten_and_mark_dead_program(mut program: Program, id_gen: &IdGenerator) -> Program {
+fn flatten_and_mark_dead_program(
+    mut program: Program,
+    id_gen: &IdGenerator,
+    jsx_preserve: bool,
+) -> Program {
     let mut substitution = HashMap::new();
-    program.block = flatten_and_mark_dead_block(program.block, id_gen, &mut substitution);
+    program.block =
+        flatten_and_mark_dead_block(program.block, id_gen, &mut substitution, jsx_preserve);
     mark_dead_code(&mut program);
     program
 }
@@ -8076,10 +8093,11 @@ fn flatten_and_mark_dead_block(
     block: Block,
     id_gen: &IdGenerator,
     substitution: &mut HashMap<Ident, Expression>,
+    jsx_preserve: bool,
 ) -> Block {
     block
         .into_iter()
-        .map(|stmt| flatten_and_mark_dead_statement(stmt, id_gen, substitution))
+        .map(|stmt| flatten_and_mark_dead_statement(stmt, id_gen, substitution, jsx_preserve))
         .collect()
 }
 
@@ -8087,6 +8105,7 @@ fn flatten_and_mark_dead_statement(
     stmt: Statement,
     id_gen: &IdGenerator,
     substitution: &mut HashMap<Ident, Expression>,
+    jsx_preserve: bool,
 ) -> Statement {
     let Statement { desc, comment } = stmt;
     match desc {
@@ -8128,8 +8147,12 @@ fn flatten_and_mark_dead_statement(
                             if is_simple_block_binding_item(&item) {
                                 rewritten_items.push(item);
                             } else {
-                                let rewritten =
-                                    flatten_and_mark_dead_expression(item, id_gen, substitution);
+                                let rewritten = flatten_and_mark_dead_expression(
+                                    item,
+                                    id_gen,
+                                    substitution,
+                                    jsx_preserve,
+                                );
                                 let temp = id_gen.create(&block_substitution_name(
                                     &decl.ident,
                                     &tag_info,
@@ -8206,7 +8229,14 @@ fn flatten_and_mark_dead_statement(
                     ident: decl.ident,
                     value: decl
                         .value
-                        .map(|value| flatten_and_mark_dead_expression(value, id_gen, substitution)),
+                        .map(|value| {
+                            flatten_and_mark_dead_expression(
+                                value,
+                                id_gen,
+                                substitution,
+                                jsx_preserve,
+                            )
+                        }),
                     property: decl.property,
                     ident_info: decl.ident_info,
                 }),
@@ -8214,11 +8244,21 @@ fn flatten_and_mark_dead_statement(
             }
         }
         StatementDesc::Block(block) => Statement {
-            desc: StatementDesc::Block(flatten_and_mark_dead_block(block, id_gen, substitution)),
+            desc: StatementDesc::Block(flatten_and_mark_dead_block(
+                block,
+                id_gen,
+                substitution,
+                jsx_preserve,
+            )),
             comment,
         },
         StatementDesc::Exp(expr) => Statement {
-            desc: StatementDesc::Exp(flatten_and_mark_dead_expression(expr, id_gen, substitution)),
+            desc: StatementDesc::Exp(flatten_and_mark_dead_expression(
+                expr,
+                id_gen,
+                substitution,
+                jsx_preserve,
+            )),
             comment,
         },
         StatementDesc::Return(expr) => Statement {
@@ -8226,37 +8266,40 @@ fn flatten_and_mark_dead_statement(
                 expr,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             comment,
         },
         StatementDesc::If(cond, then_block, else_block) => Statement {
             desc: StatementDesc::If(
-                flatten_and_mark_dead_expression(cond, id_gen, substitution),
-                flatten_and_mark_dead_block(then_block, id_gen, substitution),
-                flatten_and_mark_dead_block(else_block, id_gen, substitution),
+                flatten_and_mark_dead_expression(cond, id_gen, substitution, jsx_preserve),
+                flatten_and_mark_dead_block(then_block, id_gen, substitution, jsx_preserve),
+                flatten_and_mark_dead_block(else_block, id_gen, substitution, jsx_preserve),
             ),
             comment,
         },
         StatementDesc::While(cond, body) => Statement {
             desc: StatementDesc::While(
-                flatten_and_mark_dead_expression(cond, id_gen, substitution),
-                flatten_and_mark_dead_block(body, id_gen, substitution),
+                flatten_and_mark_dead_expression(cond, id_gen, substitution, jsx_preserve),
+                flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
         },
         StatementDesc::ForRange(start, finish, ident, direction, body) => Statement {
             desc: StatementDesc::ForRange(
-                start.map(|expr| flatten_and_mark_dead_expression(expr, id_gen, substitution)),
-                flatten_and_mark_dead_expression(finish, id_gen, substitution),
+                start.map(|expr| {
+                    flatten_and_mark_dead_expression(expr, id_gen, substitution, jsx_preserve)
+                }),
+                flatten_and_mark_dead_expression(finish, id_gen, substitution, jsx_preserve),
                 ident,
                 direction,
-                flatten_and_mark_dead_block(body, id_gen, substitution),
+                flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
         },
         StatementDesc::IntSwitch(test, clauses, default) => Statement {
             desc: StatementDesc::IntSwitch(
-                flatten_and_mark_dead_expression(test, id_gen, substitution),
+                flatten_and_mark_dead_expression(test, id_gen, substitution, jsx_preserve),
                 clauses
                     .into_iter()
                     .map(|(tag, clause)| {
@@ -8267,6 +8310,7 @@ fn flatten_and_mark_dead_statement(
                                     clause.body,
                                     id_gen,
                                     substitution,
+                                    jsx_preserve,
                                 ),
                                 should_break: clause.should_break,
                                 comment: clause.comment,
@@ -8274,13 +8318,15 @@ fn flatten_and_mark_dead_statement(
                         )
                     })
                     .collect(),
-                default.map(|block| flatten_and_mark_dead_block(block, id_gen, substitution)),
+                default.map(|block| {
+                    flatten_and_mark_dead_block(block, id_gen, substitution, jsx_preserve)
+                }),
             ),
             comment,
         },
         StatementDesc::StringSwitch(test, clauses, default) => Statement {
             desc: StatementDesc::StringSwitch(
-                flatten_and_mark_dead_expression(test, id_gen, substitution),
+                flatten_and_mark_dead_expression(test, id_gen, substitution, jsx_preserve),
                 clauses
                     .into_iter()
                     .map(|clause| crate::js_ir::StringClause {
@@ -8290,13 +8336,16 @@ fn flatten_and_mark_dead_statement(
                                 clause.clause.body,
                                 id_gen,
                                 substitution,
+                                jsx_preserve,
                             ),
                             should_break: clause.clause.should_break,
                             comment: clause.clause.comment,
                         },
                     })
                     .collect(),
-                default.map(|block| flatten_and_mark_dead_block(block, id_gen, substitution)),
+                default.map(|block| {
+                    flatten_and_mark_dead_block(block, id_gen, substitution, jsx_preserve)
+                }),
             ),
             comment,
         },
@@ -8305,19 +8354,22 @@ fn flatten_and_mark_dead_statement(
                 expr,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             comment,
         },
         StatementDesc::Try(body, catch, finally) => Statement {
             desc: StatementDesc::Try(
-                flatten_and_mark_dead_block(body, id_gen, substitution),
+                flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
                 catch.map(|(ident, block)| {
                     (
                         ident,
-                        flatten_and_mark_dead_block(block, id_gen, substitution),
+                        flatten_and_mark_dead_block(block, id_gen, substitution, jsx_preserve),
                     )
                 }),
-                finally.map(|block| flatten_and_mark_dead_block(block, id_gen, substitution)),
+                finally.map(|block| {
+                    flatten_and_mark_dead_block(block, id_gen, substitution, jsx_preserve)
+                }),
             ),
             comment,
         },
@@ -8340,6 +8392,7 @@ fn flatten_and_mark_dead_expression(
     expr: Expression,
     id_gen: &IdGenerator,
     substitution: &mut HashMap<Ident, Expression>,
+    jsx_preserve: bool,
 ) -> Expression {
     if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution) {
         return rewritten;
@@ -8352,56 +8405,63 @@ fn flatten_and_mark_dead_expression(
                 *inner,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             object,
         ),
         ExpressionDesc::IsNullOrUndefined(inner) => ExpressionDesc::IsNullOrUndefined(Box::new(
-            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution, jsx_preserve),
         )),
         ExpressionDesc::StringAppend(left, right) => ExpressionDesc::StringAppend(
             Box::new(flatten_and_mark_dead_expression(
                 *left,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             Box::new(flatten_and_mark_dead_expression(
                 *right,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
         ),
         ExpressionDesc::Bool(value) => ExpressionDesc::Bool(value),
         ExpressionDesc::Typeof(inner) => ExpressionDesc::Typeof(Box::new(
-            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution, jsx_preserve),
         )),
         ExpressionDesc::In(left, right) => ExpressionDesc::In(
             Box::new(flatten_and_mark_dead_expression(
                 *left,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             Box::new(flatten_and_mark_dead_expression(
                 *right,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
         ),
         ExpressionDesc::JsNot(inner) => ExpressionDesc::JsNot(Box::new(
-            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution, jsx_preserve),
         )),
         ExpressionDesc::JsBnot(inner) => ExpressionDesc::JsBnot(Box::new(
-            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution, jsx_preserve),
         )),
         ExpressionDesc::Seq(left, right) => ExpressionDesc::Seq(
             Box::new(flatten_and_mark_dead_expression(
                 *left,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             Box::new(flatten_and_mark_dead_expression(
                 *right,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
         ),
         ExpressionDesc::Cond(test, consequent, alternate) => ExpressionDesc::Cond(
@@ -8409,16 +8469,19 @@ fn flatten_and_mark_dead_expression(
                 *test,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             Box::new(flatten_and_mark_dead_expression(
                 *consequent,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             Box::new(flatten_and_mark_dead_expression(
                 *alternate,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
         ),
         ExpressionDesc::Bin(op, left, right) => ExpressionDesc::Bin(
@@ -8427,11 +8490,13 @@ fn flatten_and_mark_dead_expression(
                 *left,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             Box::new(flatten_and_mark_dead_expression(
                 *right,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
         ),
         ExpressionDesc::FlatCall(func, args) => ExpressionDesc::FlatCall(
@@ -8439,11 +8504,13 @@ fn flatten_and_mark_dead_expression(
                 *func,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             Box::new(flatten_and_mark_dead_expression(
                 *args,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
         ),
         ExpressionDesc::Call(func, args, info) => ExpressionDesc::Call(
@@ -8451,18 +8518,20 @@ fn flatten_and_mark_dead_expression(
                 *func,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             args.into_iter()
                 .enumerate()
                 .map(|(index, arg)| {
-                    if info.call_transformed_jsx && index == 0 {
+                    if jsx_preserve && info.call_transformed_jsx && index == 0 {
                         flatten_and_mark_dead_transformed_jsx_tag_expression(
                             arg,
                             id_gen,
                             substitution,
+                            jsx_preserve,
                         )
                     } else {
-                        flatten_and_mark_dead_expression(arg, id_gen, substitution)
+                        flatten_and_mark_dead_expression(arg, id_gen, substitution, jsx_preserve)
                     }
                 })
                 .collect(),
@@ -8473,11 +8542,13 @@ fn flatten_and_mark_dead_expression(
                 *left,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             Box::new(flatten_and_mark_dead_expression(
                 *right,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
         ),
         ExpressionDesc::ArrayIndex(left, right) => ExpressionDesc::ArrayIndex(
@@ -8485,22 +8556,33 @@ fn flatten_and_mark_dead_expression(
                 *left,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             Box::new(flatten_and_mark_dead_expression(
                 *right,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
         ),
         ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
-            Box::new(flatten_and_mark_dead_expression(*tag, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *tag,
+                id_gen,
+                substitution,
+                jsx_preserve,
+            )),
             strings
                 .into_iter()
-                .map(|value| flatten_and_mark_dead_expression(value, id_gen, substitution))
+                .map(|value| {
+                    flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
+                })
                 .collect(),
             values
                 .into_iter()
-                .map(|value| flatten_and_mark_dead_expression(value, id_gen, substitution))
+                .map(|value| {
+                    flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
+                })
                 .collect(),
         ),
         ExpressionDesc::StaticIndex(target, field, pos) => ExpressionDesc::StaticIndex(
@@ -8508,6 +8590,7 @@ fn flatten_and_mark_dead_expression(
                 *target,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             field,
             pos,
@@ -8517,11 +8600,14 @@ fn flatten_and_mark_dead_expression(
                 *target,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             args.map(|items| {
                 items
                     .into_iter()
-                    .map(|arg| flatten_and_mark_dead_expression(arg, id_gen, substitution))
+                    .map(|arg| {
+                        flatten_and_mark_dead_expression(arg, id_gen, substitution, jsx_preserve)
+                    })
                     .collect()
             }),
         ),
@@ -8537,7 +8623,7 @@ fn flatten_and_mark_dead_expression(
         } => ExpressionDesc::Fun {
             is_method,
             params,
-            body: flatten_and_mark_dead_block(body, id_gen, substitution),
+            body: flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             env,
             return_unit,
             async_,
@@ -8548,7 +8634,9 @@ fn flatten_and_mark_dead_expression(
         ExpressionDesc::Array(items, mutable_flag) => ExpressionDesc::Array(
             items
                 .into_iter()
-                .map(|item| flatten_and_mark_dead_expression(item, id_gen, substitution))
+                .map(|item| {
+                    flatten_and_mark_dead_expression(item, id_gen, substitution, jsx_preserve)
+                })
                 .collect(),
             mutable_flag,
         ),
@@ -8557,16 +8645,24 @@ fn flatten_and_mark_dead_expression(
                 *inner,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             flag,
         ),
         ExpressionDesc::CamlBlock(items, mutable_flag, tag, tag_info) => ExpressionDesc::CamlBlock(
             items
                 .into_iter()
-                .map(|item| flatten_and_mark_dead_expression(item, id_gen, substitution))
+                .map(|item| {
+                    flatten_and_mark_dead_expression(item, id_gen, substitution, jsx_preserve)
+                })
                 .collect(),
             mutable_flag,
-            Box::new(flatten_and_mark_dead_expression(*tag, id_gen, substitution)),
+            Box::new(flatten_and_mark_dead_expression(
+                *tag,
+                id_gen,
+                substitution,
+                jsx_preserve,
+            )),
             tag_info,
         ),
         ExpressionDesc::CamlBlockTag(inner, tag) => ExpressionDesc::CamlBlockTag(
@@ -8574,6 +8670,7 @@ fn flatten_and_mark_dead_expression(
                 *inner,
                 id_gen,
                 substitution,
+                jsx_preserve,
             )),
             tag,
         ),
@@ -8584,6 +8681,7 @@ fn flatten_and_mark_dead_expression(
                     *expr,
                     id_gen,
                     substitution,
+                    jsx_preserve,
                 ))
             }),
             props
@@ -8591,7 +8689,12 @@ fn flatten_and_mark_dead_expression(
                 .map(|(name, value)| {
                     (
                         name,
-                        flatten_and_mark_dead_expression(value, id_gen, substitution),
+                        flatten_and_mark_dead_expression(
+                            value,
+                            id_gen,
+                            substitution,
+                            jsx_preserve,
+                        ),
                     )
                 })
                 .collect(),
@@ -8599,10 +8702,10 @@ fn flatten_and_mark_dead_expression(
         ExpressionDesc::Undefined { is_unit } => ExpressionDesc::Undefined { is_unit },
         ExpressionDesc::Null => ExpressionDesc::Null,
         ExpressionDesc::Await(inner) => ExpressionDesc::Await(Box::new(
-            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution, jsx_preserve),
         )),
         ExpressionDesc::Spread(inner) => ExpressionDesc::Spread(Box::new(
-            flatten_and_mark_dead_expression(*inner, id_gen, substitution),
+            flatten_and_mark_dead_expression(*inner, id_gen, substitution, jsx_preserve),
         )),
     };
 
@@ -8613,6 +8716,7 @@ fn flatten_and_mark_dead_transformed_jsx_tag_expression(
     expr: Expression,
     id_gen: &IdGenerator,
     substitution: &mut HashMap<Ident, Expression>,
+    jsx_preserve: bool,
 ) -> Expression {
     let Expression { desc, comment } = expr;
     match desc {
@@ -8624,6 +8728,7 @@ fn flatten_and_mark_dead_transformed_jsx_tag_expression(
                     *target,
                     id_gen,
                     substitution,
+                    jsx_preserve,
                 )),
                 field,
                 Some(index),
@@ -8637,6 +8742,7 @@ fn flatten_and_mark_dead_transformed_jsx_tag_expression(
             },
             id_gen,
             substitution,
+            jsx_preserve,
         ),
     }
 }
@@ -11574,6 +11680,7 @@ mod tests {
     use super::*;
     use crate::cmi::persistent_env::PersistentEnv;
     use crate::js_ir::{ModulePathResolver, print_block, print_deps_program, print_expression};
+    use crate::js_ir::printer::print_deps_program_with_directives;
     use crate::lambda::constant::{Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo};
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
@@ -17094,7 +17201,7 @@ mod tests {
             ),
             modules: vec![],
             side_effect: None,
-        });
+        }, false);
 
         let [first, second] = deps.program.block.as_slice() else {
             panic!("expected two rewritten statements");
@@ -17165,7 +17272,7 @@ mod tests {
             ),
             modules: vec![],
             side_effect: None,
-        });
+        }, false);
 
         let [tuple_stmt, field_stmt] = deps.program.block.as_slice() else {
             panic!("expected the tuple binding and the rewritten projection");
@@ -17278,7 +17385,7 @@ mod tests {
             ),
             modules: vec![],
             side_effect: None,
-        });
+        }, false);
 
         let [module_stmt, projected_stmt] = deps.program.block.as_slice() else {
             panic!("expected the module binding and the rewritten projection");
@@ -17323,6 +17430,81 @@ mod tests {
 
     #[test]
     fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
+        let module = Ident::create_local("Foo");
+        let component = Ident::create_local("Async_jsx$Foo");
+        let rendered = print_deps_program_with_directives(
+            &apply_js_flatten_and_mark_dead_pass(DepsProgram {
+                program: Program::new(
+                    vec![
+                        Statement::variable(VariableDeclaration {
+                            ident: module.clone(),
+                            value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                                vec![Expression::var(component.clone())],
+                                MutableFlag::Immutable,
+                                Box::new(Expression::number(Number::int(0))),
+                                TagInfo::Module(vec!["make".to_string()]),
+                            ))),
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo::default(),
+                        }),
+                        Statement::exp(Expression::call(
+                            Expression::qualified(
+                                ModuleId {
+                                    id: Ident::create_persistent("JsxRuntime"),
+                                    kind: Kind::External {
+                                        name: "react/jsx-runtime".to_string(),
+                                        default: false,
+                                        import_attributes: None,
+                                    },
+                                    dynamic_import: false,
+                                },
+                                Some("jsx".to_string()),
+                            ),
+                            vec![
+                                Expression::new(ExpressionDesc::StaticIndex(
+                                    Box::new(Expression::var(module.clone())),
+                                    "make".to_string(),
+                                    Some(0),
+                                )),
+                                Expression::new(ExpressionDesc::CamlBlock(
+                                    vec![],
+                                    MutableFlag::Immutable,
+                                    Box::new(Expression::number(Number::int(0))),
+                                    TagInfo::record(
+                                        vec![],
+                                        crate::parser::ast::MutableFlag::Immutable,
+                                    ),
+                                )),
+                            ],
+                            CallInfo {
+                                call_transformed_jsx: true,
+                                ..CallInfo::default()
+                            },
+                        )),
+                    ],
+                    vec![],
+                ),
+                modules: vec![],
+                side_effect: None,
+            }, true),
+            None,
+            &[],
+            false,
+            true,
+        );
+
+        assert!(
+            rendered.contains("<Foo.make />"),
+            "expected transformed JSX preserve mode to keep Foo.make visible:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("<Async_jsx$Foo />"),
+            "transformed JSX tag regressed to the component function value:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn js_flatten_and_mark_dead_does_not_preserve_component_make_reads_without_jsx_preserve() {
         let module = Ident::create_local("Foo");
         let component = Ident::create_local("Async_jsx$Foo");
         let rendered = print_deps_program(
@@ -17379,17 +17561,17 @@ mod tests {
                 ),
                 modules: vec![],
                 side_effect: None,
-            }),
+            }, false),
             None,
         );
 
         assert!(
-            rendered.contains("<Foo.make />"),
-            "expected transformed JSX preserve mode to keep Foo.make visible:\n{rendered}"
+            rendered.contains("JsxRuntime.jsx(Async_jsx$Foo, {})"),
+            "without jsx preserve the single-field module projection should inline:\n{rendered}"
         );
         assert!(
-            !rendered.contains("<Async_jsx$Foo />"),
-            "transformed JSX tag regressed to the component function value:\n{rendered}"
+            !rendered.contains("Foo.make"),
+            "component .make read should not survive when jsx preserve is disabled:\n{rendered}"
         );
     }
 
@@ -17436,7 +17618,7 @@ mod tests {
             ),
             modules: vec![],
             side_effect: None,
-        });
+        }, false);
 
         let [record_stmt] = deps.program.block.as_slice() else {
             panic!("expected the record binding to stay as a single declaration");
@@ -17525,7 +17707,7 @@ mod tests {
             ),
             modules: vec![],
             side_effect: None,
-        });
+        }, false);
 
         let [stmt] = deps.program.block.as_slice() else {
             panic!("expected one top-level function binding");
