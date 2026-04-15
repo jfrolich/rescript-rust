@@ -43,6 +43,58 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: keep return-position staticcatch handlers explicit even when
+  they end in effectful `...; undefined` wrappers, instead of letting the
+  Rust fallthrough-return shortcut treat only the exact leaf `undefined` case
+  as special and collapse OCaml's fail-first guard shape back into a
+  success-shaped nest
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is `Lam_compile` staticcatch / switch
+  lowering in `compiler-rust/src/lambda/compile.rs`, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_staticcatch` and the
+  non-tail lowering that keeps exit/default structure explicit until the
+  surrounding switch/default guard shape is formed
+- Rust change:
+  - generalized the unit-handler check into
+    `handler_returns_unit_undefined(...)` so the return-position
+    fallthrough staticcatch shortcut is also blocked for zero-binding handlers
+    whose final result is `JsUndefined { is_unit: true }` through
+    `Lsequence`, `Llet`, or `Lletrec`
+  - this keeps effectful unit handlers materialized as the explicit default
+    path inside nested untagged return switches instead of resolving them away
+    into an empty trailing fallthrough block too early
+  - added focused regression coverage in
+    `effectful_unit_staticcatch_handlers_keep_fail_first_guards` to lock down
+    the OCaml-style `len !== 3` early-return guard for an effectful unit
+    handler
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml effectful_unit_staticcatch_handlers_keep_fail_first_guards -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/UntaggedVariants.res` now keeps the OCaml-aligned
+    fail-first `len !== 3` guard in `check$1`; the remaining drift in that
+    file is deeper untagged literal/type guard lowering, not the outer
+    staticcatch default shape
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the unchanged guard
+  - the full authoritative sweep in this current worktree still reports
+    **539 / 657** passing, **0** compile errors, and **118** output diffs
+- Topline impact in this current worktree:
+  - JS snapshot parity: **539 / 657** -> **539 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **118** -> **118** (**no change**)
+- Keep this change because OCaml's backend cares about the handler's final
+  unit-return shape, not whether the handler is syntactically the bare
+  `undefined` leaf. Preserving that distinction in Rust removes a verified
+  Rust-only shortcut in `Lam_compile` even though the current snapshot totals
+  do not move yet.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: keep unit-`undefined` staticcatch handlers materialized as the
   default arm in return-position untagged switches instead of using the Rust
   fallthrough-return shortcut that collapses OCaml's negative guard shape into

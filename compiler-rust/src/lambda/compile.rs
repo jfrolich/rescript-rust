@@ -1318,12 +1318,18 @@ impl LambdaCompiler {
         result
     }
 
-    fn is_unit_undefined_handler(&self, bindings: &[Ident], handler: &Lambda) -> bool {
-        bindings.is_empty()
-            && matches!(
-                handler,
-                Lambda::Lconst(Constant::JsUndefined { is_unit: true })
-            )
+    fn handler_returns_unit_undefined(&self, bindings: &[Ident], handler: &Lambda) -> bool {
+        if !bindings.is_empty() {
+            return false;
+        }
+
+        match handler {
+            Lambda::Lconst(Constant::JsUndefined { is_unit: true }) => true,
+            Lambda::Lsequence(_, rest) => self.handler_returns_unit_undefined(&[], rest),
+            Lambda::Llet(_, _, _, body) => self.handler_returns_unit_undefined(&[], body),
+            Lambda::Lletrec(_, body) => self.handler_returns_unit_undefined(&[], body),
+            _ => false,
+        }
     }
 
     fn compile_fallthrough_static_raise_return_block(
@@ -1393,7 +1399,7 @@ impl LambdaCompiler {
                 }
                 _ if self.return_unit_stack.last().copied() == Some(true)
                     && !inside_enclosing_staticcatch_chain
-                    && !self.is_unit_undefined_handler(bindings, handler)
+                    && !self.handler_returns_unit_undefined(bindings, handler)
                     && !lambda_contains_static_raise(handler) =>
                 {
                     if !bindings.is_empty() {
@@ -1430,7 +1436,7 @@ impl LambdaCompiler {
                 }
                 _ if self.return_unit_stack.last().copied() == Some(true)
                     && !inside_enclosing_staticcatch_chain
-                    && !self.is_unit_undefined_handler(bindings, handler)
+                    && !self.handler_returns_unit_undefined(bindings, handler)
                     && !lambda_contains_static_raise(handler) =>
                 {
                     if !bindings.is_empty() {
@@ -17156,6 +17162,182 @@ mod tests {
         assert!(
             rendered.contains("seen = 1;"),
             "expected the object branch effect to remain after the guard:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn effectful_unit_staticcatch_handlers_keep_fail_first_guards() {
+        let mut compiler = LambdaCompiler::new();
+        let s = Ident::create_local("s");
+        let len = Ident::create_local("len");
+        let match_ = Ident::create_local("match");
+        let seen = Ident::create_local("seen");
+        let failed = Ident::create_local("failed");
+        let block = compiler.with_return_unit_context(true, |compiler| {
+            compiler.compile_return_block(&Lambda::LstaticCatch(
+                Box::new(Lambda::Lswitch(
+                    Box::new(Lambda::var(s.clone())),
+                    LambdaSwitch {
+                        sw_consts_full: false,
+                        sw_consts: vec![],
+                        sw_blocks_full: false,
+                        sw_blocks: vec![(
+                            0,
+                            Lambda::let_(
+                                LetKind::Alias,
+                                len.clone(),
+                                Lambda::prim(
+                                    Primitive::Parraylength,
+                                    vec![Lambda::var(s.clone())],
+                                    Location::none(),
+                                ),
+                                Lambda::LifThenElse(
+                                    Box::new(Lambda::prim(
+                                        Primitive::Pintcomp(Comparison::Neq),
+                                        vec![
+                                            Lambda::var(len.clone()),
+                                            Lambda::const_(Constant::int(3)),
+                                        ],
+                                        Location::none(),
+                                    )),
+                                    Box::new(Lambda::static_raise(11, Vec::new())),
+                                    Box::new(Lambda::let_(
+                                        LetKind::StrictOpt,
+                                        match_.clone(),
+                                        Lambda::prim(
+                                            Primitive::Parrayrefu,
+                                            vec![
+                                                Lambda::var(s.clone()),
+                                                Lambda::const_(Constant::int(0)),
+                                            ],
+                                            Location::none(),
+                                        ),
+                                        Lambda::Lswitch(
+                                            Box::new(Lambda::var(match_.clone())),
+                                            LambdaSwitch {
+                                                sw_consts_full: false,
+                                                sw_consts: vec![(
+                                                    2,
+                                                    Lambda::Lassign(
+                                                        seen.clone(),
+                                                        Box::new(Lambda::const_(Constant::int(1))),
+                                                    ),
+                                                )],
+                                                sw_blocks_full: false,
+                                                sw_blocks: vec![],
+                                                sw_failaction: Some(Box::new(
+                                                    Lambda::static_raise(11, Vec::new()),
+                                                )),
+                                                sw_names: Some(SwitchNames {
+                                                    consts: vec![
+                                                        crate::lambda::SwitchTag {
+                                                            name: "Missing".to_string(),
+                                                            tag_type: Some(
+                                                                crate::lambda::SwitchCaseTag::Undefined,
+                                                            ),
+                                                        },
+                                                        crate::lambda::SwitchTag {
+                                                            name: "False".to_string(),
+                                                            tag_type: Some(
+                                                                crate::lambda::SwitchCaseTag::Bool(false),
+                                                            ),
+                                                        },
+                                                        crate::lambda::SwitchTag {
+                                                            name: "True".to_string(),
+                                                            tag_type: Some(
+                                                                crate::lambda::SwitchCaseTag::Bool(true),
+                                                            ),
+                                                        },
+                                                        crate::lambda::SwitchTag {
+                                                            name: "Null".to_string(),
+                                                            tag_type: Some(
+                                                                crate::lambda::SwitchCaseTag::Null,
+                                                            ),
+                                                        },
+                                                    ],
+                                                    blocks: vec![
+                                                        crate::lambda::SwitchBlock {
+                                                            tag: crate::lambda::SwitchTag::named(
+                                                                "String",
+                                                            ),
+                                                            tag_name: None,
+                                                            block_type: Some(
+                                                                crate::lambda::SwitchBlockType::String,
+                                                            ),
+                                                        },
+                                                        crate::lambda::SwitchBlock {
+                                                            tag: crate::lambda::SwitchTag::named(
+                                                                "Number",
+                                                            ),
+                                                            tag_name: None,
+                                                            block_type: Some(
+                                                                crate::lambda::SwitchBlockType::Float,
+                                                            ),
+                                                        },
+                                                        crate::lambda::SwitchBlock {
+                                                            tag: crate::lambda::SwitchTag::named(
+                                                                "Object",
+                                                            ),
+                                                            tag_name: None,
+                                                            block_type: Some(
+                                                                crate::lambda::SwitchBlockType::Object,
+                                                            ),
+                                                        },
+                                                        crate::lambda::SwitchBlock {
+                                                            tag: crate::lambda::SwitchTag::named(
+                                                                "Array",
+                                                            ),
+                                                            tag_name: None,
+                                                            block_type: Some(
+                                                                crate::lambda::SwitchBlockType::Instance(
+                                                                    "Array".to_string(),
+                                                                ),
+                                                            ),
+                                                        },
+                                                    ],
+                                                }),
+                                            },
+                                        ),
+                                    )),
+                                ),
+                            ),
+                        )],
+                        sw_failaction: Some(Box::new(Lambda::static_raise(11, Vec::new()))),
+                        sw_names: Some(SwitchNames {
+                            consts: vec![],
+                            blocks: vec![crate::lambda::SwitchBlock {
+                                tag: crate::lambda::SwitchTag::named("Array"),
+                                tag_name: None,
+                                block_type: Some(crate::lambda::SwitchBlockType::Instance(
+                                    "Array".to_string(),
+                                )),
+                            }],
+                        }),
+                    },
+                )),
+                (11, vec![]),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lassign(
+                        failed.clone(),
+                        Box::new(Lambda::const_(Constant::int(1))),
+                    )),
+                    Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
+                )),
+            ))
+        });
+
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains("if (len !== 3) {"),
+            "expected the length mismatch to stay as a fail-first guard:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("if (len === 3) {"),
+            "expected the success-first length nest to be gone:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("failed = 1;"),
+            "expected the effectful unit handler to stay explicit in the lowered guard chain:\n{rendered}"
         );
     }
 
