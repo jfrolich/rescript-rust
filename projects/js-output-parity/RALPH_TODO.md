@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 533 / 657 JS snapshots passing, 0 compile errors, 124 output diffs
+**Status:** 534 / 657 JS snapshots passing, 0 compile errors, 123 output diffs
 
 ## Goal
 
@@ -35,11 +35,72 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **533 / 657**
+- JS snapshot parity: **534 / 657**
 - Compile errors: **0**
-- Output diffs: **124**
+- Output diffs: **123**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep outer plain-handler staticcatches resolved inside
+  untagged object-return switches instead of peeling them into a trailing
+  fallthrough return when nested inner staticcatchs target other labels
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is `Lam_compile` return-switch /
+  staticcatch control-flow lowering in `compiler-rust/src/lambda/compile.rs`,
+  not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml` and
+  `compiler/core/lam_compile_context.ml`, especially the interaction between
+  `compile_switch`, `compile_staticcatch`, pseudo-jump lowering, and
+  `DynamicChecks.is_a_literal_case` for mixed untagged switches whose default
+  branch raises to an outer plain handler
+- Rust change:
+  - materialized literal-side defaults directly when mixed untagged switch
+    tables have no explicit const arms, so return/assign/effect lowering no
+    longer drops those default blocks before dispatch
+  - narrowed the `uses_fallthrough_staticcatch_return(...)` path for `Lswitch`
+    so the "other-label" fallthrough shortcut does not peel outer plain
+    handlers out of untagged variant switches; those switches now stay on the
+    normal static-handler resolution path and inline the handler inside the
+    switch just like OCaml
+  - added focused regression coverage in
+    `default_only_untagged_object_return_keeps_literal_default_branch_outside_object_chain`
+    and
+    `untagged_object_return_switches_keep_outer_plain_handler_inside_the_switch`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml default_only_untagged_object_return_keeps_literal_default_branch_outside_object_chain -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml untagged_object_return_switches_keep_outer_plain_handler_inside_the_switch -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_handler -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml default_only_untagged_boolean_return_skips_literal_dispatch_when_defaults_match -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml small_untagged_object_value_switches_keep_ocaml_runtime_guards -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for
+    `tests/tests/src/DictPatternMatchingOptimization.res`, diffing
+    `/tmp/DictPatternMatchingOptimization.mjs` against the checked-in snapshot
+  - direct release guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the broader unchanged guard
+  - `tests/tests/src/DictPatternMatchingOptimization.res` moved materially in
+    the intended OCaml direction: the old top-level
+    `if (typeof match === "object" && ...) { ... } return [];` shape is gone,
+    and the surviving diff is now a deeper `"e"` / `"f"` nested-fallthrough
+    hunk rather than the outer plain-handler/object-dispatch mismatch
+  - the full authoritative sweep in this worktree remains **534 / 657**
+    passing, **0** compile errors, and **123** output diffs
+- Topline impact:
+  - JS snapshot parity: **534 / 657** -> **534 / 657** (**no net change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **123** -> **123** (**no net change**)
+- Keep this change because it restores the OCaml backend rule for outer plain
+  staticcatch handlers on untagged object-return switches at the source;
+  the focused release repro and unit tests confirm the control-flow shape is
+  now closer to the checked-in snapshot even though the remaining inner hunk
+  keeps the authoritative totals flat for this iteration.
 
 Latest iteration on **2026-04-15**:
 

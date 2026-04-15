@@ -1367,7 +1367,8 @@ impl LambdaCompiler {
                 {
                     true
                 }
-                _ if !lambda_contains_static_raise(handler)
+                _ if !self.uses_untagged_variant_switch(switch)
+                    && !lambda_contains_static_raise(handler)
                     && !lambda_contains_staticcatch(handler)
                     && switch_cases_contain_static_raise_to_label(
                         &switch.sw_consts,
@@ -3084,17 +3085,24 @@ impl LambdaCompiler {
             .iter()
             .any(|tag| matches!(tag, SwitchCaseTag::Null));
         let const_cases_are_complete = const_cases.len() == literal_cases.len();
-        let const_branch = self.compile_named_string_switch_assignment(
-            result,
-            scrut_expr.clone(),
-            &const_cases,
-            if const_cases_are_complete {
-                None
-            } else {
-                self.const_switch_default(switch)
-            },
-            const_cases_are_complete,
-        );
+        let const_default = if const_cases_are_complete {
+            None
+        } else {
+            self.const_switch_default(switch)
+        };
+        let const_branch = if const_cases.is_empty() {
+            const_default
+                .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                .unwrap_or_default()
+        } else {
+            self.compile_named_string_switch_assignment(
+                result,
+                scrut_expr.clone(),
+                &const_cases,
+                const_default,
+                const_cases_are_complete,
+            )
+        };
         let block_branch = self.compile_untagged_block_switch_assignment_statements(
             result,
             scrut_expr.clone(),
@@ -3163,16 +3171,23 @@ impl LambdaCompiler {
             .iter()
             .any(|tag| matches!(tag, SwitchCaseTag::Null));
         let const_cases_are_complete = const_cases.len() == literal_cases.len();
-        let const_branch = self.compile_named_string_switch_return(
-            scrut_expr.clone(),
-            &const_cases,
-            if const_cases_are_complete {
-                None
-            } else {
-                self.const_switch_default(switch)
-            },
-            const_cases_are_complete,
-        );
+        let const_default = if const_cases_are_complete {
+            None
+        } else {
+            self.const_switch_default(switch)
+        };
+        let const_branch = if const_cases.is_empty() {
+            const_default
+                .map(|fallback| self.compile_return_block(fallback))
+                .unwrap_or_default()
+        } else {
+            self.compile_named_string_switch_return(
+                scrut_expr.clone(),
+                &const_cases,
+                const_default,
+                const_cases_are_complete,
+            )
+        };
         let block_branch = self.compile_untagged_block_switch_return_statements(
             scrut_expr.clone(),
             switch,
@@ -3240,16 +3255,23 @@ impl LambdaCompiler {
             .iter()
             .any(|tag| matches!(tag, SwitchCaseTag::Null));
         let const_cases_are_complete = const_cases.len() == literal_cases.len();
-        let const_branch = self.compile_named_string_switch_effect(
-            scrut_expr.clone(),
-            &const_cases,
-            if const_cases_are_complete {
-                None
-            } else {
-                self.const_switch_default(switch)
-            },
-            const_cases_are_complete,
-        );
+        let const_default = if const_cases_are_complete {
+            None
+        } else {
+            self.const_switch_default(switch)
+        };
+        let const_branch = if const_cases.is_empty() {
+            const_default
+                .map(|fallback| self.compile_effect_block(fallback))
+                .unwrap_or_default()
+        } else {
+            self.compile_named_string_switch_effect(
+                scrut_expr.clone(),
+                &const_cases,
+                const_default,
+                const_cases_are_complete,
+            )
+        };
         let block_branch = self.compile_untagged_block_switch_effect_statements(
             scrut_expr.clone(),
             switch,
@@ -16235,6 +16257,83 @@ mod tests {
     }
 
     #[test]
+    fn untagged_object_return_switches_keep_outer_plain_handler_inside_the_switch() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let body_id = Ident::create_local("body");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::Lswitch(
+                Box::new(Lambda::var(value.clone())),
+                LambdaSwitch {
+                    sw_consts_full: false,
+                    sw_consts: vec![],
+                    sw_blocks_full: false,
+                    sw_blocks: vec![(
+                        0,
+                        Lambda::LstaticCatch(
+                            Box::new(Lambda::static_raise(2, Vec::new())),
+                            (2, vec![]),
+                            Box::new(Lambda::let_(
+                                LetKind::Strict,
+                                body_id.clone(),
+                                Lambda::const_(Constant::int(1)),
+                                Lambda::var(body_id.clone()),
+                            )),
+                        ),
+                    )],
+                    sw_failaction: Some(Box::new(Lambda::static_raise(1, Vec::new()))),
+                    sw_names: Some(SwitchNames {
+                        consts: vec![
+                            crate::lambda::SwitchTag {
+                                name: "Null".to_string(),
+                                tag_type: Some(crate::lambda::SwitchCaseTag::Null),
+                            },
+                            crate::lambda::SwitchTag {
+                                name: "String".to_string(),
+                                tag_type: Some(crate::lambda::SwitchCaseTag::String(
+                                    "string".to_string(),
+                                )),
+                            },
+                        ],
+                        blocks: vec![
+                            crate::lambda::SwitchBlock {
+                                tag: crate::lambda::SwitchTag::named("Object"),
+                                tag_name: None,
+                                block_type: Some(crate::lambda::SwitchBlockType::Object),
+                            },
+                            crate::lambda::SwitchBlock {
+                                tag: crate::lambda::SwitchTag::named("Array"),
+                                tag_name: None,
+                                block_type: Some(crate::lambda::SwitchBlockType::Instance(
+                                    "Array".to_string(),
+                                )),
+                            },
+                        ],
+                    }),
+                },
+            )),
+            (1, vec![]),
+            Box::new(Lambda::const_(Constant::int(0))),
+        ));
+
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains(
+                "if (typeof value !== \"object\" || value === null || Array.isArray(value))"
+            ),
+            "expected the outer handler to stay as the literal-side guard:\n{rendered}"
+        );
+        assert!(
+            !rendered.ends_with("return 0;"),
+            "expected the outer handler not to be peeled out as a trailing fallthrough:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("let body = 1;") && rendered.contains("return body;"),
+            "expected the object branch to stay inline after the guard:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn nested_staticcatch_binding_handlers_that_raise_outward_avoid_exit_temps() {
         let mut compiler = LambdaCompiler::new();
         let cond = Ident::create_local("cond");
@@ -18536,6 +18635,75 @@ mod tests {
         assert_typeof_check(cond, &value, "boolean", BinOp::EqEqEq);
         assert_int_expr(then_expr, 1);
         assert_int_expr(else_expr, 0);
+    }
+
+    #[test]
+    fn default_only_untagged_object_return_keeps_literal_default_branch_outside_object_chain() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let body_id = Ident::create_local("body");
+        let block = compiler.compile_untagged_variant_switch_return_statements(
+            Expression::var(value.clone()),
+            &LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![],
+                sw_blocks_full: false,
+                sw_blocks: vec![(
+                    0,
+                    Lambda::let_(
+                        LetKind::Strict,
+                        body_id.clone(),
+                        Lambda::const_(Constant::int(1)),
+                        Lambda::var(body_id.clone()),
+                    ),
+                )],
+                sw_failaction: Some(Box::new(Lambda::const_(Constant::int(0)))),
+                sw_names: Some(SwitchNames {
+                    consts: vec![
+                        crate::lambda::SwitchTag {
+                            name: "Null".to_string(),
+                            tag_type: Some(crate::lambda::SwitchCaseTag::Null),
+                        },
+                        crate::lambda::SwitchTag {
+                            name: "String".to_string(),
+                            tag_type: Some(crate::lambda::SwitchCaseTag::String(
+                                "string".to_string(),
+                            )),
+                        },
+                    ],
+                    blocks: vec![
+                        crate::lambda::SwitchBlock {
+                            tag: crate::lambda::SwitchTag::named("Object"),
+                            tag_name: None,
+                            block_type: Some(crate::lambda::SwitchBlockType::Object),
+                        },
+                        crate::lambda::SwitchBlock {
+                            tag: crate::lambda::SwitchTag::named("Array"),
+                            tag_name: None,
+                            block_type: Some(crate::lambda::SwitchBlockType::Instance(
+                                "Array".to_string(),
+                            )),
+                        },
+                    ],
+                }),
+            },
+        );
+
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains(
+                "if (typeof value !== \"object\" || value === null || Array.isArray(value))"
+            ),
+            "expected the literal/default side to stay outside the object chain:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("return 0;"),
+            "expected the literal/default branch to return the fallback:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("let body = 1;") && rendered.contains("return body;"),
+            "expected the object branch to stay inside the guarded path:\n{rendered}"
+        );
     }
 
     fn assert_switch_case_assigns_int_result(block: &Block, result: &Ident, expected: i32) {
