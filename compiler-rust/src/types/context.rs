@@ -517,6 +517,31 @@ impl<'a> TypeContext<'a> {
         Some(f(components))
     }
 
+    /// Look up a module alias target from the qualified module components cache.
+    ///
+    /// For a path like `Pdot(Pident("Js"), "Exn", _)`, checks whether `Js`'s
+    /// qualified components contain `Exn` as a `MtyAlias`. If so, returns the
+    /// alias target (e.g., `Pident("Stdlib_Exn")`).
+    ///
+    /// Used by `matching.rs` to resolve persistent module aliases without
+    /// access to the full `PersistentEnv`.
+    pub fn find_module_alias_in_components(
+        &self,
+        parent_path: &Path,
+        module_name: &str,
+    ) -> Option<Path> {
+        let key = QualifiedModuleComponentsCacheKey::new(parent_path.clone(), None);
+        self.with_qualified_module_components(&key, |components| {
+            let (_, _, md) = components.lookup_module(module_name)?;
+            match &md.md_type {
+                super::decl::ModuleType::MtyAlias(_, target) => Some(target.clone()),
+                super::decl::ModuleType::MtyIdent(target) => Some(target.clone()),
+                _ => None,
+            }
+        })
+        .flatten()
+    }
+
     /// Cache a dotted value lookup for a resolved module access path.
     pub(crate) fn register_resolved_module_value(
         &self,
