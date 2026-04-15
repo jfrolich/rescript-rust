@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 487 / 657 JS snapshots passing, 0 compile errors, 170 output diffs
+**Status:** 488 / 657 JS snapshots passing, 0 compile errors, 169 output diffs
 
 ## Goal
 
@@ -35,11 +35,69 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **487 / 657**
+- JS snapshot parity: **488 / 657**
 - Compile errors: **0**
-- Output diffs: **170**
+- Output diffs: **169**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: stop force-spilling value-context `Lapply` nodes through a
+  synthetic `call` temp during JS lowering, so direct calls in value context
+  stay direct call expressions instead of becoming `let call = ...; let x =
+  call;`
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`, because the mismatch lived in
+  `Lam_compile.compile_apply`'s value-context lowering boundary before JS IR
+  cleanup: OCaml compiles the callee and arguments under `NeedValue Not_tail`
+  and then feeds the final `E.call ...` directly into
+  `Js_output.output_of_block_and_expression`, while Rust was materializing any
+  prelude-bearing call into an extra temporary even when the surrounding
+  context already wanted a value
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_apply` and its final
+  `Js_output.output_of_block_and_expression ... (E.call ...)` path for
+  `NeedValue`; plus `compiler/core/lam_compile_main.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so `Lambda::Lapply` in
+    `compile_expr(...)` now returns `compile_apply_call(...)` directly instead
+    of forcing the result through `materialize_compiled_value("call", ...)`
+  - removed the now-unneeded `materialize_compiled_value(...)` helper that was
+    inventing value-context `call` aliases
+  - added focused regression coverage in
+    `value_context_direct_calls_stay_as_call_expressions` and
+    `let_bound_direct_calls_skip_intermediate_call_aliases`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml value_context_direct_calls_stay_as_call_expressions -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml let_bound_direct_calls_skip_intermediate_call_aliases -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml effect_context_calls_with_arg_preludes_skip_intermediate_call_temps -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml return_context_calls_with_arg_preludes_skip_intermediate_call_temps -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/ari_regress_test.res`, diffing
+    `/tmp/ari_regress_test.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - `tests/tests/src/ari_regress_test.res` now drops the synthetic
+    `let call = ...; let x = call;` alias and matches the OCaml call/value
+    shape more closely, though it still differs in a remaining arity-specific
+    simplification cluster
+  - `tests/tests/src/int_map.res` dropped out of the authoritative failure set
+    after this change, while `ari_regress_test.res`, `mutable_uncurry_test.res`,
+    and `test_demo.res` remain in the current diff cluster
+- Topline impact:
+  - JS snapshot parity: **487 / 657** -> **488 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **170** -> **169** (**-1**)
+- Keep this change because it aligns Rust's value-context call lowering with
+  OCaml's `Lam_compile.compile_apply` behavior, removes a Rust-only synthetic
+  aliasing step, and improves the authoritative snapshot baseline without any
+  printer-only rewrite.
 
 Latest iteration on **2026-04-15**:
 

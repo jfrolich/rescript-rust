@@ -400,25 +400,6 @@ impl LambdaCompiler {
         }
     }
 
-    fn materialize_compiled_value(&mut self, hint: &str, compiled: Compiled) -> Compiled {
-        if compiled.prelude.is_empty() {
-            return compiled;
-        }
-
-        let mut prelude = compiled.prelude;
-        let tmp = self.fresh_ident(hint);
-        prelude.push(Statement::variable(VariableDeclaration {
-            ident: tmp.clone(),
-            value: Some(compiled.expr),
-            property: LetKind::Strict,
-            ident_info: IdentInfo::default(),
-        }));
-        Compiled {
-            prelude,
-            expr: Expression::var(tmp),
-        }
-    }
-
     fn try_statement(&self, body: Block, exn: &Ident, handler: Block) -> Statement {
         Statement::new(StatementDesc::Try(
             body,
@@ -448,10 +429,7 @@ impl LambdaCompiler {
                 prelude: vec![],
                 expr: Self::compile_constant(cst),
             },
-            Lambda::Lapply(apply) => {
-                let compiled = self.compile_apply_call(apply);
-                self.materialize_compiled_value("call", compiled)
-            }
+            Lambda::Lapply(apply) => self.compile_apply_call(apply),
             Lambda::Lfunction(func) => {
                 if let Some(expr) = self.compile_eta_wrapped_runtime_alias(func) {
                     return Compiled {
@@ -15979,6 +15957,109 @@ mod tests {
             rendered.contains("(1);"),
             "effect-context apply lost the direct call:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn value_context_direct_calls_stay_as_call_expressions() {
+        let mut compiler = LambdaCompiler::new();
+        let callback = Ident::create_local("callback");
+        let compiled = compiler.compile_expr(&Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::var(callback.clone())),
+            ap_args: vec![Lambda::const_(Constant::int(1))],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        }));
+
+        assert!(
+            compiled.prelude.is_empty(),
+            "value-context call unexpectedly emitted a prelude: {:?}",
+            compiled.prelude
+        );
+        assert!(matches!(
+            compiled.expr,
+            Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            } if matches!(
+                func.as_ref(),
+                Expression {
+                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                    ..
+                } if id.same(&callback)
+            ) && matches!(
+                args.as_slice(),
+                [Expression {
+                    desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                    ..
+                }]
+            )
+        ));
+    }
+
+    #[test]
+    fn let_bound_direct_calls_skip_intermediate_call_aliases() {
+        let mut compiler = LambdaCompiler::new();
+        let callback = Ident::create_local("callback");
+        let x = Ident::create_local("x");
+        let compiled = compiler.compile_expr(&Lambda::Llet(
+            LetKind::Strict,
+            x.clone(),
+            Box::new(Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::var(callback)),
+                ap_args: vec![Lambda::const_(Constant::int(1))],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            })),
+            Box::new(Lambda::var(x.clone())),
+        ));
+
+        let [decl] = compiled.prelude.as_slice() else {
+            panic!("expected one initialized declaration for the let-bound call");
+        };
+        assert!(matches!(
+            decl,
+            Statement {
+                desc: StatementDesc::Variable(VariableDeclaration {
+                    ident,
+                    value:
+                        Some(Expression {
+                            desc: ExpressionDesc::Call(func, args, _),
+                            ..
+                        }),
+                    ..
+                }),
+                ..
+            } if ident.same(&x)
+                && matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.name() == "callback"
+                )
+                && matches!(
+                    args.as_slice(),
+                    [Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                        ..
+                    }]
+                )
+        ));
+        assert!(matches!(
+            compiled.expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&x)
+        ));
     }
 
     #[test]
