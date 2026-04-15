@@ -17,7 +17,7 @@ let result = add(1, 2)
 
 let greet = (name) => {
   let message = "Hello, " ++ name ++ "!"
-  Js.log(message)
+  Console.log(message)
   message
 }
 `;
