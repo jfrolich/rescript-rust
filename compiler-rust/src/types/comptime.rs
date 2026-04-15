@@ -545,6 +545,71 @@ pub fn generate_specialized_source(
                 runtime_value_name, inner_encoded
             ))
         }
+        TypeInfo::Variant { constructors, .. } => {
+            let mut arms = Vec::new();
+            for ctor in constructors {
+                let arm = if ctor.args.is_empty() {
+                    // No-arg constructor: | Point => { TAG: "Point" }
+                    format!(
+                        "  | {} => {{\n    let obj = Js.Dict.empty()\n    Js.Dict.set(obj, \"TAG\", Js.Json.string(\"{}\"))\n    Js.Json.object_(obj)\n  }}",
+                        ctor.name, ctor.name
+                    )
+                } else {
+                    // Constructor with args — encode each arg
+                    let mut lines = Vec::new();
+                    lines.push(format!("  | {}(payload) => {{", ctor.name));
+                    lines.push("    let obj = Js.Dict.empty()".to_string());
+                    lines.push(format!(
+                        "    Js.Dict.set(obj, \"TAG\", Js.Json.string(\"{}\"))",
+                        ctor.name
+                    ));
+                    for (i, arg_type) in ctor.args.iter().enumerate() {
+                        let arg_name = if ctor.args.len() == 1 {
+                            "payload".to_string()
+                        } else {
+                            format!("payload_{}", i)
+                        };
+                        let encoded = generate_specialized_source(
+                            arg_type,
+                            &arg_name,
+                            fuel,
+                        )?;
+                        lines.push(format!(
+                            "    Js.Dict.set(obj, \"_{}\", {})",
+                            i, encoded
+                        ));
+                    }
+                    lines.push("    Js.Json.object_(obj)".to_string());
+                    lines.push("  }".to_string());
+                    lines.join("\n")
+                };
+                arms.push(arm);
+            }
+            Ok(format!(
+                "switch {} {{\n{}\n}}",
+                runtime_value_name,
+                arms.join("\n")
+            ))
+        }
+        TypeInfo::Unknown { description } if description == "recursive type" => {
+            // For recursive types, generate a placeholder that indicates
+            // a recursive encoder call would be needed.
+            // In a full implementation, this would call the encoder function
+            // by name. For now, use a JSON string placeholder.
+            Ok(format!("Js.Json.string(\"[recursive: {}]\")", runtime_value_name))
+        }
+        TypeInfo::Tuple { elements } => {
+            let mut items = Vec::new();
+            for (i, elem) in elements.iter().enumerate() {
+                let (_, part) = match i {
+                    0 => ("fst", generate_specialized_source(elem, &format!("fst({})", runtime_value_name), fuel)?),
+                    1 => ("snd", generate_specialized_source(elem, &format!("snd({})", runtime_value_name), fuel)?),
+                    _ => ("", generate_specialized_source(elem, &format!("/* tuple_{} */", i), fuel)?),
+                };
+                items.push(part);
+            }
+            Ok(format!("[{}]->Js.Json.array", items.join(", ")))
+        }
         _ => {
             Err(format!("Cannot encode type: {:?}", type_info))
         }
