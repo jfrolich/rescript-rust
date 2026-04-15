@@ -1400,6 +1400,82 @@ pub fn compile_source_to_js_with_options(
     Ok(js)
 }
 
+/// Build a structural module coercion by matching interface items to implementation
+/// positions by name, without type-checking. Used as a fallback when `compunit`
+/// fails due to type representation differences (e.g., OCaml CMI stamps vs Rust stamps).
+///
+/// This matches OCaml's `Tcoerce_structure` behavior: for each runtime component
+/// in the interface signature, find its runtime position in the implementation
+/// signature and emit a `(pos, Tcoerce_none)` entry. Items in the implementation
+/// that don't appear in the interface are excluded from the export block.
+fn build_name_based_coercion(
+    impl_sig: &crate::types::decl::Signature,
+    intf_sig: &crate::types::decl::Signature,
+) -> crate::types::typedtree::ModuleCoercion {
+    use crate::types::includemod::is_runtime_component;
+    use crate::types::typedtree::ModuleCoercion;
+
+    // Build name → runtime_position map from the implementation signature.
+    // Only runtime components get a position index.
+    let mut impl_name_to_pos: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut runtime_pos = 0usize;
+    for item in impl_sig {
+        if is_runtime_component(item) {
+            let name = match item {
+                crate::types::decl::SignatureItem::SigValue(id, _)
+                | crate::types::decl::SignatureItem::SigModule(id, _, _)
+                | crate::types::decl::SignatureItem::SigTypext(id, _, _) => id.name().to_string(),
+                _ => {
+                    runtime_pos += 1;
+                    continue;
+                }
+            };
+            impl_name_to_pos.insert(name, runtime_pos);
+            runtime_pos += 1;
+        }
+    }
+    let len_impl = runtime_pos;
+
+    // Build coercions and runtime_fields from the interface signature.
+    // For each runtime component in the interface, look up its position in the impl.
+    let mut coercions: Vec<(usize, ModuleCoercion)> = Vec::new();
+    let mut runtime_fields: Vec<String> = Vec::new();
+
+    for item in intf_sig {
+        if !is_runtime_component(item) {
+            continue;
+        }
+        let name = match item {
+            crate::types::decl::SignatureItem::SigValue(id, _)
+            | crate::types::decl::SignatureItem::SigModule(id, _, _)
+            | crate::types::decl::SignatureItem::SigTypext(id, _, _) => id.name().to_string(),
+            _ => continue,
+        };
+        if let Some(&pos) = impl_name_to_pos.get(&name) {
+            coercions.push((pos, ModuleCoercion::Tcoerce_none));
+            runtime_fields.push(name);
+        }
+    }
+
+    let len_sig = coercions.len();
+
+    // Check if this is already an identity coercion (same items in same order)
+    let is_identity = len_impl == len_sig
+        && coercions
+            .iter()
+            .enumerate()
+            .all(|(expected_pos, (actual_pos, coercion))| {
+                *actual_pos == expected_pos && matches!(coercion, ModuleCoercion::Tcoerce_none)
+            });
+
+    if is_identity {
+        ModuleCoercion::Tcoerce_none
+    } else {
+        ModuleCoercion::Tcoerce_structure(coercions, Vec::new(), runtime_fields)
+    }
+}
+
 fn compute_raw_implementation_coercion(
     tctx: &mut TypeCheckContext<'_>,
     type_ctx: &TypeContext<'_>,
@@ -1415,7 +1491,8 @@ fn compute_raw_implementation_coercion(
     }
 
     let impl_sig = typed_structure.str_type.clone();
-    let target_sig = if std::path::Path::new(&format!("{source_file}i")).exists() {
+    let has_resi = std::path::Path::new(&format!("{source_file}i")).exists();
+    let target_sig = if has_resi {
         let Some(module_name) = std::path::Path::new(source_file)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -1442,15 +1519,26 @@ fn compute_raw_implementation_coercion(
         crate::types::includemod::simplify_signature(&impl_sig)
     };
 
-    crate::types::includemod::compunit(
+    match crate::types::includemod::compunit(
         type_ctx,
         env,
         source_file,
         &impl_sig,
         "(inferred signature)",
         &target_sig,
-    )
-    .unwrap_or(crate::types::typedtree::ModuleCoercion::Tcoerce_none)
+    ) {
+        Ok(cc) => cc,
+        Err(_) if has_resi => {
+            // compunit can fail when the OCaml-built CMI has different type stamps
+            // than what Rust's type-checker produces. In that case, fall back to a
+            // name-based structural coercion that at least filters the export block
+            // to match the interface's set of exported items. This ensures functors
+            // and other implementation-only items are excluded from the module export
+            // block, matching OCaml's behavior.
+            build_name_based_coercion(&impl_sig, &target_sig)
+        }
+        Err(_) => crate::types::typedtree::ModuleCoercion::Tcoerce_none,
+    }
 }
 
 /// Type-check an interface file and dump typed sexp if requested.
