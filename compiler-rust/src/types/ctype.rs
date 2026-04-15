@@ -1578,9 +1578,13 @@ fn normalize_path_full<'a>(ctx: &'a TypeContext<'a>, env: &Env, path: &Path) -> 
     if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
         return cached;
     }
-    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new());
+    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true);
     ctx.register_normalized_path_full(env_id, path, normalized.clone());
     normalized
+}
+
+fn normalize_path_forward_only<'a>(ctx: &'a TypeContext<'a>, env: &Env, path: &Path) -> Path {
+    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false)
 }
 
 fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
@@ -1624,6 +1628,7 @@ fn normalize_path_full_inner<'a>(
     path: &Path,
     depth: usize,
     visiting: &mut HashSet<Path>,
+    allow_reverse_local_aliases: bool,
 ) -> Path {
     if depth > 20 {
         return path.clone();
@@ -1632,7 +1637,14 @@ fn normalize_path_full_inner<'a>(
     // First, recursively normalize the prefix for Pdot paths
     let path = match path {
         Path::Pdot(p, s, pos) => {
-            let p_norm = normalize_path_full_inner(ctx, env, p, depth + 1, visiting);
+            let p_norm = normalize_path_full_inner(
+                ctx,
+                env,
+                p,
+                depth + 1,
+                visiting,
+                allow_reverse_local_aliases,
+            );
             if p_norm == **p {
                 path.clone()
             } else {
@@ -1681,7 +1693,14 @@ fn normalize_path_full_inner<'a>(
     // First try the simple env lookup (handles Pident and some Pdot paths).
     if let Ok(md) = env.lookup_module(&path) {
         if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
-            return normalize_path_full_inner(ctx, env, alias_path, depth + 1, visiting);
+            return normalize_path_full_inner(
+                ctx,
+                env,
+                alias_path,
+                depth + 1,
+                visiting,
+                allow_reverse_local_aliases,
+            );
         }
     }
 
@@ -1696,13 +1715,29 @@ fn normalize_path_full_inner<'a>(
             resolve_module_type_through_env_path(ctx, env, &path, &mut resolve_visiting)
         {
             if let super::decl::ModuleType::MtyAlias(_, alias_path) = &mty {
-                return normalize_path_full_inner(ctx, env, alias_path, depth + 1, visiting);
+                return normalize_path_full_inner(
+                    ctx,
+                    env,
+                    alias_path,
+                    depth + 1,
+                    visiting,
+                    allow_reverse_local_aliases,
+                );
             }
         }
     }
 
-    if let Some(rewritten) = normalize_path_through_local_aliases(env, &path) {
-        return normalize_path_full_inner(ctx, env, &rewritten, depth + 1, visiting);
+    if allow_reverse_local_aliases
+        && let Some(rewritten) = normalize_path_through_local_aliases(env, &path)
+    {
+        return normalize_path_full_inner(
+            ctx,
+            env,
+            &rewritten,
+            depth + 1,
+            visiting,
+            allow_reverse_local_aliases,
+        );
     }
 
     path
@@ -2075,13 +2110,15 @@ fn try_expand_head_with_mode<'a>(
                 }
             }
 
-            // 4. Path normalization fallback (OCaml ctype.ml:1315).
-            // When all expansion attempts fail, try normalizing the path by
-            // following module aliases. If the normalized path differs, create
-            // a new Tconstr with the normalized path so the next expansion
-            // attempt can find the type declaration.
-            if matches!(mode, ExpandHeadMode::General) {
-                let path_norm = normalize_path_full(ctx, env, &path);
+            // 4. Path normalization fallback (OCaml ctype.ml:1370).
+            // `expand_abbrev_gen` does this for both `expand_head` and
+            // `expand_head_unif`, so keep unification on the same path instead
+            // of recovering later with Rust-only alias fallback work.
+            {
+                let path_norm = match mode {
+                    ExpandHeadMode::General => normalize_path_full(ctx, env, &path),
+                    ExpandHeadMode::Unify => normalize_path_forward_only(ctx, env, &path),
+                };
                 if path_norm != path {
                     let level = ctx.get_level(ty);
                     let normalized = ctx.new_type(TypeDesc::Tconstr {
@@ -2094,8 +2131,6 @@ fn try_expand_head_with_mode<'a>(
                 } else {
                     None
                 }
-            } else {
-                None
             }
         }
         _ => None,
@@ -2603,6 +2638,17 @@ fn unify_after_expansion<'a>(
     let lhs = ctx.repr(lhs);
     let rhs = ctx.repr(rhs);
     if lhs == rhs {
+        if state.mode != crate::types::UnifyMode::Pattern {
+            let keep_expanded_repr = state.env().is_some_and(|env| {
+                should_keep_expanded_manifest_alias_repr(ctx, env, lhs, rhs, relink_target, swap)
+            });
+            if !keep_expanded_repr {
+                let to_ty = ctx.repr(relink_target);
+                if lhs != to_ty && !deep_occur(ctx, lhs, to_ty) {
+                    ctx.set_desc(lhs, TypeDesc::Tlink(to_ty));
+                }
+            }
+        }
         return Ok(());
     }
 
