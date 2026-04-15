@@ -4132,14 +4132,8 @@ impl LambdaCompiler {
         }
 
         let expr = match prim {
-            Pstringlength => Expression::new(ExpressionDesc::Length(
-                Box::new(compiled_args[0].clone()),
-                LengthObject::String,
-            )),
-            Parraylength => Expression::new(ExpressionDesc::Length(
-                Box::new(compiled_args[0].clone()),
-                LengthObject::Array,
-            )),
+            Pstringlength => Expression::length(compiled_args[0].clone(), LengthObject::String),
+            Parraylength => Expression::length(compiled_args[0].clone(), LengthObject::Array),
             Pstringrefs | Pstringrefu => {
                 self.runtime_call_expr("Primitive_string", "getChar", compiled_args)
             }
@@ -5510,7 +5504,7 @@ impl LambdaCompiler {
     }
 
     fn is_null_or_undefined_expr(&self, expr: Expression) -> Expression {
-        Expression::new(ExpressionDesc::IsNullOrUndefined(Box::new(expr)))
+        Expression::is_null_or_undefined(expr)
     }
 
     fn some_expr(&self, value: Expression) -> Expression {

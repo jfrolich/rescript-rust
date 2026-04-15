@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 513 / 657 JS snapshots passing, 0 compile errors, 144 output diffs
+**Status:** 516 / 657 JS snapshots passing, 0 compile errors, 141 output diffs
 
 ## Goal
 
@@ -35,11 +35,70 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **513 / 657**
+- JS snapshot parity: **516 / 657**
 - Compile errors: **0**
-- Output diffs: **144**
+- Output diffs: **141**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: port OCaml's constant-folding for `.length` and
+  null/undefined checks so pure array/string/function length expressions and
+  immediate nullish predicates stop surviving into emitted JS when
+  `js_exp_make.ml` already reduces them to literals
+- Active backend focus for this slice is **Phase 4: Port JS Passes** from
+  `PLAN.md`, because the remaining emitted-JS drift sat in Rust's
+  `compiler-rust/src/js_ir/mod.rs` and the primitive lowering hooks in
+  `compiler-rust/src/lambda/compile.rs`, where `Length(...)` and
+  `IsNullOrUndefined(...)` nodes were still emitted for pure literals that
+  OCaml folds directly in `js_exp_make.array_length`, `string_length`,
+  `function_length`, and `is_null_undefined`
+- OCaml reference:
+  `compiler/core/js_exp_make.ml`
+- Rust change:
+  - added OCaml-aligned `Expression::length` folding for pure array/caml-block
+    literals, plain string literals, and function arity in
+    `compiler-rust/src/js_ir/mod.rs`
+  - added OCaml-aligned `Expression::is_null_or_undefined` folding for
+    immediate `null` / `undefined` and for known non-nullish numbers,
+    arrays, and caml blocks in `compiler-rust/src/js_ir/mod.rs`
+  - routed `Pstringlength`, `Parraylength`, and nullable-option lowering in
+    `compiler-rust/src/lambda/compile.rs` through those helpers instead of
+    always emitting raw IR nodes
+  - added focused regressions covering folded array length, string length,
+    function length, and nullish predicates
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_array_length_folds_pure_array_literals_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_string_length_folds_plain_string_literals_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_function_length_folds_fun_arity_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_is_null_or_undefined_folds_numbers_false_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_nullable_predicates_to_js_null_checks -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact direct release repros for `tests/tests/src/js_array_test.res` and
+    `tests/tests/src/js_nullable_test.res`, both diffing cleanly against the
+    checked-in snapshots after the change
+  - unchanged broader guards for `tests/tests/src/test_zero_nullable.res` and
+    `tests/tests/src/option_repr_test.res`, both still differing in the same
+    remaining nullable/option clusters rather than regressing into new failures
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/js_array_test.res` now matches exactly, with the pure
+    `[1, 2, 3].length` case folded to `3` like OCaml
+  - `tests/tests/src/js_nullable_test.res` now matches exactly, with immediate
+    `(3 == null)` checks folded away like OCaml
+  - the full authoritative sweep improved by three files while keeping compile
+    errors at zero, confirming the helper-level folds clear more than the two
+    direct repros
+- Topline impact:
+  - JS snapshot parity: **513 / 657** -> **516 / 657** (**+3**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **144** -> **141** (**-3**)
+- Keep this change because it matches `js_exp_make.ml`'s constant-folding
+  rules, improves the authoritative baseline, and leaves the remaining
+  nullable-option drift in files like `test_zero_nullable` as a separate
+  lowering problem rather than a reason to keep Rust's JS-expression layer more
+  conservative than OCaml.
 
 Latest iteration on **2026-04-15**:
 

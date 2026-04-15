@@ -680,6 +680,41 @@ impl Expression {
         Self::new(ExpressionDesc::Array(elements, mutable_flag))
     }
 
+    /// Create a `.length` expression with OCaml-aligned constant folding.
+    pub fn length(target: Expression, object: LengthObject) -> Self {
+        match (&target.desc, object) {
+            (ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _, _), LengthObject::Array)
+                if expression_has_no_side_effects(&target) =>
+            {
+                Expression::number(Number::int(items.len() as i32))
+            }
+            (ExpressionDesc::Str { txt, delim: Delim::None }, LengthObject::String) => {
+                Expression::number(Number::int(txt.len() as i32))
+            }
+            (
+                ExpressionDesc::Fun {
+                    is_method, params, ..
+                },
+                LengthObject::Function,
+            ) => {
+                let len = params.len() as i32;
+                Expression::number(Number::int(if *is_method { len - 1 } else { len }))
+            }
+            _ => Self::new(ExpressionDesc::Length(Box::new(target), object)),
+        }
+    }
+
+    /// Create a loose null/undefined check with OCaml-aligned constant folding.
+    pub fn is_null_or_undefined(target: Expression) -> Self {
+        match target.desc {
+            ExpressionDesc::Null | ExpressionDesc::Undefined { .. } => Expression::bool(true),
+            ExpressionDesc::Number(_)
+            | ExpressionDesc::Array(_, _)
+            | ExpressionDesc::CamlBlock(_, _, _, _) => Expression::bool(false),
+            _ => Self::new(ExpressionDesc::IsNullOrUndefined(Box::new(target))),
+        }
+    }
+
     /// Create a binary operation
     pub fn bin(op: BinOp, left: Expression, right: Expression) -> Self {
         if let Some(expr) = rewrite_plus_negative_int_rhs(op, &left, &right) {
@@ -2209,6 +2244,77 @@ mod tests {
         );
 
         assert!(matches!(expr.desc, ExpressionDesc::Bool(false)));
+    }
+
+    #[test]
+    fn test_array_length_folds_pure_array_literals_like_ocaml() {
+        let expr = Expression::length(
+            Expression::array(
+                vec![
+                    Expression::number(Number::int(1)),
+                    Expression::number(Number::int(2)),
+                    Expression::number(Number::int(3)),
+                ],
+                MutableFlag::Immutable,
+            ),
+            LengthObject::Array,
+        );
+
+        assert!(matches!(
+            expr.desc,
+            ExpressionDesc::Number(Number::Int { i: 3, .. })
+        ));
+    }
+
+    #[test]
+    fn test_string_length_folds_plain_string_literals_like_ocaml() {
+        let expr = Expression::length(
+            Expression::string("hello"),
+            LengthObject::String,
+        );
+
+        assert!(matches!(
+            expr.desc,
+            ExpressionDesc::Number(Number::Int { i: 5, .. })
+        ));
+    }
+
+    #[test]
+    fn test_function_length_folds_fun_arity_like_ocaml() {
+        let expr = Expression::length(
+            Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![
+                    Ident::create_local("x"),
+                    Ident::create_local("y"),
+                ],
+                body: vec![],
+                env: Default::default(),
+                return_unit: false,
+                async_: false,
+                directive: None,
+            }),
+            LengthObject::Function,
+        );
+
+        assert!(matches!(
+            expr.desc,
+            ExpressionDesc::Number(Number::Int { i: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn test_is_null_or_undefined_folds_numbers_false_like_ocaml() {
+        let expr = Expression::is_null_or_undefined(Expression::number(Number::int(3)));
+
+        assert!(matches!(expr.desc, ExpressionDesc::Bool(false)));
+    }
+
+    #[test]
+    fn test_is_null_or_undefined_folds_null_true_like_ocaml() {
+        let expr = Expression::is_null_or_undefined(Expression::null());
+
+        assert!(matches!(expr.desc, ExpressionDesc::Bool(true)));
     }
 
     #[test]
