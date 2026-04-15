@@ -1057,6 +1057,11 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
                 && strings.iter().all(expression_has_no_side_effects)
                 && values.iter().all(expression_has_no_side_effects)
         }
+        ExpressionDesc::Call(func, args, _)
+            if is_array_is_array_callee(func) && args.len() == 1 =>
+        {
+            args.iter().all(expression_has_no_side_effects)
+        }
         ExpressionDesc::FlatCall(_, _)
         | ExpressionDesc::Call(_, _, _)
         | ExpressionDesc::New(_, _)
@@ -1782,14 +1787,30 @@ fn strict_var_literal_comparison(expr: &Expression) -> Option<(BinOp, &VIdent, &
     Some((*op, vident, right))
 }
 
+fn is_array_is_array_callee(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Str { txt, .. } => txt == "Array.isArray",
+        ExpressionDesc::StaticIndex(target, field, _)
+            if field == "isArray"
+                && matches!(
+                    target.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(array_ident)),
+                        ..
+                    } if array_ident.name() == "Array"
+                ) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
 fn array_is_array_var(expr: &Expression) -> Option<&VIdent> {
     let ExpressionDesc::Call(func, args, _) = &expr.desc else {
         return None;
     };
-    let ExpressionDesc::Str { txt, .. } = &func.desc else {
-        return None;
-    };
-    if txt != "Array.isArray" {
+    if !is_array_is_array_callee(func) {
         return None;
     }
     let [arg] = args.as_slice() else {
@@ -2696,6 +2717,103 @@ mod tests {
             js_and_expression(typeof_boolean, not_equals_undefined).desc,
             ExpressionDesc::Bin(BinOp::EqEqEq, _, _)
         ));
+    }
+
+    #[test]
+    fn test_js_and_simplifies_static_array_is_array_nullish_guards_like_ocaml() {
+        let value = Ident::create_local("value");
+        let array_is_array = Expression::call(
+            Expression::new(ExpressionDesc::StaticIndex(
+                Box::new(Expression::var(Ident::create_persistent("Array"))),
+                "isArray".to_string(),
+                None,
+            )),
+            vec![Expression::var(value.clone())],
+            CallInfo::default(),
+        );
+        let equals_null = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(value.clone()),
+            Expression::null(),
+        );
+        let not_equals_null = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::var(value.clone()),
+            Expression::null(),
+        );
+        let equals_undefined = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(value.clone()),
+            Expression::undefined(false),
+        );
+        let not_equals_undefined = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::var(value.clone()),
+            Expression::undefined(false),
+        );
+
+        assert!(matches!(
+            js_and_expression(array_is_array.clone(), equals_null).desc,
+            ExpressionDesc::Bool(false)
+        ));
+        assert!(matches!(
+            js_and_expression(array_is_array.clone(), not_equals_null).desc,
+            ExpressionDesc::Call(_, _, _)
+        ));
+        assert!(matches!(
+            js_and_expression(array_is_array.clone(), equals_undefined).desc,
+            ExpressionDesc::Bool(false)
+        ));
+        assert!(matches!(
+            js_and_expression(array_is_array, not_equals_undefined).desc,
+            ExpressionDesc::Call(_, _, _)
+        ));
+    }
+
+    #[test]
+    fn test_js_and_simplifies_object_guard_with_static_array_exclusion_like_ocaml() {
+        let value = Ident::create_local("value");
+        let object_guard = Expression::bin(
+            BinOp::And,
+            Expression::bin(
+                BinOp::And,
+                Expression::bin(
+                    BinOp::EqEqEq,
+                    Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
+                        value.clone(),
+                    )))),
+                    Expression::string("object"),
+                ),
+                Expression::bin(BinOp::NotEqEq, Expression::var(value.clone()), Expression::null()),
+            ),
+            Expression::not(Expression::call(
+                Expression::new(ExpressionDesc::StaticIndex(
+                    Box::new(Expression::var(Ident::create_persistent("Array"))),
+                    "isArray".to_string(),
+                    None,
+                )),
+                vec![Expression::var(value.clone())],
+                CallInfo::default(),
+            )),
+        );
+        let not_equals_undefined = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::var(value.clone()),
+            Expression::undefined(false),
+        );
+
+        let simplified = js_and_expression(not_equals_undefined, object_guard.clone());
+        assert!(
+            !conjunction_contains_expression(
+                &simplified,
+                &Expression::bin(
+                    BinOp::NotEqEq,
+                    Expression::var(value),
+                    Expression::undefined(false),
+                ),
+            ),
+            "expected the redundant undefined guard to disappear, got {simplified:?}"
+        );
     }
 
     #[test]

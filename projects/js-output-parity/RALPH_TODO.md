@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 512 / 657 JS snapshots passing, 0 compile errors, 145 output diffs
+**Status:** 513 / 657 JS snapshots passing, 0 compile errors, 144 output diffs
 
 ## Goal
 
@@ -35,11 +35,68 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **512 / 657**
+- JS snapshot parity: **513 / 657**
 - Compile errors: **0**
-- Output diffs: **145**
+- Output diffs: **144**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: port OCaml's JS-expression purity and `&&` simplification for
+  `Array.isArray` guards, so redundant nullish checks stop surviving when the
+  backend already has a stronger object/array test
+- Active backend focus for this slice is **Phase 4: Port JS Passes** from
+  `PLAN.md`, because the remaining emitted-JS drift sat in Rust's
+  `compiler-rust/src/js_ir/mod.rs`, where `js_and_expression` and
+  `expression_has_no_side_effects` still treated `Array.isArray(x)` calls as
+  generic effectful calls and only recognized the string-literal callee form,
+  preventing OCaml-style boolean guard collapse on the `StaticIndex(Array,
+  "isArray")` form the Rust backend actually emits
+- OCaml reference:
+  `compiler/core/js_exp_make.ml` and
+  `compiler/core/js_analyzer.ml`
+- Rust change:
+  - updated `compiler-rust/src/js_ir/mod.rs` so the JS analyzer and
+    simplifier recognize both `Array.isArray(x)` callee encodings
+    (`"Array.isArray"` and `Array["isArray"]`) and treat them as pure when
+    their argument is pure, matching OCaml's `no_side_effect` /
+    `simplify_and_` behavior instead of conservatively blocking the recursive
+    `&&` simplification
+  - added focused regressions
+    `test_js_and_simplifies_static_array_is_array_nullish_guards_like_ocaml`
+    and
+    `test_js_and_simplifies_object_guard_with_static_array_exclusion_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_js_and_simplifies_static_array_is_array_nullish_guards_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_js_and_simplifies_object_guard_with_static_array_exclusion_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_js_and_simplifies_boolean_typeof_nullish_guards_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/DictPatternMatchingOptimization.res`,
+    diffing `/tmp/DictPatternMatchingOptimization.mjs` against the checked-in
+    snapshot
+  - unchanged broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - `tests/tests/src/DictPatternMatchingOptimization.res` still differs, but
+    the remaining drift is now the higher-level branch polarity / early-return
+    shape rather than the pure `Array.isArray`-guard simplification rule this
+    slice targeted
+  - the full authoritative sweep improved by one file, confirming the
+    OCaml-aligned `Array.isArray` purity/simplification rule clears at least
+    one checked-in snapshot without reintroducing compile errors
+- Topline impact:
+  - JS snapshot parity: **512 / 657** -> **513 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **145** -> **144** (**-1**)
+- Keep this change because it matches OCaml's `js_analyzer` /
+  `js_exp_make.simplify_and_` behavior for `Array.isArray`, improves the
+  authoritative baseline, and leaves the remaining object-guard branch-shape
+  drift as a separate follow-up pass-order issue rather than a reason to keep
+  the Rust simplifier overly conservative.
 
 Latest iteration on **2026-04-15**:
 
