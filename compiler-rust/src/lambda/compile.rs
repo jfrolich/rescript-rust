@@ -1369,7 +1369,6 @@ impl LambdaCompiler {
                 }
                 _ if !lambda_contains_static_raise(handler)
                     && !lambda_contains_staticcatch(handler)
-                    && !inside_enclosing_staticcatch_chain
                     && lambda_contains_static_raise_to_label(body, label, bindings.len())
                     && lambda_contains_static_raise_to_other_label(body, label) =>
                 {
@@ -1401,7 +1400,6 @@ impl LambdaCompiler {
                 }
                 _ if !lambda_contains_static_raise(handler)
                     && !lambda_contains_staticcatch(handler)
-                    && !inside_enclosing_staticcatch_chain
                     && lambda_contains_static_raise_to_label(body, label, bindings.len())
                     && lambda_contains_static_raise_to_other_label(body, label) =>
                 {
@@ -16155,7 +16153,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_named_variant_return_switches_keep_plain_inner_handlers_as_default_arms() {
+    fn nested_named_variant_return_switches_allow_plain_inner_handlers_to_fall_through() {
         let mut compiler = LambdaCompiler::new();
         let action = Ident::create_local("action");
         let block = compiler.compile_return_block(&Lambda::LstaticCatch(
@@ -16196,16 +16194,11 @@ mod tests {
         ));
         let rendered = print_block(&block);
 
-        let [switch_stmt] = block.as_slice() else {
-            panic!(
-                "expected the nested plain handlers to stay inside the switch:\n{rendered}"
-            );
+        let [switch_stmt, handler_return] = block.as_slice() else {
+            panic!("expected a switch followed by the inner fallthrough handler:\n{rendered}");
         };
-        let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc
-        else {
-            panic!(
-                "expected the innermost plain handler to remain as the switch default arm:\n{rendered}"
-            );
+        let StatementDesc::StringSwitch(test, clauses, None) = &switch_stmt.desc else {
+            panic!("expected the innermost plain handler to move outside the switch:\n{rendered}");
         };
         assert!(matches!(
             test,
@@ -16228,13 +16221,173 @@ mod tests {
         assert!(clauses[2].clause.body.is_empty());
         assert_switch_case_returns_int_result(&clauses[3].clause.body, 30);
 
-        let [default_return] = default_block.as_slice() else {
-            panic!("expected the default arm to return the inner plain handler");
-        };
-        match &default_return.desc {
+        match &handler_return.desc {
             StatementDesc::Return(expr) => assert_int_expr(expr, 10),
-            other => panic!("expected the default return, got {other:?}"),
+            other => panic!("expected the outer fallthrough return, got {other:?}"),
         }
+    }
+
+    fn gpr_1438_switch_cases(b: &Ident, c: &Ident, d: &Ident, e: &Ident) -> Vec<(i32, Lambda)> {
+        vec![
+            (98, Lambda::var(c.clone())),
+            (99, Lambda::static_raise(1, Vec::new())),
+            (100, Lambda::static_raise(2, Vec::new())),
+            (101, Lambda::static_raise(2, Vec::new())),
+            (102, Lambda::static_raise(2, Vec::new())),
+            (103, Lambda::static_raise(2, Vec::new())),
+            (104, Lambda::static_raise(2, Vec::new())),
+            (105, Lambda::static_raise(2, Vec::new())),
+            (106, Lambda::var(d.clone())),
+            (107, Lambda::var(e.clone())),
+            (108, Lambda::static_raise(2, Vec::new())),
+            (109, Lambda::static_raise(2, Vec::new())),
+            (110, Lambda::static_raise(2, Vec::new())),
+            (111, Lambda::static_raise(2, Vec::new())),
+            (112, Lambda::static_raise(2, Vec::new())),
+            (113, Lambda::static_raise(2, Vec::new())),
+            (114, Lambda::static_raise(2, Vec::new())),
+            (115, Lambda::static_raise(2, Vec::new())),
+            (116, Lambda::var(b.clone())),
+            (117, Lambda::static_raise(2, Vec::new())),
+            (118, Lambda::static_raise(1, Vec::new())),
+        ]
+    }
+
+    fn gpr_1438_fallthrough_handler() -> Lambda {
+        let param = Ident::create_local("param");
+        Lambda::prim(
+            Primitive::PjsFnMake(1),
+            vec![Lambda::function_(
+                1,
+                vec![param],
+                Lambda::const_(Constant::JsUndefined { is_unit: true }),
+                FunctionAttribute {
+                    return_unit: true,
+                    ..FunctionAttribute::default()
+                },
+            )],
+            Location::none(),
+        )
+    }
+
+    #[test]
+    fn nested_plain_int_return_switches_can_fall_through_like_gpr_1438() {
+        let mut compiler = LambdaCompiler::new();
+        let key = Ident::create_local("key");
+        let a = Ident::create_local("a");
+        let b = Ident::create_local("b");
+        let c = Ident::create_local("c");
+        let d = Ident::create_local("d");
+        let e = Ident::create_local("e");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::LstaticCatch(
+                Box::new(Lambda::Lswitch(
+                    Box::new(Lambda::var(key.clone())),
+                    LambdaSwitch {
+                        sw_consts_full: false,
+                        sw_consts: gpr_1438_switch_cases(&b, &c, &d, &e),
+                        sw_blocks_full: true,
+                        sw_blocks: vec![],
+                        sw_failaction: Some(Box::new(Lambda::static_raise(2, Vec::new()))),
+                        sw_names: None,
+                    },
+                )),
+                (2, vec![]),
+                Box::new(gpr_1438_fallthrough_handler()),
+            )),
+            (1, vec![]),
+            Box::new(Lambda::var(a.clone())),
+        ));
+
+        let [switch_stmt, handler_return] = block.as_slice() else {
+            panic!("expected a switch followed by the outer fallthrough handler");
+        };
+        let StatementDesc::IntSwitch(test, clauses, None) = &switch_stmt.desc else {
+            panic!("expected the inner plain handler to stay outside the switch");
+        };
+        assert!(matches!(
+            test,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&key)
+        ));
+        assert_eq!(clauses.len(), 6);
+
+        let rendered = print_block(&block);
+        assert_eq!(
+            rendered,
+            "switch (key) {\n  case 98 :\n    return c;\n  case 106 :\n    return d;\n  case 107 :\n    return e;\n  case 116 :\n    return b;\n  case 99 :\n  case 118 :\n    return a;\n}\n\nreturn param => {};"
+        );
+
+        match &handler_return.desc {
+            StatementDesc::Return(_) => {}
+            other => panic!("expected the outer handler return, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
+        let mut compiler = LambdaCompiler::new();
+        let action_key = Ident::create_local("actionKey");
+        let key = Ident::create_local("key");
+        let a = Ident::create_local("a");
+        let b = Ident::create_local("b");
+        let c = Ident::create_local("c");
+        let d = Ident::create_local("d");
+        let e = Ident::create_local("e");
+        let function = Lambda::function_(
+            6,
+            vec![
+                key.clone(),
+                a.clone(),
+                b.clone(),
+                c.clone(),
+                d.clone(),
+                e.clone(),
+            ],
+            Lambda::LstaticCatch(
+                Box::new(Lambda::LstaticCatch(
+                    Box::new(Lambda::Lswitch(
+                        Box::new(Lambda::var(key.clone())),
+                        LambdaSwitch {
+                            sw_consts_full: false,
+                            sw_consts: gpr_1438_switch_cases(&b, &c, &d, &e),
+                            sw_blocks_full: true,
+                            sw_blocks: vec![],
+                            sw_failaction: Some(Box::new(Lambda::static_raise(2, Vec::new()))),
+                            sw_names: None,
+                        },
+                    )),
+                    (2, vec![]),
+                    Box::new(gpr_1438_fallthrough_handler()),
+                )),
+                (1, vec![]),
+                Box::new(Lambda::var(a.clone())),
+            ),
+            FunctionAttribute::default(),
+        );
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            action_key.clone(),
+            Lambda::prim(Primitive::PjsFnMake(6), vec![function], Location::none()),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::ModuleExport(vec![action_key.clone()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::var(action_key.clone())],
+                Location::none(),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+        let rendered = print_deps_program(&deps, None);
+        assert_eq!(
+            rendered,
+            "// Generated by ReScript, PLEASE EDIT WITH CARE\n\n\nfunction actionKey(key, a, b, c, d, e) {\n  switch (key) {\n    case 98 :\n      return c;\n    case 106 :\n      return d;\n    case 107 :\n      return e;\n    case 116 :\n      return b;\n    case 99 :\n    case 118 :\n      return a;\n  }\n  return param => {};\n}\n\nexport {\n  actionKey,\n}\n/* No side effect */\n"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 517 / 657 JS snapshots passing, 0 compile errors, 140 output diffs
+**Status:** 516 / 657 JS snapshots passing, 0 compile errors, 141 output diffs
 
 ## Goal
 
@@ -35,11 +35,66 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **517 / 657**
+- JS snapshot parity: **516 / 657**
 - Compile errors: **0**
-- Output diffs: **140**
+- Output diffs: **141**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: restore the OCaml-aligned plain-handler fallthrough path for
+  nested `staticcatch` return switches that also re-raise an outer label, so
+  the inner plain handler can stay outside the switch body again
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is still `Lam_compile`
+  control-flow lowering after optimized lambda parity, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially the nested-staticcatch
+  return-switch behavior around `flat_catches`, `flatten_nested_caches`, and
+  `compile_staticcatch`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so
+    `uses_fallthrough_staticcatch_return(...)` no longer suppresses the plain
+    handler fallthrough path solely because the current switch sits under an
+    enclosing staticcatch chain
+  - added exact regressions for the live `tests/tests/src/gpr_1438.res` shape,
+    covering both `compile_return_block(...)` and
+    `compile_deps_program(...)` with the real `PjsFnMake(1)` fallthrough
+    handler and explicit `Lstaticraise 2` hole cases
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_plain_int_return_switches_can_fall_through_like_gpr_1438 -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/gpr_1438.res`, diffing
+    `/tmp/gpr_1438.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - direct sibling repros for
+    `tests/tests/src/VariantPatternMatchingSpreads.res` and
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1438.res` now matches its checked-in `.mjs` snapshot
+    exactly again; the inner `param => {}` handler falls through outside the
+    switch instead of reappearing as the `default:` arm
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as a
+    broader guard
+  - `tests/tests/src/VariantPatternMatchingSpreads.res` regressed back to the
+    post-switch `doWithA(d);` fallthrough shape, and
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` regressed
+    in the same family, so the remaining work in this cluster is to narrow the
+    fallthrough rule rather than keep the broader enclosing-chain suppression
+  - the full authoritative sweep in this worktree remains **516 / 657**
+    passing, **0** compile errors, and **141** output diffs
+- Topline impact:
+  - JS snapshot parity: **516 / 657** -> **516 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **141** -> **141** (**no change**)
+- Keep this change because it restores a real checked-in OCaml snapshot match
+  for `gpr_1438` and reopens the remaining `VariantPatternMatchingSpreads`
+  sibling drift as the narrower control-flow rule that still needs to be
+  ported.
 
 Latest iteration on **2026-04-15**:
 
