@@ -82,6 +82,15 @@ impl SimplifyEnv {
         }
         next
     }
+
+    fn across_capture_boundary(&self) -> Self {
+        let mut next = self.clone();
+        next.call_substitutions
+            .retain(|_, value| captured_substitution_allowed(value));
+        next.substitutions
+            .retain(|_, value| captured_substitution_allowed(value));
+        next
+    }
 }
 
 /// Simplify lowered lambda before JS IR lowering.
@@ -597,7 +606,9 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
         Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
         Lambda::Lapply(apply) => simplify_apply(apply, env, exports),
         Lambda::Lfunction(func) => {
-            let body_env = env.without_idents(func.params.iter());
+            let body_env = env
+                .across_capture_boundary()
+                .without_idents(func.params.iter());
             let simplified = Lambda::function_(
                 func.arity,
                 func.params.clone(),
@@ -802,11 +813,19 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             }
         }
         Lambda::Lwhile(cond, body) => Lambda::Lwhile(
-            Box::new(simplify_with_env(cond, env, exports)),
-            Box::new(simplify_with_env(body, env, exports)),
+            Box::new(simplify_with_env(
+                cond,
+                &env.across_capture_boundary(),
+                exports,
+            )),
+            Box::new(simplify_with_env(
+                body,
+                &env.across_capture_boundary(),
+                exports,
+            )),
         ),
         Lambda::Lfor(id, from, to, direction, body) => {
-            let scoped_env = env.without_ident(id);
+            let scoped_env = env.across_capture_boundary().without_ident(id);
             Lambda::Lfor(
                 id.clone(),
                 Box::new(simplify_with_env(from, env, exports)),
@@ -919,13 +938,24 @@ fn alias_use_info(target: &Ident, lam: &Lambda) -> AliasUseInfo {
                 collect(target, then_, info);
                 collect(target, else_, info);
             }
-            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+            Lambda::Lsequence(first, second) => {
+                collect(target, first, info);
+                collect(target, second, info);
+            }
+            Lambda::Lwhile(first, second) => {
+                if free_variables(first).contains(target) || free_variables(second).contains(target)
+                {
+                    info.captured = true;
+                }
                 collect(target, first, info);
                 collect(target, second, info);
             }
             Lambda::Lfor(_, from, to, _, body) => {
                 collect(target, from, info);
                 collect(target, to, info);
+                if free_variables(body).contains(target) {
+                    info.captured = true;
+                }
                 collect(target, body, info);
             }
             Lambda::Lassign(id, value) => {
@@ -985,7 +1015,9 @@ fn substitute_alias_use(lam: &Lambda, target: &Ident, replacement: &Lambda) -> L
                 Lambda::letrec(
                     bindings
                         .iter()
-                        .map(|(id, lam)| (id.clone(), substitute_alias_use(lam, target, replacement)))
+                        .map(|(id, lam)| {
+                            (id.clone(), substitute_alias_use(lam, target, replacement))
+                        })
                         .collect(),
                     substitute_alias_use(body, target, replacement),
                 )
@@ -2881,6 +2913,13 @@ fn substitution_candidate(
         }
         _ => None,
     }
+}
+
+fn captured_substitution_allowed(value: &Lambda) -> bool {
+    matches!(
+        value,
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_)
+    )
 }
 
 fn plain_string_constant(lam: &Lambda) -> Option<String> {
@@ -5248,6 +5287,57 @@ mod tests {
             *func.body,
             Lambda::Lvar(id) if id == projected
         ));
+    }
+
+    #[test]
+    fn keeps_module_field_aliases_materialized_inside_for_loops_like_ocaml() {
+        let module_value = Ident::create_local("M");
+        let cmp = Ident::create_local("cmp");
+        let loop_var = Ident::create_local("i");
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            cmp.clone(),
+            Lambda::prim(
+                Primitive::Pfield(
+                    0,
+                    FieldDbgInfo::Module {
+                        name: "cmp".to_string(),
+                    },
+                ),
+                vec![Lambda::var(module_value.clone())],
+                Location::none(),
+            ),
+            Lambda::for_(
+                loop_var.clone(),
+                Lambda::const_(Constant::int(0)),
+                Lambda::const_(Constant::int(1)),
+                DirectionFlag::Upto,
+                Lambda::var(cmp.clone()),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(kind, kept_cmp, value, body) = simplified else {
+            panic!("expected loop-carried module field alias to remain materialized");
+        };
+        assert!(matches!(kind, LetKind::Strict | LetKind::Alias));
+        assert!(kept_cmp.same(&cmp));
+        assert!(matches!(
+            *value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(0, FieldDbgInfo::Module { ref name }),
+                args,
+                ..
+            }) if name == "cmp"
+                && matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&module_value))
+        ));
+        let Lambda::Lfor(kept_loop_var, _, _, direction, loop_body) = *body else {
+            panic!("expected the alias body to stay as a for-loop");
+        };
+        assert!(kept_loop_var.same(&loop_var));
+        assert_eq!(direction, DirectionFlag::Upto);
+        assert!(matches!(*loop_body, Lambda::Lvar(id) if id.same(&cmp)));
     }
 
     #[test]

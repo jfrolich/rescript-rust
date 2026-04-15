@@ -43,6 +43,61 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: treat module-field aliases used under loop/function capture
+  boundaries the same way OCaml's backend does, so post-lowering alias
+  substitution stops erasing bindings like `let cmp = M.cmp` when the only use
+  sits inside a `for` body
+- Active backend focus for this slice is **Phase 2: Port Post-Lowering Lambda
+  Backend Stages** from `PLAN.md`, because the optimized-lambda boundary was
+  already green and the drift sat in Rust's `simplify_for_js_backend`
+  approximation of OCaml's `lam_pass_count` / `lam_pass_lets_dce` capture
+  semantics for alias materialization under loops
+- OCaml reference:
+  `compiler/core/lam_pass_count.ml`,
+  `compiler/core/lam_pass_lets_dce.ml`, and
+  `compiler/core/lam_util.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so nontrivial alias
+    substitutions no longer propagate across function / loop capture
+    boundaries, matching OCaml's use-count reset behavior under lambdas and
+    loops
+  - updated alias-use accounting so `Lwhile` / `Lfor` uses mark aliases as
+    captured before the final single-use inlining check, again matching
+    `Lam_pass_count.collect_occurs`
+  - added focused regression
+    `keeps_module_field_aliases_materialized_inside_for_loops_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml keeps_module_field_aliases_materialized_inside_for_loops_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml does_not_inline_captured_single_use_aliases -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml keeps_local_module_field_wrappers_materialized_like_functors_res -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact AST-path release repro for `tests/tests/src/bs_map_set_dict_test.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/bs_map_set_dict_test.mjs`
+    against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bs_map_set_dict_test.res` now matches exactly again: the
+    backend keeps `let cmp = m_dict$1.cmp;` materialized before the set loop,
+    matching the checked-in OCaml snapshot
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - the full authoritative sweep stayed flat, which means this correct
+    OCaml-aligned loop-capture fix traded against another still-unidentified
+    file in the broader alias/materialization cluster
+- Topline impact:
+  - JS snapshot parity: **499 / 657** -> **499 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **158** -> **158** (**no change**)
+- Keep this change because it ports OCaml's `Lam_pass_count` captured-use
+  semantics into Rust's post-lowering alias simplifier and resolves a real
+  emitted-JS drift on `bs_map_set_dict_test`; the flat topline indicates a
+  separate remaining file in the same backend cluster, not that this fix is
+  incorrect.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: keep OCaml's `ForRange` synthetic `*_finish` temp-name
   reservation in the enclosing printer scope so sibling loops in the same
   function keep the same suffix progression as `js_dump`, instead of
