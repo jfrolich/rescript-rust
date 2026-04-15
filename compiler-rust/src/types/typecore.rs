@@ -19947,7 +19947,8 @@ fn lookup_type_decl_for_path<'a>(
 // ── Comptime Application Detection ─────────────────────────────────────────
 
 /// Check if a function application is a call to a registered @comptime function.
-/// If so, attempt to specialize it. Returns None if not a comptime call.
+/// If so, generate specialized code, parse and type-check it.
+/// Returns None if not a comptime call.
 fn try_comptime_application(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -19959,49 +19960,143 @@ fn try_comptime_application(
     // Check if the function is a simple identifier
     let func_name = match &*funct_expr.pexp_desc {
         crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
-            // Get the identifier name from the longident
             tctx.arena.get_longident(lid.txt).to_string()
         }
         _ => return None,
     };
 
     // Check if it's a registered comptime function
-    let comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
+    let _comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
 
-    // For now, build TypeInfo from the expected type and pass it
-    // as the first comptime argument. This is a simplified version
-    // that handles the common case: encode(user, myUser) where
-    // the first arg is a type.
+    // Analyze arguments to find the comptime type argument.
+    // For the encode pattern: encodeField(user, myUser)
+    // The first arg is a type constructor (a module/type name used as value).
+    // We need to find the concrete type being encoded.
     //
-    // Full implementation would analyze the function's parameter
-    // annotations to determine which args are comptime.
+    // Strategy: type-check the runtime argument(s) first to determine
+    // the concrete type, then use that for TypeInfo.
+    let mut concrete_type = None;
+    let mut runtime_arg_name = None;
 
-    // Try to specialize the comptime function body
-    let mut comptime_bindings = std::collections::HashMap::new();
+    for (i, (_label, arg_idx)) in args.iter().enumerate() {
+        let arg_expr = tctx.arena.get_expr(*arg_idx);
+        // Try to type-check the argument to get its type
+        let ctx = tctx.type_ctx;
+        let arg_ty = ctx.new_var(None);
+        match type_expect(tctx, env, arg_expr, arg_ty, None) {
+            Ok(typed_arg) => {
+                let resolved_ty = ctx.repr(typed_arg.exp_type);
+                let desc = ctx.get_desc(resolved_ty);
 
-    // Build TypeInfo from the concrete type at the call site
-    // For now, use the expected type as a heuristic
+                // Check if this is a concrete type (not a type variable)
+                match &*desc {
+                    crate::types::type_expr::TypeDesc::Tconstr { .. }
+                    | crate::types::type_expr::TypeDesc::Ttuple(_) => {
+                        if concrete_type.is_none() {
+                            // First concrete-typed arg — this is probably the runtime value
+                            concrete_type = Some(typed_arg.exp_type);
+                            // Extract the variable name for code generation
+                            runtime_arg_name = match &*arg_expr.pexp_desc {
+                                crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
+                                    Some(tctx.arena.get_longident(lid.txt).to_string())
+                                }
+                                _ => Some(format!("__comptime_arg{}", i)),
+                            };
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    let concrete_type = concrete_type?;
+    let runtime_arg_name = runtime_arg_name.unwrap_or_else(|| "value".to_string());
+
+    // Build TypeInfo from the concrete type
     let mut visited = Vec::new();
     let type_info = crate::types::comptime::build_type_info(
         tctx.type_ctx,
         env,
-        expected_ty,
+        concrete_type,
         &mut visited,
     );
-    comptime_bindings.insert(
-        "T".to_string(),
-        crate::types::comptime::ComptimeValue::Type(type_info),
+
+    // Generate specialized source code
+    let specialized_source = match crate::types::comptime::generate_specialized_source(
+        &type_info,
+        &runtime_arg_name,
+        &mut { crate::types::comptime::DEFAULT_FUEL },
+    ) {
+        Ok(source) => source,
+        Err(msg) => return Some(Err(TypeCoreError::Other(msg))),
+    };
+
+    // Wrap in a function call: ((value) => SPECIALIZED_BODY)(runtime_arg)
+    let wrapper_source = format!(
+        "((value) => {})({})",
+        specialized_source, runtime_arg_name
     );
 
-    let mut spec_env = crate::types::comptime::SpecEnv::new(comptime_bindings);
-    match crate::types::comptime::specialize_expression(
-        &comptime_fn.body,
-        &mut spec_env,
-        tctx.type_ctx,
-        env,
-    ) {
-        Ok(specialized) => Some(Ok(specialized)),
-        Err(msg) => Some(Err(TypeCoreError::Other(msg))),
+    // Parse the generated source as an expression and type-check it
+    // in the current environment.
+    let expr_source = format!("{}", specialized_source);
+    let wrapped = format!("let _ = {}", expr_source);
+    let mut parser = crate::parser::Parser::new("__comptime__.res", &wrapped);
+    let structure = crate::parser::module::parse_structure(&mut parser);
+
+    if parser.has_errors() {
+        return Some(Err(TypeCoreError::Other(format!(
+            "Comptime generated invalid ReScript:\n{}\nErrors: {:?}",
+            expr_source,
+            parser.diagnostics()
+        ))));
+    }
+
+    // Extract the expression from `let _ = EXPR`
+    let parsed_expr = match structure.first() {
+        Some(item) => match &*item.pstr_desc {
+            crate::parser::ast::StructureItemDesc::Pstr_value(inner) => {
+                let (_, ref bindings) = **inner;
+                if let Some(vb) = bindings.first() {
+                    let expr = parser.arena().get_expr(vb.pvb_expr);
+                    expr.clone()
+                } else {
+                    return Some(Err(TypeCoreError::Other(
+                        "Comptime: no binding in generated code".to_string(),
+                    )));
+                }
+            }
+            _ => {
+                return Some(Err(TypeCoreError::Other(
+                    "Comptime: unexpected structure item".to_string(),
+                )));
+            }
+        },
+        None => {
+            return Some(Err(TypeCoreError::Other(
+                "Comptime: empty generated structure".to_string(),
+            )));
+        }
+    };
+
+    // Type-check the generated expression in the current environment.
+    // We need a fresh arena reference for the generated code — but we can't
+    // change tctx.arena (it's borrowed). Instead, we type-check the expression
+    // using a temporary context that shares the same type context and env.
+    //
+    // For now, we'll type-check by creating a temporary TypeCheckContext
+    // with the generated parser's arena.
+    let generated_arena = parser.into_arena();
+    let mut gen_tctx = TypeCheckContext::new(tctx.type_ctx, &generated_arena);
+    gen_tctx.persistent_env = tctx.persistent_env.clone();
+    // Copy comptime functions to the sub-context
+    gen_tctx.comptime_functions = tctx.comptime_functions.clone();
+
+    match type_expect(&mut gen_tctx, env, &parsed_expr, expected_ty, None) {
+        Ok(typed_expr) => Some(Ok(typed_expr)),
+        Err(e) => Some(Err(e)),
     }
 }
 

@@ -453,6 +453,123 @@ pub fn match_typeinfo_pattern(
 
 // ── Specialization Engine ───────────────────────────────────────────────────
 
+// ── Source-level Specialization ──────────────────────────────────────────────
+//
+// Instead of trying to rewrite the typed tree (which requires constructing
+// nodes with correct types/envs/idents), we generate ReScript source code
+// from the comptime evaluation and let the normal type checker handle it.
+//
+// This is the same approach PPXs use and avoids the complexity of typed
+// tree construction.
+
+/// Generate specialized ReScript source code for a comptime function call.
+///
+/// Takes the function body's source structure, comptime bindings (type info),
+/// and produces ReScript source that can be parsed and type-checked normally.
+pub fn generate_specialized_source(
+    type_info: &TypeInfo,
+    runtime_value_name: &str,
+    fuel: &mut usize,
+) -> Result<String, String> {
+    if *fuel == 0 {
+        return Err("Comptime fuel exhausted".to_string());
+    }
+    *fuel -= 1;
+
+    match type_info {
+        TypeInfo::String => {
+            Ok(format!("Js.Json.string({})", runtime_value_name))
+        }
+        TypeInfo::Int => {
+            Ok(format!("Js.Json.number(Int.toFloat({}))", runtime_value_name))
+        }
+        TypeInfo::Float => {
+            Ok(format!("Js.Json.number({})", runtime_value_name))
+        }
+        TypeInfo::Bool => {
+            Ok(format!("Js.Json.boolean({})", runtime_value_name))
+        }
+        TypeInfo::Record { fields, .. } => {
+            let mut lines = Vec::new();
+            lines.push("{".to_string());
+            lines.push("  let obj = Js.Dict.empty()".to_string());
+            for field in fields {
+                let field_value = format!("{}.{}", runtime_value_name, field.name);
+                let encoded = generate_specialized_source(
+                    &field.typ,
+                    &field_value,
+                    fuel,
+                )?;
+                if field.optional {
+                    lines.push(format!(
+                        "  switch {}.{} {{ | Some(v) => Js.Dict.set(obj, \"{}\", {}) | None => () }}",
+                        runtime_value_name,
+                        field.name,
+                        field.name,
+                        generate_specialized_source(
+                            &field.typ,
+                            "v",
+                            fuel,
+                        )?
+                    ));
+                } else {
+                    lines.push(format!(
+                        "  Js.Dict.set(obj, \"{}\", {})",
+                        field.name, encoded
+                    ));
+                }
+            }
+            lines.push("  Js.Json.object_(obj)".to_string());
+            lines.push("}".to_string());
+            Ok(lines.join("\n"))
+        }
+        TypeInfo::Array { element } => {
+            let inner = generate_specialized_source(
+                element,
+                "v",
+                fuel,
+            )?;
+            Ok(format!(
+                "{}->Array.map(v => {})->Js.Json.array",
+                runtime_value_name, inner
+            ))
+        }
+        TypeInfo::Option { inner } => {
+            let inner_encoded = generate_specialized_source(
+                inner,
+                "v",
+                fuel,
+            )?;
+            Ok(format!(
+                "switch {} {{ | Some(v) => {} | None => Js.Json.null }}",
+                runtime_value_name, inner_encoded
+            ))
+        }
+        _ => {
+            Err(format!("Cannot encode type: {:?}", type_info))
+        }
+    }
+}
+
+/// Generate a complete specialized function for a comptime encode call.
+/// Returns ReScript source for a let binding that can be spliced into the module.
+pub fn generate_encode_binding(
+    func_name: &str,
+    type_info: &TypeInfo,
+    type_name: &str,
+) -> Result<String, String> {
+    let mut fuel = DEFAULT_FUEL;
+    let body = generate_specialized_source(
+        type_info,
+        "value",
+        &mut fuel,
+    )?;
+    Ok(format!(
+        "let {}_specialized = (value: {}) => {}",
+        func_name, type_name, body
+    ))
+}
+
 /// Environment for comptime specialization.
 pub struct SpecEnv {
     /// Comptime bindings: name → value.
