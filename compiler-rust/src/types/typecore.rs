@@ -13300,7 +13300,7 @@ fn type_letmodule(
                 let md = crate::types::typedtree::ModuleExpr {
                     mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_structure(structure),
                     mod_loc: module_expr.pmod_loc,
-                    mod_type: crate::types::typedtree::ModuleType::placeholder(),
+                    mod_type: crate::types::decl::ModuleType::MtySignature(sig_items.clone()),
                     mod_env: EnvRef(0),
                     mod_attributes: Attributes::new(),
                 };
@@ -13672,7 +13672,7 @@ fn type_pack(
                         placeholder_lid,
                     ),
                     mod_loc: loc,
-                    mod_type: crate::types::typedtree::ModuleType::placeholder(),
+                    mod_type: crate::types::decl::ModuleType::MtySignature(vec![]),
                     mod_env: EnvRef(0),
                     mod_attributes: Attributes::new(),
                 })),
@@ -13769,7 +13769,6 @@ fn type_pack(
         ctx,
     )
     .unwrap_or(crate::types::decl::ModuleType::MtyIdent(pack_path.clone()));
-    let package_mty = typed_module_type_for_unpack(tctx.arena, loc, &decl_package_mty);
     let constraint_arg_mty =
         crate::types::typemod::decl_module_type_from_typed_module_expr_for_constraint_arg(
             &typed_module,
@@ -13811,12 +13810,12 @@ fn type_pack(
     let wrapped_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
             Box::new(typed_module),
-            package_mty.clone(),
+            decl_package_mty.clone(),
             crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
             coercion,
         ),
         mod_loc: typed_module_loc,
-        mod_type: package_mty,
+        mod_type: decl_package_mty,
         mod_env: EnvRef(0),
         mod_attributes: Attributes::new(),
     };
@@ -13912,11 +13911,15 @@ fn typed_module_type_for_unpack(
     match module_type {
         DeclMty::MtyIdent(path) => crate::types::typedtree::ModuleType {
             mty_desc: ModuleTypeDesc::Tmty_ident(path.clone(), arena.placeholder_located(loc)),
+            mty_type: module_type.clone(),
+            mty_env: EnvRef(0),
             mty_loc: loc,
             mty_attributes: Attributes::new(),
         },
         DeclMty::MtyAlias(_, path) => crate::types::typedtree::ModuleType {
             mty_desc: ModuleTypeDesc::Tmty_alias(path.clone(), arena.placeholder_located(loc)),
+            mty_type: module_type.clone(),
+            mty_env: EnvRef(0),
             mty_loc: loc,
             mty_attributes: Attributes::new(),
         },
@@ -13955,7 +13958,6 @@ fn type_expect_with_module_unpacks(
     };
 
     let decl_mty = module_type_from_package_binding(tctx, env, unpack.ty);
-    let typed_mty = typed_module_type_for_unpack(tctx.arena, unpack.loc_idx, &decl_mty);
     // Match OCaml Env.enter_module: create one fresh ident used for
     // both the body environment binding and the Texp_letmodule node.
     let letmod_id = tctx.type_ctx.create_ident(unpack.id.name());
@@ -13970,7 +13972,7 @@ fn type_expect_with_module_unpacks(
     body_env.add_module(
         letmod_id.clone(),
         crate::types::decl::ModuleDeclaration {
-            md_type: decl_mty,
+            md_type: decl_mty.clone(),
             md_attributes: vec![],
             md_loc: crate::location::Location::none(),
             md_path: None,
@@ -14017,10 +14019,10 @@ fn type_expect_with_module_unpacks(
     let unpack_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_unpack(
             unpack_expr,
-            typed_mty.clone(),
+            decl_mty.clone(),
         ),
         mod_loc: unpack.loc_idx,
-        mod_type: typed_mty,
+        mod_type: decl_mty,
         mod_env: EnvRef(0),
         mod_attributes: Attributes::new(),
     };

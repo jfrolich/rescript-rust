@@ -293,8 +293,12 @@ impl PersistentEnv {
             let typed_signature =
                 transl_signature(&mut tctx, &env, parser.arena(), &signature).ok()?;
             let fallback_pers = tctx.persistent_env.take()?;
+            let decl_signature =
+                crate::types::typemod::decl_signature_from_typed_signature(&typed_signature);
             let typed_module_type = TypedModuleType {
                 mty_desc: TypedModuleTypeDesc::Tmty_signature(typed_signature),
+                mty_type: crate::types::decl::ModuleType::MtySignature(decl_signature),
+                mty_env: crate::types::typedtree::EnvRef(0),
                 mty_loc: crate::parse_arena::LocIdx(0),
                 mty_attributes: crate::parser::ast::Attributes::new(),
             };

@@ -569,6 +569,7 @@ fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structure) 
     }
 
     fn visit_module_expr(max_stamp: &mut i32, module_expr: &ModuleExpr) {
+        visit_decl_module_type(max_stamp, &module_expr.mod_type);
         match &module_expr.mod_desc {
             ModuleExprDesc::Tmod_ident(path, _) => visit_path(max_stamp, path),
             ModuleExprDesc::Tmod_structure(structure) => visit_structure(max_stamp, structure),
@@ -586,13 +587,13 @@ fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structure) 
             }
             ModuleExprDesc::Tmod_constraint(module_expr, module_type, constraint_, coercion) => {
                 visit_module_expr(max_stamp, module_expr);
-                visit_module_type(max_stamp, module_type);
+                visit_decl_module_type(max_stamp, module_type);
                 visit_module_type_constraint(max_stamp, constraint_);
                 visit_module_coercion(max_stamp, coercion);
             }
             ModuleExprDesc::Tmod_unpack(expr, module_type) => {
                 visit_expression(max_stamp, expr);
-                visit_module_type(max_stamp, module_type);
+                visit_decl_module_type(max_stamp, module_type);
             }
         }
     }
