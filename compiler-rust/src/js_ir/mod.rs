@@ -1289,6 +1289,18 @@ impl Statement {
         Self::new(StatementDesc::Exp(expr))
     }
 
+    /// Create a block statement using OCaml's block normalization rules.
+    pub fn block(block: Block) -> Self {
+        match block.as_slice() {
+            [] => Self::new(StatementDesc::Block(vec![])),
+            [stmt] => match &stmt.desc {
+                StatementDesc::Block(inner) => Self::block(inner.clone()),
+                _ => stmt.clone(),
+            },
+            _ => Self::new(StatementDesc::Block(block)),
+        }
+    }
+
     /// Create an if statement
     pub fn if_(cond: Expression, then_: Block, else_: Block) -> Self {
         simplify_if_statement(cond, then_, else_)
@@ -1333,7 +1345,7 @@ impl Statement {
 fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statement {
     match cond.desc {
         ExpressionDesc::Bool(value) => {
-            return Statement::new(StatementDesc::Block(if value { then_ } else { else_ }));
+            return Statement::block(if value { then_ } else { else_ });
         }
         ExpressionDesc::JsNot(inner) if !else_.is_empty() => {
             return simplify_if_statement(*inner, else_, then_);
@@ -1362,14 +1374,14 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
             vec![],
         )));
         block.extend(then_);
-        return Statement::new(StatementDesc::Block(block));
+        return Statement::block(block);
     }
 
     if block_last_is_terminal(&then_) {
         let mut block = Vec::with_capacity(1 + else_.len());
         block.push(Statement::new(StatementDesc::If(cond, then_, vec![])));
         block.extend(else_);
-        return Statement::new(StatementDesc::Block(block));
+        return Statement::block(block);
     }
 
     if let (Some((lhs_then, rhs_then)), Some((lhs_else, rhs_else))) = (
@@ -1432,7 +1444,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
 
 fn block_last_is_terminal(block: &Block) -> bool {
     matches!(
-        last_unwrapped_statement(block).map(|stmt| &stmt.desc),
+        last_statement(block).map(|stmt| &stmt.desc),
         Some(StatementDesc::Return(_))
             | Some(StatementDesc::Throw(_))
             | Some(StatementDesc::Continue)
@@ -1440,7 +1452,7 @@ fn block_last_is_terminal(block: &Block) -> bool {
 }
 
 fn single_return_expr(block: &Block) -> Option<Expression> {
-    let stmt = single_unwrapped_statement(block)?;
+    let stmt = single_statement(block)?;
     match &stmt.desc {
         StatementDesc::Return(expr) => Some(expr.clone()),
         _ => None,
@@ -1448,7 +1460,7 @@ fn single_return_expr(block: &Block) -> Option<Expression> {
 }
 
 fn single_assignment_expr(block: &Block) -> Option<(Expression, Expression)> {
-    let stmt = single_unwrapped_statement(block)?;
+    let stmt = single_statement(block)?;
     let StatementDesc::Exp(expr) = &stmt.desc else {
         return None;
     };
@@ -1485,7 +1497,7 @@ fn same_assignment_target(lhs: &Expression, rhs: &Expression) -> bool {
 }
 
 fn single_exp_expr(block: &Block) -> Option<Expression> {
-    let stmt = single_unwrapped_statement(block)?;
+    let stmt = single_statement(block)?;
     let StatementDesc::Exp(expr) = &stmt.desc else {
         return None;
     };
@@ -1493,33 +1505,22 @@ fn single_exp_expr(block: &Block) -> Option<Expression> {
 }
 
 fn single_if_block(block: &Block) -> Option<(&Expression, &Block, &Block)> {
-    let stmt = single_unwrapped_statement(block)?;
+    let stmt = single_statement(block)?;
     match &stmt.desc {
         StatementDesc::If(cond, then_block, else_block) => Some((cond, then_block, else_block)),
         _ => None,
     }
 }
 
-fn unwrap_single_block_statement(stmt: &Statement) -> &Statement {
-    match &stmt.desc {
-        StatementDesc::Block(block) if block.len() == 1 => unwrap_single_block_statement(&block[0]),
-        _ => stmt,
-    }
-}
-
-fn single_unwrapped_statement(block: &Block) -> Option<&Statement> {
+fn single_statement(block: &Block) -> Option<&Statement> {
     let [stmt] = block.as_slice() else {
         return None;
     };
-    Some(unwrap_single_block_statement(stmt))
+    Some(stmt)
 }
 
-fn last_unwrapped_statement(block: &Block) -> Option<&Statement> {
-    let stmt = block.last()?;
-    match &stmt.desc {
-        StatementDesc::Block(inner) if inner.len() == 1 => last_unwrapped_statement(inner),
-        _ => Some(stmt),
-    }
+fn last_statement(block: &Block) -> Option<&Statement> {
+    block.last()
 }
 
 fn negate_condition(cond: Expression) -> Expression {
@@ -2890,6 +2891,81 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn test_if_statement_does_not_unwrap_single_block_wrapped_else_if_for_or_merge() {
+        let outer = Ident::create_local("outer");
+        let inner = Ident::create_local("inner");
+        let then_block = vec![Statement::return_(Expression::number(Number::int(1)))];
+        let else_block = vec![Statement::new(StatementDesc::Block(vec![Statement::new(
+            StatementDesc::If(
+                Expression::var(inner.clone()),
+                then_block.clone(),
+                vec![Statement::return_(Expression::number(Number::int(0)))],
+            ),
+        )]))];
+
+        let stmt = Statement::if_(Expression::var(outer.clone()), then_block, else_block);
+
+        let StatementDesc::Block(block) = &stmt.desc else {
+            panic!("expected the wrapped else-if to stay as a block, got {stmt:?}");
+        };
+
+        let [guard, wrapped_else] = block.as_slice() else {
+            panic!("expected a guard if followed by the wrapped else branch");
+        };
+
+        assert!(matches!(
+            &guard.desc,
+            StatementDesc::If(
+                Expression {
+                    desc: ExpressionDesc::Var(VIdent::Id(id)),
+                    ..
+                },
+                then_block,
+                else_block
+            ) if id.same(&outer) && matches!(
+                then_block.as_slice(),
+                [Statement {
+                    desc: StatementDesc::Return(Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                        ..
+                    }),
+                    ..
+                }]
+            ) && else_block.is_empty()
+        ));
+        assert!(matches!(
+            &wrapped_else.desc,
+            StatementDesc::Block(inner_block) if matches!(
+                inner_block.as_slice(),
+                [Statement {
+                    desc: StatementDesc::If(
+                        Expression {
+                            desc: ExpressionDesc::Var(VIdent::Id(id)),
+                            ..
+                        },
+                        _,
+                        _
+                    ),
+                    ..
+                }] if id.same(&inner)
+            )
+        ));
+    }
+
+    #[test]
+    fn test_if_statement_does_not_treat_wrapped_return_block_as_terminal() {
+        let cond = Expression::var(Ident::create_local("cond"));
+        let then_block = vec![Statement::new(StatementDesc::Block(vec![Statement::return_(
+            Expression::number(Number::int(1)),
+        )]))];
+        let else_block = vec![Statement::exp(Expression::number(Number::int(2)))];
+
+        let stmt = Statement::if_(cond, then_block, else_block);
+
+        assert!(matches!(stmt.desc, StatementDesc::If(_, _, _)));
     }
 
     #[test]

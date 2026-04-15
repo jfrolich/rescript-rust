@@ -43,6 +43,67 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: match OCaml's `Js_stmt_make.block` normalization and direct
+  block-shape matching in `if_`, instead of combining raw single-statement
+  `Block` wrappers with Rust-only recursive helper unwrapping during JS IR
+  `if` simplification
+- Active backend focus for this slice is **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; this is downstream JS statement shaping in
+  `compiler-rust/src/js_ir/mod.rs`, aligned to OCaml's `js_stmt_make`
+  behavior rather than typedtree, lambda, or printer-only rewrites
+- OCaml reference:
+  `compiler/core/js_stmt_make.ml`, specifically `block` and `if_`, where
+  single-element blocks are normalized up front and the later merge rules
+  inspect the resulting block structure directly rather than recursively
+  looking through nested single `Block` wrappers
+- Rust change:
+  - added `Statement::block(...)` in `compiler-rust/src/js_ir/mod.rs` to
+    mirror OCaml's `block` normalization for `[]`, `[stmt]`, and
+    `[Block bs]`
+  - updated `simplify_if_statement(...)` to route its block-producing
+    rewrites through `Statement::block(...)` instead of constructing raw
+    `StatementDesc::Block(...)` wrappers
+  - updated the `single_return_expr`, `single_assignment_expr`,
+    `single_exp_expr`, `single_if_block`, and `block_last_is_terminal`
+    helpers to stop recursively unwrapping nested single-statement `Block`s
+    before applying OCaml's `if_` merge rules
+  - added focused regression coverage in
+    `test_if_statement_does_not_unwrap_single_block_wrapped_else_if_for_or_merge`
+    and
+    `test_if_statement_does_not_treat_wrapped_return_block_as_terminal`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_preserves_single_block_wrapped_nested_if_when_shared_else_is_empty -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_does_not_unwrap_single_block_wrapped_else_if_for_or_merge -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_does_not_treat_wrapped_return_block_as_terminal -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - direct release repro for
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res`, diffing
+    `/tmp/VariantPatternMatchingSpreadsWithPayloads.mjs` against the checked-in
+    snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as a
+    broader unchanged guard
+  - `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` remained
+    unchanged, which confirms this fix is narrower than that remaining
+    fallthrough-vs-explicit-else hunk
+  - the full authoritative sweep in this worktree improved to **522 / 657**
+    passing, **0** compile errors, and **135** output diffs
+- Topline impact:
+  - JS snapshot parity: **521 / 657** -> **522 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **136** -> **135** (**-1**)
+- Keep this change because OCaml's `js_stmt_make` normalizes block shape before
+  `if_` simplification and then matches block structure literally; the previous
+  Rust combination of raw single-statement `Block` wrappers plus recursive
+  helper unwrapping was not the same algorithm, and the authoritative sweep
+  confirms that restoring the OCaml block semantics removes a real snapshot
+  diff cluster.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: preserve OCaml's singleton-array indentation when the sole
   element is itself a multiline expression, while explicitly avoiding the
   broader multiline-array and parenthesized-object indentation changes that
