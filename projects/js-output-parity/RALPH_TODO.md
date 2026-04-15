@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 525 / 657 JS snapshots passing, 0 compile errors, 132 output diffs
+**Status:** 529 / 657 JS snapshots passing, 0 compile errors, 128 output diffs
 
 ## Goal
 
@@ -35,11 +35,69 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **525 / 657**
+- JS snapshot parity: **529 / 657**
 - Compile errors: **0**
-- Output diffs: **132**
+- Output diffs: **128**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: port OCaml's `Js_of_lam_option.destruct_optional` handling for
+  `@obj` optional fields so statically-known `Some x` values inline directly
+  into the object literal while unknown option values still lower through the
+  temp-object plus conditional assignment path
+- Active backend focus for this slice is backend object lowering in
+  `compiler-rust/src/lambda/compile.rs` for `Pjs_object_create`, aligned to
+  OCaml's `lam_compile_external_obj` behavior rather than a printer-only fix
+- OCaml reference:
+  `compiler/core/lam_compile.ml`,
+  `compiler/core/lam_compile_external_obj.ml`,
+  `compiler/core/js_of_lam_option.ml`, and
+  `compiler/core/lam_compile_external_call.ml`
+- Rust change:
+  - updated `compile_js_object_create` so `ExternalObjLabel::Optional`
+    mirrors OCaml's split between statically-known `Some` and unknown option
+    values
+  - `Undefined` now omits the field entirely, `OptionalBlock(inner, _)`
+    lowers immediately into the inline object literal, and the unknown-option
+    path unwraps with `val_from_option_expr(...)` unless
+    `for_sure_no_nested_option` is already known
+  - added focused regression coverage in
+    `lowers_js_object_create_with_statically_present_optional_field_inline_like_ocaml`
+    and
+    `lowers_js_object_create_with_unknown_optional_field_to_conditional_assignment_like_ocaml`
+  - updated `lowers_js_object_create_with_marshaled_fields` to assert on
+    `compile_expr(...)` directly so the test keeps checking object lowering
+    even when a pure top-level object literal would otherwise be shaken away
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_js_object_create_with_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact-args release repro for `tests/tests/src/demo_page.res`, diffing
+    `/tmp/demo_page.mjs` against the checked-in snapshot from
+    `tests/tests/lib/bs`
+  - exact-args release guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot from
+    `tests/tests/lib/bs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/demo_page.res` is now an exact snapshot match again
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the broader unchanged guard
+  - the full authoritative sweep in this dirty worktree now reports
+    **529 / 657** passing, **0** compile errors, and **128** output diffs
+  - `demo_page` and `test_react` dropped out of the diff set after the rebuild
+  - the remaining optional-object cluster still includes
+    `gpr_1072`, `gpr_1072_reg`, `gpr_1409_test`, `gpr_2503_test`,
+    `optional_regression_test`, and `Stdlib_TempTests`
+- Topline impact:
+  - JS snapshot parity: **526 / 657** -> **529 / 657** (**+3**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **131** -> **128** (**-3**)
+- Keep this change because it ports the OCaml backend rule for optional
+  external-object fields into Rust's lowering path instead of patching
+  emitted text after the fact, and the authoritative harness confirms the
+  backend-aligned fix improves parity.
 
 Latest iteration on **2026-04-15**:
 

@@ -6168,38 +6168,66 @@ impl LambdaCompiler {
                         }
                     }
                 },
-                ExternalObjLabel::Optional { name, .. } => {
+                ExternalObjLabel::Optional {
+                    name,
+                    for_sure_no_nested_option,
+                } => {
                     let arg = runtime_args
                         .next()
                         .unwrap_or_else(|| Expression::undefined(false));
-                    if matches!(arg.desc, ExpressionDesc::Undefined { .. }) {
-                        continue;
-                    }
 
-                    let prepared = if self.expr_is_simple(&arg) {
-                        arg
-                    } else {
-                        let tmp = self.fresh_ident("obj");
-                        prelude.push(Statement::variable(VariableDeclaration {
-                            ident: tmp.clone(),
-                            value: Some(arg),
-                            property: LetKind::Variable,
-                            ident_info: IdentInfo::default(),
-                        }));
-                        Expression::var(tmp)
-                    };
+                    match arg.desc {
+                        ExpressionDesc::Undefined { .. } => continue,
+                        // Match OCaml's Js_of_lam_option.destruct_optional:
+                        // statically-known `Some x` goes straight into the
+                        // object literal, while unknown option values keep the
+                        // temp-object plus conditional assignment path.
+                        ExpressionDesc::OptionalBlock(inner, _) => {
+                            let (value, effect) = self.lower_external_arg_value_and_effect(
+                                *inner,
+                                ExternalArgLabel::Label,
+                                &obj_param.obj_arg_type,
+                            );
+                            if let Some(effect) = effect {
+                                effects.push(effect);
+                            }
+                            if let Some(value) = value {
+                                props.push((PropertyName::lit(name.clone()), value));
+                            }
+                        }
+                        other => {
+                            let arg = Expression::new(other);
+                            let prepared = if self.expr_is_simple(&arg) {
+                                arg
+                            } else {
+                                let tmp = self.fresh_ident("obj");
+                                prelude.push(Statement::variable(VariableDeclaration {
+                                    ident: tmp.clone(),
+                                    value: Some(arg),
+                                    property: LetKind::Variable,
+                                    ident_info: IdentInfo::default(),
+                                }));
+                                Expression::var(tmp)
+                            };
 
-                    let (value, effect) = self.lower_external_arg_value_and_effect(
-                        prepared.clone(),
-                        ExternalArgLabel::Empty,
-                        &obj_param.obj_arg_type,
-                    );
-                    if let Some(value) = value {
-                        optional_assignments.push((
-                            name.clone(),
-                            prepared,
-                            self.add_external_effect(effect, value),
-                        ));
+                            let value_arg = if *for_sure_no_nested_option {
+                                prepared.clone()
+                            } else {
+                                self.val_from_option_expr(prepared.clone())
+                            };
+                            let (value, effect) = self.lower_external_arg_value_and_effect(
+                                value_arg,
+                                ExternalArgLabel::Empty,
+                                &obj_param.obj_arg_type,
+                            );
+                            if let Some(value) = value {
+                                optional_assignments.push((
+                                    name.clone(),
+                                    prepared,
+                                    self.add_external_effect(effect, value),
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -21854,7 +21882,7 @@ let fib3 = n => {
     fn lowers_js_object_create_with_marshaled_fields() {
         let mut compiler = LambdaCompiler::new();
         let name_ident = Ident::create_local("name");
-        let lam = Lambda::prim(
+        let compiled = compiler.compile_expr(&Lambda::prim(
             Primitive::PjsObjectCreate(vec![
                 ExternalObjSpec {
                     obj_arg_type: ExternalArgAttr::ArgCst(ExternalArgConst::StringLit(
@@ -21890,17 +21918,11 @@ let fib3 = n => {
                 Lambda::const_(Constant::JsUndefined { is_unit: true }),
             ],
             Location::none(),
-        );
+        ));
 
-        let program = compiler.compile_program(&lam);
-        let [stmt] = program.block.as_slice() else {
-            panic!("expected a single expression statement");
-        };
-        match &stmt.desc {
-            StatementDesc::Exp(Expression {
-                desc: ExpressionDesc::Object(_, props),
-                ..
-            }) => {
+        assert!(compiled.prelude.is_empty());
+        match &compiled.expr.desc {
+            ExpressionDesc::Object(_, props) => {
                 assert_eq!(props.len(), 3);
                 assert!(matches!(
                     &props[0],
@@ -21939,7 +21961,143 @@ let fib3 = n => {
                     ) if name == "someOther" && txt == "true"
                 ));
             }
-            other => panic!("expected an object literal, got {other:?}"),
+            other => panic!("expected an object literal expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_js_object_create_with_statically_present_optional_field_inline_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PjsObjectCreate(vec![ExternalObjSpec {
+                obj_arg_type: ExternalArgAttr::Nothing,
+                obj_arg_label: ExternalObjLabel::Optional {
+                    name: "alt".to_string(),
+                    for_sure_no_nested_option: false,
+                },
+            }]),
+            vec![Lambda::prim(
+                Primitive::Psome,
+                vec![Lambda::const_(Constant::string("pic"))],
+                Location::none(),
+            )],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        match &compiled.expr.desc {
+            ExpressionDesc::Object(_, props) => {
+                assert_eq!(props.len(), 1);
+                assert!(matches!(
+                    &props[0],
+                    (
+                        PropertyName::Lit(name),
+                        Expression {
+                            desc: ExpressionDesc::Str { txt, .. },
+                            ..
+                        },
+                    ) if name == "alt" && txt == "pic"
+                ));
+            }
+            other => panic!("expected an inline object literal expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_js_object_create_with_unknown_optional_field_to_conditional_assignment_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let opt = Ident::create_local("opt");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PjsObjectCreate(vec![ExternalObjSpec {
+                obj_arg_type: ExternalArgAttr::Nothing,
+                obj_arg_label: ExternalObjLabel::Optional {
+                    name: "alt".to_string(),
+                    for_sure_no_nested_option: false,
+                },
+            }]),
+            vec![Lambda::var(opt.clone())],
+            Location::none(),
+        ));
+
+        let ExpressionDesc::Var(crate::js_ir::VIdent::Id(obj)) = &compiled.expr.desc else {
+            panic!("expected the conditional path to return the temp object");
+        };
+
+        let [init_stmt, if_stmt] = compiled.prelude.as_slice() else {
+            panic!("expected object init plus one conditional assignment");
+        };
+
+        match &init_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Object(_, props),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(obj));
+                assert!(props.is_empty());
+            }
+            other => panic!("expected an empty object temp, got {other:?}"),
+        }
+
+        match &if_stmt.desc {
+            StatementDesc::If(cond, then_block, else_block) => {
+                assert!(else_block.is_empty());
+                assert!(matches!(
+                    &cond.desc,
+                    ExpressionDesc::Bin(
+                        BinOp::NotEqEq,
+                        left,
+                        right,
+                    ) if matches!(
+                        left.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                            ..
+                        } if id.same(&opt)
+                    ) && matches!(
+                        right.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Undefined { is_unit: false },
+                            ..
+                        }
+                    )
+                ));
+
+                let [assign_stmt] = then_block.as_slice() else {
+                    panic!("expected one conditional assignment");
+                };
+                match &assign_stmt.desc {
+                    StatementDesc::Exp(Expression {
+                        desc: ExpressionDesc::Bin(BinOp::Eq, target, value),
+                        ..
+                    }) => {
+                        assert!(matches!(
+                            target.as_ref(),
+                            Expression {
+                                desc: ExpressionDesc::StaticIndex(target_obj, field, _),
+                                ..
+                            } if field == "alt"
+                                && matches!(
+                                    target_obj.as_ref(),
+                                    Expression {
+                                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                                        ..
+                                    } if id.same(obj)
+                                )
+                        ));
+                        assert_eq!(
+                            print_expression(value),
+                            "Primitive_option.valFromOption(opt)"
+                        );
+                    }
+                    other => panic!("expected an object-field assignment, got {other:?}"),
+                }
+            }
+            other => panic!("expected a conditional optional assignment, got {other:?}"),
         }
     }
 
