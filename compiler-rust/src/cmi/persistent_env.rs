@@ -695,6 +695,13 @@ impl PersistentEnv {
     /// Load a module from a .cmi file, or fall back to the source path embedded
     /// in a sibling `.ast` when the module is implementation-only.
     fn load_module<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<PersStruct> {
+        // In in-process mode, the registry/source fallback is authoritative.
+        // Never touch `.cmi` files on disk, even if stale artifacts happen to
+        // exist on the load path.
+        if self.in_process_mode {
+            return self.load_module_from_source_path_fallback(name, ctx);
+        }
+
         let cmi_filename = format!("{}.cmi", name);
         if let Some(full_path) = self.find_in_path_uncap(&cmi_filename) {
             let cmi = match cmi_format::read_cmi(&full_path) {
@@ -714,14 +721,6 @@ impl PersistentEnv {
                 full_path,
                 ctx,
             ));
-        }
-
-        // In in-process mode, try source-based type checking as a fallback.
-        // This handles implicit dependencies (e.g., modules accessed via
-        // `-open Pervasives`) that aren't in the explicit dep graph and
-        // haven't been compiled yet in the current wave.
-        if self.in_process_mode {
-            return self.load_module_from_source_path_fallback(name, ctx);
         }
 
         self.load_module_from_source_fallback(name, ctx)
@@ -767,7 +766,16 @@ impl PersistentEnv {
     /// Pident paths that match the implementation's local paths.
     /// In OCaml, ps_sig retains raw Pident paths; path substitution happens
     /// lazily in components_of_module_maker, not on ps_sig.
-    pub fn read_raw_sig<'a>(&self, name: &str, ctx: &'a TypeContext<'a>) -> Option<Signature> {
+    pub fn read_raw_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<Signature> {
+        if self.in_process_mode {
+            if let Some(loaded) = self.cache.get(name).and_then(|loaded| loaded.as_ref()) {
+                return Some(loaded.ps_sig.clone());
+            }
+
+            let loaded = self.find_pers_struct(name, ctx)?;
+            return Some(loaded.ps_sig.clone());
+        }
+
         let cmi_filename = format!("{}.cmi", name);
         let full_path = self.find_in_path_uncap(&cmi_filename)?;
         let cmi = cmi_format::read_cmi(&full_path).ok()?;
@@ -1033,6 +1041,43 @@ fn register_sig_types_recursive<'a>(
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::IdGenerator;
+    use tempfile::tempdir;
+
+    #[test]
+    fn in_process_ignores_bogus_cmi_on_load_path() {
+        let tmp = tempdir().expect("failed to create tempdir");
+        let load_path = tmp.path().join("lib").join("ocaml");
+        std::fs::create_dir_all(&load_path).expect("failed to create load path");
+        std::fs::write(load_path.join("Foo.cmi"), b"bogus cmi").expect("failed to write bogus cmi");
+
+        let source_path = tmp.path().join("Foo.res");
+        std::fs::write(&source_path, "let answer = 1\n").expect("failed to write source");
+
+        let id_gen = IdGenerator::new();
+        let type_ctx = TypeContext::new(&id_gen);
+
+        let mut env = PersistentEnv::new();
+        env.set_in_process_mode(true);
+        env.set_nopervasives(true);
+        env.add_load_path(load_path);
+        Arc::make_mut(&mut env.source_fallback_paths).insert("Foo".to_string(), source_path);
+
+        let loaded = env
+            .find_pers_struct("Foo", &type_ctx)
+            .expect("expected source fallback to load Foo");
+        assert_eq!(loaded.ps_name, "Foo");
+
+        let raw_sig = env
+            .read_raw_sig("Foo", &type_ctx)
+            .expect("expected raw signature from in-memory source load");
+        assert!(!raw_sig.is_empty());
     }
 }
 
