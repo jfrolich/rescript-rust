@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 485 / 657 JS snapshots passing, 0 compile errors, 172 output diffs
+**Status:** 486 / 657 JS snapshots passing, 0 compile errors, 171 output diffs
 
 ## Goal
 
@@ -35,11 +35,68 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **485 / 657**
+- JS snapshot parity: **486 / 657**
 - Compile errors: **0**
-- Output diffs: **172**
+- Output diffs: **171**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: remove Rust's remaining second-chance named-function inlining
+  in `simplify_apply(...)` so the JS backend only inlines a named callee when
+  the original callee is already syntactically `Lvar`, instead of retrying
+  after projected/module-field simplification turns some other callee shape
+  into an `Lvar`
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`, because the mismatch still lived in the final
+  post-lowering lambda cleanup boundary before JS IR lowering:
+  `lam_pass_remove_alias.ml` makes the named-function inlining decision only in
+  the `Lapply {ap_func = Lvar v as fn; ...}` branch, while its fallback
+  `normal()` path rebuilds `Lam.apply (simpl fn) ...` without retrying after
+  the callee simplifies
+- OCaml reference:
+  `compiler/core/lam_pass_remove_alias.ml`, especially the
+  `Lapply {ap_func = Lvar v as fn; ...}` branch versus the fallback
+  `normal()` path that returns `Lam.apply (simpl fn) ap_args ap_info`;
+  `compiler/core/lam_compile_main.ml`; and
+  `compiler/core/lam_compile.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so
+    `simplify_apply(...)` no longer retries
+    `reduce_named_function_application(...)` after simplifying a non-`Lvar`
+    callee into an `Lvar`
+  - kept the original named-callee inlining path intact when the source apply
+    already starts as `Lvar`, so the OCaml-aligned direct functor inlining
+    cases still reduce
+- Verified focused guards for this slice:
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml inlines_named_functor_applications_even_when_inline_heuristics_reject_them -- --nocapture`
+  - `timeout 180 cargo test --manifest-path compiler-rust/Cargo.toml reruns_js_backend_simplify_after_functor_inlining_exposes_projected_module_fields -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/functors_one_arg_at_a_time.res`,
+    diffing `/tmp/functors_one_arg_at_a_time.mjs` against the checked-in
+    snapshot
+  - direct guard repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - direct release repro for `tests/tests/src/functors.res`, diffing
+    `/tmp/functors.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/functors_one_arg_at_a_time.res` is now an exact snapshot
+    match again; Rust no longer collapses `M.Eq((), ())` through a retry that
+    OCaml never performs after simplifying the projected callee
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - `tests/tests/src/functors.res` is unchanged and still differs in the same
+    remaining module-field wrapper/eta cluster, so that root cause is separate
+    from this apply-boundary fix
+- Topline impact:
+  - JS snapshot parity: **485 / 657** -> **486 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **172** -> **171** (**-1**)
+- Keep this change because it matches OCaml's `lam_pass_remove_alias` control
+  flow more closely, removes one remaining Rust-only retry path, and improves
+  the authoritative snapshot baseline without adding any printer-only rewrite.
 
 Latest iteration on **2026-04-15**:
 

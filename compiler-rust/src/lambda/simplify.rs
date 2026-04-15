@@ -2216,6 +2216,10 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
         }
     }
 
+    // OCaml's lam_pass_remove_alias only tries named-function inlining when the
+    // original callee is syntactically an Lvar. If simplifying a projected
+    // callee later exposes an Lvar, OCaml rebuilds the apply instead of retrying
+    // the inlining decision at that new shape.
     let func = match apply.ap_func.as_ref() {
         Lambda::Lvar(id) => env
             .call_substitutions
@@ -2224,23 +2228,6 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
             .unwrap_or_else(|| simplify_with_env(&apply.ap_func, env, exports)),
         _ => simplify_with_env(&apply.ap_func, env, exports),
     };
-    if !matches!(apply.ap_func.as_ref(), Lambda::Lapply(_)) {
-        if let Lambda::Lvar(id) = &func {
-            if !args
-                .iter()
-                .any(|arg| lambda_hits_variable_through_env(id, arg, env))
-            {
-                if let Some(func) = env.functions.get(id) {
-                    if let Some(reduced) =
-                        reduce_named_function_application(id, func, &args, exports)
-                    {
-                        return simplify_with_env(&reduced, env, exports);
-                    }
-                }
-            }
-        }
-    }
-
     Lambda::Lapply(Apply {
         ap_func: Box::new(func),
         ap_args: args,
