@@ -796,7 +796,7 @@ impl<'a> MarshalWriter<'a> {
         } else if len < 0x100 {
             self.write_u8(CODE_STRING8);
             self.write_u8(len as u8);
-        } else if len < 0x100000000 {
+        } else if (len as u64) < 0x100000000u64 {
             self.write_u8(CODE_STRING32);
             self.write_u32_be(len as u32);
         } else {
