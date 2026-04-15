@@ -194,6 +194,17 @@ pub fn compile_all(source: &str, filename: &str) -> String {
     );
     let typed_tree_sexp = String::from_utf8_lossy(&typed_buf).into_owned();
 
+    // Save all compiled stdlib modules back to the registry so subsequent
+    // compiles don't re-type-check them from source.
+    if let Some(ref pe) = tctx.persistent_env {
+        let (portables, alias_rewrites) = pe.extract_all_cached_modules(&type_ctx);
+        REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            reg.cached_modules.extend(portables);
+            reg.alias_rewrites.extend(alias_rewrites);
+        });
+    }
+
     // 4. Lambda conversion
     let lambda_start_stamp = type_ctx
         .current_stamp()
