@@ -757,33 +757,80 @@ fn json_encode_recursive_type() {
 // TypeUtils examples from EXAMPLES.md Section 6
 // ============================================================================
 
+use rescript_compiler::types::comptime::{generate_key_of_source, generate_partial_source};
+
 #[test]
-#[ignore = "requires @comptime.derive + @buildVariant"]
 fn key_of_generates_variant_from_record_fields() {
-    let source = r#"
-@keyOf
-type user = {
-  name: string,
-  age: int,
-  email: string,
-}
+    let info = TypeInfo::Record {
+        name: "user".to_string(),
+        fields: vec![
+            FieldInfo {
+                name: "name".to_string(),
+                typ: TypeInfo::String,
+                mutable: false,
+                optional: false,
+                attributes: vec![],
+            },
+            FieldInfo {
+                name: "age".to_string(),
+                typ: TypeInfo::Int,
+                mutable: false,
+                optional: false,
+                attributes: vec![],
+            },
+            FieldInfo {
+                name: "email".to_string(),
+                typ: TypeInfo::String,
+                mutable: false,
+                optional: false,
+                attributes: vec![],
+            },
+        ],
+        unboxed: false,
+    };
 
-// Expected: type user_key = Name | Age | Email
-"#;
+    let result = generate_key_of_source(&info, "user");
+    assert!(result.is_ok(), "keyOf generation failed: {:?}", result.err());
+
+    let source = result.unwrap();
+    // Should generate a variant type with one case per field
+    assert!(source.contains("Name"), "Missing Name variant in:\n{source}");
+    assert!(source.contains("Age"), "Missing Age variant in:\n{source}");
+    assert!(source.contains("Email"), "Missing Email variant in:\n{source}");
+    assert!(source.contains("user_key"), "Missing type name user_key in:\n{source}");
 }
 
 #[test]
-#[ignore = "requires @comptime.derive + @buildRecord with optional fields"]
 fn partial_makes_all_fields_optional() {
-    let source = r#"
-@partial
-type user = {
-  name: string,
-  age: int,
-}
+    let info = TypeInfo::Record {
+        name: "user".to_string(),
+        fields: vec![
+            FieldInfo {
+                name: "name".to_string(),
+                typ: TypeInfo::String,
+                mutable: false,
+                optional: false,
+                attributes: vec![],
+            },
+            FieldInfo {
+                name: "age".to_string(),
+                typ: TypeInfo::Int,
+                mutable: false,
+                optional: false,
+                attributes: vec![],
+            },
+        ],
+        unboxed: false,
+    };
 
-// Expected: type user_partial = { name?: string, age?: int }
-"#;
+    let result = generate_partial_source(&info, "user");
+    assert!(result.is_ok(), "partial generation failed: {:?}", result.err());
+
+    let source = result.unwrap();
+    // All fields should be optional
+    assert!(source.contains("name?:") || source.contains("name ?:"), "name should be optional in:\n{source}");
+    assert!(source.contains("age?:") || source.contains("age ?:"), "age should be optional in:\n{source}");
+    assert!(source.contains("user_partial"), "Missing type name user_partial in:\n{source}");
 }
 
 // ============================================================================

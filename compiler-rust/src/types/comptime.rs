@@ -635,6 +635,89 @@ pub fn generate_encode_binding(
     ))
 }
 
+// ── Derive Generators ───────────────────────────────────────────────────────
+
+/// Generate a `keyOf` variant type from a record TypeInfo.
+/// Produces: `type <name>_key = Name | Age | Email`
+pub fn generate_key_of_source(
+    type_info: &TypeInfo,
+    type_name: &str,
+) -> Result<String, String> {
+    match type_info {
+        TypeInfo::Record { fields, .. } => {
+            let cases: Vec<String> = fields
+                .iter()
+                .map(|f| {
+                    let mut chars = f.name.chars();
+                    let capitalized = match chars.next() {
+                        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    };
+                    format!("  | @as(\"{}\") {}", f.name, capitalized)
+                })
+                .collect();
+            Ok(format!(
+                "type {}_key =\n{}",
+                type_name,
+                cases.join("\n")
+            ))
+        }
+        _ => Err("@keyOf requires a record type".to_string()),
+    }
+}
+
+/// Generate a `partial` record type where all fields are optional.
+/// Produces: `type <name>_partial = { name?: string, age?: int }`
+pub fn generate_partial_source(
+    type_info: &TypeInfo,
+    type_name: &str,
+) -> Result<String, String> {
+    match type_info {
+        TypeInfo::Record { fields, .. } => {
+            let field_decls: Vec<String> = fields
+                .iter()
+                .map(|f| {
+                    let type_str = type_info_to_rescript_type(&f.typ);
+                    format!("  {}?: {}", f.name, type_str)
+                })
+                .collect();
+            Ok(format!(
+                "type {}_partial = {{\n{},\n}}",
+                type_name,
+                field_decls.join(",\n")
+            ))
+        }
+        _ => Err("@partial requires a record type".to_string()),
+    }
+}
+
+/// Convert a TypeInfo to a ReScript type syntax string.
+fn type_info_to_rescript_type(info: &TypeInfo) -> String {
+    match info {
+        TypeInfo::Int => "int".to_string(),
+        TypeInfo::Float => "float".to_string(),
+        TypeInfo::String => "string".to_string(),
+        TypeInfo::Bool => "bool".to_string(),
+        TypeInfo::Unit => "unit".to_string(),
+        TypeInfo::Char => "char".to_string(),
+        TypeInfo::Bigint => "bigint".to_string(),
+        TypeInfo::Array { element } => format!("array<{}>", type_info_to_rescript_type(element)),
+        TypeInfo::Option { inner } => format!("option<{}>", type_info_to_rescript_type(inner)),
+        TypeInfo::Tuple { elements } => {
+            let parts: Vec<String> = elements.iter().map(type_info_to_rescript_type).collect();
+            format!("({})", parts.join(", "))
+        }
+        TypeInfo::Record { name, .. } => name.clone(),
+        TypeInfo::Variant { name, .. } => name.clone(),
+        TypeInfo::Function { args, return_type } => {
+            let arg_parts: Vec<String> = args.iter().map(type_info_to_rescript_type).collect();
+            format!("({}) => {}", arg_parts.join(", "), type_info_to_rescript_type(return_type))
+        }
+        TypeInfo::External { name } | TypeInfo::Opaque { name } => name.clone(),
+        TypeInfo::Unknown { description } => format!("/* {} */ unknown", description),
+    }
+}
+
 /// Environment for comptime specialization.
 pub struct SpecEnv {
     /// Comptime bindings: name → value.
