@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 519 / 657 JS snapshots passing, 0 compile errors, 138 output diffs
+**Status:** 520 / 657 JS snapshots passing, 0 compile errors, 137 output diffs
 
 ## Goal
 
@@ -35,11 +35,65 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **519 / 657**
+- JS snapshot parity: **520 / 657**
 - Compile errors: **0**
-- Output diffs: **138**
+- Output diffs: **137**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: route incomplete named-variant payload-only/default dispatches
+  through the same literal-vs-block split that OCaml uses, instead of taking a
+  Rust-only payload-fast-path whenever the explicit cases happen to live only
+  on the block side
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is still `Lam_compile`
+  named-variant switch lowering after optimized lambda parity, not a printer
+  rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`,
+  `compiler/core/js_stmt_make.ml`,
+  `compiler/core/js_exp_make.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so named-variant
+    assignment/return/effect lowering only skips the mixed const-vs-block
+    dispatch when the opposite side is actually complete; incomplete
+    payload-only and const-only cases now reuse the same mixed dispatch shape
+    that OCaml's `compile_switch` reaches through `dispatch e`
+  - added/updated focused named-variant tests to assert the rendered OCaml-like
+    dispatch shapes that the parity harness actually measures, including the
+    negated default guard for incomplete payload-only return switches and the
+    direct TAG-only guard for complete payload-only return switches
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml named_variant_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/variant.res`, diffing
+    `/tmp/variant.mjs` against the checked-in snapshot
+  - direct guard repro for `tests/tests/src/gpr_2413_test.res`, diffing
+    `/tmp/gpr_2413_test.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/variant.res` now matches its checked-in `.mjs` snapshot
+    exactly; `fooC` keeps OCaml's negated default guard
+    (`typeof x !== "object" || x.TAG !== "C"`) instead of Rust's earlier
+    positive object/tag conjunction
+  - `tests/tests/src/gpr_2413_test.res` remained an exact snapshot match, so
+    the earlier staticcatch tail-binding fix stayed intact
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as a
+    broader guard
+  - the full authoritative sweep in this worktree now reports **520 / 657**
+    passing, **0** compile errors, and **137** output diffs
+- Topline impact:
+  - JS snapshot parity: **519 / 657** -> **520 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **138** -> **137** (**-1**)
+- Keep this change because it restores OCaml's mixed named-variant dispatch
+  routing for incomplete payload/default switches instead of relying on a
+  Rust-only fast path that happened to be logically equivalent but emitted the
+  wrong JS shape.
 
 Latest iteration on **2026-04-15**:
 

@@ -3199,6 +3199,33 @@ impl LambdaCompiler {
         )
     }
 
+    fn dispatch_named_variant_branches(
+        &self,
+        scrut_expr: Expression,
+        const_branch: Block,
+        block_branch: Block,
+    ) -> Block {
+        if const_branch.is_empty() {
+            vec![Statement::if_(
+                self.variant_object_test(scrut_expr),
+                block_branch,
+                vec![],
+            )]
+        } else if block_branch.is_empty() {
+            vec![Statement::if_(
+                self.variant_non_object_test(scrut_expr),
+                const_branch,
+                vec![],
+            )]
+        } else {
+            vec![Statement::if_(
+                self.variant_non_object_test(scrut_expr),
+                const_branch,
+                block_branch,
+            )]
+        }
+    }
+
     fn variant_tag_expr(&self, expr: Expression, field_name: &str) -> Expression {
         Expression::new(ExpressionDesc::StaticIndex(
             Box::new(expr),
@@ -3535,85 +3562,47 @@ impl LambdaCompiler {
         let block_default = self.block_switch_default(switch);
         let tag_name = self.variant_tag_name(switch);
 
-        match (const_cases.is_empty(), block_cases.is_empty()) {
-            (false, false) => {
-                let const_branch = self.compile_named_string_switch_assignment(
-                    result,
-                    scrut_expr.clone(),
-                    &const_cases,
-                    const_default,
-                    self.const_switch_complete(switch),
-                );
-                let block_branch = self.compile_named_string_switch_assignment(
-                    result,
-                    self.variant_tag_expr(scrut_expr.clone(), &tag_name),
-                    &block_cases,
-                    block_default,
-                    self.block_switch_complete(switch),
-                );
-                if const_branch.is_empty() {
-                    vec![Statement::if_(
-                        self.variant_object_test(scrut_expr),
-                        block_branch,
-                        vec![],
-                    )]
-                } else if block_branch.is_empty() {
-                    vec![Statement::if_(
-                        self.variant_non_object_test(scrut_expr),
-                        const_branch,
-                        vec![],
-                    )]
-                } else {
-                    vec![Statement::if_(
-                        self.variant_non_object_test(scrut_expr),
-                        const_branch,
-                        block_branch,
-                    )]
-                }
-            }
-            (false, true) => {
-                let const_branch = self.compile_named_string_switch_assignment(
-                    result,
-                    scrut_expr.clone(),
-                    &const_cases,
-                    const_default,
-                    self.const_switch_complete(switch),
-                );
-                if self.block_switch_complete(switch) {
-                    const_branch
-                } else {
-                    vec![Statement::if_(
-                        self.variant_non_object_test(scrut_expr),
-                        const_branch,
-                        block_default
-                            .map(|fallback| self.compile_assign_to_target_block(result, fallback))
-                            .unwrap_or_default(),
-                    )]
-                }
-            }
-            (true, false) => {
-                let block_branch = self.compile_named_string_switch_assignment(
-                    result,
-                    self.variant_tag_expr(scrut_expr.clone(), &tag_name),
-                    &block_cases,
-                    block_default,
-                    self.block_switch_complete(switch),
-                );
-                if self.const_switch_complete(switch) {
-                    block_branch
-                } else {
-                    vec![Statement::if_(
-                        self.variant_object_test(scrut_expr),
-                        block_branch,
-                        const_default
-                            .map(|fallback| self.compile_assign_to_target_block(result, fallback))
-                            .unwrap_or_default(),
-                    )]
-                }
-            }
-            (true, true) => const_default
+        if const_cases.is_empty() && block_cases.is_empty() {
+            return const_default
                 .map(|fallback| self.compile_assign_to_target_block(result, fallback))
-                .unwrap_or_default(),
+                .unwrap_or_default();
+        }
+
+        let const_complete = self.const_switch_complete(switch);
+        let block_complete = self.block_switch_complete(switch);
+        let const_branch = if const_cases.is_empty() {
+            const_default
+                .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                .unwrap_or_default()
+        } else {
+            self.compile_named_string_switch_assignment(
+                result,
+                scrut_expr.clone(),
+                &const_cases,
+                const_default,
+                const_complete,
+            )
+        };
+        let block_branch = if block_cases.is_empty() {
+            block_default
+                .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                .unwrap_or_default()
+        } else {
+            self.compile_named_string_switch_assignment(
+                result,
+                self.variant_tag_expr(scrut_expr.clone(), &tag_name),
+                &block_cases,
+                block_default,
+                block_complete,
+            )
+        };
+
+        if const_cases.is_empty() && const_complete {
+            block_branch
+        } else if block_cases.is_empty() && block_complete {
+            const_branch
+        } else {
+            self.dispatch_named_variant_branches(scrut_expr, const_branch, block_branch)
         }
     }
 
@@ -3633,81 +3622,45 @@ impl LambdaCompiler {
         let block_default = self.block_switch_default(switch);
         let tag_name = self.variant_tag_name(switch);
 
-        match (const_cases.is_empty(), block_cases.is_empty()) {
-            (false, false) => {
-                let const_branch = self.compile_named_string_switch_return(
-                    scrut_expr.clone(),
-                    &const_cases,
-                    const_default,
-                    self.const_switch_complete(switch),
-                );
-                let block_branch = self.compile_named_string_switch_return(
-                    self.variant_tag_expr(scrut_expr.clone(), &tag_name),
-                    &block_cases,
-                    block_default,
-                    self.block_switch_complete(switch),
-                );
-                if const_branch.is_empty() {
-                    vec![Statement::if_(
-                        self.variant_object_test(scrut_expr),
-                        block_branch,
-                        vec![],
-                    )]
-                } else if block_branch.is_empty() {
-                    vec![Statement::if_(
-                        self.variant_non_object_test(scrut_expr),
-                        const_branch,
-                        vec![],
-                    )]
-                } else {
-                    vec![Statement::if_(
-                        self.variant_non_object_test(scrut_expr),
-                        const_branch,
-                        block_branch,
-                    )]
-                }
-            }
-            (false, true) => {
-                let const_branch = self.compile_named_string_switch_return(
-                    scrut_expr.clone(),
-                    &const_cases,
-                    const_default,
-                    self.const_switch_complete(switch),
-                );
-                if self.block_switch_complete(switch) {
-                    const_branch
-                } else {
-                    vec![Statement::if_(
-                        self.variant_non_object_test(scrut_expr),
-                        const_branch,
-                        block_default
-                            .map(|fallback| self.compile_return_block(fallback))
-                            .unwrap_or_default(),
-                    )]
-                }
-            }
-            (true, false) => {
-                let block_branch = self.compile_named_string_switch_return(
-                    self.variant_tag_expr(scrut_expr.clone(), &tag_name),
-                    &block_cases,
-                    block_default,
-                    self.block_switch_complete(switch),
-                );
-                if self.const_switch_complete(switch) {
-                    block_branch
-                } else {
-                    vec![Statement::if_(
-                        self.variant_object_test(scrut_expr),
-                        block_branch,
-                        const_default
-                            .map(|fallback| self.compile_return_block(fallback))
-                            .unwrap_or_default(),
-                    )]
-                }
-            }
-            (true, true) => const_default
+        if const_cases.is_empty() && block_cases.is_empty() {
+            return const_default
                 .map(|fallback| self.compile_return_block(fallback))
-                .unwrap_or_default(),
+                .unwrap_or_default();
+        }
+
+        let const_complete = self.const_switch_complete(switch);
+        let block_complete = self.block_switch_complete(switch);
+        let const_branch = if const_cases.is_empty() {
+            const_default
+                .map(|fallback| self.compile_return_block(fallback))
+                .unwrap_or_default()
+        } else {
+            self.compile_named_string_switch_return(
+                scrut_expr.clone(),
+                &const_cases,
+                const_default,
+                const_complete,
+            )
+        };
+        let block_branch = if block_cases.is_empty() {
+            block_default
+                .map(|fallback| self.compile_return_block(fallback))
+                .unwrap_or_default()
+        } else {
+            self.compile_named_string_switch_return(
+                self.variant_tag_expr(scrut_expr.clone(), &tag_name),
+                &block_cases,
+                block_default,
+                block_complete,
+            )
+        };
+
+        if const_cases.is_empty() && const_complete {
+            block_branch
+        } else if block_cases.is_empty() && block_complete {
+            const_branch
+        } else {
+            self.dispatch_named_variant_branches(scrut_expr, const_branch, block_branch)
         }
     }
 
@@ -3727,77 +3680,49 @@ impl LambdaCompiler {
         let block_default = self.block_switch_default(switch);
         let tag_name = self.variant_tag_name(switch);
 
-        match (const_cases.is_empty(), block_cases.is_empty()) {
-            (false, false) => {
-                let const_branch = self.compile_named_string_switch_effect(
-                    scrut_expr.clone(),
-                    &const_cases,
-                    const_default,
-                    self.const_switch_complete(switch),
-                );
-                let block_branch = self.compile_named_string_switch_effect(
-                    self.variant_tag_expr(scrut_expr.clone(), &tag_name),
-                    &block_cases,
-                    block_default,
-                    self.block_switch_complete(switch),
-                );
-                if const_branch.is_empty() {
-                    vec![Statement::if_(
-                        self.variant_object_test(scrut_expr),
-                        block_branch,
-                        vec![],
-                    )]
-                } else if block_branch.is_empty() {
-                    vec![Statement::if_(
-                        self.variant_non_object_test(scrut_expr),
-                        const_branch,
-                        vec![],
-                    )]
-                } else {
-                    vec![Statement::if_(
-                        self.variant_non_object_test(scrut_expr),
-                        const_branch,
-                        block_branch,
-                    )]
-                }
-            }
-            (false, true) => {
-                let const_branch = self.compile_named_string_switch_effect(
-                    scrut_expr.clone(),
-                    &const_cases,
-                    const_default,
-                    self.const_switch_complete(switch),
-                );
-                if self.block_switch_complete(switch) {
-                    const_branch
-                } else {
-                    let cond = self.variant_non_object_test(scrut_expr);
-                    let else_block = block_default
-                        .map(|fallback| self.compile_effect_block(fallback))
-                        .unwrap_or_default();
-                    self.compile_effect_if(cond, const_branch, else_block)
-                }
-            }
-            (true, false) => {
-                let block_branch = self.compile_named_string_switch_effect(
-                    self.variant_tag_expr(scrut_expr.clone(), &tag_name),
-                    &block_cases,
-                    block_default,
-                    self.block_switch_complete(switch),
-                );
-                if self.const_switch_complete(switch) {
-                    block_branch
-                } else {
-                    let cond = self.variant_object_test(scrut_expr);
-                    let else_block = const_default
-                        .map(|fallback| self.compile_effect_block(fallback))
-                        .unwrap_or_default();
-                    self.compile_effect_if(cond, block_branch, else_block)
-                }
-            }
-            (true, true) => const_default
+        if const_cases.is_empty() && block_cases.is_empty() {
+            return const_default
                 .map(|fallback| self.compile_effect_block(fallback))
-                .unwrap_or_default(),
+                .unwrap_or_default();
+        }
+
+        let const_complete = self.const_switch_complete(switch);
+        let block_complete = self.block_switch_complete(switch);
+        let const_branch = if const_cases.is_empty() {
+            const_default
+                .map(|fallback| self.compile_effect_block(fallback))
+                .unwrap_or_default()
+        } else {
+            self.compile_named_string_switch_effect(
+                scrut_expr.clone(),
+                &const_cases,
+                const_default,
+                const_complete,
+            )
+        };
+        let block_branch = if block_cases.is_empty() {
+            block_default
+                .map(|fallback| self.compile_effect_block(fallback))
+                .unwrap_or_default()
+        } else {
+            self.compile_named_string_switch_effect(
+                self.variant_tag_expr(scrut_expr.clone(), &tag_name),
+                &block_cases,
+                block_default,
+                block_complete,
+            )
+        };
+
+        if const_cases.is_empty() && const_complete {
+            block_branch
+        } else if block_cases.is_empty() && block_complete {
+            const_branch
+        } else {
+            self.compile_effect_if(
+                self.variant_non_object_test(scrut_expr),
+                const_branch,
+                block_branch,
+            )
         }
     }
 
@@ -17633,53 +17558,15 @@ mod tests {
             },
         ));
 
-        let [dispatch] = block.as_slice() else {
-            panic!("expected an object check around the payload-effect switch");
-        };
-        let StatementDesc::If(cond, then_block, else_block) = &dispatch.desc else {
-            panic!("expected an if statement for the payload-effect switch");
-        };
-        assert_typeof_object_check(cond, &action, true);
-        assert!(else_block.is_empty());
-
-        let [switch_stmt] = then_block.as_slice() else {
-            panic!("expected a payload constructor switch inside the object branch");
-        };
-        let StatementDesc::StringSwitch(test, clauses, None) = &switch_stmt.desc else {
-            panic!("expected a tag switch without an empty default arm");
-        };
-        assert_tag_field_access(test, &action);
-        assert_eq!(clauses.len(), 1);
-        assert_eq!(
-            clauses[0].tag_type,
-            SwitchCaseTag::String("WithPayload".to_string())
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains("if (typeof action === \"object\" && action.TAG === \"WithPayload\") {"),
+            "expected the payload-effect switch to stay guarded by the object/tag check:\n{rendered}"
         );
-        assert!(clauses[0].clause.should_break);
-        let [assign] = clauses[0].clause.body.as_slice() else {
-            panic!("expected a single effect statement in the payload case");
-        };
-        match &assign.desc {
-            StatementDesc::Exp(Expression {
-                desc: ExpressionDesc::Bin(BinOp::Eq, left, right),
-                ..
-            }) => {
-                assert!(matches!(
-                    left.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                        ..
-                    } if id.same(&captured)
-                ));
-                assert!(matches!(
-                    right.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Number(Number::Int { i, .. }),
-                        ..
-                    } if *i == 1
-                ));
-            }
-            other => panic!("expected an assignment effect in the payload case, got {other:?}"),
-        }
+        assert!(
+            rendered.contains("captured = 1;"),
+            "expected the payload-effect branch to keep the assignment:\n{rendered}"
+        );
     }
 
     #[test]
@@ -17707,15 +17594,73 @@ mod tests {
             },
         ));
 
-        let [dispatch] = block.as_slice() else {
-            panic!("expected a single direct payload dispatch");
-        };
-        let StatementDesc::If(cond, then_block, else_block) = &dispatch.desc else {
-            panic!("expected a direct if/else over the TAG field");
-        };
-        assert_string_equality_check(cond, None, Some(&action), "Ok");
-        assert_switch_case_returns_int_result(then_block, 1);
-        assert_switch_case_returns_int_result(else_block, 2);
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains("return action.TAG === \"Ok\" ? 1 : 2;"),
+            "expected the all-payload switch to lower directly over TAG without an object split:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn named_variant_incomplete_payload_only_return_switches_keep_default_as_negated_guard() {
+        let mut compiler = LambdaCompiler::new();
+        let action = Ident::create_local("action");
+        let block = compiler.compile_return_block(&Lambda::Lswitch(
+            Box::new(Lambda::var(action.clone())),
+            LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![],
+                sw_blocks_full: false,
+                sw_blocks: vec![(1, Lambda::const_(Constant::int(7)))],
+                sw_failaction: Some(Box::new(Lambda::const_(Constant::int(42)))),
+                sw_names: Some(SwitchNames {
+                    consts: vec![
+                        crate::lambda::SwitchTag::named("A1"),
+                        crate::lambda::SwitchTag::named("A2"),
+                    ],
+                    blocks: vec![
+                        crate::lambda::SwitchBlock::named("B"),
+                        crate::lambda::SwitchBlock::named("C"),
+                        crate::lambda::SwitchBlock::named("D"),
+                    ],
+                }),
+            },
+        ));
+
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains("return typeof action !== \"object\" || action.TAG !== \"C\" ? 42 : 7;"),
+            "expected the incomplete payload-only dispatch to keep OCaml's negated default guard:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn named_variant_incomplete_const_only_return_switches_keep_literal_guard() {
+        let mut compiler = LambdaCompiler::new();
+        let action = Ident::create_local("action");
+        let block = compiler.compile_return_block(&Lambda::Lswitch(
+            Box::new(Lambda::var(action.clone())),
+            LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![(0, Lambda::const_(Constant::int(1)))],
+                sw_blocks_full: false,
+                sw_blocks: vec![],
+                sw_failaction: Some(Box::new(Lambda::const_(Constant::int(42)))),
+                sw_names: Some(SwitchNames {
+                    consts: vec![
+                        crate::lambda::SwitchTag::named("A1"),
+                        crate::lambda::SwitchTag::named("A2"),
+                    ],
+                    blocks: vec![crate::lambda::SwitchBlock::named("C")],
+                }),
+            },
+        ));
+
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains("return typeof action !== \"object\" && action === \"A1\" ? 1 : 42;"),
+            "expected the incomplete const-only dispatch to keep the literal-side guard:\n{rendered}"
+        );
     }
 
     #[test]
