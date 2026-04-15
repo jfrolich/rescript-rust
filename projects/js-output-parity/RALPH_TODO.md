@@ -43,6 +43,62 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: match OCaml's nested argument grouping when `new ...([ ... ])`
+  is itself used as a member/index target inside a surrounding call, so the
+  multiline array argument keeps the extra inner indentation seen in the
+  checked-in `Stdlib_TypedArrayTests` snapshot
+- Active backend focus for this slice is **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; this is downstream `js_dump` printer grouping in
+  `compiler-rust/src/js_ir/printer.rs`, not typedtree, lambda, or JS-pass work
+- OCaml reference:
+  `compiler/core/js_dump.ml`, specifically the `New`, `Array_index`, and
+  shared `arguments` grouping paths whose nested pretty-printer groups keep
+  multiline argument literals indented when the `new` expression is printed at
+  member/index precedence inside a surrounding call
+- Rust change:
+  - updated `compiler-rust/src/js_ir/printer.rs` so `ExpressionDesc::New`
+    routes its argument printing through the same nested call-argument
+    indentation helper as regular calls instead of printing arguments
+    directly
+  - narrowed the extra indentation rule to multiline array literals as well as
+    object literals when that nested call/new argument is being printed at the
+    member/index precedence level OCaml uses for `Array_index`
+  - added focused regression coverage in
+    `test_print_new_index_call_argument_keeps_multiline_array_group_indent_like_ocaml`
+    alongside the existing multiline-`new` array test
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_new_call_with_multiline_array_argument_keeps_array_layout -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_new_index_call_argument_keeps_multiline_array_group_indent_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact-args release repro for
+    `tests/tests/src/stdlib/Stdlib_TypedArrayTests.res`, diffing
+    `/tmp/Stdlib_TypedArrayTests.mjs` against the checked-in snapshot from
+    `tests/tests/lib/bs`
+  - direct release guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/stdlib/Stdlib_TypedArrayTests.res` is now an exact
+    snapshot match; the previous nested `new BigInt64Array([ ... ])[1]`
+    indentation drift is gone
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the broader unchanged guard
+  - the full authoritative sweep in this dirty worktree remained **525 / 657**
+    passing, **0** compile errors, and **132** output diffs; after the release
+    rebuild, `Stdlib_TypedArrayTests.res` dropped out of the diff set while
+    `ari_regress_test.res` appeared as a separate failure, so the flat topline
+    here is not evidence that the focused printer fix was spurious
+- Topline impact:
+  - JS snapshot parity: **525 / 657** -> **525 / 657** (**no net change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **132** -> **132** (**no net change**)
+- Keep this change because the targeted OCaml-aligned printer rule is verified
+  directly on the affected checked-in snapshot and on the unchanged
+  `ExternalShadow` guard; the authoritative totals stayed flat only because the
+  rebuilt dirty worktree introduced an unrelated sibling failure elsewhere.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: match OCaml-style unit-function nested-`if` tail printing in
   `compiler-rust/src/js_ir/printer.rs`, so shared fallthrough tails become an
   explicit outer `else` only when the snapshot shape requires it, while the

@@ -1618,7 +1618,7 @@ impl JsPrinter {
                         if i > 0 {
                             self.write(", ");
                         }
-                        self.print_expression(arg, 1);
+                        self.print_call_argument(arg, level);
                     }
                 }
                 self.write_char(')');
@@ -2219,8 +2219,7 @@ impl JsPrinter {
     }
 
     fn print_call_argument(&mut self, expr: &Expression, call_level: u8) {
-        let extra_group_indent = call_level == 15
-            && matches!(expr.desc, ExpressionDesc::Object(_, _))
+        let extra_group_indent = call_argument_needs_extra_group_indent(expr, call_level)
             && !self.output.is_empty()
             && !self.last_new_line;
         if extra_group_indent {
@@ -2659,6 +2658,18 @@ fn raw_js_expression_needs_paren(code: &str) -> bool {
         JsExpClassification::JsFunction { .. } | JsExpClassification::JsExpUnknown => {
             !raw_snippet_exp_simple_enough(code)
         }
+    }
+}
+
+fn call_argument_needs_extra_group_indent(expr: &Expression, call_level: u8) -> bool {
+    if call_level != 15 {
+        return false;
+    }
+
+    match &expr.desc {
+        ExpressionDesc::Object(_, _) => true,
+        ExpressionDesc::Array(elements, _) => elements.len() > 1,
+        _ => false,
     }
 }
 
@@ -5353,6 +5364,33 @@ mod tests {
 
         assert!(rendered.starts_with("new $$BigInt64Array(["));
         assert!(rendered.contains("[\n  num1,\n  num2\n])"));
+    }
+
+    #[test]
+    fn test_print_new_index_call_argument_keeps_multiline_array_group_indent_like_ocaml() {
+        let arg = Expression::new(ExpressionDesc::ArrayIndex(
+            Box::new(Expression::new(ExpressionDesc::New(
+                Box::new(Expression::var(Ident::create_local("BigInt64Array"))),
+                Some(vec![Expression::array(
+                    vec![
+                        Expression::var(Ident::create_local("num1")),
+                        Expression::var(Ident::create_local("num2")),
+                    ],
+                    MutableFlag::Immutable,
+                )]),
+            ))),
+            Box::new(Expression::number(Number::int(1))),
+        ));
+        let call = Expression::call(
+            Expression::var(Ident::create_local("f")),
+            vec![arg],
+            CallInfo::default(),
+        );
+
+        assert_eq!(
+            print_expression(&call),
+            "f(new $$BigInt64Array([\n    num1,\n    num2\n  ])[1])"
+        );
     }
 
     #[test]
