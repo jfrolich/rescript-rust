@@ -1286,7 +1286,22 @@ impl Statement {
 
     /// Create an expression statement
     pub fn exp(expr: Expression) -> Self {
-        Self::new(StatementDesc::Exp(expr))
+        match expr.desc {
+            ExpressionDesc::Seq(left, right) => {
+                if expression_stmt_is_trivial(left.as_ref()) {
+                    return Self::exp(*right);
+                }
+                if expression_stmt_is_trivial(right.as_ref()) {
+                    return Self::exp(*left);
+                }
+                Self::new(StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Seq(left, right),
+                    comment: expr.comment,
+                }))
+            }
+            ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. } => Self::block(vec![]),
+            _ => Self::new(StatementDesc::Exp(expr)),
+        }
     }
 
     /// Create a block statement using OCaml's block normalization rules.
@@ -1517,6 +1532,13 @@ fn single_statement(block: &Block) -> Option<&Statement> {
         return None;
     };
     Some(stmt)
+}
+
+fn expression_stmt_is_trivial(expr: &Expression) -> bool {
+    matches!(
+        expr.desc,
+        ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }
+    )
 }
 
 fn last_statement(block: &Block) -> Option<&Statement> {
@@ -2693,17 +2715,95 @@ mod tests {
     }
 
     #[test]
+    fn test_statement_exp_drops_trivial_literals_like_ocaml() {
+        let number_stmt = Statement::exp(Expression::number(Number::int(1)));
+        let undefined_stmt = Statement::exp(Expression::undefined(false));
+
+        assert!(matches!(
+            number_stmt.desc,
+            StatementDesc::Block(block) if block.is_empty()
+        ));
+        assert!(matches!(
+            undefined_stmt.desc,
+            StatementDesc::Block(block) if block.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_statement_exp_peels_trivial_seq_wrappers_like_ocaml() {
+        let effect = Expression::call(
+            Expression::var(Ident::create_local("log")),
+            vec![Expression::string("x")],
+            CallInfo::default(),
+        );
+
+        let leading = Statement::exp(Expression::new(ExpressionDesc::Seq(
+            Box::new(Expression::undefined(false)),
+            Box::new(effect.clone()),
+        )));
+        let trailing = Statement::exp(Expression::new(ExpressionDesc::Seq(
+            Box::new(effect.clone()),
+            Box::new(Expression::number(Number::int(0))),
+        )));
+
+        assert!(matches!(leading.desc, StatementDesc::Exp(_)));
+        assert!(matches!(trailing.desc, StatementDesc::Exp(_)));
+        let StatementDesc::Exp(leading_expr) = &leading.desc else {
+            panic!("expected the leading trivial seq to collapse to the effect");
+        };
+        let StatementDesc::Exp(trailing_expr) = &trailing.desc else {
+            panic!("expected the trailing trivial seq to collapse to the effect");
+        };
+        assert!(matches!(leading_expr.desc, ExpressionDesc::Call(_, _, _)));
+        assert!(matches!(trailing_expr.desc, ExpressionDesc::Call(_, _, _)));
+    }
+
+    #[test]
+    fn test_if_statement_keeps_explicit_empty_else_block_when_pure_branch_drops_like_ocaml() {
+        let stmt = Statement::if_(
+            Expression::var(Ident::create_local("cond")),
+            vec![Statement::exp(Expression::call(
+                Expression::var(Ident::create_local("log")),
+                vec![Expression::string("side effect")],
+                CallInfo::default(),
+            ))],
+            vec![Statement::exp(Expression::undefined(false))],
+        );
+
+        let StatementDesc::If(_, _, else_block) = &stmt.desc else {
+            panic!("expected the dropped pure branch to stay as an explicit empty else");
+        };
+        assert!(matches!(
+            else_block.as_slice(),
+            [Statement {
+                desc: StatementDesc::Block(inner),
+                ..
+            }] if inner.is_empty()
+        ));
+    }
+
+    #[test]
     fn test_if_statement_merges_nested_then_if_with_shared_else_into_and_condition() {
         let outer = Ident::create_local("outer");
         let inner = Ident::create_local("inner");
+        let truthy = Expression::call(
+            Expression::var(Ident::create_local("truthy")),
+            vec![],
+            CallInfo::default(),
+        );
+        let falsy = Expression::call(
+            Expression::var(Ident::create_local("falsy")),
+            vec![],
+            CallInfo::default(),
+        );
         let stmt = Statement::if_(
             Expression::var(outer.clone()),
             vec![Statement::new(StatementDesc::If(
                 Expression::var(inner.clone()),
-                vec![Statement::exp(Expression::number(Number::int(1)))],
-                vec![Statement::exp(Expression::number(Number::int(0)))],
+                vec![Statement::exp(truthy.clone())],
+                vec![Statement::exp(falsy.clone())],
             ))],
-            vec![Statement::exp(Expression::number(Number::int(0)))],
+            vec![Statement::exp(falsy)],
         );
 
         let StatementDesc::Exp(Expression {
@@ -2735,11 +2835,11 @@ mod tests {
         ));
         assert!(matches!(
             consequent.as_ref().desc,
-            ExpressionDesc::Number(Number::Int { i: 1, .. })
+            ExpressionDesc::Call(_, _, _)
         ));
         assert!(matches!(
             alternate.as_ref().desc,
-            ExpressionDesc::Number(Number::Int { i: 0, .. })
+            ExpressionDesc::Call(_, _, _)
         ));
     }
 
@@ -2747,13 +2847,23 @@ mod tests {
     fn test_if_statement_merges_nested_else_if_with_shared_then_into_or_condition() {
         let outer = Ident::create_local("outer");
         let inner = Ident::create_local("inner");
+        let truthy = Expression::call(
+            Expression::var(Ident::create_local("truthy")),
+            vec![],
+            CallInfo::default(),
+        );
+        let falsy = Expression::call(
+            Expression::var(Ident::create_local("falsy")),
+            vec![],
+            CallInfo::default(),
+        );
         let stmt = Statement::if_(
             Expression::var(outer.clone()),
-            vec![Statement::exp(Expression::number(Number::int(1)))],
+            vec![Statement::exp(truthy.clone())],
             vec![Statement::new(StatementDesc::If(
                 Expression::var(inner.clone()),
-                vec![Statement::exp(Expression::number(Number::int(1)))],
-                vec![Statement::exp(Expression::number(Number::int(0)))],
+                vec![Statement::exp(truthy)],
+                vec![Statement::exp(falsy.clone())],
             ))],
         );
 
@@ -2786,11 +2896,11 @@ mod tests {
         ));
         assert!(matches!(
             consequent.as_ref().desc,
-            ExpressionDesc::Number(Number::Int { i: 1, .. })
+            ExpressionDesc::Call(_, _, _)
         ));
         assert!(matches!(
             alternate.as_ref().desc,
-            ExpressionDesc::Number(Number::Int { i: 0, .. })
+            ExpressionDesc::Call(_, _, _)
         ));
     }
 

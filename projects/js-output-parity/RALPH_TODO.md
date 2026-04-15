@@ -43,6 +43,67 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: port OCaml's `Js_stmt_make.exp` normalization so statement
+  emission drops bare `Number` / `Undefined` expressions and peels trivial
+  `Seq` wrappers before later `if_` simplification sees them
+- Active backend focus for this slice is **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; this is downstream JS statement shaping in
+  `compiler-rust/src/js_ir/mod.rs`, aligned to OCaml's `js_stmt_make`
+  behavior rather than typedtree, lambda, or printer-only string rewrites
+- OCaml reference:
+  `compiler/core/js_stmt_make.ml`, specifically `exp`, where statement
+  lowering discards `Number` / `Undefined` and recursively drops trivial
+  `Seq` prefixes or suffixes before constructing `Exp`
+- Rust change:
+  - updated `compiler-rust/src/js_ir/mod.rs` so `Statement::exp(...)`
+    mirrors OCaml's `Js_stmt_make.exp` rules for `Number`, `Undefined`, and
+    `Seq(_, _)` with trivial ends
+  - added focused regression coverage in
+    `test_statement_exp_drops_trivial_literals_like_ocaml`,
+    `test_statement_exp_peels_trivial_seq_wrappers_like_ocaml`, and
+    `test_if_statement_keeps_explicit_empty_else_block_when_pure_branch_drops_like_ocaml`
+  - updated the existing nested-`if` merge unit tests to keep using
+    structurally equal side-effectful expressions after the new
+    `Statement::exp(...)` normalization
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_statement_exp_drops_trivial_literals_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_statement_exp_peels_trivial_seq_wrappers_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_keeps_explicit_empty_else_block_when_pure_branch_drops_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_merges_nested_then_if_with_shared_else_into_and_condition -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_merges_nested_else_if_with_shared_then_into_or_condition -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact-args release repro for `tests/tests/src/gpr_1667_test.res`,
+    diffing `/tmp/gpr_1667_test.mjs` against the checked-in snapshot
+  - exact-args release repro for `tests/tests/src/gpr_4491_test.res`,
+    diffing `/tmp/gpr_4491_test_exact.mjs` against the checked-in snapshot
+  - direct release repro for
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res`, diffing
+    `/tmp/VariantPatternMatchingSpreadsWithPayloads.mjs` against the
+    checked-in snapshot
+  - direct guard repro for `tests/tests/src/ExternalShadow.res`, diffing
+    `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the broader unchanged guard
+  - `tests/tests/src/gpr_1667_test.res`,
+    `tests/tests/src/gpr_4491_test.res`, and
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` remained
+    unchanged, which shows the current canonical JS snapshot frontier is being
+    blocked by a later backend stage than `Js_stmt_make.exp`
+  - the full authoritative sweep in this worktree remained **524 / 657**
+    passing, **0** compile errors, and **133** output diffs
+- Topline impact:
+  - JS snapshot parity: **524 / 657** -> **524 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **133** -> **133** (**no change**)
+- Keep this change because it ports a real OCaml backend rule into Rust's JS
+  IR construction without regressing the authoritative harness; under the
+  project correctness rule, verified OCaml-aligned backend behavior remains
+  worth landing even when the current snapshot baseline does not move yet.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: match OCaml's `js_dump` grouping for parenthesized
   object-literal member/index expressions by narrowing the extra indent to
   the array-index case that actually picks up an extra nested group, while
