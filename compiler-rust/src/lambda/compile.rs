@@ -1518,6 +1518,60 @@ impl LambdaCompiler {
         }
     }
 
+    fn compile_hoisted_named_string_return_tail(&mut self, body: &Lambda) -> Block {
+        self.compile_hoisted_static_raise_chain_return_tail(body)
+            .unwrap_or_else(|| self.compile_return_block(body))
+    }
+
+    fn compile_hoisted_static_raise_chain_return_tail(&mut self, lam: &Lambda) -> Option<Block> {
+        match lam {
+            Lambda::Llet(kind, id, value, body) => {
+                let mut block = self.compile_let_binding(*kind, id, value);
+                if block_finishes_output(&block) {
+                    return Some(block);
+                }
+                block.extend(self.compile_hoisted_static_raise_chain_return_tail(body)?);
+                Some(block)
+            }
+            Lambda::Lsequence(first, second) => {
+                let mut block = self.compile_effect_block(first);
+                if block_finishes_output(&block) {
+                    return Some(block);
+                }
+                block.extend(self.compile_hoisted_static_raise_chain_return_tail(second)?);
+                Some(block)
+            }
+            Lambda::LstaticRaise(label, args) => {
+                let handler_index = self
+                    .static_handlers
+                    .iter()
+                    .rposition(|handler| handler.label == *label && handler.bindings.len() == args.len())?;
+                let handler = self.static_handlers[handler_index].clone();
+                let removed = self.static_handlers.remove(handler_index);
+
+                let mut block = Vec::new();
+                for (arg, binding) in args.iter().zip(&handler.bindings) {
+                    if matches!(arg, Lambda::Lvar(id) if id.same(binding)) {
+                        continue;
+                    }
+                    block.extend(self.compile_let_binding(LetKind::Strict, binding, arg));
+                    if block_finishes_output(&block) {
+                        self.static_handlers.insert(handler_index, removed);
+                        return Some(block);
+                    }
+                }
+
+                block.extend(
+                    self.compile_hoisted_static_raise_chain_return_tail(&handler.handler)
+                        .unwrap_or_else(|| self.compile_return_block(&handler.handler)),
+                );
+                self.static_handlers.insert(handler_index, removed);
+                Some(block)
+            }
+            _ => None,
+        }
+    }
+
     fn compile_recursive_function_expr(
         &mut self,
         _function: &Ident,
@@ -3362,7 +3416,7 @@ impl LambdaCompiler {
                 }
 
                 let (_, body, _) = &grouped_cases[group_end];
-                let compiled_body = self.compile_return_block(body);
+                let compiled_body = self.compile_hoisted_named_string_return_tail(body);
                 let hoist_shared_tail = group_start != group_end
                     && group_end + 1 == grouped_cases.len()
                     && self.should_hoist_grouped_named_string_return_tail(body)
@@ -17768,6 +17822,67 @@ mod tests {
         assert_eq!(clauses[2].tag_type, SwitchCaseTag::String("C".to_string()));
         assert_switch_case_returns_int_result(&clauses[2].clause.body, 2);
         assert!(!clauses[2].clause.should_break);
+    }
+
+    #[test]
+    fn named_variant_return_switches_preserve_binding_temps_in_hoisted_shared_tails() {
+        let mut compiler = LambdaCompiler::new();
+        let action = Ident::create_local("action");
+        let inner = Ident::create_local("inner");
+        let carried = Ident::create_local("carried");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::LstaticCatch(
+                Box::new(Lambda::Lswitch(
+                    Box::new(Lambda::var(action.clone())),
+                    LambdaSwitch {
+                        sw_consts_full: true,
+                        sw_consts: vec![
+                            (0, Lambda::const_(Constant::int(1))),
+                            (1, Lambda::static_raise(3, Vec::new())),
+                            (2, Lambda::static_raise(3, Vec::new())),
+                        ],
+                        sw_blocks_full: true,
+                        sw_blocks: vec![],
+                        sw_failaction: None,
+                        sw_names: Some(SwitchNames {
+                            consts: vec![
+                                crate::lambda::SwitchTag::named("A"),
+                                crate::lambda::SwitchTag::named("B"),
+                                crate::lambda::SwitchTag::named("C"),
+                            ],
+                            blocks: vec![],
+                        }),
+                    },
+                )),
+                (3, vec![]),
+                Box::new(Lambda::let_(
+                    LetKind::Strict,
+                    inner.clone(),
+                    Lambda::const_(Constant::int(5)),
+                    Lambda::static_raise(2, vec![Lambda::var(inner.clone())]),
+                )),
+            )),
+            (2, vec![carried.clone()]),
+            Box::new(Lambda::prim(
+                Primitive::Pmulint,
+                vec![Lambda::var(carried.clone()), Lambda::var(carried.clone())],
+                Location::none(),
+            )),
+        ));
+
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains("case \"B\" :\n  case \"C\" :\n    break;"),
+            "expected the grouped shared tail to stay after the switch:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("let carried = inner;"),
+            "expected the outer staticcatch binding to stay materialized as a temp:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("return carried * carried | 0;"),
+            "expected the hoisted tail to return through the bound temp:\n{rendered}"
+        );
     }
 
     #[test]

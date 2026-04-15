@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 518 / 657 JS snapshots passing, 0 compile errors, 139 output diffs
+**Status:** 519 / 657 JS snapshots passing, 0 compile errors, 138 output diffs
 
 ## Goal
 
@@ -35,11 +35,66 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **518 / 657**
+- JS snapshot parity: **519 / 657**
 - Compile errors: **0**
-- Output diffs: **139**
+- Output diffs: **138**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: preserve OCaml's staticcatch-bound temp materialization when a
+  grouped named-constructor return switch hoists a shared tail through a
+  nested `staticraise` chain, instead of substituting the handler argument all
+  the way through the final return expression
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is still `Lam_compile`
+  control-flow lowering after optimized lambda parity, specifically the
+  `compile_staticcatch` / grouped return-switch interaction rather than a
+  printer-only cleanup
+- OCaml reference:
+  `compiler/core/lam_compile.ml`,
+  `compiler/core/lam_exit_code.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so the grouped
+    named-string return-switch hoist path now follows nested
+    `LstaticRaise(label, args)` chains explicitly, emits the handler-bound
+    temp assignments for those raised arguments, and only falls back to the
+    generic return-block compilation when the hoisted tail is not a static
+    raise chain
+  - added focused regression coverage for the `gpr_2413_test` shape so the
+    post-switch shared tail keeps the materialized binding (`let carried =
+    inner; return carried * carried | 0;`) instead of collapsing to direct
+    substitution
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml named_variant_return_switches_preserve_binding_temps_in_hoisted_shared_tails -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml named_variant_return_switches_inline_resolved_static_handler_values_inside_the_switch -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/gpr_2413_test.res`, diffing
+    `/tmp/gpr_2413_test.mjs` against the checked-in snapshot
+  - direct guard repro for `tests/tests/src/variant.res`, diffing
+    `/tmp/variant.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_2413_test.res` now matches its checked-in `.mjs`
+    snapshot exactly; the shared `B | C` tail keeps OCaml's materialized temp
+    binding after the switch instead of inlining `x._0._0` twice
+  - `tests/tests/src/variant.res` stayed narrowed to the separate pre-existing
+    `fooC` control-shape diff, so the earlier grouped-handler fix remains
+    intact
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as a
+    broader guard
+  - the full authoritative sweep in this worktree now reports **519 / 657**
+    passing, **0** compile errors, and **138** output diffs
+- Topline impact:
+  - JS snapshot parity: **518 / 657** -> **519 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **139** -> **138** (**-1**)
+- Keep this change because it matches OCaml's staticcatch argument binding
+  behavior in the hoisted shared tail instead of erasing that temp through
+  Rust-side substitution.
 
 Latest iteration on **2026-04-15**:
 
