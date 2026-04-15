@@ -727,6 +727,8 @@ pub struct TypeCheckContext<'a> {
     /// application reuses the types with correct path substitutions.
     pub module_expr_semantic_types:
         HashMap<crate::parse_arena::LocIdx, crate::types::decl::ModuleType>,
+    /// Registry of @comptime functions for compile-time specialization.
+    pub comptime_functions: HashMap<String, crate::types::comptime::ComptimeFunction>,
 }
 
 /// A diagnostic from type checking.
@@ -755,6 +757,7 @@ impl<'a> TypeCheckContext<'a> {
             force_fresh_local_float: false,
             generic_constraint_body_ty: None,
             module_expr_semantic_types: HashMap::new(),
+            comptime_functions: HashMap::new(),
         }
     }
 
@@ -4519,6 +4522,12 @@ pub fn type_expect<'a>(
             } = **inner;
             // Function application
             let funct_expr = tctx.arena.get_expr(*funct);
+
+            // Check for comptime function call
+            if let Some(result) = try_comptime_application(tctx, env, loc, funct_expr, args, expected_ty) {
+                return result;
+            }
+
             let typed_apply = type_application(
                 tctx,
                 env,
@@ -19933,6 +19942,67 @@ fn lookup_type_decl_for_path<'a>(
     }
 
     None
+}
+
+// ── Comptime Application Detection ─────────────────────────────────────────
+
+/// Check if a function application is a call to a registered @comptime function.
+/// If so, attempt to specialize it. Returns None if not a comptime call.
+fn try_comptime_application(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    funct_expr: &ParsedExpression,
+    args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
+    expected_ty: TypeExprRef,
+) -> Option<TypeCoreResult<Expression>> {
+    // Check if the function is a simple identifier
+    let func_name = match &*funct_expr.pexp_desc {
+        crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
+            // Get the identifier name from the longident
+            tctx.arena.get_longident(lid.txt).to_string()
+        }
+        _ => return None,
+    };
+
+    // Check if it's a registered comptime function
+    let comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
+
+    // For now, build TypeInfo from the expected type and pass it
+    // as the first comptime argument. This is a simplified version
+    // that handles the common case: encode(user, myUser) where
+    // the first arg is a type.
+    //
+    // Full implementation would analyze the function's parameter
+    // annotations to determine which args are comptime.
+
+    // Try to specialize the comptime function body
+    let mut comptime_bindings = std::collections::HashMap::new();
+
+    // Build TypeInfo from the concrete type at the call site
+    // For now, use the expected type as a heuristic
+    let mut visited = Vec::new();
+    let type_info = crate::types::comptime::build_type_info(
+        tctx.type_ctx,
+        env,
+        expected_ty,
+        &mut visited,
+    );
+    comptime_bindings.insert(
+        "T".to_string(),
+        crate::types::comptime::ComptimeValue::Type(type_info),
+    );
+
+    let mut spec_env = crate::types::comptime::SpecEnv::new(comptime_bindings);
+    match crate::types::comptime::specialize_expression(
+        &comptime_fn.body,
+        &mut spec_env,
+        tctx.type_ctx,
+        env,
+    ) {
+        Ok(specialized) => Some(Ok(specialized)),
+        Err(msg) => Some(Err(TypeCoreError::Other(msg))),
+    }
 }
 
 #[cfg(test)]
