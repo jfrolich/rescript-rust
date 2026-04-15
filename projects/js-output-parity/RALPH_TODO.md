@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 535 / 657 JS snapshots passing, 0 compile errors, 122 output diffs
+**Status:** 537 / 657 JS snapshots passing, 0 compile errors, 120 output diffs
 
 ## Goal
 
@@ -35,11 +35,66 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **535 / 657**
+- JS snapshot parity: **537 / 657**
 - Compile errors: **0**
-- Output diffs: **122**
+- Output diffs: **120**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: align statement-valued `if` / `switch` / `trywith` result temp
+  names with OCaml's plain `Ext_ident.create_tmp ()` temps instead of emitting
+  Rust-only names like `ifres`, `switch`, and `tryres`
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is `Lam_compile` value-result lowering
+  in `compiler-rust/src/lambda/compile.rs`, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially the `NeedValue` paths in
+  `compile_switch`, `compile_stringswitch`, `compile_trywith`, and the
+  statement-valued `if` lowering, together with
+  `compiler/ext/ext_ident.ml` where `Ext_ident.create_tmp ()` defaults to the
+  base name `tmp`
+- Rust change:
+  - introduced `fresh_tmp_ident()` to mirror OCaml's default temp-name path
+  - switched statement-valued `LifThenElse`, `Lswitch`,
+    `LstringSwitch`, `LtryWith`, and switch-scrutinee binding temps to use
+    that OCaml-aligned `tmp` prefix instead of `ifres`, `switch`, or `tryres`
+  - added focused regression coverage in
+    `trywith_expression_result_temp_uses_tmp_name_like_ocaml`
+    plus explicit `tmp` assertions in the existing `if` / int-switch /
+    string-switch temp tests
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml trywith_expression_result_temp_uses_tmp_name_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml if_value_branches_keep_assignment_continuation_through_let_bindings -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml int_switch_expressions_assign_branch_values_into_the_result_temp -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml string_switch_expressions_assign_branch_values_into_the_result_temp -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml bind_switch_scrutinee_once_uses_tmp_name_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/arity_infer.res`, diffing
+    `/tmp/arity_infer.mjs` against the checked-in snapshot
+  - direct release guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/arity_infer.res` is now an exact snapshot match; the
+    `tmp` function-value temp now matches OCaml in both the `if` and `switch`
+    cases
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the unchanged guard
+  - no remaining failing JS diffs mention `ifres`, `switch` result temps, or
+    `tryres`; `recursive_module.res` still differs, but now only on its
+    recursive-module initialization / lazy alias shape rather than temp naming
+  - the full authoritative sweep in this current worktree now reports
+    **537 / 657** passing, **0** compile errors, and **120** output diffs
+- Topline impact in this current worktree:
+  - JS snapshot parity: **535 / 657** -> **537 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **122** -> **120** (**-2**)
+- Keep this change because OCaml's backend already routes these statement-valued
+  expressions through plain `Ext_ident.create_tmp ()` temps; matching that
+  naming rule in Rust removes user-visible backend drift at the lowering source
+  instead of papering over it in the emitted JavaScript later.
 
 Latest iteration on **2026-04-15**:
 

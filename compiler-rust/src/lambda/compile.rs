@@ -585,7 +585,7 @@ impl LambdaCompiler {
                 }
             }
             Lambda::LtryWith(body, exn, handler) => {
-                let result = self.fresh_ident("tryres");
+                let result = self.fresh_tmp_ident();
                 let mut prelude = vec![Statement::variable(VariableDeclaration {
                     ident: result.clone(),
                     value: None,
@@ -615,7 +615,7 @@ impl LambdaCompiler {
                         ),
                     }
                 } else {
-                    let tmp = self.fresh_ident("ifres");
+                    let tmp = self.fresh_tmp_ident();
                     prelude.push(Statement::variable(VariableDeclaration {
                         ident: tmp.clone(),
                         value: None,
@@ -1139,7 +1139,7 @@ impl LambdaCompiler {
             return Compiled { prelude, expr };
         }
 
-        let tmp = self.fresh_ident("tmp");
+        let tmp = self.fresh_tmp_ident();
         prelude.push(Statement::variable(VariableDeclaration {
             ident: tmp.clone(),
             value: Some(op.default_expr()),
@@ -2084,7 +2084,7 @@ impl LambdaCompiler {
             let scrut_compiled = self.compile_expr(scrut);
             let (mut prelude, scrut_expr) =
                 self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
-            let tmp = self.fresh_ident("switch");
+            let tmp = self.fresh_tmp_ident();
             prelude.push(Statement::variable(VariableDeclaration {
                 ident: tmp.clone(),
                 value: None,
@@ -2110,7 +2110,7 @@ impl LambdaCompiler {
                 } else {
                     (scrut_compiled.prelude, scrut_compiled.expr)
                 };
-            let tmp = self.fresh_ident("switch");
+            let tmp = self.fresh_tmp_ident();
             prelude.push(Statement::variable(VariableDeclaration {
                 ident: tmp.clone(),
                 value: None,
@@ -2129,7 +2129,7 @@ impl LambdaCompiler {
 
         let scrut_compiled = self.compile_expr(scrut);
         let mut prelude = scrut_compiled.prelude;
-        let tmp = self.fresh_ident("switch");
+        let tmp = self.fresh_tmp_ident();
         prelude.push(Statement::variable(VariableDeclaration {
             ident: tmp.clone(),
             value: None,
@@ -2185,7 +2185,7 @@ impl LambdaCompiler {
     ) -> Compiled {
         let scrut_compiled = self.compile_expr(scrut);
         let mut prelude = scrut_compiled.prelude;
-        let tmp = self.fresh_ident("switch");
+        let tmp = self.fresh_tmp_ident();
         prelude.push(Statement::variable(VariableDeclaration {
             ident: tmp.clone(),
             value: None,
@@ -3306,7 +3306,7 @@ impl LambdaCompiler {
             return (prelude, expr);
         }
 
-        let ident = self.fresh_ident("tmp");
+        let ident = self.fresh_tmp_ident();
         prelude.push(Statement::variable(VariableDeclaration {
             ident: ident.clone(),
             value: Some(expr),
@@ -6654,6 +6654,10 @@ impl LambdaCompiler {
 
     fn fresh_ident(&self, prefix: &str) -> Ident {
         self.id_gen.create(prefix)
+    }
+
+    fn fresh_tmp_ident(&self) -> Ident {
+        self.fresh_ident("tmp")
     }
 
     fn with_static_handler<T>(
@@ -15456,6 +15460,69 @@ mod tests {
     }
 
     #[test]
+    fn trywith_expression_result_temp_uses_tmp_name_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let exn = Ident::create_local("exn");
+        let compiled = compiler.compile_expr(&Lambda::LtryWith(
+            Box::new(Lambda::const_(Constant::int(1))),
+            exn.clone(),
+            Box::new(Lambda::const_(Constant::int(2))),
+        ));
+
+        let [declare, try_stmt] = compiled.prelude.as_slice() else {
+            panic!("expected a declaration followed by a try statement");
+        };
+        let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc
+        else {
+            panic!("expected the trywith result temp declaration");
+        };
+        assert_eq!(result.name(), "tmp");
+        let StatementDesc::Try(body, Some((caught, handler)), None) = &try_stmt.desc else {
+            panic!("expected a try statement");
+        };
+        assert!(caught.same(&exn));
+        assert!(matches!(
+            body.as_slice(),
+            [Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Bin(BinOp::Eq, lhs, rhs),
+                    ..
+                }),
+                ..
+            }] if matches!(
+                (&lhs.desc, &rhs.desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                    ExpressionDesc::Number(Number::Int { i: 1, .. })
+                ) if lhs_id.same(result)
+            )
+        ));
+        assert!(matches!(
+            handler.as_slice(),
+            [Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Bin(BinOp::Eq, lhs, rhs),
+                    ..
+                }),
+                ..
+            }] if matches!(
+                (&lhs.desc, &rhs.desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                    ExpressionDesc::Number(Number::Int { i: 2, .. })
+                ) if lhs_id.same(result)
+            )
+        ));
+        assert!(matches!(
+            compiled.expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(result)
+        ));
+    }
+
+    #[test]
     fn nested_static_raises_in_return_position_keep_the_return_continuation() {
         let mut compiler = LambdaCompiler::new();
         let cond_a = Ident::create_local("condA");
@@ -15675,6 +15742,7 @@ mod tests {
         else {
             panic!("expected the switch temporary declaration");
         };
+        assert_eq!(result.name(), "tmp");
         let StatementDesc::IntSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
             panic!("expected an integer switch with a default block");
         };
@@ -15721,6 +15789,7 @@ mod tests {
         else {
             panic!("expected the string switch temporary declaration");
         };
+        assert_eq!(result.name(), "tmp");
         let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc
         else {
             panic!("expected a string switch with a default block");
@@ -17765,6 +17834,7 @@ mod tests {
             StatementDesc::Variable(VariableDeclaration { ident, .. }) => ident.clone(),
             _ => panic!("expected a result temp declaration"),
         };
+        assert_eq!(result.name(), "tmp");
         let StatementDesc::If(_, then_block, else_block) = &if_stmt.desc else {
             panic!("expected an if statement");
         };
