@@ -8,11 +8,12 @@ This document describes a proposed compile-time execution system for ReScript, i
 2. [Design Goals](#design-goals)
 3. [Core Concepts](#core-concepts)
 4. [Type Introspection](#type-introspection)
-5. [Comptime Interpreter](#comptime-interpreter)
-6. [Replacing PPXs](#replacing-ppxs)
-7. [Implementation Plan](#implementation-plan)
-8. [Examples](#examples)
-9. [Appendix: Zig Comptime Reference](#appendix-zig-comptime-reference)
+5. [Execution Model: QuickJS](#execution-model-quickjs)
+6. [Why an Integrated In-Process Compiler](#why-an-integrated-in-process-compiler)
+7. [Derive Attributes](#derive-attributes)
+8. [Replacing PPXs](#replacing-ppxs)
+9. [Implementation Plan](#implementation-plan)
+10. [Appendix: Zig Comptime Reference](#appendix-zig-comptime-reference)
 
 ---
 
@@ -38,44 +39,57 @@ Comptime (compile-time execution) allows regular ReScript code to execute during
 | **Community** | OCaml expertise needed | Any ReScript developer |
 | **Maintenance** | AST changes break PPXs | Stable interface |
 
-### Key Insight
+### Key Design Choice: Zig-Style Partial Evaluation
 
-PPXs receive **strings** via extension points (`%sql(...)`, `%graphql(...)`), then parse those strings and generate code. Comptime can do the same thing—the DSL syntax is just string content, not ReScript syntax.
+Unlike macro systems that generate code as strings or AST, comptime uses **partial evaluation**. You write a normal function, mark compile-time-known parameters, and the compiler specializes it:
 
 ```rescript
-// PPX approach:
-let query = %sql(`SELECT * FROM users WHERE id = $id`)
+@comptime
+let encode = (comptime T: type, value: T): Js.Json.t => {
+  switch @typeInfo(T) {
+  | String => Js.Json.string(value)
+  | Int => Js.Json.number(Int.toFloat(value))
+  | Record({fields}) =>
+    let obj = Js.Dict.empty()
+    inline for field in fields {
+      Js.Dict.set(obj, field.name, encode(field.typ, @field(value, field.name)))
+    }
+    Js.Json.object_(obj)
+  | _ => @compileError(`Cannot encode ${@typeName(T)}`)
+  }
+}
 
-// Comptime approach:
-let query = sql(`SELECT * FROM users WHERE id = $id`)
-//              ↑ comptime function  ↑ comptime string argument
+// Call site:
+let json = encode(user, myUser)
 ```
+
+The compiler evaluates the `switch @typeInfo(T)` at compile time, picks the matching branch, unrolls `inline for`, recursively specializes each `encode` call. What comes out is concrete code with no type dispatch:
+
+```javascript
+// Generated output — no runtime type info, no loops, no generics
+var obj = Js_dict.empty();
+Js_dict.set(obj, "name", Js_json.string(myUser.name));
+Js_dict.set(obj, "age", Js_json.number(myUser.age));
+var json = Js_json.object_(obj);
+```
+
+No code generation step. No strings, no AST builders, no quasi-quotation. The function body **is** the template. Comptime evaluation **is** specialization.
 
 ---
 
 ## Design Goals
 
-### 1. No Global State
+### 1. Same Language, No Code Generation
+
+Unlike macro systems with separate DSLs or code-as-strings, comptime is just ReScript. You write what looks like a normal function. The compiler partially evaluates it. There is no "generate code" step — the function body contains both comptime and runtime expressions, and the compiler teases them apart.
+
+### 2. No Global State
 
 The Rust compiler is designed for concurrent compilation. Comptime must not introduce global state:
 
-- Each compilation unit gets its own interpreter instance
+- Each compilation unit gets its own QuickJS instance
 - Type contexts are passed explicitly
 - No `static mut` or `thread_local!`
-
-### 2. Same Language
-
-Unlike macro systems with separate DSLs, comptime is just ReScript:
-
-```rescript
-// This is regular ReScript that happens to run at compile time
-@comptime
-let factorial = (n: int): int => {
-  if n <= 1 { 1 } else { n * factorial(n - 1) }
-}
-
-let x = factorial(10) // Evaluated at compile time → 3628800
-```
 
 ### 3. Hermetic Evaluation
 
@@ -85,6 +99,8 @@ Following Zig's design, comptime has no I/O:
 - No network access
 - No randomness
 - Results are deterministic and cacheable
+
+QuickJS starts with a blank global scope by default — no `fs`, `fetch`, `process`. Only the comptime builtins are exposed.
 
 ### 4. Explicit Opt-In
 
@@ -107,56 +123,57 @@ const DEFAULT_FUEL: usize = 100_000;
 
 Each interpreter step decrements fuel. Exhaustion produces a compile error.
 
+### 6. Fully In-Memory
+
+Comptime code is compiled to JS and executed in-memory during compilation. No comptime artifacts are written to disk. No comptime JS appears in the compiled output. Comptime functions do their job during compilation and disappear — only the specialized runtime code remains.
+
 ---
 
 ## Core Concepts
 
 ### Comptime Functions
 
-Functions marked `@comptime` can execute at compile time when all arguments are comptime-known:
+Functions marked `@comptime` can execute at compile time when all comptime parameters are known:
 
 ```rescript
 @comptime
-let double = (x: int): int => x * 2
+let double = (comptime x: int): int => x * 2
 
 let a = double(5)        // Comptime: becomes `let a = 10`
-let b = double(runtime)  // Runtime: becomes `let b = runtime * 2`
+let b = double(runtime)  // Error: runtime is not comptime-known
 ```
 
 ### Comptime Parameters
 
-Parameters marked `comptime` must be known at compile time:
+Parameters marked `comptime` must be known at compile time. Non-comptime parameters become runtime code:
 
 ```rescript
 @comptime
-let repeat = (comptime n: int, s: string): string => {
-  let result = ""
-  for _ in 0 to n - 1 {
-    result = result ++ s
+let encode = (comptime T: type, value: T): Js.Json.t => {
+  switch @typeInfo(T) {
+  | String => Js.Json.string(value)     // value is runtime
+  | Int => Js.Json.number(Int.toFloat(value))
+  | _ => @compileError(`Cannot encode ${@typeName(T)}`)
   }
-  result
 }
 
-let x = repeat(3, "hi")     // Comptime n, generates unrolled code
-let y = repeat(count, "hi") // Error: count is not comptime-known
+let x = encode(string, myString)   // T is comptime, value is runtime
+let y = encode('a, something)      // Error: 'a is not comptime-known
 ```
 
-### Type Parameters
+### Fully Resolved Types Required
 
-Types can be passed as comptime values:
+Comptime type parameters must be fully resolved — no unresolved type variables:
 
 ```rescript
-@comptime
-let sizeOf = (comptime T: type): int => {
-  switch @typeInfo(T) {
-  | Int => 4
-  | Float => 8
-  | Record({fields}) => fields->Array.reduce(0, (acc, f) => acc + sizeOf(f.typ))
-  | _ => 0
-  }
-}
+encode(user, myUser)              // Fine: user is concrete
+encode(array<int>, myArr)         // Fine: fully resolved
+encode(array<'a>, myArr)          // Error: 'a not comptime-known
+encode(option<string>, myOpt)     // Fine: fully resolved
 
-let intSize = sizeOf(int)   // Comptime: becomes `let intSize = 4`
+// Polymorphism and comptime are opposites:
+// - Polymorphism: works for any type at runtime
+// - Comptime: specialized for a specific type at compile time
 ```
 
 ### Inline For
@@ -165,10 +182,10 @@ Loops over comptime arrays are unrolled:
 
 ```rescript
 @comptime
-let fields = @typeInfo(User)->getFields
+let fields = @typeInfo(user)->getFields
 
 // This loop is unrolled at compile time
-@inline for field in fields {
+inline for field in fields {
   Console.log(field.name)
 }
 
@@ -182,477 +199,650 @@ Console.log("email")
 
 ## Type Introspection
 
-### The Type.t Representation
+### The typeInfo Representation
 
-Types at compile time are represented as a variant:
+Types at compile time are represented as a variant. Since comptime requires fully resolved types, there are no unresolved type variables — the type info tree is always concrete.
 
 ```rescript
-// Provided by the compiler in a Type module
-type rec t =
-  | Var({name: option<string>})
-  | Arrow({arg: labeledArg, ret: t})
-  | Tuple({elements: array<t>})
-  | Constr({path: string, args: array<t>})
-  | Record({path: string, fields: array<field>})
-  | Variant({path: string, constructors: array<constructor>})
-  | PolyVariant({cases: array<variantCase>, closed: bool})
-  | Object({methods: array<method>})
+type rec typeInfo =
+  // === Primitives ===
+  | Int
+  | Float
+  | String
+  | Char
+  | Bool
+  | Unit
+  | Bigint
 
-and field = {
+  // === Containers (always concrete element types) ===
+  | Array({element: typeInfo})
+  | Dict({value: typeInfo})
+  | Option({inner: typeInfo})
+  | Null({inner: typeInfo})
+  | Nullable({inner: typeInfo})
+  | Promise({value: typeInfo})
+  | Tuple({elements: array<typeInfo>})
+
+  // === Record ===
+  | Record({
+      name: string,
+      modulePath: string,
+      fields: array<fieldInfo>,
+      attributes: array<attribute>,
+      unboxed: bool,
+    })
+
+  // === Variant ===
+  | Variant({
+      name: string,
+      modulePath: string,
+      constructors: array<constructorInfo>,
+      attributes: array<attribute>,
+      unboxed: bool,
+      tag: option<string>,              // @tag("kind") → Some("kind")
+    })
+
+  // === Polymorphic Variant ===
+  | PolyVariant({
+      cases: array<polyCase>,
+      closed: bool,                     // [#A | #B] vs [> #A | #B]
+    })
+
+  // === Function ===
+  | Function({
+      args: array<argInfo>,
+      return: typeInfo,
+    })
+
+  // === Object type ===
+  | Object({
+      methods: array<methodInfo>,
+      open_: bool,                      // {..} vs {.}
+    })
+
+  // === Opaque (ReScript type, definition hidden by module signature) ===
+  | Opaque({
+      name: string,
+      modulePath: string,
+      attributes: array<attribute>,
+    })
+
+  // === External (JS interop type, no ReScript definition) ===
+  | External({
+      name: string,
+      modulePath: string,              // "Js.Date", "Dom", "ReactDOM"
+      attributes: array<attribute>,
+      bindings: array<externalBinding>,
+    })
+
+  // === Alias (user-defined type alias) ===
+  | Alias({
+      name: string,
+      modulePath: string,
+      resolved: typeInfo,              // what it actually is
+      attributes: array<attribute>,
+    })
+
+  // === Recursive reference (breaks cycles in recursive types) ===
+  | Recursive({name: string, modulePath: string})
+```
+
+### Field Info
+
+```rescript
+and fieldInfo = {
   name: string,
-  typ: t,
+  typ: typeInfo,
   mutable_: bool,
-  optional: bool,
+  optional: bool,                       // x?: int
   attributes: array<attribute>,
+  jsName: string,                       // @as("userName") → "userName", else name
 }
+```
 
-and constructor = {
+### Constructor Info
+
+```rescript
+and constructorInfo = {
   name: string,
   args: constructorArgs,
   attributes: array<attribute>,
+  jsValue: option<constructorJsRepr>,
 }
 
 and constructorArgs =
-  | Tuple(array<t>)
-  | InlineRecord(array<field>)
+  | NoArgs                              // | A
+  | TupleArgs(array<typeInfo>)          // | A(int, string)
+  | InlineRecord(array<fieldInfo>)      // | A({x: int, y: string})
 
-and labeledArg = {
-  label: option<string>,
-  optional: bool,
-  typ: t,
+and constructorJsRepr =
+  | JsString(string)                    // @as("active")
+  | JsInt(int)                          // @as(0)
+  | JsBool(bool)                        // @as(true)
+  | JsNull                              // @as(null)
+  | JsUndefined                         // @as(undefined)
+```
+
+### Polymorphic Variant Case
+
+```rescript
+and polyCase = {
+  name: string,                         // #A, #"some-name"
+  payload: option<polyPayload>,
+  attributes: array<attribute>,
+  jsValue: option<constructorJsRepr>,
 }
 
-and variantCase = {
+and polyPayload =
+  | Single(typeInfo)                    // #A(int)
+  | Multiple(array<typeInfo>)           // #A(int, string)
+```
+
+### Function Arg Info
+
+```rescript
+and argInfo = {
+  label: argLabel,
+  typ: typeInfo,
+}
+
+and argLabel =
+  | Positional
+  | Labeled(string)                     // ~name: string
+  | Optional(string)                    // ~name: string=?
+```
+
+### Object Method Info
+
+```rescript
+and methodInfo = {
   name: string,
-  payload: option<t>,
+  typ: typeInfo,
 }
+```
 
-and method = {
-  name: string,
-  typ: t,
-}
+### Attributes
 
+```rescript
 and attribute = {
   name: string,
   payload: option<string>,
 }
 ```
 
+### External Bindings (Sum Type)
+
+External bindings represent JS interop declarations associated with an external type. Each binding is exactly one thing:
+
+```rescript
+and externalBinding =
+  | Constructor({                       // @new external make: unit => t = "Date"
+      name: string,
+      jsName: string,
+      args: array<argInfo>,
+      return: typeInfo,
+    })
+  | Method({                            // @send external toISOString: t => string
+      name: string,
+      jsName: string,
+      args: array<argInfo>,             // excluding self
+      return: typeInfo,
+    })
+  | Getter({                            // @get external length: t => int = "length"
+      name: string,
+      jsName: string,
+      typ: typeInfo,
+    })
+  | Setter({                            // @set external setName: (t, string) => unit
+      name: string,
+      jsName: string,
+      typ: typeInfo,
+    })
+  | StaticMethod({                      // @scope("Date") @val external now: unit => float
+      name: string,
+      jsName: string,
+      args: array<argInfo>,
+      return: typeInfo,
+    })
+  | GlobalValue({                       // @val external document: t = "document"
+      name: string,
+      jsName: string,
+    })
+  | ModuleImport({                      // @module("moment") external moment: string => t
+      name: string,
+      jsName: string,
+      from: string,
+      args: array<argInfo>,
+      return: typeInfo,
+    })
+```
+
+### Opaque vs External
+
+These are fundamentally different:
+
+- **Opaque**: A ReScript type with a hidden definition. It *has* structure, you just can't see it from outside the module. If comptime runs *inside* the defining module, it sees through to the real type.
+- **External**: A JS value with no ReScript definition at all. It has whatever shape JS gave it. The `bindings` field exposes what the compiler knows about its JS API.
+
+```rescript
+@comptime
+let rec encodeField = (comptime T: type, value: T): Js.Json.t => {
+  switch @typeInfo(T) {
+  | String => Js.Json.string(value)
+  | Int => Js.Json.number(Int.toFloat(value))
+  | Record({fields}) => ...
+  | Opaque(_) =>
+    // There IS a definition, but it's hidden.
+    @compileError(`${@typeName(T)} is opaque. Expose the type or add @encode.`)
+  | External({bindings}) =>
+    // JS type — try to find a serialization method
+    let hasToJSON = bindings->Array.find(b =>
+      switch b {
+      | Method({jsName: "toJSON"}) => true
+      | _ => false
+      }
+    )
+    switch hasToJSON {
+    | Some(Method(m)) => value->@send(m.jsName)
+    | _ => @compileError(`${@typeName(T)} is external with no known serialization`)
+    }
+  | ...
+  }
+}
+```
+
 ### Introspection Builtins
 
 ```rescript
-// Get type information
-@typeInfo(User)           // → Type.Record({fields: [...], ...})
-
-// Get type name as string
-@typeName(User)           // → "User"
-
-// Check if type has a field
-@hasField(User, "name")   // → true
-
-// Get field type
-@fieldType(User, "name")  // → Type.Constr({path: "string", args: []})
-
-// Get attribute value
+@typeInfo(user)           // → Record({fields: [...], ...})
+@typeName(user)           // → "user"
 @getAttr(field, "json.key") // → option<string>
-
-// Access field value at comptime
-@field(value, "name")     // → value.name (field name is comptime string)
+@field(value, field.name)   // → field access with comptime-known name
+@compileError(msg)          // → emit compile error
+@embedFile(path)            // → embed file contents as string
 ```
 
-### Example: Record Field Iteration
+### Type Alias Resolution
+
+Built-in aliases are always fully resolved:
 
 ```rescript
-type user = {
-  id: int,
-  name: string,
-  email: option<string>,
-}
-
-@comptime
-let printFields = (comptime T: type): unit => {
-  switch @typeInfo(T) {
-  | Record({fields}) =>
-    fields->Array.forEach(field => {
-      Console.log(`Field: ${field.name}, Type: ${@typeName(field.typ)}`)
-    })
-  | _ => @compileError("Expected a record type")
-  }
-}
-
-printFields(user)
-// Compile-time output:
-// Field: id, Type: int
-// Field: name, Type: string
-// Field: email, Type: option<string>
+@typeInfo(Array.t<int>)   // → Array({element: Int})
+@typeInfo(array<int>)     // → Array({element: Int})
+// identical — Array.t is just an alias for array
 ```
+
+User-defined aliases are resolved by default. The original alias name is available if needed but the common case is simple:
+
+```rescript
+type userId = string
+type user = { id: userId, name: string }
+
+@typeInfo(user).fields[0].typ   // → String (fully resolved)
+```
+
+### Recursive Types
+
+```rescript
+type rec tree = { value: int, children: array<tree> }
+
+@typeInfo(tree)
+// → Record({
+//     name: "tree",
+//     fields: [
+//       {name: "value", typ: Int},
+//       {name: "children", typ: Array({element: Recursive({name: "tree"})})},
+//     ]
+//   })
+```
+
+The `Recursive` case breaks the cycle. Call `@typeInfo` again on the referenced type to follow it.
 
 ---
 
-## Comptime Interpreter
+## Execution Model: QuickJS
 
-### Architecture
+### Why QuickJS?
 
-The comptime interpreter is a tree-walking interpreter written in Rust that evaluates Lambda IR:
+ReScript already compiles to JavaScript. Instead of writing a custom interpreter in Rust, comptime functions are compiled to JS through the normal pipeline and executed with QuickJS embedded in the compiler.
+
+- **Small** (~200KB compiled into the Rust binary), no external dependencies
+- **Blank global scope** by default — hermetic by design, only expose comptime builtins
+- **ES2020** support — plenty for comptime workloads
+- **No JIT needed** — comptime code is short-lived, evaluating type info and unrolling loops
+
+### Architecture: Partial Evaluation
+
+QuickJS doesn't produce code — it **makes decisions** that the compiler uses to specialize:
+
+1. Compiler walks the `@comptime` function's AST
+2. Hits `@typeInfo(T)` → evaluates via host function, gets type info
+3. Hits `switch` on comptime value → QuickJS evaluates the scrutinee, compiler keeps only the matching branch
+4. Hits `inline for` → QuickJS evaluates the array, compiler unrolls the loop
+5. Hits `@getAttr(field, "json.key")` → QuickJS evaluates, returns the attribute value
+6. Runtime expressions are kept as AST with comptime values substituted as constants
+
+QuickJS handles **computation** (string parsing, attribute lookup, conditional logic). The compiler handles **specialization** (branch selection, loop unrolling, constant substitution, recursive inlining).
+
+### In-Memory Compilation Flow
 
 ```
-ReScript Source
-    ↓ Parser
-AST (Surface Syntax)
-    ↓ Type Checker
-Typed AST + TypeContext
-    ↓ Lambda Conversion
-Lambda IR
-    ↓
-┌─────────────────────────────────────┐
-│     Comptime Detection              │
-│  (find @comptime functions/calls)   │
-└─────────────────────────────────────┘
-    ↓
-┌─────────────────────────────────────┐
-│     Comptime Interpreter            │
-│  - Tree-walking evaluation          │
-│  - Access to TypeContext            │
-│  - Fuel-limited execution           │
-└─────────────────────────────────────┘
-    ↓ (splice results back)
-Lambda IR (with comptime results inlined)
-    ↓ JS Compilation
-JavaScript
+@comptime function source
+    ↓ normal parse + type check
+Typed AST
+    ↓ compile to JS (in memory, never written to disk)
+JS source string
+    ↓ stored in CompiledModule.comptime_js
+    ↓ (available for cross-module comptime calls)
+
+When called with comptime-known arguments:
+    ↓ load into QuickJS context
+    ↓ execute — calls host functions for @typeInfo etc.
+    ↓ returns decisions/values
+    ↓ compiler specializes the original AST
+Specialized AST (comptime parts resolved, runtime parts remain)
+    ↓ type check (normal)
+    ↓ Lambda lowering (normal)
+    ↓ JS codegen (normal)
+Output JS (no trace of comptime)
 ```
 
-### Value Representation
+### Module State
 
-Comptime values are represented in Rust:
+Each compiled module carries comptime JS in memory alongside its normal compilation output:
 
 ```rust
-/// Runtime values during comptime evaluation
-#[derive(Debug, Clone)]
-pub enum Value {
-    /// A constant value (int, string, bool, etc.)
-    Const(Constant),
-
-    /// A type (result of @typeInfo)
-    Type(ComptimeType),
-
-    /// A closure (function + captured environment)
-    Closure {
-        params: Vec<Ident>,
-        body: Box<Lambda>,
-        env: Env,
-    },
-
-    /// A record/struct value
-    Record(HashMap<String, Value>),
-
-    /// An array value
-    Array(Vec<Value>),
-
-    /// A variant/constructor
-    Variant {
-        tag: String,
-        payload: Option<Box<Value>>,
-    },
+struct CompiledModule {
+    signature: ModuleSignature,              // types, for downstream type checking
+    lambda: Lambda,                          // runtime code, for JS emission
+    comptime_js: HashMap<String, String>,    // fn_name → JS source, in memory only
 }
-
-type Env = HashMap<Ident, Value>;
 ```
 
-### Interpreter Core
+### Cross-Module Comptime
+
+When `User.res` calls a comptime function from `Codec.res`:
+
+1. `Codec.res` was already compiled (dependency order)
+2. Its comptime JS is in memory in `CompiledModule.comptime_js`
+3. Load into the QuickJS context via custom module loader
+4. Execute — the call chain works naturally across modules
+
+QuickJS's custom module loader resolves imports from the compiler's in-memory module map:
 
 ```rust
-pub struct ComptimeInterpreter<'ctx> {
-    /// Type context for @typeInfo
-    type_ctx: &'ctx TypeContext<'ctx>,
-    /// Variable environment
-    env: Env,
-    /// Remaining fuel (decremented each step)
-    fuel: usize,
+context.set_module_loader(|module_name| {
+    compiled_modules.get(module_name)
+        .map(|m| m.comptime_js_bundle())
+});
+```
+
+### Host Functions
+
+The compiler exposes these to QuickJS:
+
+```rust
+// Type introspection — reads from the compiler's type environment
+__comptime_typeInfo(type_path)      // → JS object with type structure
+__comptime_typeName(type_path)      // → string
+__comptime_getAttr(field, name)     // → string | null
+__comptime_compileError(msg)        // → throws, compiler catches as compile error
+```
+
+These cross the Rust-QuickJS FFI boundary. Rust's borrow checker ensures the type environment isn't mutated while QuickJS is reading it.
+
+---
+
+## Why an Integrated In-Process Compiler
+
+Comptime could theoretically be built on a traditional batch compiler (like OCaml's `bsc`). But an integrated, in-process Rust compiler is fundamentally better suited for it. Here's why.
+
+### Comptime Erases the Phase Distinction
+
+A traditional compiler has rigid phases: Parse → Type Check → Lower → Codegen. Each phase completes fully before the next. Artifacts on disk are the boundaries.
+
+Comptime **destroys this model.** When the compiler hits `@encoder` on a type:
+
+1. Type checking must pause
+2. Comptime code must execute — which requires type info from *this* and *other* modules
+3. Comptime produces specialized code
+4. That code must be type-checked
+5. The newly type-checked code might trigger more comptime
+6. Only then can type checking continue
+
+This is not a pipeline. It's a **conversation** between compilation phases. An in-process compiler does it naturally — all the state is right there.
+
+### In-Memory Module Graph
+
+The in-process compiler holds the entire project in memory — all modules' types, signatures, comptime JS, the full dependency graph. This changes what's possible:
+
+**Comptime dependency resolution is trivial.** When `User.res` hits `@encoder`, the compiler needs the comptime JS for `Spice.encoder`. It's already in memory — compiled earlier in dependency order. Just hand QuickJS a reference. No file lookup, no deserialization, no cache invalidation.
+
+With a batch compiler, you'd need to serialize comptime JS to disk (a `.comptime` artifact), load it when needed, track a second dependency graph for comptime deps, and handle cache invalidation across packages. You're building a second build system inside the build system.
+
+### Comptime Dependency Chains
+
+```rescript
+// Package: rescript-schema (comptime JSON schema parser)
+@comptime
+let parseJsonSchema = (input: string): Schema.t => { ... }
+
+// Package: rescript-api-gen (depends on rescript-schema)
+@comptime.derive("api")
+let api = (comptime decl: typeDeclaration): ... => {
+  let schema = @embedFile(@getAttr(decl, "schema"))
+  let parsed = Schema.parseJsonSchema(schema)   // cross-package comptime call
+  generateEndpoints(parsed, decl)
 }
 
-impl<'ctx> ComptimeInterpreter<'ctx> {
-    pub fn eval(&mut self, lam: &Lambda) -> Result<Value, ComptimeError> {
-        // Decrement fuel
-        self.fuel = self.fuel.checked_sub(1)
-            .ok_or(ComptimeError::OutOfFuel)?;
+// User's code (depends on rescript-api-gen)
+@api @schema("./openapi.json")
+type endpoints
+```
 
-        match lam {
-            Lambda::Lconst(c) => Ok(Value::Const(c.clone())),
+**In-process:** All comptime JS from the dependency chain is in memory. QuickJS loads and calls across packages naturally. The compiler knows the full dependency graph and invalidates precisely.
 
-            Lambda::Lvar(id) => self.env.get(id).cloned()
-                .ok_or(ComptimeError::UnboundVariable(id.clone())),
+**Batch:** Each package compiled separately. Need a new artifact format, a resolver for comptime artifacts across packages, a dependency tracker that distinguishes comptime deps from runtime deps, and cross-package cache invalidation. Every piece is duplicated infrastructure.
 
-            Lambda::Llet(_, id, value, body) => {
-                let v = self.eval(value)?;
-                self.env.insert(id.clone(), v);
-                let result = self.eval(body);
-                self.env.remove(id);
-                result
-            }
+### The Type Environment as a Live Query Engine
 
-            Lambda::Lfunction(func) => Ok(Value::Closure {
-                params: func.params.clone(),
-                body: func.body.clone(),
-                env: self.env.clone(),
-            }),
+When comptime calls `@typeInfo(user)`, the compiler walks its in-memory type environment — arena-allocated, indexed access, no serialization. The query is a function call.
 
-            Lambda::Lapply(apply) => {
-                let func = self.eval(&apply.ap_func)?;
-                let args: Vec<Value> = apply.ap_args.iter()
-                    .map(|a| self.eval(a))
-                    .collect::<Result<_, _>>()?;
-                self.apply(func, args)
-            }
+In a batch compiler, the type environment for other modules was serialized to `.cmi` and discarded. To answer `@typeInfo(User.user)` from `App.res`, you'd need to deserialize `.cmi` files back into queryable structures. And `.cmi` files are lossy — they contain signatures, not full internal representations. Attributes on fields, internal aliases, implementation details needed by comptime may not survive the round-trip.
 
-            Lambda::Lprim(info) => self.eval_primitive(&info.primitive, &info.args),
+### IDE Integration
 
-            Lambda::LifThenElse(cond, then_, else_) => {
-                match self.eval(cond)? {
-                    Value::Const(Constant::JsTrue) => self.eval(then_),
-                    Value::Const(Constant::JsFalse) => self.eval(else_),
-                    _ => Err(ComptimeError::TypeError("expected bool".into())),
-                }
-            }
+Comptime-generated code needs to work seamlessly in the IDE:
 
-            // ... other cases
-        }
+```rescript
+@encoder @decoder
+type user = { name: string, age: int }
+
+let json = encode_user(myUser)
+//         ^^^^^^^^^^^
+//         hover: (user) => Js.Json.t
+//         go-to-def: → generated by @encoder (Spice.res:15)
+```
+
+**In-process compiler as LSP backend:** The compiler is a long-lived process with the full module graph, all comptime results, all provenance. When the user edits the `user` type, the compiler incrementally re-runs `@encoder`, updates types, pushes new diagnostics. One process, one source of truth.
+
+**Batch compiler as LSP backend:** The LSP server shells out to `bsc`, reads `.cmi` files. Generated code provenance is lost. Go-to-definition through comptime requires a separate provenance database. Re-running comptime on edit means re-invoking the compiler and re-reading artifacts.
+
+### Incremental Comptime Caching
+
+The in-process compiler can cache comptime results with fine granularity:
+
+```rust
+struct ComptimeCache {
+    // Key: hash of (comptime function identity + type declaration + attributes)
+    // Value: specialized AST
+    cache: HashMap<u64, Vec<StructureItem>>,
+}
+```
+
+When a type hasn't changed and the derive function hasn't changed, skip re-evaluation entirely. Precise, minimal invalidation because the compiler has the full before/after state in memory.
+
+### Concurrency
+
+Each module gets its own `ComptimeEngine` with its own QuickJS instance. Rust's ownership model ensures no shared mutable state between compilation units. Independent modules can compile (and run comptime) in parallel.
+
+### Rust-QuickJS FFI Safety
+
+The comptime boundary between Rust and QuickJS is hot — every `@typeInfo` call crosses it. Rust's type system (lifetimes, borrow checker) ensures the type environment isn't mutated during QuickJS callbacks. OCaml's C FFI with QuickJS would require manual GC management (`CAMLparam`/`CAMLreturn` stubs) with no static enforcement.
+
+### Summary
+
+| | Batch Compiler | In-Process Rust Compiler |
+|---|---|---|
+| Phase interleaving | Serialize/deserialize workarounds | Natural — call between phases |
+| Cross-module type queries | Deserialize .cmi, lossy | Direct memory access, full fidelity |
+| Comptime dependency chains | Second artifact format + build system | Just the module graph |
+| IDE integration | Re-run compiler, re-read artifacts | Live state, incremental updates |
+| Caching | Disk-based, coarse | In-memory, per-derive granularity |
+| Concurrency | GIL / subprocess-per-module | Threads with ownership |
+
+---
+
+## Derive Attributes
+
+### Rust-Inspired Derives
+
+Like Rust's `#[derive(Serialize, Deserialize)]`, ReScript comptime supports derive attributes on type declarations:
+
+```rescript
+@encoder @decoder
+type user = {
+  name: string,
+  @json.key("user_age") age: int,
+  email: option<string>,
+}
+
+// ↑ automatically generates encode_user and decode_user
+```
+
+### Defining a Derive Handler
+
+A derive handler is a comptime function registered to an attribute name:
+
+```rescript
+@comptime.derive("encoder")
+let encoder = (comptime T: type) => {
+  (value: T): Js.Json.t => {
+    switch @typeInfo(T) {
+    | Record({fields}) =>
+      let obj = Js.Dict.empty()
+      inline for field in fields {
+        let key = @getAttr(field, "json.key")->Option.getOr(field.name)
+        Js.Dict.set(obj, key, encodeField(field.typ, @field(value, field.name)))
+      }
+      Js.Json.object_(obj)
+    | _ => @compileError(`@encoder requires a record type`)
     }
+  }
 }
-```
 
-### Supported Operations
-
-The interpreter supports all pure Lambda operations:
-
-| Operation | Supported | Notes |
-|-----------|-----------|-------|
-| Constants | ✅ | int, float, string, bool |
-| Variables | ✅ | Lexically scoped |
-| Let bindings | ✅ | Strict and recursive |
-| Functions | ✅ | Closures with captured env |
-| Application | ✅ | With arity checking |
-| If/else | ✅ | Condition must be bool |
-| Pattern matching | ✅ | Switch on constants/blocks |
-| Arithmetic | ✅ | All int/float/bigint ops |
-| String ops | ✅ | Concat, length, get, sub |
-| Array ops | ✅ | Make, get, length |
-| Record ops | ✅ | Field access, construction |
-| Type introspection | ✅ | @typeInfo, @typeName |
-| While/for loops | ❌ | Runtime only |
-| Mutation | ❌ | Runtime only |
-| Exceptions | ❌ | Runtime only |
-| I/O | ❌ | By design |
-
-### Primitive Evaluation
-
-```rust
-fn eval_primitive(&mut self, prim: &Primitive, args: &[Lambda]) -> Result<Value, ComptimeError> {
-    let values: Vec<Value> = args.iter()
-        .map(|a| self.eval(a))
-        .collect::<Result<_, _>>()?;
-
-    match prim {
-        // Integer arithmetic
-        Primitive::Paddint => {
-            let (a, b) = self.extract_ints(&values)?;
-            Ok(Value::Const(Constant::int(a.wrapping_add(b))))
-        }
-        Primitive::Psubint => {
-            let (a, b) = self.extract_ints(&values)?;
-            Ok(Value::Const(Constant::int(a.wrapping_sub(b))))
-        }
-        Primitive::Pmulint => {
-            let (a, b) = self.extract_ints(&values)?;
-            Ok(Value::Const(Constant::int(a.wrapping_mul(b))))
-        }
-        Primitive::Pdivint => {
-            let (a, b) = self.extract_ints(&values)?;
-            if b == 0 {
-                return Err(ComptimeError::DivisionByZero);
-            }
-            Ok(Value::Const(Constant::int(a / b)))
-        }
-
-        // String operations
-        Primitive::Pstringadd => {
-            let (a, b) = self.extract_strings(&values)?;
-            Ok(Value::Const(Constant::string(a + &b)))
-        }
-        Primitive::Pstringlength => {
-            let s = self.extract_string(&values[0])?;
-            Ok(Value::Const(Constant::int(s.len() as i32)))
-        }
-
-        // Type introspection (comptime-specific)
-        Primitive::PcomptimeTypeInfo => {
-            let type_ref = self.extract_type_arg(&args[0])?;
-            let comptime_type = type_to_comptime(self.type_ctx, type_ref);
-            Ok(Value::Type(comptime_type))
-        }
-
-        // Compile error
-        Primitive::PcomptimeError => {
-            let msg = self.extract_string(&values[0])?;
-            Err(ComptimeError::UserError(msg))
-        }
-
-        _ => Err(ComptimeError::UnsupportedPrimitive(prim.clone())),
+@comptime
+let rec encodeField = (comptime T: type, value: T): Js.Json.t => {
+  switch @typeInfo(T) {
+  | String => Js.Json.string(value)
+  | Int => Js.Json.number(Int.toFloat(value))
+  | Float => Js.Json.number(value)
+  | Bool => Js.Json.boolean(value)
+  | Option(inner) =>
+    switch value {
+    | Some(v) => encodeField(inner, v)
+    | None => Js.Json.null
     }
-}
-```
-
-### Type Conversion
-
-Converting the compiler's internal type representation to comptime values:
-
-```rust
-/// Convert TypeExprRef to ComptimeType
-pub fn type_to_comptime(ctx: &TypeContext, typ: TypeExprRef) -> ComptimeType {
-    let ty = ctx.repr(typ);
-    let desc = ctx.get(ty).desc();
-
-    match &*desc {
-        TypeDesc::Tvar(name) => ComptimeType::Var {
-            name: name.clone()
-        },
-
-        TypeDesc::Tarrow { arg, ret, .. } => ComptimeType::Arrow {
-            arg: Box::new(ComptimeArg {
-                label: match &arg.lbl {
-                    ArgLabel::Nolabel => None,
-                    ArgLabel::Labelled(s) => Some(s.clone()),
-                    ArgLabel::Optional(s) => Some(s.clone()),
-                },
-                optional: matches!(arg.lbl, ArgLabel::Optional(_)),
-                typ: type_to_comptime(ctx, arg.typ),
-            }),
-            ret: Box::new(type_to_comptime(ctx, *ret)),
-        },
-
-        TypeDesc::Ttuple(elems) => ComptimeType::Tuple {
-            elements: elems.iter()
-                .map(|e| type_to_comptime(ctx, *e))
-                .collect(),
-        },
-
-        TypeDesc::Tconstr { path, args, .. } => {
-            // Look up type declaration for records/variants
-            if let Some(decl) = ctx.find_type_declaration(path) {
-                match &decl.type_kind {
-                    TypeKind::TypeRecord(labels, _) => ComptimeType::Record {
-                        path: path.to_string(),
-                        fields: labels.iter()
-                            .map(|l| ComptimeField {
-                                name: l.ld_id.name().to_string(),
-                                typ: type_to_comptime(ctx, l.ld_type),
-                                mutable_: l.ld_mutable == MutableFlag::Mutable,
-                                optional: l.ld_optional,
-                                attributes: convert_attributes(&l.ld_attributes),
-                            })
-                            .collect(),
-                    },
-                    TypeKind::TypeVariant(constrs) => ComptimeType::Variant {
-                        path: path.to_string(),
-                        constructors: constrs.iter()
-                            .map(|c| ComptimeConstructor {
-                                name: c.cd_id.name().to_string(),
-                                args: convert_constructor_args(&c.cd_args, ctx),
-                                attributes: convert_attributes(&c.cd_attributes),
-                            })
-                            .collect(),
-                    },
-                    _ => ComptimeType::Constr {
-                        path: path.to_string(),
-                        args: args.iter().map(|a| type_to_comptime(ctx, *a)).collect(),
-                    },
-                }
-            } else {
-                ComptimeType::Constr {
-                    path: path.to_string(),
-                    args: args.iter().map(|a| type_to_comptime(ctx, *a)).collect(),
-                }
-            }
-        },
-
-        TypeDesc::Tvariant(row) => ComptimeType::PolyVariant {
-            cases: row.row_fields.iter()
-                .map(|(label, field)| ComptimeVariantCase {
-                    name: label.clone(),
-                    payload: match field {
-                        RowField::Rpresent(Some(t)) => Some(type_to_comptime(ctx, *t)),
-                        _ => None,
-                    },
-                })
-                .collect(),
-            closed: row.row_closed,
-        },
-
-        _ => ComptimeType::Unknown,
+  | Array(elem) =>
+    value->Array.map(v => encodeField(elem, v))->Js.Json.array
+  | External({bindings}) =>
+    switch bindings->Array.find(b =>
+      switch b { | Method({jsName: "toJSON"}) => true | _ => false }
+    ) {
+    | Some(Method(m)) => value->@send(m.jsName)
+    | _ => @compileError(`Cannot encode external type ${@typeName(T)}`)
     }
+  | Opaque(_) =>
+    @compileError(`${@typeName(T)} is opaque. Expose the type or add @encode attribute.`)
+  | _ => @compileError(`Cannot encode ${@typeName(T)}`)
+  }
 }
 ```
 
-### Splicing Results Back
+### What the Compiler Does
 
-After comptime evaluation, results are converted back to Lambda IR:
+When processing:
 
-```rust
-/// Convert a comptime value back to Lambda IR
-pub fn splice_value(value: Value) -> Lambda {
-    match value {
-        Value::Const(c) => Lambda::Lconst(c),
+```rescript
+@encoder @decoder
+type user = { name: string, @json.key("user_age") age: int, email: option<string> }
+```
 
-        Value::Array(elements) => {
-            let lam_elements: Vec<Lambda> = elements.into_iter()
-                .map(splice_value)
-                .collect();
-            Lambda::prim(
-                Primitive::Pmakearray,
-                lam_elements,
-                Location::none(),
-            )
+1. Type check the `user` declaration normally
+2. See `@encoder` attribute → look up the registered derive handler
+3. Call the handler in QuickJS with `T = user`
+4. Compiler specializes the result (partial evaluation resolves all comptime expressions)
+5. Splice the specialized function in after the type declaration
+6. Type check it normally
+7. Repeat for `@decoder`
+
+The user's file effectively becomes:
+
+```rescript
+type user = { name: string, @json.key("user_age") age: int, email: option<string> }
+
+// generated by @encoder — fully specialized, no type dispatch at runtime
+let encode_user = (value: user): Js.Json.t => {
+  let obj = Js.Dict.empty()
+  Js.Dict.set(obj, "name", Js.Json.string(value.name))
+  Js.Dict.set(obj, "user_age", Js.Json.number(Int.toFloat(value.age)))
+  Js.Dict.set(obj, "email", switch value.email {
+    | Some(v) => Js.Json.string(v)
+    | None => Js.Json.null
+  })
+  Js.Json.object_(obj)
+}
+
+// generated by @decoder
+let decode_user = (json: Js.Json.t): result<user, string> => { ... }
+```
+
+### Decoder Example
+
+```rescript
+@comptime.derive("decoder")
+let decoder = (comptime T: type) => {
+  (json: Js.Json.t): result<T, string> => {
+    switch @typeInfo(T) {
+    | Record({fields}) =>
+      switch Js.Json.classify(json) {
+      | JSONObject(dict) =>
+        inline for field in fields {
+          let key = @getAttr(field, "json.key")->Option.getOr(field.name)
+          let raw = Js.Dict.get(dict, key)
+          switch (raw, field.optional) {
+          | (None, false) => return Error(`Missing field: ${key}`)
+          | _ => ()
+          }
         }
-
-        Value::Record(fields) => {
-            // Convert to block with fields in order
-            let elements: Vec<Lambda> = fields.into_iter()
-                .map(|(_, v)| splice_value(v))
-                .collect();
-            Lambda::prim(
-                Primitive::Pmakeblock(0, TagInfo::Record, Mutable::Immutable),
-                elements,
-                Location::none(),
-            )
-        }
-
-        Value::Variant { tag, payload } => {
-            match payload {
-                Some(p) => Lambda::prim(
-                    Primitive::Pmakeblock(
-                        tag_to_int(&tag),
-                        TagInfo::Variant(tag),
-                        Mutable::Immutable,
-                    ),
-                    vec![splice_value(*p)],
-                    Location::none(),
-                ),
-                None => Lambda::Lconst(Constant::int(tag_to_int(&tag))),
-            }
-        }
-
-        Value::Type(_) => {
-            // Types at runtime become unit (they're compile-time only)
-            Lambda::unit()
-        }
-
-        Value::Closure { .. } => {
-            // Closures become functions
-            // This requires more sophisticated handling
-            panic!("Cannot splice closure to runtime")
-        }
+        // ... build record from decoded fields
+      | _ => Error("Expected object")
+      }
+    | _ => @compileError(`@decoder requires a record type`)
     }
+  }
 }
 ```
+
+### Registration (TBD)
+
+How derive attributes are registered to handlers is an open design question. Options include:
+
+- **Config-based:** `rescript.json` maps attribute names to handler modules
+- **Convention-based:** `@encoder` looks for a module `Encoder` with a `@comptime.derive` export
+- **Declaration-based:** `@comptime.derive("encoder")` self-registers when the module is compiled
+
+The exact mechanism can be decided later. The important thing is: the user's experience is just `@encoder` on a type.
 
 ---
 
@@ -681,75 +871,131 @@ type user = {
 
 **With Comptime:**
 ```rescript
-// codec.res - Generic JSON codec generator
+// Codec.res - Generic JSON codec generator
 @comptime
-let makeCodec = (comptime T: type): Codec.t<T> => {
+let rec encodeField = (comptime T: type, value: T): Js.Json.t => {
   switch @typeInfo(T) {
-  | Record({fields}) => {
-      encode: (value: T) => {
-        let obj = Js.Dict.empty()
-        @inline for field in fields {
-          let key = switch @getAttr(field, "json.key") {
-          | Some(k) => k
-          | None => field.name
-          }
-          let fieldValue = @field(value, field.name)
-          Js.Dict.set(obj, key, encodeField(fieldValue, field.typ))
-        }
-        Js.Json.object_(obj)
-      },
-      decode: (json: Js.Json.t) => {
-        switch Js.Json.classify(json) {
-        | JSONObject(dict) =>
-          let result = {}
-          @inline for field in fields {
-            let key = switch @getAttr(field, "json.key") {
-            | Some(k) => k
-            | None => field.name
-            }
-            switch Js.Dict.get(dict, key) {
-            | Some(v) => @setField(result, field.name, decodeField(v, field.typ))
-            | None if field.optional => @setField(result, field.name, None)
-            | None => return Error(`Missing field: ${field.name}`)
-            }
-          }
-          Ok(result)
-        | _ => Error("Expected object")
-        }
-      },
+  | String => Js.Json.string(value)
+  | Int => Js.Json.number(Int.toFloat(value))
+  | Float => Js.Json.number(value)
+  | Bool => Js.Json.boolean(value)
+  | Option(inner) =>
+    switch value {
+    | Some(v) => encodeField(inner, v)
+    | None => Js.Json.null
     }
-  | _ => @compileError("makeCodec requires a record type")
+  | Array(elem) =>
+    value->Array.map(v => encodeField(elem, v))->Js.Json.array
+  | Record({fields}) =>
+    let obj = Js.Dict.empty()
+    inline for field in fields {
+      let key = @getAttr(field, "json.key")->Option.getOr(field.name)
+      Js.Dict.set(obj, key, encodeField(field.typ, @field(value, field.name)))
+    }
+    Js.Json.object_(obj)
+  | External({bindings}) =>
+    switch bindings->Array.find(b =>
+      switch b { | Method({jsName: "toJSON"}) => true | _ => false }
+    ) {
+    | Some(_) => value->@send("toJSON")
+    | None => @compileError(`Cannot encode external type ${@typeName(T)}`)
+    }
+  | Opaque(_) =>
+    @compileError(`${@typeName(T)} is opaque. Expose the type or add @encode.`)
+  | _ => @compileError(`Unsupported type for JSON encoding: ${@typeName(T)}`)
+  }
+}
+
+@comptime.derive("encoder")
+let encoder = (comptime T: type) => {
+  (value: T): Js.Json.t => {
+    switch @typeInfo(T) {
+    | Record({fields}) =>
+      let obj = Js.Dict.empty()
+      inline for field in fields {
+        let key = @getAttr(field, "json.key")->Option.getOr(field.name)
+        Js.Dict.set(obj, key, encodeField(field.typ, @field(value, field.name)))
+      }
+      Js.Json.object_(obj)
+    | _ => @compileError(`@encoder requires a record type`)
+    }
   }
 }
 
 @comptime
-let encodeField = (value: 'a, typ: Type.t): Js.Json.t => {
-  switch typ {
-  | Constr({path: "string"}) => Js.Json.string(value)
-  | Constr({path: "int"}) => Js.Json.number(Int.toFloat(value))
-  | Constr({path: "float"}) => Js.Json.number(value)
-  | Constr({path: "bool"}) => Js.Json.boolean(value)
-  | Constr({path: "option", args: [inner]}) =>
-    switch value {
-    | Some(v) => encodeField(v, inner)
-    | None => Js.Json.null
+let rec decodeField = (comptime T: type, json: Js.Json.t): result<T, string> => {
+  switch @typeInfo(T) {
+  | String =>
+    switch Js.Json.classify(json) {
+    | JSONString(s) => Ok(s)
+    | _ => Error(`Expected string, got ${Js.Json.stringify(json)}`)
     }
-  | Constr({path: "array", args: [inner]}) =>
-    Js.Json.array(value->Array.map(v => encodeField(v, inner)))
-  | Record(_) => makeCodec(typ).encode(value)
-  | _ => @compileError(`Unsupported type for JSON encoding: ${@typeName(typ)}`)
+  | Int =>
+    switch Js.Json.classify(json) {
+    | JSONNumber(n) => Ok(Int.fromFloat(n))
+    | _ => Error(`Expected int`)
+    }
+  | Float =>
+    switch Js.Json.classify(json) {
+    | JSONNumber(n) => Ok(n)
+    | _ => Error(`Expected float`)
+    }
+  | Bool =>
+    switch Js.Json.classify(json) {
+    | JSONTrue => Ok(true)
+    | JSONFalse => Ok(false)
+    | _ => Error(`Expected bool`)
+    }
+  | Option(inner) =>
+    switch Js.Json.classify(json) {
+    | JSONNull => Ok(None)
+    | _ => decodeField(inner, json)->Result.map(v => Some(v))
+    }
+  | Array(elem) =>
+    switch Js.Json.classify(json) {
+    | JSONArray(arr) =>
+      arr->Array.map(v => decodeField(elem, v))->Array.reduce(Ok([]), (acc, r) =>
+        switch (acc, r) {
+        | (Ok(arr), Ok(v)) => Ok(Array.concat(arr, [v]))
+        | (Error(e), _) => Error(e)
+        | (_, Error(e)) => Error(e)
+        }
+      )
+    | _ => Error("Expected array")
+    }
+  | Record({fields}) =>
+    switch Js.Json.classify(json) {
+    | JSONObject(dict) =>
+      inline for field in fields {
+        let key = @getAttr(field, "json.key")->Option.getOr(field.name)
+        let raw = Js.Dict.get(dict, key)
+        switch (raw, field.optional) {
+        | (Some(v), _) =>
+          switch decodeField(field.typ, v) {
+          | Error(e) => return Error(`${field.name}: ${e}`)
+          | Ok(_) => ()
+          }
+        | (None, true) => ()
+        | (None, false) => return Error(`Missing field: ${key}`)
+        }
+      }
+      Ok(@buildRecord(T))
+    | _ => Error("Expected object")
+    }
+  | _ => @compileError(`Cannot decode ${@typeName(T)}`)
   }
 }
 
 // Usage
+@encoder @decoder
 type user = {
   name: string,
   @json.key("user_age") age: int,
   email: option<string>,
 }
 
-let userCodec = makeCodec(user)
-let json = userCodec.encode({name: "Alice", age: 30, email: Some("alice@example.com")})
+let json = encode_user({name: "Alice", age: 30, email: Some("alice@example.com")})
+let user = decode_user(json)
 ```
 
 ### 2. GraphQL (graphql-ppx, rescript-relay)
@@ -769,7 +1015,7 @@ module UserQuery = %graphql(`
 
 **With Comptime:**
 ```rescript
-// graphql/parser.res - GraphQL parser written in ReScript
+// graphql/parser.res - GraphQL parser written in ReScript, runs in QuickJS
 
 type token =
   | LBrace | RBrace | LParen | RParen | Colon | Bang | Dollar
@@ -793,7 +1039,7 @@ type operation = {
 }
 
 @comptime
-let tokenize = (input: string): array<token> => {
+let tokenize = (comptime input: string): array<token> => {
   let tokens = []
   let i = ref(0)
   let len = String.length(input)
@@ -810,7 +1056,6 @@ let tokenize = (input: string): array<token> => {
     | '$' => { Array.push(tokens, Dollar); i := i.contents + 1 }
     | ' ' | '\n' | '\t' | '\r' | ',' => i := i.contents + 1
     | '#' => {
-      // Skip comment
       while i.contents < len && String.get(input, i.contents) != '\n' {
         i := i.contents + 1
       }
@@ -853,7 +1098,7 @@ let tokenize = (input: string): array<token> => {
 }
 
 @comptime
-let parse = (tokens: array<token>): operation => {
+let parse = (comptime tokens: array<token>): operation => {
   let pos = ref(0)
 
   let peek = () => tokens[pos.contents]
@@ -865,21 +1110,18 @@ let parse = (tokens: array<token>): operation => {
     advance()
   }
 
-  // Parse operation type
   let kind = switch peek() {
   | Name("query") => { advance(); #query }
   | Name("mutation") => { advance(); #mutation }
   | Name("subscription") => { advance(); #subscription }
-  | _ => #query  // Default to query
+  | _ => #query
   }
 
-  // Parse operation name
   let name = switch peek() {
   | Name(n) if n != "query" && n != "mutation" => { advance(); Some(n) }
   | _ => None
   }
 
-  // Parse variables
   let variables = switch peek() {
   | LParen => {
     advance()
@@ -900,7 +1142,6 @@ let parse = (tokens: array<token>): operation => {
   | _ => []
   }
 
-  // Parse selection set
   expect(LBrace)
   let selectionSet = parseSelectionSet(tokens, pos)
   expect(RBrace)
@@ -908,38 +1149,16 @@ let parse = (tokens: array<token>): operation => {
   {kind, name, variables, selectionSet}
 }
 
-// graphql/codegen.res - Type generation
-
+// graphql/codegen.res - Type generation from parsed query
 @comptime
-let generateTypes = (op: operation, schema: Schema.t): GraphQLModule => {
-  // Generate Variables type
-  let variablesType = @generateRecord(
-    op.variables->Array.map(v => {
-      name: v.name,
-      typ: graphqlTypeToRescript(v.typ, schema),
-      optional: false,
-    })
-  )
-
-  // Generate Response type from selection set
-  let responseType = generateSelectionType(op.selectionSet, schema.queryType, schema)
-
-  {
-    Variables: variablesType,
-    Response: responseType,
-    query: operationToString(op),
-  }
-}
-
-// Usage
-@comptime
-let graphql = (comptime query: string): GraphQLModule => {
+let graphql = (comptime query: string) => {
   let tokens = GraphQL.Parser.tokenize(query)
   let operation = GraphQL.Parser.parse(tokens)
   GraphQL.Validator.validate(operation, Schema.schema)
   GraphQL.Codegen.generateTypes(operation, Schema.schema)
 }
 
+// Usage
 module UserQuery = graphql(`
   query UserQuery($id: ID!) {
     user(id: $id) {
@@ -991,13 +1210,13 @@ type cssBlock = {
 }
 
 @comptime
-let parseCSS = (input: string): cssBlock => {
+let parseCSS = (comptime input: string): cssBlock => {
   let tokens = tokenizeCSS(input)
-  parseCSSBlock(tokens, "&")  // Root selector is &
+  parseCSSBlock(tokens, "&")
 }
 
 @comptime
-let tokenizeCSS = (input: string): array<cssToken> => {
+let tokenizeCSS = (comptime input: string): array<cssToken> => {
   let tokens = []
   let i = ref(0)
   let len = String.length(input)
@@ -1031,7 +1250,6 @@ let tokenizeCSS = (input: string): array<cssToken> => {
         }
       }
       let numStr = String.sub(input, start, i.contents - start)
-      // Check for unit
       let unitStart = i.contents
       while i.contents < len {
         let ch = String.get(input, i.contents)
@@ -1070,7 +1288,7 @@ let validProperties = [
 ]
 
 @comptime
-let validateCSS = (block: cssBlock): unit => {
+let validateCSS = (comptime block: cssBlock): unit => {
   block.rules->Array.forEach(rule => {
     if !Array.includes(validProperties, rule.property) {
       @compileError(`Unknown CSS property: ${rule.property}`)
@@ -1079,16 +1297,16 @@ let validateCSS = (block: cssBlock): unit => {
   block.nested->Array.forEach(validateCSS)
 }
 
-// css/codegen.res - Generate Emotion styles
+// css/styled.res - Generate Emotion styles
 
 @comptime
-let generateClassName = (css: string): string => {
+let generateClassName = (comptime css: string): string => {
   let hash = hashString(css)
   `css-${hash}`
 }
 
 @comptime
-let styled = (comptime tag: string, comptime css: string): React.component<{..}> => {
+let styled = (comptime tag: string, comptime css: string) => {
   let block = CSS.Parser.parseCSS(css)
   CSS.Validator.validateCSS(block)
 
@@ -1151,7 +1369,7 @@ type selectQuery = {
 }
 
 @comptime
-let parseSQL = (input: string): sqlQuery => {
+let parseSQL = (comptime input: string): sqlQuery => {
   let tokens = tokenizeSQL(input)
   parseSQLQuery(tokens)
 }
@@ -1159,7 +1377,7 @@ let parseSQL = (input: string): sqlQuery => {
 // sql/codegen.res - Type generation
 
 @comptime
-let sql = (comptime query: string, comptime schema: DBSchema): SQLQuery => {
+let sql = (comptime query: string, comptime schema: DBSchema) => {
   let parsed = SQL.Parser.parseSQL(query)
 
   // Extract parameters ($id, $name, etc.)
@@ -1175,22 +1393,7 @@ let sql = (comptime query: string, comptime schema: DBSchema): SQLQuery => {
   | _ => []
   }
 
-  // Generate types
-  let paramsType = @generateRecord(params->Array.map(p => {
-    name: p.name,
-    typ: p.typ,
-    optional: false,
-  }))
-
-  let resultType = @generateRecord(columns->Array.map(c => {
-    name: c.name,
-    typ: sqlTypeToRescript(c.typ),
-    optional: c.nullable,
-  }))
-
   {
-    Params: paramsType,
-    Result: resultType,
     query: query,
     execute: (db, params) => db.query(query, params),
   }
@@ -1221,50 +1424,48 @@ type config = {
 
 **With Comptime:**
 ```rescript
-@comptime
+@comptime.derive("keyOf")
 let keyOf = (comptime T: type) => {
   switch @typeInfo(T) {
   | Record({fields}) =>
-    @generateVariant(
-      fields->Array.map(f => {
-        name: String.capitalize(f.name),
-        payload: None,
-      })
-    )
+    inline for field in fields {
+      | @variant(String.capitalize(field.name))
+    }
   | _ => @compileError("keyOf requires a record type")
   }
 }
 
-@comptime
+@comptime.derive("keyToString")
 let keyToString = (comptime T: type) => {
   let keyType = keyOf(T)
   (key: keyType): string => {
     switch key {
-    @inline for field in @typeInfo(T)->getFields {
-      | @variant(String.capitalize(field.name)) => field.name
+    inline for field in @typeInfo(T)->getFields {
+    | @variant(String.capitalize(field.name)) => field.name
     }
     }
   }
 }
 
 // Usage
+@keyOf
 type config = {
   host: string,
   port: int,
 }
 
-type configKey = keyOf(config)  // Host | Port
-let toString = keyToString(config)
+// Generated: type config_key = Host | Port
+// Generated: let config_keyToString = ...
 
-let key: configKey = Host
-Console.log(toString(key))  // "host"
+let key: config_key = Host
+Console.log(config_keyToString(key))  // "host"
 ```
 
 ### 6. Form Bindings (ppx_react_hook_form)
 
 **With Comptime:**
 ```rescript
-@comptime
+@comptime.derive("form")
 let makeForm = (comptime T: type) => {
   switch @typeInfo(T) {
   | Record({fields}) =>
@@ -1272,8 +1473,7 @@ let makeForm = (comptime T: type) => {
       useForm: () => {
         let form = ReactHookForm.useForm()
 
-        // Generate register functions for each field
-        @inline for field in fields {
+        inline for field in fields {
           let register = form.register(field.name)
         }
 
@@ -1281,26 +1481,23 @@ let makeForm = (comptime T: type) => {
       },
 
       // Type-safe field accessors
-      fields: @generateRecord(
-        fields->Array.map(f => {
-          name: f.name,
-          typ: FormField(f.typ),
-          optional: false,
-        })
-      ),
+      fields: inline for field in fields {
+        @record(field.name, FormField(field.typ))
+      },
     }
-  | _ => @compileError("makeForm requires a record type")
+  | _ => @compileError("@form requires a record type")
   }
 }
 
 // Usage
+@form
 type loginForm = {
   email: string,
   password: string,
   rememberMe: bool,
 }
 
-let LoginForm = makeForm(loginForm)
+// Generated: LoginForm module with useForm() and typed fields
 
 @react.component
 let make = () => {
@@ -1314,88 +1511,6 @@ let make = () => {
   </form>
 }
 ```
-
----
-
-## Implementation Plan
-
-### Phase 1: Core Interpreter
-
-**Goal:** Basic comptime evaluation of constants and simple functions
-
-**Tasks:**
-1. Add `@comptime` attribute parsing
-2. Implement `ComptimeInterpreter` in Rust
-3. Support basic types: int, float, string, bool, array, record
-4. Implement arithmetic and string primitives
-5. Add fuel limits and error handling
-6. Implement value splicing back to Lambda IR
-
-**Deliverables:**
-- `compiler-rust/src/lambda/comptime/mod.rs`
-- `compiler-rust/src/lambda/comptime/interpreter.rs`
-- `compiler-rust/src/lambda/comptime/value.rs`
-- `compiler-rust/src/lambda/comptime/splice.rs`
-
-### Phase 2: Type Introspection
-
-**Goal:** Enable `@typeInfo` and related builtins
-
-**Tasks:**
-1. Define `ComptimeType` enum in Rust
-2. Implement `type_to_comptime` conversion
-3. Add `Primitive::PcomptimeTypeInfo`
-4. Implement `@typeInfo`, `@typeName`, `@hasField`, `@fieldType`
-5. Add `@getAttr` for attribute access
-6. Implement `@field` for runtime field access with comptime name
-
-**Deliverables:**
-- `compiler-rust/src/lambda/comptime/types.rs`
-- Extended `Primitive` enum
-- Type introspection tests
-
-### Phase 3: Code Generation
-
-**Goal:** Enable generating types and code from comptime
-
-**Tasks:**
-1. Implement `@generateRecord` primitive
-2. Implement `@generateVariant` primitive
-3. Implement `@inline for` loop unrolling
-4. Add `@compileError` for user-defined errors
-5. Implement module generation
-
-**Deliverables:**
-- Code generation primitives
-- Loop unrolling in Lambda generation
-- Module synthesis
-
-### Phase 4: Standard Library
-
-**Goal:** Provide parsers and utilities for common use cases
-
-**Tasks:**
-1. Write JSON codec generator
-2. Write basic parsers (tokenizer utilities)
-3. Write SQL parser
-4. Write GraphQL parser
-5. Write CSS parser
-6. Document patterns and best practices
-
-**Deliverables:**
-- `packages/@rescript/comptime/` library
-- Parser combinator utilities
-- Example implementations
-
-### Phase 5: Tooling
-
-**Goal:** IDE support and developer experience
-
-**Tasks:**
-1. LSP support for comptime errors
-2. Hover information for generated types
-3. Go-to-definition through comptime
-4. Debugging support (comptime traces)
 
 ---
 
@@ -1426,16 +1541,14 @@ type createUserParams = {
 // api/client.res - Client generator
 @comptime
 let makeClient = (comptime endpoints: array<(string, endpoint<'p, 'r>)>) => {
-  @generateRecord(
-    endpoints->Array.map(((name, ep)) => {
-      name: name,
-      typ: Function({
-        params: [@typeInfo(ep.params)],
-        return: Promise(@typeInfo(ep.response)),
-      }),
-      optional: false,
+  inline for (name, ep) in endpoints {
+    @record(name, (ep.params) => {
+      fetch(ep.path, {
+        method: ep.method,
+        body: Json.stringify(ep.params),
+      })
     })
-  )
+  }
 }
 
 // api/endpoints.res - Define endpoints
@@ -1504,7 +1617,7 @@ let makeTable = (comptime name: string, comptime T: type): table<T> => {
 }
 
 @comptime
-let select = (comptime table: table<'row>): SelectQuery<'row> => {
+let select = (comptime table: table<'row>) => {
   {
     from: table.name,
     columns: All,
@@ -1546,6 +1659,61 @@ let activeUsers = await
 
 ---
 
+## Implementation Plan
+
+### Phase 1: Core Infrastructure
+
+**Goal:** QuickJS integration, basic comptime evaluation
+
+1. Embed QuickJS in the Rust compiler via `rquickjs`
+2. Add `@comptime` attribute parsing
+3. Compile `@comptime` functions to JS (in memory)
+4. Implement comptime parameter detection and specialization
+5. Add fuel limits and error handling
+6. Implement basic partial evaluation (switch on comptime values, constant substitution)
+
+### Phase 2: Type Introspection
+
+**Goal:** Enable `@typeInfo` and related builtins
+
+1. Define the full `typeInfo` type in Rust
+2. Implement `typeInfo` conversion from compiler internals
+3. Register `__comptime_typeInfo` as QuickJS host function
+4. Implement `@typeName`, `@getAttr`, `@field`, `@compileError`
+5. Handle Opaque vs External distinction
+6. Expose external binding info
+
+### Phase 3: Partial Evaluation
+
+**Goal:** Zig-style specialization
+
+1. Implement `inline for` loop unrolling
+2. Implement switch branch elimination on comptime values
+3. Implement recursive comptime specialization
+4. Implement constant inlining from comptime results
+5. Splice specialized AST back into module structure
+
+### Phase 4: Derive System
+
+**Goal:** Attribute-triggered comptime
+
+1. Implement `@comptime.derive` registration
+2. Implement derive invocation at type declaration boundaries
+3. Declaration-level interleaving (pause type checking → run comptime → splice → resume)
+4. Cross-module comptime (load comptime JS from in-memory module graph)
+5. Error reporting with comptime provenance
+
+### Phase 5: Standard Library & Tooling
+
+**Goal:** Practical comptime libraries and IDE support
+
+1. JSON codec generator (encoder/decoder)
+2. Parser utilities for DSLs
+3. LSP support for comptime-generated code (hover, go-to-def, provenance)
+4. Comptime result caching
+
+---
+
 ## Appendix: Zig Comptime Reference
 
 ### How Zig Does It
@@ -1559,6 +1727,8 @@ Zig's compiler uses a multi-stage pipeline:
 The Sema phase attempts to evaluate each instruction:
 - If operands are comptime-known → evaluate immediately
 - If runtime values needed → generate AIR instructions
+
+Zig explicitly chose to build a self-hosted compiler (abandoning the C++ bootstrap) because comptime needed deep integration with the compilation pipeline. The C++ bootstrap had limited comptime support. The self-hosted compiler made comptime first-class.
 
 ### Key Zig Features
 
@@ -1583,33 +1753,24 @@ fn dump(value: anytype) void {
                 std.debug.print("{}: {}\n", .{field.name, @field(value, field.name)});
             }
         },
-        // ...
     }
 }
 
 // inline for - unrolled at comptime
 inline for (fields) |field| {
-    // This generates separate code for each field
+    // Generates separate code for each field
 }
 ```
 
-### Zig Limitations
+### Why Template Haskell and Rust Proc Macros Are Painful
 
-Zig comptime has deliberate restrictions:
+Both are comptime-like features bolted onto batch compilers:
 
-1. **No I/O** - Compilation is hermetic
-2. **No heap allocation** - Stack-based evaluation only
-3. **No runtime type info** - Types exist only at comptime
-4. **No custom syntax** - Only Zig syntax, operates on values
+**Rust proc macros** must live in a separate crate, compiled to a dylib. They only see token streams — no type information. This isn't a design choice, it's an architectural limitation: proc macros run before type checking.
 
-### ReScript Advantages
+**Template Haskell** has a "stage restriction" — a splice can't reference definitions from the same module that appear after it. GHC processes the file in chunks separated by splices. Cross-module TH requires the dependency to be fully compiled first.
 
-Our design has some advantages over Zig:
-
-1. **Heap allocation allowed** - Interpreter runs in Rust
-2. **Richer type system** - Records, variants, objects
-3. **String parsing** - Full parser combinators possible
-4. **Attribute system** - Can read `@decorator` attributes
+Both systems are widely considered the most painful parts of their respective ecosystems. The pain comes from the architecture, not from bad design. ReScript's comptime avoids these pitfalls by being integrated into the compiler's compilation model.
 
 ### References
 
@@ -1618,4 +1779,3 @@ Our design has some advantages over Zig:
 - [Things Zig comptime Won't Do](https://matklad.github.io/2025/04/19/things-zig-comptime-wont-do.html)
 - [Comptime Zig ORM](https://matklad.github.io/2025/03/19/comptime-zig-orm.html)
 - [Zig Sema: ZIR → AIR](https://mitchellh.com/zig/sema)
-- [Zig Parser Combinators](https://devlog.hexops.com/2021/zig-parser-combinators-and-why-theyre-awesome/)
