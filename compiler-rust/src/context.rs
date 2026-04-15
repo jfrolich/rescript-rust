@@ -23,6 +23,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
+#[cfg(feature = "native")]
 use crate::cache::ModuleCache;
 use crate::config::CompilerConfig;
 use crate::diagnostics::DiagnosticsContext;
@@ -264,6 +265,7 @@ fn derive_output_prefix(path: &str) -> String {
 /// let id = ctx.create_ident("x");
 /// assert_eq!(id.name(), "x");
 /// ```
+#[cfg(feature = "native")]
 #[derive(Debug)]
 pub struct CompilationContext {
     /// Compiler configuration (immutable, shared).
@@ -278,6 +280,7 @@ pub struct CompilationContext {
     diagnostics: DiagnosticsContext,
 }
 
+#[cfg(feature = "native")]
 impl CompilationContext {
     /// Create a new compilation context for a source file.
     pub fn new(
@@ -427,6 +430,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "native")]
     fn test_compilation_context() {
         let config = Arc::new(CompilerConfig::default());
         let cache = Arc::new(ModuleCache::new());

@@ -22,6 +22,7 @@
 //! assert!(cache.get(&path).is_some());
 //! ```
 
+#[cfg(feature = "native")]
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -149,6 +150,7 @@ impl CompiledInterface {
 /// This is designed to be shared across multiple compilation threads
 /// via `Arc<ModuleCache>`. It provides concurrent access to cached
 /// interfaces for incremental compilation.
+#[cfg(feature = "native")]
 #[derive(Debug, Default)]
 pub struct ModuleCache {
     /// Cached interfaces indexed by module path.
@@ -157,6 +159,7 @@ pub struct ModuleCache {
     dependencies: DashMap<ModulePath, HashSet<ModulePath>>,
 }
 
+#[cfg(feature = "native")]
 impl ModuleCache {
     /// Create a new empty cache.
     pub fn new() -> Self {
