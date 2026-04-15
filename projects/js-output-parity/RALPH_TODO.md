@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 537 / 657 JS snapshots passing, 0 compile errors, 120 output diffs
+**Status:** 539 / 657 JS snapshots passing, 0 compile errors, 118 output diffs
 
 ## Goal
 
@@ -35,11 +35,60 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **537 / 657**
+- JS snapshot parity: **539 / 657**
 - Compile errors: **0**
-- Output diffs: **120**
+- Output diffs: **118**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep unit-`undefined` staticcatch handlers materialized as the
+  default arm in return-position untagged switches instead of using the Rust
+  fallthrough-return shortcut that collapses OCaml's negative guard shape into
+  a success-shaped nest
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is `Lam_compile` staticcatch / switch
+  lowering in `compiler-rust/src/lambda/compile.rs`, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_staticcatch` and the
+  non-tail lowering that keeps exit/default structure explicit, together with
+  `compiler/core/js_stmt_make.ml`'s `if_` lowering that then prints these
+  cases as negative early-return guards
+- Rust change:
+  - added `is_unit_undefined_handler(...)` and used it to block the
+    return-position fallthrough staticcatch shortcut for zero-binding
+    `JsUndefined { is_unit: true }` handlers
+  - this preserves the handler as the explicit default path inside nested
+    untagged return switches instead of resolving it away into an empty
+    fallthrough block too early
+  - added focused regression coverage in
+    `single_case_staticcatch_wrapped_untagged_object_unit_handler_keeps_negative_guard`
+    to lock down the OCaml-style negative guard shape
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml single_case_staticcatch_wrapped_untagged_object_unit_handler_keeps_negative_guard -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_handler -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/UntaggedVariants.res` now matches the OCaml snapshot for
+    `printLength`; the remaining diff in that file is down to the deeper
+    `check$1` staticcatch / guard-shape mismatch
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the unchanged guard
+  - the full authoritative sweep in this current worktree now reports
+    **539 / 657** passing, **0** compile errors, and **118** output diffs
+- Topline impact in this current worktree:
+  - JS snapshot parity: **537 / 657** -> **539 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **120** -> **118** (**-2**)
+- Keep this change because the removed shortcut was Rust-only. OCaml's
+  backend keeps these unit staticcatch handlers explicit long enough for the
+  surrounding guard/default control flow to lower into the checked-in early
+  return shape, so preserving that boundary in Rust improves emitted JS parity
+  at the backend source rather than by rewriting output text later.
 
 Latest iteration on **2026-04-15**:
 
