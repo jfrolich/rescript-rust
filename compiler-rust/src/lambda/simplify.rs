@@ -630,7 +630,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                     }
                 }
                 if preserve_exported_eta_alias {
-                    if module_field_call_substitution_candidate(&substitution) {
+                    if eta_reducible_module_field_read(&substitution) {
                         body_env
                             .call_substitutions
                             .insert(id.clone(), substitution.clone());
@@ -1528,14 +1528,7 @@ fn refine_let_binding(kind: LetKind, id: &Ident, value: Lambda, body: Lambda) ->
 fn is_safe_to_alias(lam: &Lambda) -> bool {
     match lam {
         Lambda::Lvar(_) | Lambda::Lconst(_) => true,
-        Lambda::Lprim(crate::lambda::PrimInfo {
-            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
-            args,
-            ..
-        }) => matches!(
-            args.as_slice(),
-            [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]
-        ),
+        _ if safe_aliasable_module_field_read(lam) => true,
         Lambda::Lprim(crate::lambda::PrimInfo {
             primitive: Primitive::PsomeNotNest,
             args,
@@ -1576,7 +1569,7 @@ fn simplify_primitive(
             env,
             exports,
         ),
-        (Primitive::PjsFnMake(_), [arg]) if module_field_call_substitution_candidate(arg) => {
+        (Primitive::PjsFnMake(_), [arg]) if eta_reducible_module_field_read(arg) => {
             arg.clone()
         }
         (Primitive::PjsFnMakeUnit, [Lambda::Lfunction(func)])
@@ -2330,15 +2323,8 @@ fn eta_reduce_function_value(func: &LFunction, env: &SimplifyEnv) -> Option<Lamb
         {
             Some(Lambda::var(id.clone()))
         }
-        Lambda::Lprim(crate::lambda::PrimInfo {
-            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
-            args,
-            ..
-        }) if apply.ap_info.status != ApplyStatus::Na
-            && matches!(
-                args.as_slice(),
-                [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]
-            ) =>
+        _ if apply.ap_info.status != ApplyStatus::Na
+            && eta_reducible_module_field_read(apply.ap_func.as_ref()) =>
         {
             Some((*apply.ap_func).clone())
         }
@@ -2353,14 +2339,7 @@ fn preserve_exported_eta_alias_binding(original_value: &Lambda, simplified_value
 
     match simplified_value {
         Lambda::Lvar(_) => true,
-        Lambda::Lprim(crate::lambda::PrimInfo {
-            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
-            args,
-            ..
-        }) => matches!(
-            args.as_slice(),
-            [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]
-        ),
+        _ if eta_reducible_module_field_read(simplified_value) => true,
         _ => false,
     }
 }
@@ -2648,7 +2627,7 @@ fn plain_string_constant(lam: &Lambda) -> Option<String> {
     }
 }
 
-fn module_field_call_substitution_candidate(lam: &Lambda) -> bool {
+fn safe_aliasable_module_field_read(lam: &Lambda) -> bool {
     match lam {
         Lambda::Lprim(crate::lambda::PrimInfo {
             primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
@@ -2658,6 +2637,17 @@ fn module_field_call_substitution_candidate(lam: &Lambda) -> bool {
             args.as_slice(),
             [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]
         ),
+        _ => false,
+    }
+}
+
+fn eta_reducible_module_field_read(lam: &Lambda) -> bool {
+    match lam {
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
+            args,
+            ..
+        }) => matches!(args.as_slice(), [Lambda::LglobalModule(_, _)]),
         _ => false,
     }
 }
@@ -5767,6 +5757,60 @@ mod tests {
                 ..
             }) if name == "fromArray"
                 && matches!(args.as_slice(), [Lambda::LglobalModule(id, false)] if id.same(&belt_map))
+        ));
+    }
+
+    #[test]
+    fn keeps_local_module_field_wrappers_materialized_like_functors_res() {
+        let module_param = Ident::create_local("X");
+        let param = Ident::create_local("x");
+
+        let simplified = simplify_for_js_backend(&Lambda::prim(
+            Primitive::PjsFnMake(1),
+            vec![Lambda::function_(
+                1,
+                vec![param.clone()],
+                Lambda::Lapply(Apply {
+                    ap_func: Box::new(Lambda::prim(
+                        Primitive::Pfield(
+                            0,
+                            FieldDbgInfo::Module {
+                                name: "foo".to_string(),
+                            },
+                        ),
+                        vec![Lambda::var(module_param.clone())],
+                        Location::none(),
+                    )),
+                    ap_args: vec![Lambda::var(param.clone())],
+                    ap_info: ApInfo {
+                        loc: Location::none(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Uncurry,
+                    },
+                    ap_transformed_jsx: false,
+                }),
+                FunctionAttribute::default(),
+            )],
+            Location::none(),
+        ));
+
+        let Lambda::Lfunction(func) = simplified else {
+            panic!("expected functor-local module field wrapper to stay a function");
+        };
+        assert_eq!(func.params, vec![param.clone()]);
+        assert!(matches!(
+            *func.body,
+            Lambda::Lapply(Apply { ap_func, ap_args, .. })
+                if matches!(
+                    ap_func.as_ref(),
+                    Lambda::Lprim(crate::lambda::PrimInfo {
+                        primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+                        args,
+                        ..
+                    }) if name == "foo"
+                        && matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&module_param))
+                )
+                    && matches!(ap_args.as_slice(), [Lambda::Lvar(id)] if id.same(&param))
         ));
     }
 

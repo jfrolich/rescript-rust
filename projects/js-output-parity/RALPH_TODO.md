@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 486 / 657 JS snapshots passing, 0 compile errors, 171 output diffs
+**Status:** 487 / 657 JS snapshots passing, 0 compile errors, 170 output diffs
 
 ## Goal
 
@@ -35,11 +35,67 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **486 / 657**
+- JS snapshot parity: **487 / 657**
 - Compile errors: **0**
-- Output diffs: **171**
+- Output diffs: **170**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: stop treating OCaml's local-module-field `SafeAlias` rule as if
+  it also authorized eta-reducing JS-function wrappers over local module vars,
+  so the Rust JS backend no longer collapses functor-local wrappers like
+  `x => X.foo(x)` into bare `X.foo`
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`, because the mismatch still lived in the final
+  post-lowering lambda cleanup boundary before JS IR lowering: OCaml's
+  `Lam_util.refine_let` / `SafeAlias` path allows local-module field reads such
+  as `MS.forEach` to be aliased through strict lets, but there is no matching
+  OCaml rule that strips `Pjs_fn_make` / eta wrappers around local-module field
+  calls after that point; Rust had reused the same predicate for both behaviors
+- OCaml reference:
+  `compiler/core/lam_util.ml`, especially the `SafeAlias` predicate for
+  `Pfield (_, Fld_module _)` over `[Lglobal_module _ | Lvar _]`;
+  `compiler/core/lam_pass_remove_alias.ml`; `compiler/core/lam_compile_main.ml`;
+  and `compiler/core/lam_compile.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` to split
+    safe-aliasable module-field reads from eta-reducible module-field reads
+  - kept local-module `Lvar` field reads eligible for strict-let aliasing and
+    substitution, preserving the earlier `Import.res` local-module-field fix
+  - narrowed eta reduction, `PjsFnMake` wrapper stripping, and exported-eta
+    call substitution so only `LglobalModule` module-field reads are treated as
+    direct JS-function aliases
+  - added focused regression coverage in
+    `keeps_local_module_field_wrappers_materialized_like_functors_res`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml module_field -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/functors.res`, diffing
+    `/tmp/functors.mjs` against the checked-in snapshot
+  - direct related guard repro for `tests/tests/src/Import.res`, diffing
+    `/tmp/Import.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/functors.res` is now an exact snapshot match again; Rust
+    keeps the functor-local `cow = x => X.foo(x)` wrapper materialized instead
+    of collapsing it to `cow: X.foo`
+  - `tests/tests/src/Import.res` remains an exact snapshot match, which
+    confirms local-module field aliasing through lets still follows OCaml's
+    `SafeAlias` behavior after narrowing eta reduction
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+- Topline impact:
+  - JS snapshot parity: **486 / 657** -> **487 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **171** -> **170** (**-1**)
+- Keep this change because it separates two OCaml behaviors Rust had conflated,
+  fixes the remaining `functors.res` module-field wrapper/eta cluster, and
+  improves the authoritative snapshot baseline without adding any printer-only
+  rewrite.
 
 Latest iteration on **2026-04-15**:
 
