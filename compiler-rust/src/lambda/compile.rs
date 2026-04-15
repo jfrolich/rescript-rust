@@ -5913,24 +5913,18 @@ impl LambdaCompiler {
         }
     }
 
-    fn lower_external_arg_value_and_effect(
+    fn lower_object_external_arg_value_and_effect(
         &self,
-        arg: Expression,
+        raw_arg: Expression,
         arg_label: ExternalArgLabel,
         arg_type: &ExternalArgAttr,
-    ) -> (Option<Expression>, Option<Expression>) {
-        match arg_type {
-            ExternalArgAttr::ArgCst(_) => (None, None),
-            ExternalArgAttr::ExternUnit => {
-                let effect = self.external_arg_effect(&arg);
-                if matches!(arg_label, ExternalArgLabel::Empty) {
-                    (None, effect)
-                } else {
-                    (Some(Expression::undefined(true)), effect)
-                }
-            }
-            ExternalArgAttr::Ignore => (None, self.external_arg_effect(&arg)),
-            _ => (Some(arg), None),
+    ) -> (Expression, Option<Expression>) {
+        let (values, effect) =
+            self.lower_external_arg_values_and_effect(raw_arg, arg_label, arg_type);
+        match values.as_slice() {
+            [value] => (value.clone(), effect),
+            [] => panic!("object field lowering expected one JS arg for {arg_type:?}"),
+            _ => panic!("object field lowering expected one JS arg, got {:?}", values),
         }
     }
 
@@ -6155,7 +6149,7 @@ impl LambdaCompiler {
                         let arg = runtime_args
                             .next()
                             .unwrap_or_else(|| Expression::undefined(false));
-                        let (value, effect) = self.lower_external_arg_value_and_effect(
+                        let (value, effect) = self.lower_object_external_arg_value_and_effect(
                             arg,
                             ExternalArgLabel::Label,
                             &obj_param.obj_arg_type,
@@ -6163,9 +6157,7 @@ impl LambdaCompiler {
                         if let Some(effect) = effect {
                             effects.push(effect);
                         }
-                        if let Some(value) = value {
-                            props.push((PropertyName::lit(name.clone()), value));
-                        }
+                        props.push((PropertyName::lit(name.clone()), value));
                     }
                 },
                 ExternalObjLabel::Optional {
@@ -6183,7 +6175,7 @@ impl LambdaCompiler {
                         // object literal, while unknown option values keep the
                         // temp-object plus conditional assignment path.
                         ExpressionDesc::OptionalBlock(inner, _) => {
-                            let (value, effect) = self.lower_external_arg_value_and_effect(
+                            let (value, effect) = self.lower_object_external_arg_value_and_effect(
                                 *inner,
                                 ExternalArgLabel::Label,
                                 &obj_param.obj_arg_type,
@@ -6191,9 +6183,7 @@ impl LambdaCompiler {
                             if let Some(effect) = effect {
                                 effects.push(effect);
                             }
-                            if let Some(value) = value {
-                                props.push((PropertyName::lit(name.clone()), value));
-                            }
+                            props.push((PropertyName::lit(name.clone()), value));
                         }
                         other => {
                             let arg = Expression::new(other);
@@ -6215,18 +6205,16 @@ impl LambdaCompiler {
                             } else {
                                 self.val_from_option_expr(prepared.clone())
                             };
-                            let (value, effect) = self.lower_external_arg_value_and_effect(
+                            let (value, effect) = self.lower_object_external_arg_value_and_effect(
                                 value_arg,
                                 ExternalArgLabel::Empty,
                                 &obj_param.obj_arg_type,
                             );
-                            if let Some(value) = value {
-                                optional_assignments.push((
-                                    name.clone(),
-                                    prepared,
-                                    self.add_external_effect(effect, value),
-                                ));
-                            }
+                            optional_assignments.push((
+                                name.clone(),
+                                prepared,
+                                self.add_external_effect(effect, value),
+                            ));
                         }
                     }
                 }
@@ -21959,6 +21947,87 @@ let fib3 = n => {
                             ..
                         },
                     ) if name == "someOther" && txt == "true"
+                ));
+            }
+            other => panic!("expected an object literal expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_js_object_create_with_polyvar_string_field_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PjsObjectCreate(vec![ExternalObjSpec {
+                obj_arg_type: ExternalArgAttr::PolyVarString {
+                    descr: vec![
+                        ("lookup".to_string(), "lookup".to_string()),
+                        ("best_fit".to_string(), "best fit".to_string()),
+                    ],
+                },
+                obj_arg_label: ExternalObjLabel::Label {
+                    name: "localeMatcher".to_string(),
+                },
+            }]),
+            vec![Lambda::const_(Constant::Pointer("best_fit".to_string()))],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        match &compiled.expr.desc {
+            ExpressionDesc::Object(_, props) => {
+                assert_eq!(props.len(), 1);
+                assert!(matches!(
+                    &props[0],
+                    (
+                        PropertyName::Lit(name),
+                        Expression {
+                            desc: ExpressionDesc::Str { txt, .. },
+                            ..
+                        },
+                    ) if name == "localeMatcher" && txt == "best fit"
+                ));
+            }
+            other => panic!("expected an object literal expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_js_object_create_with_optional_polyvar_string_field_inline_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PjsObjectCreate(vec![ExternalObjSpec {
+                obj_arg_type: ExternalArgAttr::PolyVarString {
+                    descr: vec![
+                        ("numeric".to_string(), "numeric".to_string()),
+                        ("two_digit".to_string(), "2-digit".to_string()),
+                    ],
+                },
+                obj_arg_label: ExternalObjLabel::Optional {
+                    name: "day".to_string(),
+                    for_sure_no_nested_option: false,
+                },
+            }]),
+            vec![Lambda::prim(
+                Primitive::Psome,
+                vec![Lambda::const_(Constant::Pointer("two_digit".to_string()))],
+                Location::none(),
+            )],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        match &compiled.expr.desc {
+            ExpressionDesc::Object(_, props) => {
+                assert_eq!(props.len(), 1);
+                assert!(matches!(
+                    &props[0],
+                    (
+                        PropertyName::Lit(name),
+                        Expression {
+                            desc: ExpressionDesc::Str { txt, .. },
+                            ..
+                        },
+                    ) if name == "day" && txt == "2-digit"
                 ));
             }
             other => panic!("expected an object literal expression, got {other:?}"),

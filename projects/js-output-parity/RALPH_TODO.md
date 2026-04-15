@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 529 / 657 JS snapshots passing, 0 compile errors, 128 output diffs
+**Status:** 532 / 657 JS snapshots passing, 0 compile errors, 125 output diffs
 
 ## Goal
 
@@ -35,11 +35,69 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **529 / 657**
+- JS snapshot parity: **532 / 657**
 - Compile errors: **0**
-- Output diffs: **128**
+- Output diffs: **125**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: port OCaml's `Lam_compile_external_call.ocaml_to_js_eff`
+  conversions into `@obj` field lowering so object fields with `@string`
+  polymorphic variants honor `@as(...)` dispatches instead of emitting raw
+  constructor names like `"best_fit"` and `"two_digit"`
+- Active backend focus for this slice is backend object lowering in
+  `compiler-rust/src/lambda/compile.rs` for `Pjs_object_create`, aligned to
+  OCaml's `lam_compile_external_obj` / `lam_compile_external_call` behavior
+  rather than a printer-only fix
+- OCaml reference:
+  `compiler/core/lam_compile_external_obj.ml` and
+  `compiler/core/lam_compile_external_call.ml`
+- Rust change:
+  - replaced the narrow single-value object-field helper with
+    `lower_object_external_arg_value_and_effect(...)`, which now reuses
+    `lower_external_arg_values_and_effect(...)` and asserts that `@obj`
+    fields lower to exactly one JS argument just like OCaml's `Splice1`
+    requirement in `assemble_obj_args`
+  - wired labeled and optional `Pjs_object_create` field lowering through that
+    shared path so `PolyVarString`, `Int`, and `Unwrap` conversions now apply
+    inside object literals and inline optional fields instead of only on
+    regular JS externals
+  - added focused regression coverage in
+    `lowers_js_object_create_with_polyvar_string_field_like_ocaml` and
+    `lowers_js_object_create_with_optional_polyvar_string_field_inline_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_js_object_create_with_polyvar_string_field_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_js_object_create_with_optional_polyvar_string_field_inline_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_js_object_create_with_marshaled_fields -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/gpr_1072_reg.res`, diffing
+    `/tmp/gpr_1072_reg.mjs` against the checked-in snapshot
+  - direct release repro for `tests/tests/src/gpr_1072.res`, diffing
+    `/tmp/gpr_1072.mjs` against the checked-in snapshot
+  - direct release guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1072.res` and
+    `tests/tests/src/gpr_1072_reg.res` are now exact snapshot matches; the
+    remaining `@obj` `@string` field drift for `"best fit"` / `"2-digit"`
+    is gone
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the broader unchanged guard
+  - the full authoritative sweep in this worktree now reports
+    **532 / 657** passing, **0** compile errors, and **125** output diffs
+  - `gpr_1072` and `gpr_1072_reg` dropped out of the diff set after the
+    release rebuild; sibling object-lowering diffs like
+    `optional_regression_test` and `Stdlib_IntlTests` remain separate
+- Topline impact:
+  - JS snapshot parity: **530 / 657** -> **532 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **127** -> **125** (**-2**)
+- Keep this change because OCaml already routes `@obj` fields through
+  `ocaml_to_js_eff`; moving Rust onto the same lowering path fixes the backend
+  rule at the source instead of post-processing emitted JavaScript text.
 
 Latest iteration on **2026-04-15**:
 
