@@ -21,13 +21,14 @@ use super::context::TypeContext;
 use super::decl::{
     ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorTag,
     LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType, PrimitiveDescription,
-    SignatureItem, TypeDeclaration, TypeKind, ValueDescription, ValueKind,
+    Signature, SignatureItem, TypeDeclaration, TypeKind, ValueDescription, ValueKind,
 };
 use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
 use crate::ident::{Ident, IdentFlags};
 use crate::location::Location;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use std::cell::RefCell;
 use std::sync::Arc;
 
 /// Collect free type variables (Tvar nodes) from a type expression.
@@ -335,8 +336,20 @@ pub struct Env {
     /// Module bindings.
     modules: BindingTable<Arc<ModuleDeclaration>>,
 
+    /// Lazily-forced qualified component views for local module bindings.
+    /// This mirrors OCaml's `env.components` table for local `Pident` paths.
+    module_components: BindingTable<Arc<super::env_lazy::StoredModuleComponents>>,
+
     /// Module type bindings.
     modtypes: BindingTable<Arc<ModtypeDeclaration>>,
+
+    /// Active local module aliases keyed by the current visible binding set.
+    /// This is computed lazily because the env_lazy-backed module-components
+    /// cache key logic consults it frequently in module-heavy files.
+    local_module_aliases_cache: RefCell<Option<Vec<(Ident, Path)>>>,
+
+    /// Memoized env-scope decisions for qualified module-component cache keys.
+    module_path_requires_env_scoped_cache_cache: RefCell<HashMap<String, bool>>,
 
     /// Summary of bindings.
     summary: Arc<EnvSummary>,
@@ -363,7 +376,12 @@ impl Clone for Env {
             constrs: self.constrs.clone(),
             labels: self.labels.clone(),
             modules: self.modules.clone(),
+            module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
+            local_module_aliases_cache: RefCell::new(self.local_module_aliases_cache.borrow().clone()),
+            module_path_requires_env_scoped_cache_cache: RefCell::new(
+                self.module_path_requires_env_scoped_cache_cache.borrow().clone(),
+            ),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
             gadt_instances: self.gadt_instances.clone(),
@@ -391,7 +409,10 @@ impl Env {
             constrs: BindingTable::new(),
             labels: BindingTable::new(),
             modules: BindingTable::new(),
+            module_components: BindingTable::new(),
             modtypes: BindingTable::new(),
+            local_module_aliases_cache: RefCell::new(None),
+            module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
             summary: Arc::new(EnvSummary::Empty),
             local_constraints: im_rc::HashMap::new(),
             gadt_instances: Vec::new(),
@@ -415,7 +436,12 @@ impl Env {
             constrs: self.constrs.clone(),
             labels: self.labels.clone(),
             modules: self.modules.clone(),
+            module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
+            local_module_aliases_cache: RefCell::new(self.local_module_aliases_cache.borrow().clone()),
+            module_path_requires_env_scoped_cache_cache: RefCell::new(
+                self.module_path_requires_env_scoped_cache_cache.borrow().clone(),
+            ),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
             gadt_instances: self.gadt_instances.clone(),
@@ -431,6 +457,97 @@ impl Env {
     /// Mark this environment as changed.
     fn bump_id(&mut self) {
         self.id = NEXT_ENV_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn invalidate_module_alias_caches(&self) {
+        self.local_module_aliases_cache.borrow_mut().take();
+        self.module_path_requires_env_scoped_cache_cache
+            .borrow_mut()
+            .clear();
+    }
+
+    fn path_has_prefix(path: &Path, prefix: &Path) -> bool {
+        if path.same(prefix) {
+            return true;
+        }
+        match path {
+            Path::Pdot(parent, _, _) => Self::path_has_prefix(parent, prefix),
+            Path::Pident(_) | Path::Papply(_, _) => false,
+        }
+    }
+
+    fn module_path_scope_cache_key(path: &Path) -> Option<String> {
+        if matches!(path, Path::Papply(_, _)) {
+            return None;
+        }
+        let head = path.head();
+        let name = path.name();
+        if head.is_persistent() || head.stamp() == 0 {
+            Some(name)
+        } else {
+            Some(format!("{name}#{}", head.stamp()))
+        }
+    }
+
+    pub(crate) fn with_current_local_module_aliases<R>(
+        &self,
+        f: impl FnOnce(&[(Ident, Path)]) -> R,
+    ) -> R {
+        if self.local_module_aliases_cache.borrow().is_none() {
+            let aliases = self
+                .modules
+                .by_name
+                .values()
+                .filter_map(|entries| entries.last())
+                .filter_map(|(id, decl, is_local)| {
+                    if !*is_local {
+                        return None;
+                    }
+                    match &decl.md_type {
+                        ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => {
+                            Some((id.clone(), target.clone()))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+            *self.local_module_aliases_cache.borrow_mut() = Some(aliases);
+        }
+
+        let cache = self.local_module_aliases_cache.borrow();
+        f(cache.as_deref().unwrap_or(&[]))
+    }
+
+    pub(crate) fn module_path_requires_env_scoped_cache(&self, module_path: &Path) -> bool {
+        let Some(cache_key) = Self::module_path_scope_cache_key(module_path) else {
+            return false;
+        };
+
+        if let Some(cached) = self
+            .module_path_requires_env_scoped_cache_cache
+            .borrow()
+            .get(&cache_key)
+            .copied()
+        {
+            return cached;
+        }
+
+        let requires = self.with_current_local_module_aliases(|aliases| {
+            aliases.iter().any(|(_, target_path)| {
+                let target_head = target_path.head();
+                self.find_module_with_origin(target_head.name())
+                    .ok()
+                    .is_some_and(|(origin_id, _, is_local)| {
+                        is_local
+                            && origin_id.same(target_head)
+                            && Self::path_has_prefix(module_path, target_path)
+                    })
+            })
+        });
+        self.module_path_requires_env_scoped_cache_cache
+            .borrow_mut()
+            .insert(cache_key, requires);
+        requires
     }
 
     // ========================================================================
@@ -716,17 +833,55 @@ impl Env {
     // Module Bindings
     // ========================================================================
 
-    /// Add a module binding.
-    pub fn add_module(&mut self, id: Ident, decl: ModuleDeclaration) {
+    pub(crate) fn add_module_with_component_path(
+        &mut self,
+        id: Ident,
+        decl: ModuleDeclaration,
+        component_path: Path,
+    ) {
+        self.add_module_with_component_context(
+            id,
+            decl.clone(),
+            decl,
+            component_path,
+            None,
+        );
+    }
+
+    pub(crate) fn add_module_with_component_context(
+        &mut self,
+        id: Ident,
+        decl: ModuleDeclaration,
+        component_decl: ModuleDeclaration,
+        component_path: Path,
+        parent_context: Option<(Path, Arc<Signature>)>,
+    ) {
+        let seed_env = self.clone_preserve_id();
+        let stored_components = Arc::new(
+            super::env_lazy::StoredModuleComponents::new_with_parent_context(
+                seed_env,
+                component_path,
+                component_decl,
+                parent_context,
+            ),
+        );
         self.bump_id();
+        self.invalidate_module_alias_caches();
         let decl = Arc::new(decl);
         self.modules.add(id.clone(), decl.clone());
+        self.module_components.add(id.clone(), stored_components);
         self.summary = Arc::new(EnvSummary::Module(self.summary.clone(), id, decl));
+    }
+
+    /// Add a module binding.
+    pub fn add_module(&mut self, id: Ident, decl: ModuleDeclaration) {
+        self.add_module_with_component_path(id.clone(), decl, Path::pident(id));
     }
 
     /// Add a module binding from an opened module (lower priority than local bindings).
     pub fn add_opened_module(&mut self, id: Ident, decl: ModuleDeclaration) {
         self.bump_id();
+        self.invalidate_module_alias_caches();
         let decl = Arc::new(decl);
         self.modules.add_opened(id.clone(), decl.clone());
         self.summary = Arc::new(EnvSummary::Module(self.summary.clone(), id, decl));
@@ -760,34 +915,16 @@ impl Env {
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
     }
 
-    /// Return current local module aliases in the environment.
-    pub fn current_local_module_aliases(&self) -> Vec<(Ident, Path)> {
-        let mut aliases = self
-            .modules
-            .by_name
-            .values()
-            .filter_map(|entries| entries.last())
-            .filter_map(|(id, decl, is_local)| {
-                if !*is_local {
-                    return None;
-                }
-                match &decl.md_type {
-                    ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => {
-                        Some((id.clone(), target.clone()))
-                    }
-                    _ => None,
-                }
-            })
-            .collect::<Vec<_>>();
-
-        aliases.sort_by(|(_, left_target), (_, right_target)| {
-            right_target
-                .name()
-                .len()
-                .cmp(&left_target.name().len())
-                .then_with(|| left_target.name().cmp(&right_target.name()))
-        });
-        aliases
+    pub(crate) fn with_local_module_components<R>(
+        &self,
+        path: &Path,
+        f: impl FnOnce(&super::env_lazy::StoredModuleComponents) -> R,
+    ) -> Option<R> {
+        let Path::Pident(id) = path else {
+            return None;
+        };
+        let components = self.module_components.find_by_ident(id)?;
+        Some(f(components.as_ref()))
     }
 
     /// Find a module by path.
@@ -870,7 +1007,19 @@ impl Env {
                 }
             }
             Path::Pident(_) => path.clone(),
-            Path::Papply(_, _) => panic!("normalize_path_prefix called on Papply"),
+            Path::Papply(p1, p2) => {
+                // Papply paths arise from functor applications (e.g., Belt.Array(X)).
+                // OCaml's normalize_path_prefix asserts false here, but the Rust
+                // compiler can reach this path via `include Belt.Array`. Normalize
+                // both sub-paths gracefully instead of panicking.
+                let n1 = self.normalize_path(p1);
+                let n2 = self.normalize_path(p2);
+                if n1 == **p1 && n2 == **p2 {
+                    path.clone()
+                } else {
+                    Path::Papply(Box::new(n1), Box::new(n2))
+                }
+            }
         }
     }
 
@@ -1891,5 +2040,51 @@ mod tests {
 
         let path = Path::pident(id);
         assert!(env.lookup_value(&path).is_ok());
+    }
+
+    #[test]
+    fn test_module_path_requires_env_scoped_cache_tracks_active_aliases() {
+        use super::super::decl::{AliasPresence, ModuleDeclaration, ModuleType};
+
+        let mut env = Env::empty();
+        let target_id = Ident::create_local("Target");
+        env.add_module(
+            target_id.clone(),
+            ModuleDeclaration {
+                md_type: ModuleType::MtySignature(vec![]),
+                md_attributes: vec![],
+                md_loc: Location::none(),
+                md_path: None,
+            },
+        );
+
+        let alias_id = Ident::create_local("Alias");
+        env.add_module(
+            alias_id.clone(),
+            ModuleDeclaration {
+                md_type: ModuleType::MtyAlias(
+                    AliasPresence::MtaPresent,
+                    Path::pident(target_id.clone()),
+                ),
+                md_attributes: vec![],
+                md_loc: Location::none(),
+                md_path: None,
+            },
+        );
+
+        let target_child_path = Path::pdot(Path::pident(target_id.clone()), "Inner");
+        assert!(env.module_path_requires_env_scoped_cache(&target_child_path));
+
+        env.add_module(
+            alias_id,
+            ModuleDeclaration {
+                md_type: ModuleType::MtySignature(vec![]),
+                md_attributes: vec![],
+                md_loc: Location::none(),
+                md_path: None,
+            },
+        );
+
+        assert!(!env.module_path_requires_env_scoped_cache(&target_child_path));
     }
 }

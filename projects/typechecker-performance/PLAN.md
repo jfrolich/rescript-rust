@@ -182,7 +182,10 @@ Acceptance:
   allowing only normal timing noise
 - the canonical 657-file benchmark shows aggregate Rust time at or below
   `0.50x` aggregate OCaml time on the same machine
-- Rust does not allocate multi-GB for `Import.res`
+- Rust peak memory usage on the authoritative `Import.res` repro is at or below
+  OCaml on the same machine
+- Rust data structures in this path are not using more memory than the OCaml
+  implementation to do equivalent work
 - typedtree behavior remains correct
 - no parity regressions are introduced in core test coverage
 

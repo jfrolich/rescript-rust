@@ -57,6 +57,8 @@ pub struct ModulePathResolver {
     runtime_path: Option<PathBuf>,
     persistent_env: Option<PersistentEnv>,
     path_overrides: HashMap<String, String>,
+    /// When true, all resolution uses the in-memory registry only — no disk probes.
+    in_process: bool,
 }
 
 impl ModulePathResolver {
@@ -67,6 +69,9 @@ impl ModulePathResolver {
         runtime_path: Option<&FsPath>,
         persistent_env: Option<PersistentEnv>,
     ) -> Self {
+        let in_process = persistent_env
+            .as_ref()
+            .is_some_and(|env| env.is_in_process_mode());
         Self {
             format: module_format_from_output_path(output_path),
             output_suffix: output_suffix_from_path(output_path),
@@ -75,7 +80,13 @@ impl ModulePathResolver {
             runtime_path: runtime_path.map(normalize_absolute_path),
             persistent_env,
             path_overrides: HashMap::new(),
+            in_process,
         }
+    }
+
+    /// Whether this resolver is in in-process mode (no disk probes).
+    pub fn is_in_process(&self) -> bool {
+        self.in_process
     }
 
     /// Override a module's emitted JS import path.
@@ -146,6 +157,18 @@ impl ModulePathResolver {
     }
 
     fn is_runtime_module(&self, module_name: &str) -> bool {
+        // Check in-memory registry first (--in-process mode)
+        if let Some(env) = &self.persistent_env {
+            if let Some(info) = env.get_in_memory_module(module_name) {
+                return info.is_runtime;
+            }
+        }
+
+        // In in-process mode, the registry is authoritative — no disk probes.
+        if self.in_process {
+            return false;
+        }
+
         let Some(runtime_path) = &self.runtime_path else {
             return false;
         };
@@ -187,6 +210,11 @@ impl ModulePathResolver {
     }
 
     fn fallback_local_module_source(&self, module_name: &str) -> Option<PathBuf> {
+        // In in-process mode, module source paths come from the registry only.
+        if self.in_process {
+            return None;
+        }
+
         let current_source = self.current_source_path.as_ref()?;
         let current_dir = current_source.parent()?;
         let entries = fs::read_dir(current_dir)
@@ -1378,14 +1406,18 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
     if let (Some(then_ret), Some(else_ret)) =
         (single_return_expr(&then_), single_return_expr(&else_))
     {
-        return Statement::return_(Expression::cond(cond, then_ret, else_ret));
+        return Statement::return_(Expression::cond(
+            cond,
+            then_ret.clone(),
+            else_ret.clone(),
+        ));
     }
 
     if let Some(else_ret) = single_return_expr(&else_) {
         let mut block = Vec::with_capacity(1 + then_.len());
         block.push(Statement::new(StatementDesc::If(
             negate_condition(cond),
-            vec![Statement::return_(else_ret)],
+            vec![Statement::return_(else_ret.clone())],
             vec![],
         )));
         block.extend(then_);
@@ -1403,17 +1435,17 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         single_assignment_expr(&then_),
         single_assignment_expr(&else_),
     ) {
-        if same_assignment_target(&lhs_then, &lhs_else) {
+        if same_assignment_target(lhs_then, lhs_else) {
             return Statement::exp(Expression::bin(
                 BinOp::Eq,
-                lhs_then,
-                Expression::cond(cond, rhs_then, rhs_else),
+                lhs_then.clone(),
+                Expression::cond(cond, rhs_then.clone(), rhs_else.clone()),
             ));
         }
     }
 
     if let (Some(then_expr), Some(else_expr)) = (single_exp_expr(&then_), single_exp_expr(&else_)) {
-        return Statement::exp(Expression::cond(cond, then_expr, else_expr));
+        return Statement::exp(Expression::cond(cond, then_expr.clone(), else_expr.clone()));
     }
 
     if let Some((nested_cond, nested_then, nested_else)) = single_if_block(&then_) {
@@ -1466,23 +1498,27 @@ fn block_last_is_terminal(block: &Block) -> bool {
     )
 }
 
-fn single_return_expr(block: &Block) -> Option<Expression> {
-    let stmt = single_statement(block)?;
+fn single_return_expr(block: &Block) -> Option<&Expression> {
+    let [stmt] = block.as_slice() else {
+        return None;
+    };
     match &stmt.desc {
-        StatementDesc::Return(expr) => Some(expr.clone()),
+        StatementDesc::Return(expr) => Some(expr),
         _ => None,
     }
 }
 
-fn single_assignment_expr(block: &Block) -> Option<(Expression, Expression)> {
-    let stmt = single_statement(block)?;
+fn single_assignment_expr(block: &Block) -> Option<(&Expression, &Expression)> {
+    let [stmt] = block.as_slice() else {
+        return None;
+    };
     let StatementDesc::Exp(expr) = &stmt.desc else {
         return None;
     };
     let ExpressionDesc::Bin(BinOp::Eq, lhs, rhs) = &expr.desc else {
         return None;
     };
-    Some(((*lhs.clone()), (*rhs.clone())))
+    Some((lhs, rhs))
 }
 
 fn same_assignment_target(lhs: &Expression, rhs: &Expression) -> bool {
@@ -1511,12 +1547,14 @@ fn same_assignment_target(lhs: &Expression, rhs: &Expression) -> bool {
     }
 }
 
-fn single_exp_expr(block: &Block) -> Option<Expression> {
-    let stmt = single_statement(block)?;
+fn single_exp_expr(block: &Block) -> Option<&Expression> {
+    let [stmt] = block.as_slice() else {
+        return None;
+    };
     let StatementDesc::Exp(expr) = &stmt.desc else {
         return None;
     };
-    Some(expr.clone())
+    Some(expr)
 }
 
 fn single_if_block(block: &Block) -> Option<(&Expression, &Block, &Block)> {

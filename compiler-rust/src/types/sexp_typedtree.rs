@@ -645,7 +645,7 @@ fn sexp_row_desc(
         let mut blocks = vec![
             row.row_fields
                 .iter()
-                .map(|(label, _)| label.clone())
+                .map(|(label, _)| label.to_string())
                 .collect(),
         ];
         let more = ctx.repr(row.row_more);
@@ -661,7 +661,7 @@ fn sexp_row_desc(
         let flat_labels: Vec<String> = row
             .row_fields
             .iter()
-            .map(|(label, _)| label.clone())
+            .map(|(label, _)| label.to_string())
             .collect();
         if filter
             .iter()

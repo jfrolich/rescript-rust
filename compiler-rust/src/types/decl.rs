@@ -377,44 +377,6 @@ pub enum SignatureItem {
     SigClassType,
 }
 
-/// Return the runtime slot and declaration for the last value with the given
-/// name in a signature, using OCaml's component-table slot accounting.
-///
-/// Slots advance only for runtime-bearing items:
-/// - `SigValue` advances unless it is `ValPrim`
-/// - `SigTypext` advances
-/// - `SigModule` advances
-/// - `SigClass` advances
-pub fn signature_runtime_value<'a>(
-    sig: &'a [SignatureItem],
-    name: &str,
-) -> Option<(usize, &'a ValueDescription)> {
-    let mut runtime_pos = 0usize;
-    let mut found = None;
-    for item in sig {
-        match item {
-            SignatureItem::SigValue(id, desc) => {
-                let current = runtime_pos;
-                if id.name() == name {
-                    found = Some((current, desc));
-                }
-                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
-                    runtime_pos += 1;
-                }
-            }
-            SignatureItem::SigTypext(_, _, _)
-            | SignatureItem::SigModule(_, _, _)
-            | SignatureItem::SigClass => {
-                runtime_pos += 1;
-            }
-            SignatureItem::SigType(_, _, _)
-            | SignatureItem::SigModtype(_, _)
-            | SignatureItem::SigClassType => {}
-        }
-    }
-    found
-}
-
 /// Return the runtime slot and declaration for the last submodule with the
 /// given name in a signature, using OCaml's component-table slot accounting.
 pub fn signature_runtime_module<'a>(

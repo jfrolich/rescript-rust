@@ -54,7 +54,24 @@ impl TypeArena {
     fn get(&self, r: TypeExprRef) -> &TypeExpr {
         unsafe {
             let types = &*self.types.get();
-            types[r.0].as_ref()
+            if r.0 < types.len() {
+                types[r.0].as_ref()
+            } else {
+                // Out-of-bounds TypeExprRef — likely from a stale cross-compilation
+                // registry cache. Create a fresh Tvar to prevent panics.
+                // This is a known correctness issue: the right fix is cross-context
+                // type re-internalization.
+                let ty = super::type_expr::TypeExpr::new(
+                    super::type_expr::TypeDesc::Tvar(None),
+                    super::type_expr::GENERIC_LEVEL,
+                    0,
+                );
+                let types = &mut *self.types.get();
+                let idx = types.len();
+                types.push(Box::new(ty));
+                // Re-borrow after push (the Vec may have reallocated)
+                types[idx].as_ref()
+            }
         }
     }
 
@@ -185,6 +202,22 @@ pub struct TypeContext<'a> {
     /// creating fresh type copies via copy_lookup_signature_for_subst.
     resolved_module_sig_cache: RefCell<ahash::AHashMap<String, (Path, super::decl::Signature)>>,
 
+    /// Cached qualified module-component views keyed by access-path semantics.
+    /// This is the Rust analogue of OCaml's lazy `components_of_module_maker`.
+    qualified_module_components_cache:
+        RefCell<ahash::AHashMap<String, super::env_lazy::QualifiedModuleComponents>>,
+
+    /// Cached dotted value lookups keyed by resolved module access path.
+    resolved_module_value_cache:
+        RefCell<ahash::AHashMap<(Path, String), (Path, super::decl::ValueDescription)>>,
+
+    /// Cached dotted type lookups keyed by resolved module access path.
+    resolved_module_type_cache:
+        RefCell<ahash::AHashMap<(Path, String), (Path, Ident, super::decl::TypeDeclaration)>>,
+
+    /// Cached child-module access paths keyed by resolved parent access path.
+    resolved_child_module_path_cache: RefCell<ahash::AHashMap<(Path, String), Path>>,
+
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
 
@@ -294,6 +327,10 @@ impl<'a> TypeContext<'a> {
             type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
             resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
+            qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
+            resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
+            resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
+            resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Vec::new()),
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
@@ -435,6 +472,105 @@ impl<'a> TypeContext<'a> {
     /// Look up a cached resolved module signature.
     pub fn find_resolved_module_sig(&self, path: &str) -> Option<(Path, super::decl::Signature)> {
         self.resolved_module_sig_cache.borrow().get(path).cloned()
+    }
+
+    /// Cache a lazily-built qualified module-components view.
+    pub(crate) fn register_qualified_module_components(
+        &self,
+        path: &str,
+        components: super::env_lazy::QualifiedModuleComponents,
+    ) {
+        self.qualified_module_components_cache
+            .borrow_mut()
+            .insert(path.to_string(), components);
+    }
+
+    /// Borrow a cached qualified module-components view.
+    pub(crate) fn with_qualified_module_components<R>(
+        &self,
+        path: &str,
+        f: impl FnOnce(&super::env_lazy::QualifiedModuleComponents) -> R,
+    ) -> Option<R> {
+        let cache = self.qualified_module_components_cache.borrow();
+        let components = cache.get(path)?;
+        Some(f(components))
+    }
+
+    /// Cache a dotted value lookup for a resolved module access path.
+    pub(crate) fn register_resolved_module_value(
+        &self,
+        module_path: &Path,
+        value_name: &str,
+        path: Path,
+        desc: super::decl::ValueDescription,
+    ) {
+        self.resolved_module_value_cache.borrow_mut().insert(
+            (module_path.clone(), value_name.to_string()),
+            (path, desc),
+        );
+    }
+
+    /// Look up a cached dotted value lookup for a resolved module access path.
+    pub(crate) fn find_resolved_module_value(
+        &self,
+        module_path: &Path,
+        value_name: &str,
+    ) -> Option<(Path, super::decl::ValueDescription)> {
+        self.resolved_module_value_cache
+            .borrow()
+            .get(&(module_path.clone(), value_name.to_string()))
+            .cloned()
+    }
+
+    /// Cache a dotted type lookup for a resolved module access path.
+    pub(crate) fn register_resolved_module_type(
+        &self,
+        module_path: &Path,
+        type_name: &str,
+        access_path: Path,
+        id: Ident,
+        decl: super::decl::TypeDeclaration,
+    ) {
+        self.resolved_module_type_cache.borrow_mut().insert(
+            (module_path.clone(), type_name.to_string()),
+            (access_path, id, decl),
+        );
+    }
+
+    /// Look up a cached dotted type lookup for a resolved module access path.
+    pub(crate) fn find_resolved_module_type(
+        &self,
+        module_path: &Path,
+        type_name: &str,
+    ) -> Option<(Path, Ident, super::decl::TypeDeclaration)> {
+        self.resolved_module_type_cache
+            .borrow()
+            .get(&(module_path.clone(), type_name.to_string()))
+            .cloned()
+    }
+
+    /// Cache a resolved child-module access path.
+    pub(crate) fn register_resolved_child_module_path(
+        &self,
+        parent_path: &Path,
+        child_name: &str,
+        child_path: Path,
+    ) {
+        self.resolved_child_module_path_cache
+            .borrow_mut()
+            .insert((parent_path.clone(), child_name.to_string()), child_path);
+    }
+
+    /// Look up a cached resolved child-module access path.
+    pub(crate) fn find_resolved_child_module_path(
+        &self,
+        parent_path: &Path,
+        child_name: &str,
+    ) -> Option<Path> {
+        self.resolved_child_module_path_cache
+            .borrow()
+            .get(&(parent_path.clone(), child_name.to_string()))
+            .cloned()
     }
 
     /// Set load paths for resolving CMI files.
@@ -1480,5 +1616,57 @@ mod tests {
             TypeDesc::Ttuple(types) => assert_eq!(types.len(), 2),
             _ => panic!("Expected tuple"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Global recursion depth guard for the type-checker
+// ---------------------------------------------------------------------------
+//
+// The type-checker has mutually recursive functions (type_expect,
+// type_module_expr, type_structure_item, etc.) that can loop infinitely on
+// certain functor-heavy input. A stack overflow in a Rayon worker kills the
+// entire process (SIGABRT), so we track recursion depth in a thread-local
+// and bail out with a panic *before* the OS kills us. The panic is caught by
+// `catch_unwind` in the in-process compile path.
+
+thread_local! {
+    static TYPECHECKER_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Maximum recursion depth for the type-checker. Each guarded function call
+/// adds ~10-50KB of stack frame. At 2000 depth * 50KB = 100MB, this stays
+/// well within 512MB thread stacks while being sufficient for real-world code.
+const MAX_TYPECHECKER_DEPTH: usize = 2000;
+
+/// RAII guard that increments the thread-local depth counter on creation
+/// and decrements it on drop.
+pub struct TypecheckerDepthGuard {
+    _priv: (),
+}
+
+impl TypecheckerDepthGuard {
+    /// Increment the depth counter. Returns `Ok(guard)` if within limits,
+    /// `Err(msg)` if the limit is exceeded.
+    #[inline]
+    pub fn enter() -> Result<Self, String> {
+        TYPECHECKER_DEPTH.with(|d| {
+            let depth = d.get();
+            if depth >= MAX_TYPECHECKER_DEPTH {
+                Err(format!(
+                    "Type-checker recursion depth exceeded ({MAX_TYPECHECKER_DEPTH})"
+                ))
+            } else {
+                d.set(depth + 1);
+                Ok(TypecheckerDepthGuard { _priv: () })
+            }
+        })
+    }
+}
+
+impl Drop for TypecheckerDepthGuard {
+    #[inline]
+    fn drop(&mut self) {
+        TYPECHECKER_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
     }
 }

@@ -22,8 +22,8 @@
 //! Type errors are represented as `TypeError` with detailed information
 //! about what went wrong during unification or other operations.
 
-use super::asttypes::PrivateFlag;
-use super::btype::{self, iter_type_expr, row_fixed, row_more, row_repr};
+use super::asttypes::{Label, PrivateFlag};
+use super::btype::{self, iter_type_expr, row_fixed, row_more, row_repr, row_repr_ref};
 use super::context::TypeContext;
 use super::env::Env;
 use super::path::Path;
@@ -155,6 +155,9 @@ impl UnifyState {
 
     /// Set the environment snapshot for type alias expansion.
     pub fn set_env(&mut self, env: &Env) {
+        if self.env.as_ref().is_some_and(|current| current.id() == env.id()) {
+            return;
+        }
         self.env = Some(env.clone_preserve_id());
     }
 
@@ -856,7 +859,7 @@ fn find_cmi_file(load_paths: &[std::path::PathBuf], module_name: &str) -> Option
     None
 }
 
-fn resolve_module_signature_through_cmi<'a>(
+pub(crate) fn resolve_module_signature_through_cmi<'a>(
     ctx: &'a TypeContext<'a>,
     load_paths: &[std::path::PathBuf],
     module_path: &Path,
@@ -962,11 +965,6 @@ pub fn resolve_type_through_modules<'a>(
     let mut visiting = HashSet::new();
     let mut current_sig =
         resolve_module_signature_through_cmi(ctx, &load_paths, module_path, &mut visiting)?;
-    // Match OCaml Subst/Mtype behavior for module signatures loaded from cmi:
-    // rewrite intra-signature type/module references to qualified access paths
-    // (e.g. `componentLike` -> `Jsx.componentLike`, `element` -> `Jsx.element`).
-    crate::cmi::persistent_env::substitute_type_paths_in_sig(&current_sig, module_path, ctx);
-    crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut current_sig, module_path);
 
     // Register ALL types in the final signature by stamp for future lookups.
     // This is important because type manifests may reference sibling types
@@ -1012,8 +1010,6 @@ fn resolve_module_type_through_env_path<'a>(
     path: &Path,
     visiting: &mut HashSet<Path>,
 ) -> Option<super::decl::ModuleType> {
-    use super::decl::SignatureItem;
-
     // Keep visited paths for the entire alias-resolution chain; this mirrors
     // OCaml's cycle-safe alias scraping and prevents re-entering `Mty_ident`
     // loops through `resolve_signature_through_env_module_type`.
@@ -1036,73 +1032,81 @@ fn resolve_module_type_through_env_path<'a>(
                 if !id.is_persistent() {
                     return None;
                 }
-                let load_paths = ctx.load_paths();
-                if load_paths.is_empty() {
-                    None
-                } else {
-                    // Mirror OCaml's persistent-module lookup in Env.find_module:
-                    // if not found in local env, consult .cmi signatures.
-                    let mut cmi_visiting = HashSet::new();
-                    resolve_module_signature_through_cmi(ctx, &load_paths, path, &mut cmi_visiting)
+                let mut no_persistent_env = None;
+                crate::types::typecore::resolve_module_signature_for_path(
+                    path,
+                    env,
+                    &mut no_persistent_env,
+                    ctx,
+                )
+                .map(|(_, sig)| super::decl::ModuleType::MtySignature(sig))
+                .or_else(|| {
+                    let load_paths = ctx.load_paths();
+                    if load_paths.is_empty() {
+                        None
+                    } else {
+                        // Mirror OCaml Env.find_module: if not found in local env,
+                        // consult .cmi signatures. Prefer the env_lazy-backed path
+                        // above so persistent module lookups share the same
+                        // qualified-view source of truth as other hot callers.
+                        let mut cmi_visiting = HashSet::new();
+                        resolve_module_signature_through_cmi(
+                            ctx,
+                            &load_paths,
+                            path,
+                            &mut cmi_visiting,
+                        )
                         .map(super::decl::ModuleType::MtySignature)
-                }
+                    }
+                })
             }
         }
         Path::Pdot(parent, name, _) => {
-            let parent_mty = resolve_module_type_through_env_path(ctx, env, parent, visiting)?;
-            let parent_sig =
-                resolve_signature_through_env_module_type(ctx, env, &parent_mty, visiting)?;
-            let parent_alias_target = match &parent_mty {
-                super::decl::ModuleType::MtyAlias(_, target_path) => Some(target_path.clone()),
-                _ => None,
-            };
-            parent_sig.iter().find_map(|item| match item {
-                SignatureItem::SigModule(id, md, _) if id.name() == name => match &md.md_type {
-                    super::decl::ModuleType::MtySignature(sig) => {
-                        // Mirror OCaml Subst behavior for env-based nested module access:
-                        // child module signatures may reference parent-defined types/modules
-                        // using bare names (e.g. `subtype` inside `Stream.Writable`).
-                        // Rewrite those references through the parent module access path.
-                        //
-                        // IMPORTANT: deep-copy the signature before applying parent
-                        // substitutions to avoid modifying the original type expressions
-                        // in-place (which would corrupt the typed tree).  OCaml's lazy
-                        // `components_of_module_maker` naturally deep-copies via
-                        // `Subst.type_declaration`; we emulate that with copy_lookup.
-                        let copied_sig = super::typecore::copy_lookup_signature_for_subst(sig, ctx);
-                        crate::cmi::persistent_env::substitute_type_paths_in_child_sig(
-                            &copied_sig,
-                            &parent_sig,
-                            parent,
+            let mut no_persistent_env = None;
+            let parent_alias_target = crate::types::typecore::module_alias_target_for_path(
+                parent,
+                env,
+                &mut no_persistent_env,
+                ctx,
+            );
+            if let Some((_, access_path, md)) =
+                crate::types::typecore::lookup_module_in_resolved_path(
+                    parent,
+                    name,
+                    env,
+                    &mut no_persistent_env,
+                    ctx,
+                )
+            {
+                match &md.md_type {
+                    super::decl::ModuleType::MtySignature(_) => {
+                        let preferred_child_path =
+                            parent_alias_target.as_ref().map(|target_parent_path| {
+                                Path::pdot(target_parent_path.clone(), name.to_string())
+                            });
+                        crate::types::typecore::resolve_module_signature_for_path(
+                            preferred_child_path.as_ref().unwrap_or(&access_path),
+                            env,
+                            &mut no_persistent_env,
                             ctx,
-                        );
-                        let child_sig = if let Some(target_parent_path) =
-                            parent_alias_target.as_ref()
-                        {
-                            let child_target_path = Path::pdot(target_parent_path.clone(), name);
-                            strengthen_signature_for_module_access_path(
-                                ctx,
-                                env,
-                                true,
-                                &child_target_path,
-                                &copied_sig,
-                                0,
-                            )
-                        } else {
-                            copied_sig
-                        };
-                        Some(super::decl::ModuleType::MtySignature(child_sig))
+                        )
+                        .or_else(|| {
+                            preferred_child_path.as_ref().and_then(|_| {
+                                crate::types::typecore::resolve_module_signature_for_path(
+                                    &access_path,
+                                    env,
+                                    &mut no_persistent_env,
+                                    ctx,
+                                )
+                            })
+                        })
+                        .map(|(_, sig)| super::decl::ModuleType::MtySignature(sig))
                     }
                     other => {
-                        let mut child_mty = other.clone();
-                        crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
-                            &mut child_mty,
-                            &parent_sig,
-                            parent,
-                            ctx,
-                        );
+                        let child_mty = other.clone();
                         if let Some(target_parent_path) = parent_alias_target.as_ref() {
-                            let child_target_path = Path::pdot(target_parent_path.clone(), name);
+                            let child_target_path =
+                                Path::pdot(target_parent_path.clone(), name.to_string());
                             Some(strengthen_module_type_for_module_access_path(
                                 ctx,
                                 env,
@@ -1114,19 +1118,18 @@ fn resolve_module_type_through_env_path<'a>(
                             Some(child_mty)
                         }
                     }
-                },
-                SignatureItem::SigModtype(id, mtd) if id.name() == name => {
-                    let mut child_mty = mtd.mtd_type.clone()?;
-                    crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
-                        &mut child_mty,
-                        &parent_sig,
-                        parent,
-                        ctx,
-                    );
-                    Some(child_mty)
                 }
-                _ => None,
-            })
+            } else if let Some((_, mtd)) = crate::types::typecore::lookup_modtype_in_resolved_path(
+                parent,
+                name,
+                env,
+                &mut no_persistent_env,
+                ctx,
+            ) {
+                mtd.mtd_type.clone()
+            } else {
+                None
+            }
         }
         Path::Papply(_, _) => None,
     };
@@ -1152,10 +1155,20 @@ fn resolve_signature_through_env_module_type<'a>(
     use super::decl::ModuleType;
 
     match mty {
-        ModuleType::MtySignature(sig) => Some(
-            crate::types::typecore::copy_lookup_signature_for_subst(sig, ctx),
-        ),
+        // The env_lazy-backed signature view is already the qualified source of
+        // truth for this access path. Reusing it preserves the same sharing
+        // shape OCaml keeps in components_of_module_maker.
+        ModuleType::MtySignature(sig) => Some(sig.clone()),
         ModuleType::MtyAlias(_, path) | ModuleType::MtyIdent(path) => {
+            let mut no_persistent_env = None;
+            if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
+                path,
+                env,
+                &mut no_persistent_env,
+                ctx,
+            ) {
+                return Some(sig);
+            }
             let resolved = resolve_module_type_through_env_path(ctx, env, path, visiting)?;
             resolve_signature_through_env_module_type(ctx, env, &resolved, visiting)
         }
@@ -1383,75 +1396,66 @@ fn resolve_type_item_through_env<'a>(
         _ => return None,
     };
 
-    let mut visiting = HashSet::new();
-    let module_mty = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)?;
-    let module_sig =
-        resolve_signature_through_env_module_type(ctx, env, &module_mty, &mut visiting)?;
-    let module_access_origin_is_persistent = module_path.head().is_persistent()
-        || matches!(module_path, Path::Pident(_))
-            && env
-                .lookup_module(module_path)
-                .or_else(|_| match module_path {
-                    Path::Pident(id) => env.find_module(id.name()),
-                    _ => unreachable!(),
-                })
-                .ok()
-                .and_then(|md| md.md_path.as_ref())
-                .is_some_and(|path| path.head().is_persistent());
-    // For alias modules, expansion should expose the alias target path
-    // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
-    let alias_target_for_strengthening = if strengthen_alias_types {
-        match &module_mty {
+    let mut no_persistent_env = None;
+    if let Some((qualified_module_path, id, decl)) =
+        crate::types::typecore::lookup_type_in_resolved_path(
+            module_path,
+            type_name,
+            env,
+            &mut no_persistent_env,
+            ctx,
+        )
+    {
+        // `lookup_type_in_resolved_path` already reads from the cached
+        // env_lazy-qualified module view. Keep that declaration graph shared
+        // instead of re-copying it on every lookup.
+        let resolved_decl = decl.clone();
+        let module_access_origin_is_persistent = qualified_module_path.head().is_persistent();
+        // For alias modules, expansion should expose the alias target path
+        // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
+        let alias_target_for_strengthening = if strengthen_alias_types {
             // Preserve local access paths like `L.t` / `V.t` instead of
             // collapsing them back to the alias target during expansion.
-            super::decl::ModuleType::MtyAlias(_, target_path)
-                if module_access_origin_is_persistent =>
-            {
-                Some(target_path.clone())
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-    // Match OCaml Env.components_of_module path lookup behavior: when resolving
-    // `M.t`, operate on a path-qualified copy of `M`'s signature so sibling
-    // references inside manifests are rewritten through the access path.
-    crate::cmi::persistent_env::substitute_type_paths_in_sig(&module_sig, module_path, ctx);
+            let mut no_persistent_env = None;
+            crate::types::typecore::module_alias_target_for_path(
+                module_path,
+                env,
+                &mut no_persistent_env,
+                ctx,
+            )
+            .filter(|_| module_access_origin_is_persistent)
+        } else {
+            None
+        };
 
-    for item in &module_sig {
-        if let SignatureItem::SigType(id, decl, _) = item {
-            if id.name() == type_name {
-                let queried_type_path = Path::pdot(module_path.clone(), type_name.to_string());
-                let self_manifest = decl.type_manifest.is_some_and(|manifest| {
-                    let manifest = ctx.repr(manifest);
-                    let manifest_desc = ctx.get_desc(manifest);
-                    matches!(
-                        &*manifest_desc,
-                        TypeDesc::Tconstr {
-                            path: manifest_path, ..
-                        } if manifest_path.same(&queried_type_path)
-                    )
-                });
-                if self_manifest {
-                    let raw_module_path = alias_target_for_strengthening
-                        .as_ref()
-                        .unwrap_or(module_path);
-                    if let Some((raw_id, raw_decl)) =
-                        lookup_raw_module_sig_type(env, raw_module_path, type_name)
-                    {
-                        return Some((raw_id, raw_decl));
-                    }
-                }
-                if let Some(target_path) = alias_target_for_strengthening.as_ref() {
-                    return Some((
-                        id.clone(),
-                        strengthen_type_decl_for_module_access_path(ctx, target_path, id, decl),
-                    ));
-                }
-                return Some((id.clone(), decl.clone()));
+        let queried_type_path = Path::pdot(qualified_module_path.clone(), type_name.to_string());
+        let self_manifest = resolved_decl.type_manifest.is_some_and(|manifest| {
+            let manifest = ctx.repr(manifest);
+            let manifest_desc = ctx.get_desc(manifest);
+            matches!(
+                &*manifest_desc,
+                TypeDesc::Tconstr {
+                    path: manifest_path, ..
+                } if manifest_path.same(&queried_type_path)
+            )
+        });
+        if self_manifest {
+            let raw_module_path = alias_target_for_strengthening
+                .as_ref()
+                .unwrap_or(module_path);
+            if let Some((raw_id, raw_decl)) =
+                lookup_raw_module_sig_type(env, raw_module_path, type_name)
+            {
+                return Some((raw_id, raw_decl));
             }
         }
+        if let Some(target_path) = alias_target_for_strengthening.as_ref() {
+            return Some((
+                id.clone(),
+                strengthen_type_decl_for_module_access_path(ctx, target_path, &id, &resolved_decl),
+            ));
+        }
+        return Some((id, resolved_decl));
     }
 
     // Fall back to CMI-based resolution if local env-based lookup didn't find
@@ -1501,6 +1505,49 @@ fn normalize_path_full<'a>(ctx: &'a TypeContext<'a>, env: &Env, path: &Path) -> 
     normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new())
 }
 
+fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
+    if path.same(old_prefix) {
+        return Some(new_prefix.clone());
+    }
+
+    match path {
+        Path::Pdot(parent, name, pos) => {
+            let rewritten_parent = rewrite_path_prefix(parent, old_prefix, new_prefix)?;
+            Some(Path::Pdot(Box::new(rewritten_parent), name.clone(), *pos))
+        }
+        Path::Pident(_) | Path::Papply(_, _) => None,
+    }
+}
+
+fn normalize_path_through_local_aliases(env: &Env, path: &Path) -> Option<Path> {
+    let mut aliases = env.with_current_local_module_aliases(|aliases| aliases.to_vec());
+    aliases.sort_by(|(left_id, left_target), (right_id, right_target)| {
+        right_target
+            .name()
+            .len()
+            .cmp(&left_target.name().len())
+            .then_with(|| right_target.name().cmp(&left_target.name()))
+            .then_with(|| right_id.stamp().cmp(&left_id.stamp()))
+    });
+
+    aliases.into_iter().find_map(|(alias_id, target_path)| {
+        let target_head = target_path.head();
+        let target_is_local = env
+            .find_module_with_origin(target_head.name())
+            .ok()
+            .is_some_and(|(origin_id, _, is_local)| is_local && origin_id.same(target_head));
+        if !target_is_local {
+            return None;
+        }
+        let alias_path = Path::pident(alias_id);
+        if alias_path.same(path) {
+            return None;
+        }
+        rewrite_path_prefix(path, &target_path, &alias_path)
+            .filter(|rewritten| !rewritten.same(path))
+    })
+}
+
 fn normalize_path_full_inner<'a>(
     ctx: &'a TypeContext<'a>,
     env: &Env,
@@ -1532,6 +1579,32 @@ fn normalize_path_full_inner<'a>(
         if id.is_persistent() {
             ctx.trigger_module_sig_rename(id.name());
         }
+        if env
+            .find_module_with_origin(id.name())
+            .ok()
+            .is_some_and(|(origin_id, md, is_local)| {
+                let target_is_local = match &md.md_type {
+                    super::decl::ModuleType::MtyAlias(_, target)
+                    | super::decl::ModuleType::MtyIdent(target) => {
+                        let head = target.head();
+                        env.find_module_with_origin(head.name()).ok().is_some_and(
+                            |(target_id, _, target_local)| target_local && target_id.same(head),
+                        )
+                    }
+                    _ => false,
+                };
+                is_local
+                    && origin_id.same(id)
+                    && target_is_local
+                    && matches!(
+                        md.md_type,
+                        super::decl::ModuleType::MtyAlias(..)
+                            | super::decl::ModuleType::MtyIdent(..)
+                    )
+            })
+        {
+            return path;
+        }
     }
 
     // Then check if the path itself is a module alias.
@@ -1556,6 +1629,10 @@ fn normalize_path_full_inner<'a>(
                 return normalize_path_full_inner(ctx, env, alias_path, depth + 1, visiting);
             }
         }
+    }
+
+    if let Some(rewritten) = normalize_path_through_local_aliases(env, &path) {
+        return normalize_path_full_inner(ctx, env, &rewritten, depth + 1, visiting);
     }
 
     path
@@ -2737,6 +2814,37 @@ fn unify_types<'a>(
                         let p2_changed = !norm2.same(path2);
                         let p1_persistent = path1.head().is_persistent();
                         let p2_persistent = path2.head().is_persistent();
+                        // When a local target path normalizes through a current
+                        // letmodule alias (e.g. Int32Array.t -> Array.t), keep
+                        // the unchanged alias path as the representative so the
+                        // typedtree matches OCaml's local-alias spelling.
+                        if p1_changed
+                            && !p2_changed
+                            && !p1_persistent
+                            && !p2_persistent
+                            && norm1.same(path2)
+                        {
+                            drop(desc1);
+                            drop(desc2);
+                            link_type(ctx, t1, t2);
+                            for (a, b) in pairs {
+                                unify(ctx, state, a, b)?;
+                            }
+                            return Ok(());
+                        } else if p2_changed
+                            && !p1_changed
+                            && !p1_persistent
+                            && !p2_persistent
+                            && norm2.same(path1)
+                        {
+                            drop(desc1);
+                            drop(desc2);
+                            link_type(ctx, t2, t1);
+                            for (a, b) in pairs {
+                                unify(ctx, state, a, b)?;
+                            }
+                            return Ok(());
+                        }
                         if p1_changed && !p2_changed && !p1_persistent && p2_persistent {
                             drop(desc1);
                             drop(desc2);
@@ -3417,8 +3525,11 @@ fn unify_types<'a>(
 // ============================================================================
 
 /// Sort row fields alphabetically by label, matching OCaml's `sort_row_fields`.
-fn sort_row_fields(fields: &[(String, RowField)]) -> Vec<(String, RowField)> {
-    let mut sorted = fields.to_vec();
+type RowFieldEntryRef<'a> = (&'a Label, &'a RowField);
+type RowPairRef<'a, 'b> = (&'a str, &'a RowField, &'b RowField);
+
+fn sort_row_fields<'a>(fields: &'a [(Label, RowField)]) -> Vec<RowFieldEntryRef<'a>> {
+    let mut sorted: Vec<_> = fields.iter().map(|(label, field)| (label, field)).collect();
     sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
     sorted
 }
@@ -3428,17 +3539,17 @@ fn sort_row_fields(fields: &[(String, RowField)]) -> Vec<(String, RowField)> {
 /// - r1: fields only in fi1 (sorted)
 /// - r2: fields only in fi2 (sorted)
 /// - pairs: matched fields from both sides
-fn merge_rf(
-    fi1: &[(String, RowField)],
-    fi2: &[(String, RowField)],
+fn merge_rf<'a, 'b>(
+    fi1: &[RowFieldEntryRef<'a>],
+    fi2: &[RowFieldEntryRef<'b>],
 ) -> (
-    Vec<(String, RowField)>,
-    Vec<(String, RowField)>,
-    Vec<(String, RowField, RowField)>,
+    Vec<RowFieldEntryRef<'a>>,
+    Vec<RowFieldEntryRef<'b>>,
+    Vec<RowPairRef<'a, 'b>>,
 ) {
-    let mut r1: Vec<(String, RowField)> = Vec::new();
-    let mut r2: Vec<(String, RowField)> = Vec::new();
-    let mut pairs: Vec<(String, RowField, RowField)> = Vec::new();
+    let mut r1 = Vec::new();
+    let mut r2 = Vec::new();
+    let mut pairs = Vec::new();
 
     let mut i1 = 0;
     let mut i2 = 0;
@@ -3447,24 +3558,24 @@ fn merge_rf(
         let (l1, f1) = &fi1[i1];
         let (l2, f2) = &fi2[i2];
         if l1 == l2 {
-            pairs.push((l1.clone(), f1.clone(), f2.clone()));
+            pairs.push((l1.as_str(), *f1, *f2));
             i1 += 1;
             i2 += 1;
         } else if l1 < l2 {
-            r1.push((l1.clone(), f1.clone()));
+            r1.push((*l1, *f1));
             i1 += 1;
         } else {
-            r2.push((l2.clone(), f2.clone()));
+            r2.push((*l2, *f2));
             i2 += 1;
         }
     }
     // Remaining elements
     while i1 < fi1.len() {
-        r1.push(fi1[i1].clone());
+        r1.push(fi1[i1]);
         i1 += 1;
     }
     while i2 < fi2.len() {
-        r2.push(fi2[i2].clone());
+        r2.push(fi2[i2]);
         i2 += 1;
     }
 
@@ -3479,25 +3590,39 @@ fn merge_rf(
 /// Merge row fields matching OCaml's `merge_row_fields`.
 /// Sorts both inputs, then uses sorted merge to partition into
 /// (r1_only, r2_only, pairs).
-fn merge_row_fields(
-    fi1: &[(String, RowField)],
-    fi2: &[(String, RowField)],
+fn merge_row_fields<'a, 'b>(
+    fi1: &'a [(Label, RowField)],
+    fi2: &'b [(Label, RowField)],
 ) -> (
-    Vec<(String, RowField)>,
-    Vec<(String, RowField)>,
-    Vec<(String, RowField, RowField)>,
+    Vec<RowFieldEntryRef<'a>>,
+    Vec<RowFieldEntryRef<'b>>,
+    Vec<RowPairRef<'a, 'b>>,
 ) {
     // Match OCaml's fast paths
     if fi1.is_empty() || fi2.is_empty() {
-        return (fi1.to_vec(), fi2.to_vec(), Vec::new());
+        return (
+            fi1.iter().map(|(label, field)| (label, field)).collect(),
+            fi2.iter().map(|(label, field)| (label, field)).collect(),
+            Vec::new(),
+        );
     }
     if fi1.len() == 1 && fi2.iter().all(|(l, _)| l != &fi1[0].0) {
-        return (fi1.to_vec(), fi2.to_vec(), Vec::new());
+        return (
+            fi1.iter().map(|(label, field)| (label, field)).collect(),
+            fi2.iter().map(|(label, field)| (label, field)).collect(),
+            Vec::new(),
+        );
     }
     if fi2.len() == 1 && fi1.iter().all(|(l, _)| l != &fi2[0].0) {
-        return (fi1.to_vec(), fi2.to_vec(), Vec::new());
+        return (
+            fi1.iter().map(|(label, field)| (label, field)).collect(),
+            fi2.iter().map(|(label, field)| (label, field)).collect(),
+            Vec::new(),
+        );
     }
-    merge_rf(&sort_row_fields(fi1), &sort_row_fields(fi2))
+    let sorted1 = sort_row_fields(fi1);
+    let sorted2 = sort_row_fields(fi2);
+    merge_rf(&sorted1, &sorted2)
 }
 
 /// Unify two row types (for polymorphic variants).
@@ -3510,8 +3635,10 @@ fn unify_rows<'a>(
     row1: &RowDesc,
     row2: &RowDesc,
 ) -> TypeResult<()> {
-    let row1 = row_repr(ctx, row1);
-    let row2 = row_repr(ctx, row2);
+    let row1 = row_repr_ref(ctx, row1);
+    let row2 = row_repr_ref(ctx, row2);
+    let row1 = row1.as_ref();
+    let row2 = row2.as_ref();
 
     let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
 
@@ -3537,9 +3664,9 @@ fn unify_rows<'a>(
     let closed = row1.row_closed || row2.row_closed;
 
     let filter_row_fields =
-        |erase: bool, fields: &[(String, RowField)]| -> Vec<(String, RowField)> {
+        |erase: bool, fields: &[RowFieldEntryRef<'_>]| -> Vec<(Label, RowField)> {
             let mut filtered = Vec::new();
-            for (label, field) in fields {
+            for (label, field) in fields.iter().copied() {
                 match super::btype::row_field_repr(ctx, field) {
                     RowField::Rabsent => {}
                     RowField::Reither {
@@ -3554,10 +3681,10 @@ fn unify_rows<'a>(
             }
             filtered
         };
-    let empty = |fields: &[(String, RowField)]| {
-        fields
-            .iter()
-            .all(|(_, f)| matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent))
+    let empty = |fields: &[RowFieldEntryRef<'_>]| {
+        fields.iter().copied().all(|(_, f)| {
+            matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent)
+        })
     };
 
     if closed {
@@ -3601,13 +3728,16 @@ fn unify_rows<'a>(
     let set_more = |ctx: &'a TypeContext<'a>,
                     state: &mut UnifyState,
                     row: &RowDesc,
-                    rest: &[(String, RowField)]|
+                    rest: &[RowFieldEntryRef<'_>]|
      -> TypeResult<()> {
         let row_is_fixed = row_fixed(ctx, row);
         let rest = if closed {
             filter_row_fields(row.row_closed, rest)
         } else {
-            rest.to_vec()
+            rest.iter()
+                .copied()
+                .map(|(label, field)| (label.clone(), field.clone()))
+                .collect()
         };
         if (!rest.is_empty() && (row.row_closed || row_is_fixed))
             || (closed && row_is_fixed && !row.row_closed)
@@ -5249,7 +5379,8 @@ fn copy_sep_inner(
         }
         TypeDesc::Tunivar(name) => TypeDesc::Tunivar(name),
         TypeDesc::Tvariant(row0) => {
-            let row = row_repr(ctx, &row0);
+            let row = row_repr_ref(ctx, &row0);
+            let row = row.as_ref();
             let more = ctx.repr(row.row_more);
             let keep = super::btype::is_tvar(ctx, more) && ctx.get_level(more) != GENERIC_LEVEL;
             let more_copy = copy_sep_inner(
@@ -5723,37 +5854,47 @@ pub fn copy_type_deep(
             new_ty
         }
         TypeDesc::Ttuple(types) => {
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
             let new_types: Vec<_> = types
                 .iter()
                 .map(|t| copy_type_deep(ctx, *t, cache))
                 .collect();
             let result = ctx.new_tuple(new_types);
+            ctx.set_desc(placeholder, TypeDesc::Tlink(result));
             cache.insert(ty, result);
             result
         }
         TypeDesc::Tconstr { path, args, .. } => {
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
             let new_args: Vec<_> = args
                 .iter()
                 .map(|t| copy_type_deep(ctx, *t, cache))
                 .collect();
             let result = ctx.new_constr(path.clone(), new_args);
+            ctx.set_desc(placeholder, TypeDesc::Tlink(result));
             cache.insert(ty, result);
             result
         }
         TypeDesc::Tpoly { body, vars } => {
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
             let new_vars: Vec<_> = vars
                 .iter()
                 .map(|t| copy_type_deep(ctx, *t, cache))
                 .collect();
             let new_body = copy_type_deep(ctx, *body, cache);
             let result = ctx.new_poly(new_body, new_vars);
+            ctx.set_desc(placeholder, TypeDesc::Tlink(result));
             cache.insert(ty, result);
             result
         }
         TypeDesc::Tvariant(row) => {
             let placeholder = ctx.new_var(None);
             cache.insert(ty, placeholder);
-            let row = row_repr(ctx, row);
+            let row = row_repr_ref(ctx, row);
+            let row = row.as_ref();
             let new_row_more = copy_type_deep(ctx, row.row_more, cache);
             let new_row_fields: Vec<_> = row
                 .row_fields
@@ -5849,10 +5990,22 @@ pub fn copy_type_deep(
             cache.insert(ty, result);
             result
         }
-        TypeDesc::Tsubst(target) => copy_type_deep(ctx, *target, cache),
-        TypeDesc::Tlink(target) => copy_type_deep(ctx, *target, cache),
+        TypeDesc::Tsubst(target) | TypeDesc::Tlink(target) => {
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
+            let result = copy_type_deep(ctx, *target, cache);
+            if result != placeholder {
+                ctx.set_desc(placeholder, TypeDesc::Tlink(result));
+                cache.insert(ty, result);
+                result
+            } else {
+                placeholder
+            }
+        }
         TypeDesc::Tnil | TypeDesc::Tunivar(_) => ty, // Return as-is
         TypeDesc::Tpackage { path, lids, args } => {
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
             let new_args: Vec<_> = args
                 .iter()
                 .map(|t| copy_type_deep(ctx, *t, cache))
@@ -5862,6 +6015,7 @@ pub fn copy_type_deep(
                 lids: lids.clone(),
                 args: new_args,
             });
+            ctx.set_desc(placeholder, TypeDesc::Tlink(result));
             cache.insert(ty, result);
             result
         }
@@ -6518,7 +6672,8 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
     // already-registered variant copy directly.
     if ctx.get_level(ty) == GENERIC_LEVEL {
         if let TypeDesc::Tvariant(row0) = &*ctx.get_desc(ty) {
-            let row = row_repr(ctx, row0);
+            let row = row_repr_ref(ctx, row0);
+            let row = row.as_ref();
             let more = ctx.repr(row.row_more);
             if let Some(marker) = cache.row_more_markers.get(&more).copied() {
                 cache.nodes.insert(ty, marker.variant);
@@ -6796,7 +6951,8 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
                 CopyAction::Variant(row) => {
                     // OCaml Ctype.copy uses copy_row with keep/fixed semantics
                     // derived from row_more, not a plain structural field copy.
-                    let row = row_repr(ctx, &row);
+                    let row = row_repr_ref(ctx, &row);
+                    let row = row.as_ref();
                     let more = ctx.repr(row.row_more);
                     let more_level = ctx.get_level(more);
                     let keep = super::btype::is_tvar(ctx, more) && more_level != GENERIC_LEVEL;
@@ -7070,7 +7226,7 @@ pub fn normalize_all_types(ctx: &TypeContext<'_>) {
         match &*desc {
             TypeDesc::Tvariant(row) => {
                 let row = row_repr(ctx, row);
-                let mut fields: Vec<(String, RowField)> = row
+                let mut fields: Vec<(Label, RowField)> = row
                     .row_fields
                     .iter()
                     .map(|(label, field)| {
@@ -7140,7 +7296,7 @@ fn normalize_type_rec(ctx: &TypeContext<'_>, visited: &mut HashSet<TypeExprRef>,
             // over-sorting expression-level variants (they happen to sort correctly already
             // or their tests fail for other reasons).
             let row = row_repr(ctx, row);
-            let mut fields: Vec<(String, RowField)> = row
+            let mut fields: Vec<(Label, RowField)> = row
                 .row_fields
                 .iter()
                 .map(|(label, field)| {
@@ -7194,10 +7350,6 @@ mod tests {
     use super::*;
     use crate::context::IdGenerator;
     use crate::ident::Ident;
-    use crate::types::asttypes::PrivateFlag;
-    use crate::types::decl::{
-        ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind,
-    };
 
     #[test]
     fn test_unify_same_type() {
@@ -7318,91 +7470,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_type_item_through_env_keeps_original_module_signature_unmodified() {
+    fn test_copy_type_deep_handles_link_subst_cycles() {
         let id_gen = IdGenerator::new();
         let ctx = TypeContext::new(&id_gen);
-        let mut env = crate::types::Env::empty();
 
-        let module_id = Ident::create_local("M");
-        let sibling_id = Ident::create_local("u");
-        let type_id = Ident::create_local("t");
+        let link = ctx.new_var(None);
+        let subst = ctx.new_type(TypeDesc::Tsubst(link));
+        ctx.set_desc(link, TypeDesc::Tlink(subst));
 
-        let int_ty = ctx.new_constr(crate::types::predef::path_int(), vec![]);
-        let sibling_decl = TypeDeclaration {
-            type_params: vec![],
-            type_arity: 0,
-            type_kind: TypeKind::TypeAbstract,
-            type_private: PrivateFlag::Public,
-            type_manifest: Some(int_ty),
-            type_variance: vec![],
-            type_newtype_level: None,
-            type_loc: crate::location::Location::none(),
-            type_attributes: vec![],
-            type_immediate: false,
-            type_unboxed: crate::types::decl::UnboxedStatus::default(),
-            type_inlined_types: vec![],
-            type_path: None,
-        };
-        let type_decl = TypeDeclaration {
-            type_params: vec![],
-            type_arity: 0,
-            type_kind: TypeKind::TypeAbstract,
-            type_private: PrivateFlag::Public,
-            type_manifest: Some(ctx.new_constr(crate::types::Path::pident(sibling_id.clone()), vec![])),
-            type_variance: vec![],
-            type_newtype_level: None,
-            type_loc: crate::location::Location::none(),
-            type_attributes: vec![],
-            type_immediate: false,
-            type_unboxed: crate::types::decl::UnboxedStatus::default(),
-            type_inlined_types: vec![],
-            type_path: None,
-        };
+        let mut cache = HashMap::new();
+        let copied = copy_type_deep(&ctx, link, &mut cache);
 
-        env.add_module(
-            module_id.clone(),
-            ModuleDeclaration {
-                md_type: ModuleType::MtySignature(vec![
-                    SignatureItem::SigType(sibling_id.clone(), sibling_decl, RecStatus::TrecNot),
-                    SignatureItem::SigType(type_id, type_decl, RecStatus::TrecNot),
-                ]),
-                md_attributes: vec![],
-                md_loc: crate::location::Location::none(),
-                md_path: None,
-            },
-        );
-
-        let queried_path = crate::types::Path::pdot(
-            crate::types::Path::pident(module_id),
-            "t".to_string(),
-        );
-        let (_, resolved_decl) =
-            resolve_type_item_through_env(&ctx, &env, &queried_path, true).expect("resolve M.t");
-
-        let resolved_manifest = resolved_decl.type_manifest.expect("resolved manifest");
-        let resolved_manifest = ctx.repr(resolved_manifest);
-        assert!(matches!(
-            &*ctx.get_desc(resolved_manifest),
-            TypeDesc::Tconstr { path, .. } if path.name() == "M.u"
-        ));
-
-        let module_decl = env.find_module("M").expect("module M");
-        let ModuleType::MtySignature(sig_items) = &module_decl.md_type else {
-            panic!("expected M to keep its original signature");
-        };
-        let Some((_, original_decl, _)) = sig_items.iter().find_map(|item| match item {
-            SignatureItem::SigType(id, decl, rec_status) if id.name() == "t" => {
-                Some((id, decl, rec_status))
-            }
-            _ => None,
-        }) else {
-            panic!("expected original type declaration for M.t");
-        };
-        let original_manifest = original_decl.type_manifest.expect("original manifest");
-        let original_manifest = ctx.repr(original_manifest);
-        assert!(matches!(
-            &*ctx.get_desc(original_manifest),
-            TypeDesc::Tconstr { path, .. } if matches!(path, crate::types::Path::Pident(id) if id.name() == "u")
-        ));
+        assert_ne!(copied, link);
+        assert_eq!(ctx.repr(copied), copied);
     }
 }

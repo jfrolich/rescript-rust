@@ -86,21 +86,27 @@ Read this first before changing code:
 
 - [IMPORT_RES_PERFORMANCE_HANDOFF.md](./IMPORT_RES_PERFORMANCE_HANDOFF.md)
 
+For this project, do not start from "what optimization can Rust add here?"
+Start from "what exact algorithm and lazy forcing path does OCaml use here?"
+The expected win comes from removing Rust-only extra work by matching OCaml more
+closely, not from inventing a different strategy first.
+
 ## Correctness Guard
 
 This project changes typing/module-resolution code. Do not accept a
 performance-only patch without correctness checks.
 
-Recommended minimum:
-
-```bash
-./scripts/test_typedtree_parity.sh Import
-```
-
-Recommended broader gate before finalizing a change:
+Required canonical parity gate for every accepted change:
 
 ```bash
 ./scripts/test_typedtree_parity.sh
+```
+
+Focused parity slices such as the `Import` subset are useful for diagnosis, but
+they do not replace the canonical full typedtree parity run:
+
+```bash
+./scripts/test_typedtree_parity.sh Import
 ```
 
 Recommended performance gate before finalizing a change:
@@ -121,7 +127,8 @@ You are done when:
 
 - `Import.res` matches or beats OCaml on the same machine
 - Rust is no slower than OCaml on every comparable file in the canonical corpus
-- Rust is no longer a multi-GB compile for this file
+- Rust peak memory usage for the authoritative `Import.res` repro is at or
+  below OCaml on the same machine
 - the profiler no longer shows repeated whole-signature deep-copy as the top cost
 - the implementation shape is recognizably closer to OCaml's lazy module view
   construction, not just a local bandaid

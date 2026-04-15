@@ -602,35 +602,20 @@ impl LambdaCompiler {
             }
             Lambda::LifThenElse(cond, then_, else_) => {
                 let cond_compiled = self.compile_expr(cond);
-                let then_compiled = self.compile_expr(then_);
-                let else_compiled = self.compile_expr(else_);
                 let mut prelude = cond_compiled.prelude;
-                if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
-                    Compiled {
-                        prelude,
-                        expr: Expression::cond(
-                            cond_compiled.expr,
-                            then_compiled.expr,
-                            else_compiled.expr,
-                        ),
-                    }
-                } else {
-                    let tmp = self.fresh_ident("ifres");
-                    prelude.push(Statement::variable(VariableDeclaration {
-                        ident: tmp.clone(),
-                        value: None,
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    }));
-                    prelude.push(Statement::if_(
-                        cond_compiled.expr,
-                        self.compile_assign_to_target_block(&tmp, then_),
-                        self.compile_assign_to_target_block(&tmp, else_),
-                    ));
-                    Compiled {
-                        prelude,
-                        expr: Expression::var(tmp),
-                    }
+                let tmp = self.fresh_ident("ifres");
+                let then_block = self.compile_assign_to_target_block(&tmp, then_);
+                let else_block = self.compile_assign_to_target_block(&tmp, else_);
+                prelude.extend(self.compile_declared_if_block(
+                    LetKind::Strict,
+                    &tmp,
+                    cond_compiled.expr,
+                    then_block,
+                    else_block,
+                ));
+                Compiled {
+                    prelude,
+                    expr: Expression::var(tmp),
                 }
             }
             Lambda::Lsequence(a, b) => {
@@ -3880,25 +3865,32 @@ impl LambdaCompiler {
         else_: &Lambda,
     ) -> Block {
         let cond_compiled = self.compile_expr(cond);
-        let then_compiled = self.compile_expr(then_);
-        let else_compiled = self.compile_expr(else_);
-
-        if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
-            let mut block = cond_compiled.prelude;
-            block.push(Statement::exp(Expression::bin(
-                BinOp::Eq,
-                Expression::var(result.clone()),
-                Expression::cond(cond_compiled.expr, then_compiled.expr, else_compiled.expr),
-            )));
-            return block;
-        }
+        let then_block = self.compile_assign_to_target_block(result, then_);
+        let else_block = self.compile_assign_to_target_block(result, else_);
 
         let mut block = cond_compiled.prelude;
-        block.push(Statement::if_(
-            cond_compiled.expr,
-            self.compile_assign_to_target_block(result, then_),
-            self.compile_assign_to_target_block(result, else_),
-        ));
+        match (
+            self.take_single_result_assignment(result, then_block),
+            self.take_single_result_assignment(result, else_block),
+        ) {
+            (Ok(then_expr), Ok(else_expr)) => {
+                block.push(self.result_assignment(
+                    result,
+                    Expression::cond(cond_compiled.expr, then_expr, else_expr),
+                ));
+            }
+            (then_result, else_result) => {
+                let then_block = match then_result {
+                    Ok(expr) => vec![self.result_assignment(result, expr)],
+                    Err(block) => block,
+                };
+                let else_block = match else_result {
+                    Ok(expr) => vec![self.result_assignment(result, expr)],
+                    Err(block) => block,
+                };
+                block.push(Statement::if_(cond_compiled.expr, then_block, else_block));
+            }
+        }
         block
     }
 
@@ -3910,71 +3902,133 @@ impl LambdaCompiler {
         then_block: Block,
         else_block: Block,
     ) -> Block {
-        if let (Some(then_expr), Some(else_expr)) = (
-            self.single_result_assignment(id, &then_block),
-            self.single_result_assignment(id, &else_block),
+        match (
+            self.take_single_result_assignment(id, then_block),
+            self.take_single_result_assignment(id, else_block),
         ) {
-            return vec![Statement::variable(VariableDeclaration {
-                ident: id.clone(),
-                value: Some(Expression::cond(cond, then_expr, else_expr)),
-                property: kind,
-                ident_info: IdentInfo::default(),
-            })];
-        }
+            (Ok(then_expr), Ok(else_expr)) => {
+                vec![Statement::variable(VariableDeclaration {
+                    ident: id.clone(),
+                    value: Some(Expression::cond(cond, then_expr, else_expr)),
+                    property: kind,
+                    ident_info: IdentInfo::default(),
+                })]
+            }
+            (then_result, else_result) => {
+                let then_block = match then_result {
+                    Ok(expr) => vec![self.result_assignment(id, expr)],
+                    Err(block) => block,
+                };
+                let else_block = match else_result {
+                    Ok(expr) => vec![self.result_assignment(id, expr)],
+                    Err(block) => block,
+                };
 
-        vec![
-            Statement::variable(VariableDeclaration {
-                ident: id.clone(),
-                value: None,
-                property: kind,
-                ident_info: IdentInfo::default(),
-            }),
-            Statement::if_(cond, then_block, else_block),
-        ]
+                vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: id.clone(),
+                        value: None,
+                        property: kind,
+                        ident_info: IdentInfo::default(),
+                    }),
+                    Statement::if_(cond, then_block, else_block),
+                ]
+            }
+        }
     }
 
-    fn single_result_assignment(&self, id: &Ident, block: &Block) -> Option<Expression> {
+    fn take_single_result_assignment(
+        &self,
+        id: &Ident,
+        block: Block,
+    ) -> Result<Expression, Block> {
         let [stmt] = block.as_slice() else {
-            return None;
+            return Err(block);
         };
         let StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Bin(BinOp::Eq, lhs, rhs),
+            desc: ExpressionDesc::Bin(BinOp::Eq, lhs, ..),
             ..
         }) = &stmt.desc
         else {
-            return None;
+            return Err(block);
         };
         let ExpressionDesc::Var(crate::js_ir::VIdent::Id(target)) = &lhs.desc else {
-            return None;
+            return Err(block);
         };
         if !target.same(id) {
-            return None;
+            return Err(block);
         }
 
-        Some((**rhs).clone())
+        let stmt = block.into_iter().next().expect("single-statement block");
+        let Statement {
+            desc: StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Bin(BinOp::Eq, _, rhs),
+                ..
+            }),
+            ..
+        } = stmt
+        else {
+            unreachable!("validated single assignment shape")
+        };
+        Ok(*rhs)
+    }
+
+    fn result_assignment(&self, id: &Ident, expr: Expression) -> Statement {
+        Statement::exp(Expression::bin(
+            BinOp::Eq,
+            Expression::var(id.clone()),
+            expr,
+        ))
+    }
+
+    fn take_single_return_expr(&self, block: Block) -> Result<Expression, Block> {
+        let [stmt] = block.as_slice() else {
+            return Err(block);
+        };
+        if !matches!(stmt.desc, StatementDesc::Return(_)) {
+            return Err(block);
+        }
+
+        let stmt = block.into_iter().next().expect("single-statement block");
+        let Statement {
+            desc: StatementDesc::Return(expr),
+            ..
+        } = stmt
+        else {
+            unreachable!("validated single return shape")
+        };
+        Ok(expr)
     }
 
     fn compile_if_return_block(&mut self, cond: &Lambda, then_: &Lambda, else_: &Lambda) -> Block {
         let cond_compiled = self.compile_expr(cond);
-        let then_compiled = self.compile_expr(then_);
-        let else_compiled = self.compile_expr(else_);
-
-        if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
-            let mut block = cond_compiled.prelude;
-            block.push(Statement::return_(Expression::cond(
-                cond_compiled.expr,
-                then_compiled.expr,
-                else_compiled.expr,
-            )));
-            return block;
-        }
+        let then_block = self.compile_return_block(then_);
+        let else_block = self.compile_return_block(else_);
 
         let mut block = cond_compiled.prelude;
-        block.push(Statement::if_(
-            cond_compiled.expr,
-            self.compile_return_block(then_),
-            self.compile_return_block(else_),
-        ));
+        match (
+            self.take_single_return_expr(then_block),
+            self.take_single_return_expr(else_block),
+        ) {
+            (Ok(then_expr), Ok(else_expr)) => {
+                block.push(Statement::return_(Expression::cond(
+                    cond_compiled.expr,
+                    then_expr,
+                    else_expr,
+                )));
+            }
+            (then_result, else_result) => {
+                let then_block = match then_result {
+                    Ok(expr) => vec![Statement::return_(expr)],
+                    Err(block) => block,
+                };
+                let else_block = match else_result {
+                    Ok(expr) => vec![Statement::return_(expr)],
+                    Err(block) => block,
+                };
+                block.push(Statement::if_(cond_compiled.expr, then_block, else_block));
+            }
+        }
         block
     }
 
@@ -4496,9 +4550,129 @@ impl LambdaCompiler {
         Compiled { prelude, expr }
     }
 
+    fn primitive_expected_arity(prim: &Primitive) -> Option<usize> {
+        use Primitive::*;
+
+        Some(match prim {
+            Pstringlength
+            | Parraylength
+            | Pnot
+            | Pnegint
+            | Pnegfloat
+            | Pnotint
+            | Poffsetint(_)
+            | Poffsetref(_)
+            | PnullToOpt
+            | PnullUndefinedToOpt
+            | PisNotNone
+            | PisNull
+            | PisUndefined
+            | PisNullUndefined
+            | PvalFromOption
+            | PvalFromOptionNotNest
+            | Psome
+            | PsomeNotNest
+            | Pfield(_, _)
+            | Ptypeof
+            | Pintoffloat
+            | Pfloatofint
+            | Pawait
+            | Pidentity
+            | Pignore
+            | PwrapExn
+            | PjsFnMake(_)
+            | PjsFnMakeUnit
+            | PjsFnMethod => 1,
+            PjsUnsafeDowngrade { setter: false, .. } => 1,
+            Paddint
+            | Paddfloat
+            | Psubint
+            | Psubfloat
+            | Pmulint
+            | Pmulfloat
+            | Pdivint
+            | Pdivfloat
+            | Pmodint
+            | Pmodfloat
+            | Ppowint
+            | Ppowfloat
+            | Pobjcomp(_)
+            | Pboolcomp(_)
+            | Pintcomp(_)
+            | Pfloatcomp(_)
+            | Pbigintcomp(_)
+            | Pstringcomp(_)
+            | Pjscomp(_)
+            | Pobjorder
+            | Pobjmin
+            | Pobjmax
+            | Pboolorder
+            | Pboolmin
+            | Pboolmax
+            | Pintorder
+            | Pintmin
+            | Pintmax
+            | Pfloatorder
+            | Pfloatmin
+            | Pfloatmax
+            | Pbigintorder
+            | Pbigintmin
+            | Pbigintmax
+            | Pstringorder
+            | Pstringmin
+            | Pstringmax
+            | Psequand
+            | Psequor
+            | Pandint
+            | Porint
+            | Pxorint
+            | Plslint
+            | Plsrint
+            | Pasrint
+            | Pstringadd
+            | Psetfield(_, _) => 2,
+            PjsUnsafeDowngrade { setter: true, .. } => 2,
+            PjsCall { arg_types, .. } => arg_types.len(),
+            PjsObjectCreate(obj_params) => obj_params.len(),
+            _ => return None,
+        })
+    }
+
+    fn compile_unsaturated_primitive(
+        &mut self,
+        prim: &Primitive,
+        args: &[Lambda],
+        expected_arity: usize,
+    ) -> Compiled {
+        let missing = expected_arity.saturating_sub(args.len());
+        debug_assert!(missing > 0);
+
+        let params = if missing == 1 {
+            vec![self.id_gen.create("prim")]
+        } else {
+            (0..missing)
+                .map(|i| self.id_gen.create(&format!("prim{i}")))
+                .collect::<Vec<_>>()
+        };
+        let mut full_args = args.to_vec();
+        full_args.extend(params.iter().cloned().map(Lambda::var));
+
+        self.compile_expr(&Lambda::function_(
+            missing as i32,
+            params,
+            Lambda::prim(prim.clone(), full_args, crate::location::Location::none()),
+            Default::default(),
+        ))
+    }
+
     fn compile_primitive(&mut self, prim: &Primitive, args: &[Lambda]) -> Compiled {
         if matches!(prim, Primitive::Pimport) {
             return self.compile_import_primitive(args);
+        }
+        if let Some(expected_arity) = Self::primitive_expected_arity(prim)
+            && args.len() < expected_arity
+        {
+            return self.compile_unsaturated_primitive(prim, args, expected_arity);
         }
 
         use Primitive::*;
@@ -14346,6 +14520,30 @@ mod tests {
 
         assert!(compiled.prelude.is_empty());
         assert!(matches!(compiled.expr.desc, ExpressionDesc::Fun { .. }));
+    }
+
+    #[test]
+    fn compile_unsaturated_array_length_primitive_eta_wraps() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Parraylength,
+            vec![],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        match &compiled.expr.desc {
+            ExpressionDesc::Fun { params, body, .. } => {
+                assert_eq!(params.len(), 1);
+
+                let rendered = print_block(body);
+                assert!(
+                    rendered.contains(".length"),
+                    "expected eta-wrapped array length body, got {rendered}"
+                );
+            }
+            other => panic!("expected eta-wrapped function, got {other:?}"),
+        }
     }
 
     #[test]
