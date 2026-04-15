@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 503 / 657 JS snapshots passing, 0 compile errors, 154 output diffs
+**Status:** 504 / 657 JS snapshots passing, 0 compile errors, 153 output diffs
 
 ## Goal
 
@@ -35,11 +35,72 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **503 / 657**
+- JS snapshot parity: **504 / 657**
 - Compile errors: **0**
-- Output diffs: **154**
+- Output diffs: **153**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep recursive tail-loop lowering and same-group alias emission
+  attached to the arity-preserving `PjsFnMake` wrappers that survive backend
+  simplification, so files like `a_scope_bug.res` still lower through the
+  OCaml-style recursive loop path instead of falling back to `return even(...)`
+  plus placeholder recursive assignments
+- Active backend focus for this slice is **Phase 3: Port JS IR Lowering And
+  Metadata** from `PLAN.md`, because the optimized-lambda boundary was already
+  green and the remaining drift sat in Rust's `lam_compile`-equivalent
+  recursive-let lowering: after `simplify_for_js_backend`, the second binding in
+  `a_scope_bug` becomes an arity-preserving `js_fn_make_1 odd` wrapper, but the
+  Rust backend only recognized bare `Lfunction` recursive bindings when it built
+  the tail-loop target set and direct recursive alias emissions
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_recursive_let`'s
+  recursive-function loop lowering, plus `compiler/core/lam_eta_conversion.ml`
+  for the arity-preserving `unsafe_adjust_to_arity` wrapper shape that shows up
+  in simplified recursive groups
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so recursive bindings now
+    recognize wrapped `PjsFnMake` / `PjsFnMakeUnit` function values when
+    deciding whether to lower through the tail-loop path
+  - taught recursive alias handling and tail-target discovery to treat
+    arity-preserving `PjsFnMake(..., Lvar target)` wrappers as direct aliases of
+    the target recursive function, which keeps same-group aliases like
+    `even = odd` in the same tailcall family
+  - added / extended focused regressions:
+    `recursive_wrapped_js_fn_make_bindings_lower_to_looping_while_bodies` and
+    `recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug`
+- Verified focused guards for this slice:
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml recursive_wrapped_js_fn_make_bindings_lower_to_looping_while_bodies -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml recursive_self_tailcalls_ -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml recursive_function_bindings_lower_directly_without_placeholder_assignments -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact AST-path release repro for `tests/tests/src/a_scope_bug.res` from
+    `tests/tests/lib/bs`, diffing `/tmp/a_scope_bug.mjs` against the checked-in
+    snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/a_scope_bug.res` now matches exactly: the recursive group
+    lowers back to the looping `odd` body plus the direct `let even = odd;`
+    alias, instead of emitting `return even(32);` and a placeholder recursive
+    assignment
+  - wrapped recursive function bindings still lower through the existing
+    self-tailcall loop path, and direct mutually-recursive function bindings
+    still avoid placeholder declarations
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+- Topline impact:
+  - JS snapshot parity: **503 / 657** -> **504 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **154** -> **153** (**-1**)
+- Keep this change because it fixes a real recursive-lowering gap in Rust's
+  `lam_compile` port, matches the OCaml snapshot on `a_scope_bug` without
+  disturbing the stable `ExternalShadow` guard, and improves the authoritative
+  657-file baseline by one file.
 
 Latest iteration on **2026-04-15**:
 

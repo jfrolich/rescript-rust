@@ -30,8 +30,10 @@ use crate::lambda::primitive::{
 };
 use crate::lambda::subst;
 use crate::lambda::{
-    Apply, ApplyStatus, Lambda, LambdaSwitch, SwitchBlock, SwitchBlockType, SwitchCaseTag, TagInfo,
+    ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda,
+    LambdaSwitch, SwitchBlock, SwitchBlockType, SwitchCaseTag, TagInfo,
 };
+use crate::location::Location;
 
 /// Compilation result for an expression: prelude statements plus a value expression.
 #[derive(Debug, Clone)]
@@ -55,16 +57,16 @@ struct FallthroughReturnHandler {
 
 #[derive(Debug, Clone)]
 struct TailLoopState {
-    function: Ident,
+    tail_targets: Vec<Ident>,
     params: Vec<Ident>,
     new_params: HashMap<Ident, Ident>,
     triggered: bool,
 }
 
 impl TailLoopState {
-    fn new(function: Ident, params: Vec<Ident>) -> Self {
+    fn new(tail_targets: Vec<Ident>, params: Vec<Ident>) -> Self {
         Self {
-            function,
+            tail_targets,
             params,
             new_params: HashMap::new(),
             triggered: false,
@@ -653,12 +655,27 @@ impl LambdaCompiler {
     }
 
     fn compile_recursive_bindings(&mut self, bindings: &[(Ident, Lambda)]) -> Block {
+        let recursive_functions = recursive_function_bindings(bindings);
+        let recursive_function_tail_targets =
+            direct_recursive_function_tail_targets_with_bindings(bindings, &recursive_functions);
+        let recursive_function_ids: HashSet<_> =
+            recursive_function_tail_targets.keys().cloned().collect();
         let mut declarations = vec![];
         let mut effects = vec![];
 
         for (id, expr) in bindings {
             let (binding_decls, binding_effects) =
-                self.compile_recursive_binding(id, expr, bindings);
+                self.compile_recursive_binding(
+                    id,
+                    expr,
+                    bindings,
+                    recursive_function_tail_targets
+                        .get(id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                    &recursive_functions,
+                    &recursive_function_ids,
+                );
             declarations.extend(binding_decls);
             effects.extend(binding_effects);
         }
@@ -672,20 +689,41 @@ impl LambdaCompiler {
         id: &Ident,
         expr: &Lambda,
         all_bindings: &[(Ident, Lambda)],
+        tail_targets: &[Ident],
+        recursive_functions: &HashMap<Ident, LFunction>,
+        recursive_function_ids: &HashSet<Ident>,
     ) -> (Block, Block) {
-        match expr {
-            // OCaml's recursive-let path emits function bindings through the same
-            // declared-binding route used by non-rec lets, which lets the printer
-            // recover `function name(...)` at the top level.
-            Lambda::Lfunction(func) => (
+        if let Some(func) = recursive_function_binding_value(expr) {
+            return (
                 vec![],
                 vec![Statement::variable(VariableDeclaration {
                     ident: id.clone(),
-                    value: Some(self.compile_recursive_function_expr(id, func)),
+                    value: Some(self.compile_recursive_function_expr(
+                        id,
+                        &func,
+                        tail_targets,
+                    )),
                     property: LetKind::Alias,
                     ident_info: IdentInfo::default(),
                 })],
-            ),
+            );
+        }
+
+        if let Some(target) = recursive_function_binding_alias_target(expr, recursive_functions) {
+            if recursive_function_ids.iter().any(|function_id| target.same(function_id)) {
+                return (
+                    vec![],
+                    vec![Statement::variable(VariableDeclaration {
+                        ident: id.clone(),
+                        value: Some(Expression::var(target)),
+                        property: LetKind::Alias,
+                        ident_info: IdentInfo::default(),
+                    })],
+                );
+            }
+        }
+
+        match expr {
             Lambda::Lprim(info)
                 if matches!(info.primitive, Primitive::Pmakeblock(_, _, _))
                     && info
@@ -1308,10 +1346,11 @@ impl LambdaCompiler {
 
     fn compile_recursive_function_expr(
         &mut self,
-        function: &Ident,
+        _function: &Ident,
         func: &crate::lambda::LFunction,
+        tail_targets: &[Ident],
     ) -> Expression {
-        if !function_has_self_tailcall(function, &func.body) {
+        if !function_has_self_tailcall(tail_targets, &func.body) {
             return self.compile_expr(&Lambda::Lfunction(func.clone())).expr;
         }
 
@@ -1320,7 +1359,7 @@ impl LambdaCompiler {
         } else {
             func.params.clone()
         };
-        let mut tail_loop = TailLoopState::new(function.clone(), params.clone());
+        let mut tail_loop = TailLoopState::new(tail_targets.to_vec(), params.clone());
         let body = self.compile_tail_loop_return_block(&func.body, &mut tail_loop);
 
         if !tail_loop.triggered {
@@ -1578,7 +1617,11 @@ impl LambdaCompiler {
         let Lambda::Lvar(function) = apply.ap_func.as_ref() else {
             return None;
         };
-        if !function.same(&tail_loop.function) {
+        if !tail_loop
+            .tail_targets
+            .iter()
+            .any(|target| function.same(target))
+        {
             return None;
         }
 
@@ -6222,6 +6265,135 @@ impl LambdaCompiler {
     }
 }
 
+fn recursive_function_binding_value(expr: &Lambda) -> Option<LFunction> {
+    match expr {
+        Lambda::Lfunction(func) => Some(func.clone()),
+        Lambda::Lprim(info) => match (&info.primitive, info.args.as_slice()) {
+            (Primitive::PjsFnMake(arity), [Lambda::Lfunction(func)]) => {
+                Some(adjust_recursive_js_fn_make_function(func, *arity, &info.loc))
+            }
+            (Primitive::PjsFnMakeUnit, [Lambda::Lfunction(func)]) => {
+                let mut func = func.clone();
+                if func.arity == 1
+                    && matches!(func.params.as_slice(), [param] if param.name() == "param")
+                {
+                    func.attr.one_unit_arg = true;
+                }
+                Some(func)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn recursive_function_bindings(bindings: &[(Ident, Lambda)]) -> HashMap<Ident, LFunction> {
+    bindings
+        .iter()
+        .filter_map(|(id, expr)| recursive_function_binding_value(expr).map(|func| (id.clone(), func)))
+        .collect()
+}
+
+fn recursive_function_binding_alias_target(
+    expr: &Lambda,
+    recursive_functions: &HashMap<Ident, LFunction>,
+) -> Option<Ident> {
+    let lookup = |target: &Ident| {
+        recursive_functions
+            .iter()
+            .find(|(function_id, _)| target.same(function_id))
+    };
+
+    match expr {
+        Lambda::Lvar(target) => lookup(target).map(|(function_id, _)| function_id.clone()),
+        Lambda::Lprim(info) => match (&info.primitive, info.args.as_slice()) {
+            (Primitive::PjsFnMake(arity), [Lambda::Lvar(target)]) => {
+                let (function_id, func) = lookup(target)?;
+                if func.attr.async_ || func.arity == *arity {
+                    Some(function_id.clone())
+                } else {
+                    None
+                }
+            }
+            (Primitive::PjsFnMakeUnit, [Lambda::Lvar(target)]) => {
+                lookup(target).map(|(function_id, _)| function_id.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn adjust_recursive_js_fn_make_function(func: &LFunction, to_: i32, loc: &Location) -> LFunction {
+    let from = func.arity;
+    if from == to_ || func.attr.async_ {
+        return func.clone();
+    }
+
+    if to_ == 0 {
+        let [param] = func.params.as_slice() else {
+            unreachable!("direct recursive js fn make adjustment should preserve a body")
+        };
+        let Lambda::Lfunction(adjusted) = Lambda::function_(
+            0,
+            vec![],
+            Lambda::let_(
+                LetKind::Alias,
+                param.clone(),
+                Lambda::unit(),
+                (*func.body).clone(),
+            ),
+            FunctionAttribute::default(),
+        ) else {
+            unreachable!("function constructor must return an Lfunction")
+        };
+        return adjusted;
+    }
+
+    if to_ > from {
+        let mut params = func.params.clone();
+        let extra_args = (0..(to_ - from))
+            .map(|_| Ident::create_local("param"))
+            .collect::<Vec<_>>();
+        let mut body = (*func.body).clone();
+        for extra_arg in &extra_args {
+            body = Lambda::Lapply(Apply {
+                ap_func: Box::new(body),
+                ap_args: vec![Lambda::var(extra_arg.clone())],
+                ap_info: ApInfo {
+                    loc: loc.clone(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            });
+        }
+        params.extend(extra_args);
+        let Lambda::Lfunction(adjusted) =
+            Lambda::function_(to_, params, body, FunctionAttribute::default())
+        else {
+            unreachable!("function constructor must return an Lfunction")
+        };
+        return adjusted;
+    }
+
+    let outer_arity = to_ as usize;
+    let outer_params = func.params[..outer_arity].to_vec();
+    let inner_params = func.params[outer_arity..].to_vec();
+    let inner = Lambda::function_(
+        from - to_,
+        inner_params,
+        (*func.body).clone(),
+        FunctionAttribute::default(),
+    );
+    let Lambda::Lfunction(adjusted) =
+        Lambda::function_(to_, outer_params, inner, FunctionAttribute::default())
+    else {
+        unreachable!("function constructor must return an Lfunction")
+    };
+    adjusted
+}
+
 fn lower_ocaml_for_range_direction<'a>(
     direction: &crate::lambda::DirectionFlag,
     finish: &'a Lambda,
@@ -6266,44 +6438,44 @@ fn single_return_expression(block: &Block) -> Option<Expression> {
     Some(expr.clone())
 }
 
-fn function_has_self_tailcall(function: &Ident, lam: &Lambda) -> bool {
+fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
     match lam {
         Lambda::Lapply(Apply { ap_func, .. }) => {
-            matches!(ap_func.as_ref(), Lambda::Lvar(id) if id.same(function))
+            matches!(ap_func.as_ref(), Lambda::Lvar(id) if tail_targets.iter().any(|target| id.same(target)))
         }
-        Lambda::Llet(_, _, _, body) => function_has_self_tailcall(function, body),
+        Lambda::Llet(_, _, _, body) => function_has_self_tailcall(tail_targets, body),
         Lambda::LifThenElse(_, then_, else_) => {
-            function_has_self_tailcall(function, then_)
-                || function_has_self_tailcall(function, else_)
+            function_has_self_tailcall(tail_targets, then_)
+                || function_has_self_tailcall(tail_targets, else_)
         }
-        Lambda::Lsequence(_, second) => function_has_self_tailcall(function, second),
+        Lambda::Lsequence(_, second) => function_has_self_tailcall(tail_targets, second),
         Lambda::Lprim(info) => short_circuit_primitive(&info.primitive, &info.args)
-            .is_some_and(|(_, _, rhs)| function_has_self_tailcall(function, rhs)),
+            .is_some_and(|(_, _, rhs)| function_has_self_tailcall(tail_targets, rhs)),
         Lambda::Lswitch(_, switch) => {
             switch
                 .sw_consts
                 .iter()
-                .any(|(_, body)| function_has_self_tailcall(function, body))
+                .any(|(_, body)| function_has_self_tailcall(tail_targets, body))
                 || switch
                     .sw_blocks
                     .iter()
-                    .any(|(_, body)| function_has_self_tailcall(function, body))
+                    .any(|(_, body)| function_has_self_tailcall(tail_targets, body))
                 || switch
                     .sw_failaction
                     .as_ref()
-                    .is_some_and(|fallback| function_has_self_tailcall(function, fallback))
+                    .is_some_and(|fallback| function_has_self_tailcall(tail_targets, fallback))
         }
         Lambda::LstringSwitch(_, cases, default) => {
             cases
                 .iter()
-                .any(|(_, body)| function_has_self_tailcall(function, body))
+                .any(|(_, body)| function_has_self_tailcall(tail_targets, body))
                 || default
                     .as_ref()
-                    .is_some_and(|fallback| function_has_self_tailcall(function, fallback))
+                    .is_some_and(|fallback| function_has_self_tailcall(tail_targets, fallback))
         }
         Lambda::LstaticCatch(body, _, handler) => {
-            function_has_self_tailcall(function, body)
-                || function_has_self_tailcall(function, handler)
+            function_has_self_tailcall(tail_targets, body)
+                || function_has_self_tailcall(tail_targets, handler)
         }
         Lambda::Lvar(_)
         | Lambda::LglobalModule(_, _)
@@ -6316,6 +6488,35 @@ fn function_has_self_tailcall(function: &Ident, lam: &Lambda) -> bool {
         | Lambda::Lfor(_, _, _, _, _)
         | Lambda::Lassign(_, _) => false,
     }
+}
+
+fn direct_recursive_function_tail_targets(bindings: &[(Ident, Lambda)]) -> HashMap<Ident, Vec<Ident>> {
+    let recursive_functions = recursive_function_bindings(bindings);
+    direct_recursive_function_tail_targets_with_bindings(bindings, &recursive_functions)
+}
+
+fn direct_recursive_function_tail_targets_with_bindings(
+    bindings: &[(Ident, Lambda)],
+    recursive_functions: &HashMap<Ident, LFunction>,
+) -> HashMap<Ident, Vec<Ident>> {
+    let mut tail_targets: HashMap<Ident, Vec<Ident>> = recursive_functions
+        .keys()
+        .cloned()
+        .map(|id| {
+            let targets = vec![id.clone()];
+            (id, targets)
+        })
+        .collect();
+
+    for (id, expr) in bindings {
+        let Some(function_id) = recursive_function_binding_alias_target(expr, recursive_functions)
+        else {
+            continue;
+        };
+        tail_targets.entry(function_id).or_default().push(id.clone());
+    }
+
+    tail_targets
 }
 
 fn module_sort_name(module: &ModuleId) -> &str {
@@ -18758,7 +18959,13 @@ mod tests {
             Location::none(),
         );
 
-        let rendered = print_block(&compiler.compile_program(&lam).block);
+        let simplified = crate::lambda::simplify::simplify_for_js_backend(&lam);
+        let compiled = compiler.compile_expr(&simplified);
+        let rendered = if compiled.prelude.is_empty() {
+            print_expression(&compiled.expr)
+        } else {
+            print_block(&compiled.prelude)
+        };
         assert_eq!(rendered, "SomeModule.formatDate(date);");
     }
 
@@ -21372,6 +21579,159 @@ let fib3 = n => {
         assert!(
             assign_start < assign_next,
             "expected acc reassignment before n reassignment:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn recursive_wrapped_js_fn_make_bindings_lower_to_looping_while_bodies() {
+        let mut compiler = LambdaCompiler::new();
+        let loop_ = Ident::create_local("loop");
+        let flag = Ident::create_local("flag");
+        let acc = Ident::create_local("acc");
+        let next = Ident::create_local("next");
+        let tailcall = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::var(loop_.clone())),
+            ap_args: vec![
+                Lambda::const_(Constant::JsFalse),
+                Lambda::var(next.clone()),
+                Lambda::var(next.clone()),
+            ],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+        let lam = Lambda::letrec(
+            vec![(
+                loop_.clone(),
+                Lambda::prim(
+                    Primitive::PjsFnMake(3),
+                    vec![Lambda::function_(
+                        3,
+                        vec![flag.clone(), acc.clone(), next],
+                        Lambda::if_(Lambda::var(flag), tailcall, Lambda::var(acc)),
+                        FunctionAttribute::default(),
+                    )],
+                    Location::none(),
+                ),
+            )],
+            Lambda::var(loop_.clone()),
+        );
+
+        let simplified = crate::lambda::simplify::simplify_for_js_backend(&lam);
+        let compiled = compiler.compile_expr(&simplified);
+        let rendered = if compiled.prelude.is_empty() {
+            print_expression(&compiled.expr)
+        } else {
+            print_block(&compiled.prelude)
+        };
+
+        assert!(
+            rendered.contains("while (true)"),
+            "expected wrapped recursive self-tailcall lowering to emit a loop:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("continue;"),
+            "expected wrapped recursive self-tailcall lowering to continue the loop:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("return loop("),
+            "unexpected wrapped recursive return call remained:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
+        let mut compiler = LambdaCompiler::new();
+        let odd = Ident::create_local("odd");
+        let even = Ident::create_local("even");
+        let z = Ident::create_local("z");
+        let y = Ident::create_local("y");
+        let lam = Lambda::letrec(
+            vec![
+                (
+                    odd.clone(),
+                    Lambda::prim(
+                        Primitive::PjsFnMake(1),
+                        vec![Lambda::function_(
+                            1,
+                            vec![z],
+                            Lambda::Lapply(Apply {
+                                ap_func: Box::new(Lambda::var(even.clone())),
+                                ap_args: vec![Lambda::const_(Constant::int(32))],
+                                ap_info: ApInfo {
+                                    loc: Location::none(),
+                                    inlined: InlineAttribute::Default,
+                                    status: ApplyStatus::Na,
+                                },
+                                ap_transformed_jsx: false,
+                            }),
+                            FunctionAttribute::default(),
+                        )],
+                        Location::none(),
+                    ),
+                ),
+                (
+                    even.clone(),
+                    Lambda::prim(
+                        Primitive::PjsFnMake(1),
+                        vec![Lambda::function_(
+                            1,
+                            vec![y.clone()],
+                            Lambda::Lapply(Apply {
+                                ap_func: Box::new(Lambda::var(odd.clone())),
+                                ap_args: vec![Lambda::var(y)],
+                                ap_info: ApInfo {
+                                    loc: Location::none(),
+                                    inlined: InlineAttribute::Default,
+                                    status: ApplyStatus::Na,
+                                },
+                                ap_transformed_jsx: false,
+                            }),
+                            FunctionAttribute::default(),
+                        )],
+                        Location::none(),
+                    ),
+                ),
+            ],
+            Lambda::var(odd.clone()),
+        );
+
+        let simplified = crate::lambda::simplify::simplify_for_js_backend(&lam);
+        let Lambda::Lletrec(bindings, _) = &simplified else {
+            panic!("expected simplified alias test to stay a letrec, got {simplified:?}");
+        };
+        let tail_targets = direct_recursive_function_tail_targets(bindings);
+        let odd_targets = tail_targets
+            .get(&odd)
+            .cloned()
+            .unwrap_or_else(|| panic!("expected tail targets for odd, got {tail_targets:?}"));
+        assert!(
+            odd_targets.iter().any(|target| target.same(&odd))
+                && odd_targets.iter().any(|target| target.same(&even)),
+            "expected odd tail targets to include the same-group alias, got {odd_targets:?}\nsimplified:\n{}",
+            crate::lambda::print::lambda_to_string(&simplified)
+        );
+        let compiled = compiler.compile_expr(&simplified);
+        let rendered = if compiled.prelude.is_empty() {
+            print_expression(&compiled.expr)
+        } else {
+            print_block(&compiled.prelude)
+        };
+
+        assert!(
+            rendered.contains("while (true)"),
+            "expected same-group function aliases to lower through the tail loop:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("let even = odd;"),
+            "expected the recursive alias binding to collapse to a direct alias:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("return even("),
+            "unexpected recursive alias call remained in the emitted JS:\n{rendered}"
         );
     }
 }
