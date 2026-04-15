@@ -1571,6 +1571,31 @@ fn simplify_primitive(
         return Lambda::prim(info.primitive.clone(), args, info.loc.clone());
     }
 
+    if let (
+        Primitive::PjsCall {
+            prim_name,
+            transformed_jsx: true,
+            ..
+        },
+        [field_arg, rest @ ..],
+    ) = (&info.primitive, info.args.as_slice())
+    {
+        if matches!(prim_name.as_str(), "jsx" | "jsxs")
+            && matches!(
+                field_arg,
+                Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Pfield(_, _),
+                    ..
+                })
+            )
+        {
+            let mut args = Vec::with_capacity(info.args.len());
+            args.push(field_arg.clone());
+            args.extend(rest.iter().map(|arg| simplify_with_env(arg, env, exports)));
+            return Lambda::prim(info.primitive.clone(), args, info.loc.clone());
+        }
+    }
+
     let args: Vec<_> = info
         .args
         .iter()
@@ -6947,6 +6972,66 @@ mod tests {
         };
         assert_eq!(func.params, vec![param]);
         assert!(func.attr.one_unit_arg);
+    }
+
+    #[test]
+    fn preserves_transformed_jsx_component_field_reads_during_alias_simplification() {
+        let props = Ident::create_local("props");
+        let field_arg = Lambda::prim(
+            Primitive::Pfield(
+                0,
+                FieldDbgInfo::Module {
+                    name: "make".to_string(),
+                },
+            ),
+            vec![Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::Module(vec!["make".to_string()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::function_(
+                    1,
+                    vec![props],
+                    Lambda::unit(),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            )],
+            Location::none(),
+        );
+
+        let simplified = simplify_for_js_backend(&Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "jsx".to_string(),
+                arg_types: vec![],
+                ffi: crate::lambda::primitive::ExternalFfiSpec {
+                    kind: crate::lambda::primitive::ExternalFfiKind::Default,
+                    spec: None,
+                    obj_params: None,
+                    return_wrapper: crate::lambda::primitive::ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: true,
+            },
+            vec![field_arg, Lambda::unit()],
+            Location::none(),
+        ));
+
+        let Lambda::Lprim(info) = simplified else {
+            panic!("expected transformed JSX primitive to survive");
+        };
+        let Some(first_arg) = info.args.first() else {
+            panic!("expected preserved component tag argument");
+        };
+        assert!(matches!(
+            first_arg,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(0, FieldDbgInfo::Module { name }),
+                ..
+            }) if name == "make"
+        ));
     }
 
     #[test]

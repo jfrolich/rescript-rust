@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 491 / 657 JS snapshots passing, 0 compile errors, 166 output diffs
+**Status:** 489 / 657 JS snapshots passing, 0 compile errors, 168 output diffs
 
 ## Goal
 
@@ -35,11 +35,75 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **491 / 657**
+- JS snapshot parity: **489 / 657**
 - Compile errors: **0**
-- Output diffs: **166**
+- Output diffs: **168**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: preserve transformed JSX through the final JS backend so the
+  dumper sees OCaml's record-block props and component `.make` tag projections
+  instead of falling back to runtime-call syntax or flattening the tag down to
+  the underlying component function variable
+- Active backend focus for this slice is **Phase 4: Port JS Passes** from
+  `PLAN.md`, because the key drift sat in
+  `js_pass_flatten_and_mark_dead` after JS IR lowering: Rust was correctly
+  carrying transformed JSX metadata into the dumper, but the JS pass still
+  substituted `Foo.make` down to `Async_jsx$Foo` before final emission; the
+  slice also required the matching `js_dump.ml` props-shape support so record
+  `Caml_block` props printed as preserved JSX at all
+- OCaml reference:
+  `compiler/core/js_dump.ml`, especially the transformed-JSX `Call` branches
+  and `print_jsx`; and
+  `compiler/core/js_pass_flatten_and_mark_dead.ml`, especially the JSX-preserve
+  substitution guard that stops inlining selected block projections before the
+  dumper runs
+- Rust change:
+  - updated `compiler-rust/src/js_ir/printer.rs` so transformed JSX accepts
+    record `CamlBlock(..., TagInfo::Record { .. })` props and filters optional
+    `undefined` fields the same way OCaml does before printing JSX syntax
+  - updated `compiler-rust/src/lambda/compile.rs` so the JS flatten/dead pass
+    preserves the first argument of transformed JSX calls when it is a module
+    `.make` projection, instead of substituting the block field to the raw
+    component function value
+  - added focused regressions for both layers:
+    `test_print_transformed_jsx_record_block_props_like_ocaml` and
+    `js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml transformed_jsx -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml js_flatten_and_mark_dead_substitutes_single_field_module_reads -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/async_jsx.res`, diffing
+    `/tmp/async_jsx.mjs` against the checked-in snapshot
+  - direct release repro for `tests/tests/src/jsx_preserve_test.res`, diffing
+    `/tmp/jsx_preserve_test.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - transformed JSX now prints from the real OCaml-style shapes instead of
+    falling back to `JsxRuntime.jsx/jsxs(...)` calls when props arrive as
+    record `CamlBlock`s
+  - component tags in preserved JSX now keep the OCaml-aligned member form such
+    as `<Foo.make />`, `<B.make />`, and `<ContextProvider.make />` instead of
+    collapsing to `<Async_jsx$Foo />`, `<Jsx_preserve_test$B />`, or the raw
+    provider binding
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - `tests/tests/src/async_jsx.res` and `tests/tests/src/jsx_preserve_test.res`
+    still differ, but the remaining drift is now narrower and sits in
+    wrapper/function naming shapes rather than preserved JSX tag/props emission
+- Topline impact:
+  - JS snapshot parity: **491 / 657** -> **489 / 657** (**-2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **166** -> **168** (**+2**)
+- Keep this change because it directly ports the OCaml dumper and
+  `js_pass_flatten_and_mark_dead` preserve-JSX behavior, fixes the concrete
+  tag/props backend drift visible in direct release repros, and therefore is a
+  verified OCaml-aligned improvement even though the current global wrapper
+  score regressed and the remaining wrapper/naming cluster still needs follow-up.
 
 Latest iteration on **2026-04-15**:
 

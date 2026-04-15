@@ -103,6 +103,15 @@ fn short_circuit_primitive<'a>(
     }
 }
 
+fn call_info_of_apply_status(call_transformed_jsx: bool, status: ApplyStatus) -> CallInfo {
+    match status {
+        ApplyStatus::InferFull | ApplyStatus::Na | ApplyStatus::Uncurry => CallInfo {
+            call_transformed_jsx,
+            ..CallInfo::default()
+        },
+    }
+}
+
 fn empty_switch_case_clause() -> CaseClause {
     CaseClause {
         body: vec![],
@@ -418,7 +427,11 @@ impl LambdaCompiler {
 
         Compiled {
             prelude,
-            expr: Expression::call(func.expr, args, CallInfo::default()),
+            expr: Expression::call(
+                func.expr,
+                args,
+                call_info_of_apply_status(apply.ap_transformed_jsx, apply.ap_info.status),
+            ),
         }
     }
 
@@ -4507,12 +4520,13 @@ impl LambdaCompiler {
                 arg_types,
                 ffi,
                 dynamic_import,
-                ..
+                transformed_jsx,
             } => self.compile_js_call(
                 prim_name,
                 arg_types,
                 ffi,
                 *dynamic_import,
+                *transformed_jsx,
                 compiled_args,
                 &mut prelude,
             ),
@@ -5318,16 +5332,16 @@ impl LambdaCompiler {
             Some(module_name) => match scopes.split_first() {
                 None => {
                     let default = name == "default";
-                    let module = self.external_module_binding(module_name, default, dynamic_import);
-                    if default {
-                        module
-                    } else {
-                        self.static_index(module, name)
-                    }
+                    Expression::qualified(
+                        self.external_module_id(module_name, default, dynamic_import),
+                        Some(name.to_string()),
+                    )
                 }
                 Some((first_scope, rest_scopes)) => {
-                    let mut expr = self.external_module_binding(module_name, false, dynamic_import);
-                    expr = self.static_index(expr, first_scope);
+                    let mut expr = Expression::qualified(
+                        self.external_module_id(module_name, false, dynamic_import),
+                        Some(first_scope.clone()),
+                    );
                     for scope in rest_scopes {
                         expr = self.static_index(expr, scope);
                     }
@@ -5776,9 +5790,15 @@ impl LambdaCompiler {
         arg_types: &[ExternalArgSpec],
         ffi: &crate::lambda::primitive::ExternalFfiSpec,
         dynamic_import: bool,
+        transformed_jsx: bool,
         args: Vec<Expression>,
         _prelude: &mut Block,
     ) -> Expression {
+        let transformed_jsx_call_info = CallInfo {
+            call_transformed_jsx: transformed_jsx,
+            ..CallInfo::default()
+        };
+
         match ffi.spec.as_ref() {
             Some(ExternalSpec::JsVar {
                 name,
@@ -5794,7 +5814,7 @@ impl LambdaCompiler {
                 if args.is_empty() {
                     value
                 } else {
-                    Expression::call(value, args, CallInfo::default())
+                    Expression::call(value, args, transformed_jsx_call_info.clone())
                 }
             }
             Some(ExternalSpec::JsCall {
@@ -5836,7 +5856,7 @@ impl LambdaCompiler {
                 let (args, effect) = self.assemble_external_args(arg_types, args, *splice);
                 self.add_external_effect(
                     effect,
-                    Expression::call(target, args, CallInfo::default()),
+                    Expression::call(target, args, transformed_jsx_call_info.clone()),
                 )
             }
             Some(ExternalSpec::JsNew {
@@ -5876,11 +5896,11 @@ impl LambdaCompiler {
                                 name,
                             ),
                             rest_args,
-                            CallInfo::default(),
+                            transformed_jsx_call_info.clone(),
                         ),
                     )
                 }
-                None => self.compile_plain_js_call(prim_name, args),
+                None => self.compile_plain_js_call(prim_name, args, transformed_jsx),
             },
             Some(ExternalSpec::JsGet {
                 js_get_name,
@@ -5892,7 +5912,7 @@ impl LambdaCompiler {
                         self.apply_scoped_access(receiver.clone(), js_get_scopes),
                         js_get_name,
                     ),
-                    _ => self.compile_plain_js_call(prim_name, assembled),
+                    _ => self.compile_plain_js_call(prim_name, assembled, transformed_jsx),
                 };
                 self.add_external_effect(effect, expr)
             }
@@ -5910,7 +5930,7 @@ impl LambdaCompiler {
                         ),
                         value.clone(),
                     ),
-                    _ => self.compile_plain_js_call(prim_name, assembled),
+                    _ => self.compile_plain_js_call(prim_name, assembled, transformed_jsx),
                 };
                 self.add_external_effect(effect, expr)
             }
@@ -5923,7 +5943,7 @@ impl LambdaCompiler {
                         Box::new(self.apply_scoped_access(receiver.clone(), js_get_index_scopes)),
                         Box::new(index.clone()),
                     )),
-                    _ => self.compile_plain_js_call(prim_name, assembled),
+                    _ => self.compile_plain_js_call(prim_name, assembled, transformed_jsx),
                 };
                 self.add_external_effect(effect, expr)
             }
@@ -5942,7 +5962,7 @@ impl LambdaCompiler {
                         )),
                         value.clone(),
                     ),
-                    _ => self.compile_plain_js_call(prim_name, assembled),
+                    _ => self.compile_plain_js_call(prim_name, assembled, transformed_jsx),
                 };
                 self.add_external_effect(effect, expr)
             }
@@ -5952,7 +5972,7 @@ impl LambdaCompiler {
                 let expr = if args.is_empty() {
                     value
                 } else {
-                    Expression::call(value, args, CallInfo::default())
+                    Expression::call(value, args, transformed_jsx_call_info.clone())
                 };
                 self.add_external_effect(effect, expr)
             }
@@ -5963,7 +5983,7 @@ impl LambdaCompiler {
                 let (args, effect) = self.assemble_external_args(arg_types, args, *splice);
                 let target =
                     self.external_module_binding(external_module_name, false, dynamic_import);
-                let expr = Expression::call(target, args, CallInfo::default());
+                let expr = Expression::call(target, args, transformed_jsx_call_info.clone());
                 self.add_external_effect(effect, expr)
             }
             Some(ExternalSpec::JsModuleAsClass(module_name)) => {
@@ -5972,15 +5992,23 @@ impl LambdaCompiler {
                 let expr = Expression::new(ExpressionDesc::New(Box::new(target), Some(args)));
                 self.add_external_effect(effect, expr)
             }
-            _ => self.compile_plain_js_call(prim_name, args),
+            _ => self.compile_plain_js_call(prim_name, args, transformed_jsx),
         }
     }
 
-    fn compile_plain_js_call(&self, prim_name: &str, args: Vec<Expression>) -> Expression {
+    fn compile_plain_js_call(
+        &self,
+        prim_name: &str,
+        args: Vec<Expression>,
+        transformed_jsx: bool,
+    ) -> Expression {
         Expression::call(
             Expression::var(Ident::create_persistent(prim_name)),
             args,
-            CallInfo::default(),
+            CallInfo {
+                call_transformed_jsx: transformed_jsx,
+                ..CallInfo::default()
+            },
         )
     }
 
@@ -8425,7 +8453,18 @@ fn flatten_and_mark_dead_expression(
                 substitution,
             )),
             args.into_iter()
-                .map(|arg| flatten_and_mark_dead_expression(arg, id_gen, substitution))
+                .enumerate()
+                .map(|(index, arg)| {
+                    if info.call_transformed_jsx && index == 0 {
+                        flatten_and_mark_dead_transformed_jsx_tag_expression(
+                            arg,
+                            id_gen,
+                            substitution,
+                        )
+                    } else {
+                        flatten_and_mark_dead_expression(arg, id_gen, substitution)
+                    }
+                })
                 .collect(),
             info,
         ),
@@ -8568,6 +8607,38 @@ fn flatten_and_mark_dead_expression(
     };
 
     Expression { desc, comment }
+}
+
+fn flatten_and_mark_dead_transformed_jsx_tag_expression(
+    expr: Expression,
+    id_gen: &IdGenerator,
+    substitution: &mut HashMap<Ident, Expression>,
+) -> Expression {
+    let Expression { desc, comment } = expr;
+    match desc {
+        // OCaml's js_pass_flatten_and_mark_dead preserves component `.make`
+        // projections in JSX-preserve mode so the dumper can print `<Foo.make />`.
+        ExpressionDesc::StaticIndex(target, field, Some(index)) if field == "make" => Expression {
+            desc: ExpressionDesc::StaticIndex(
+                Box::new(flatten_and_mark_dead_expression(
+                    *target,
+                    id_gen,
+                    substitution,
+                )),
+                field,
+                Some(index),
+            ),
+            comment,
+        },
+        other => flatten_and_mark_dead_expression(
+            Expression {
+                desc: other,
+                comment,
+            },
+            id_gen,
+            substitution,
+        ),
+    }
 }
 
 fn try_substitute_caml_block_projection(
@@ -17251,6 +17322,78 @@ mod tests {
     }
 
     #[test]
+    fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
+        let module = Ident::create_local("Foo");
+        let component = Ident::create_local("Async_jsx$Foo");
+        let rendered = print_deps_program(
+            &apply_js_flatten_and_mark_dead_pass(DepsProgram {
+                program: Program::new(
+                    vec![
+                        Statement::variable(VariableDeclaration {
+                            ident: module.clone(),
+                            value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                                vec![Expression::var(component.clone())],
+                                MutableFlag::Immutable,
+                                Box::new(Expression::number(Number::int(0))),
+                                TagInfo::Module(vec!["make".to_string()]),
+                            ))),
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo::default(),
+                        }),
+                        Statement::exp(Expression::call(
+                            Expression::qualified(
+                                ModuleId {
+                                    id: Ident::create_persistent("JsxRuntime"),
+                                    kind: Kind::External {
+                                        name: "react/jsx-runtime".to_string(),
+                                        default: false,
+                                        import_attributes: None,
+                                    },
+                                    dynamic_import: false,
+                                },
+                                Some("jsx".to_string()),
+                            ),
+                            vec![
+                                Expression::new(ExpressionDesc::StaticIndex(
+                                    Box::new(Expression::var(module.clone())),
+                                    "make".to_string(),
+                                    Some(0),
+                                )),
+                                Expression::new(ExpressionDesc::CamlBlock(
+                                    vec![],
+                                    MutableFlag::Immutable,
+                                    Box::new(Expression::number(Number::int(0))),
+                                    TagInfo::record(
+                                        vec![],
+                                        crate::parser::ast::MutableFlag::Immutable,
+                                    ),
+                                )),
+                            ],
+                            CallInfo {
+                                call_transformed_jsx: true,
+                                ..CallInfo::default()
+                            },
+                        )),
+                    ],
+                    vec![],
+                ),
+                modules: vec![],
+                side_effect: None,
+            }),
+            None,
+        );
+
+        assert!(
+            rendered.contains("<Foo.make />"),
+            "expected transformed JSX preserve mode to keep Foo.make visible:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("<Async_jsx$Foo />"),
+            "transformed JSX tag regressed to the component function value:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn js_flatten_and_mark_dead_keeps_identity_optional_record_fields_inline() {
         let record = Ident::create_local("x");
         let deps = apply_js_flatten_and_mark_dead_pass(DepsProgram {
@@ -17560,26 +17703,49 @@ mod tests {
                 assert!(matches!(
                     func.as_ref(),
                     Expression {
-                        desc: ExpressionDesc::StaticIndex(target, field, _),
-                        ..
-                    } if field == "describe"
-                        && matches!(
-                            target.as_ref(),
-                            Expression {
-                                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(
-                                    ModuleId {
-                                        kind: Kind::External { name, default, .. },
-                                        ..
-                                    },
-                                    None,
-                                )),
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(
+                            ModuleId {
+                                kind: Kind::External { name, default, .. },
                                 ..
-                            } if name == "mocha" && !default
-                        )
+                            },
+                            Some(field),
+                        )),
+                        ..
+                    } if field == "describe" && name == "mocha" && !default
                 ));
             }
             other => panic!("expected external module call, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn translates_external_module_values_to_qualified_members_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let expr = compiler.translate_scoped_module_value(
+            Some(&external_module("react/jsx-runtime")),
+            "jsx",
+            &[],
+            false,
+        );
+
+        assert!(matches!(
+            expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(
+                    ModuleId {
+                        kind: Kind::External {
+                            name: ref name,
+                            default,
+                            ..
+                        },
+                        ..
+                    },
+                    Some(ref member),
+                )),
+                ..
+            } if name == "react/jsx-runtime" && !default && member == "jsx"
+        ));
+        assert_eq!(print_expression(&expr), "JsxRuntime.jsx");
     }
 
     #[test]

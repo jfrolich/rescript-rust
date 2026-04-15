@@ -370,6 +370,9 @@ pub enum ForDirection {
 pub struct CallInfo {
     /// Is this a method call?
     pub is_method: bool,
+    /// Whether this call came from a transformed JSX node that should print
+    /// back to preserved JSX syntax.
+    pub call_transformed_jsx: bool,
     /// Additional metadata
     pub comment: Option<String>,
 }
