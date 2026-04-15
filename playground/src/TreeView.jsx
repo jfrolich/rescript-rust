@@ -21,6 +21,33 @@ const KEYWORDS = new Set([
   "makeblock", "field", "seq", "staticfail", "staticcatch",
 ]);
 
+/**
+ * Find the path from root to a target node.
+ * Returns a Set of all ancestor nodes (including the target).
+ */
+function findAncestorPath(root, target) {
+  const ancestors = new Set();
+  if (!root || !target) return ancestors;
+
+  function walk(node) {
+    if (node === target) {
+      ancestors.add(node);
+      return true;
+    }
+    if (node.type === "list" && node.children) {
+      for (const child of node.children) {
+        if (walk(child)) {
+          ancestors.add(node);
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+  walk(root);
+  return ancestors;
+}
+
 export default function TreeView({ sexp, cursorPosition, onNodeClick }) {
   const tree = useMemo(() => {
     if (!sexp) return null;
@@ -46,6 +73,11 @@ export default function TreeView({ sexp, cursorPosition, onNodeClick }) {
     return found?.node || null;
   }, [locationIndex, cursorPosition]);
 
+  // Precompute the set of nodes on the path from root to highlighted node
+  const expandedAncestors = useMemo(() => {
+    return findAncestorPath(tree, highlightedNode);
+  }, [tree, highlightedNode]);
+
   if (!tree) {
     return <div className="empty-panel">Failed to parse tree</div>;
   }
@@ -56,6 +88,7 @@ export default function TreeView({ sexp, cursorPosition, onNodeClick }) {
         node={tree}
         depth={0}
         highlightedNode={highlightedNode}
+        expandedAncestors={expandedAncestors}
         onNodeClick={onNodeClick}
       />
     </div>
@@ -66,10 +99,11 @@ const TreeNode = React.memo(function TreeNode({
   node,
   depth,
   highlightedNode,
+  expandedAncestors,
   onNodeClick,
 }) {
   const headerRef = useRef(null);
-  const [collapsed, setCollapsed] = React.useState(depth >= 2);
+  const [manualCollapsed, setManualCollapsed] = React.useState(null); // null = auto, true/false = manual
 
   if (!node) return null;
   if (node.type === "atom") return <AtomNode node={node} />;
@@ -90,6 +124,27 @@ const TreeNode = React.memo(function TreeNode({
   const isCollapsible = listChildren.length > 0;
 
   const isHighlighted = node === highlightedNode;
+  const isOnHighlightPath = expandedAncestors.has(node);
+
+  // Determine collapsed state:
+  // - If user manually toggled, respect that
+  // - If this node is on the path to the highlighted node, force expand
+  // - Otherwise, default collapsed for depth >= 2
+  let collapsed;
+  if (isOnHighlightPath) {
+    collapsed = false; // always expand nodes on the path to cursor
+  } else if (manualCollapsed !== null) {
+    collapsed = manualCollapsed;
+  } else {
+    collapsed = depth >= 2;
+  }
+
+  // Reset manual override when highlight path changes through this node
+  useEffect(() => {
+    if (isOnHighlightPath) {
+      setManualCollapsed(null);
+    }
+  }, [isOnHighlightPath]);
 
   // Scroll highlighted node into view
   useEffect(() => {
@@ -98,20 +153,13 @@ const TreeNode = React.memo(function TreeNode({
     }
   }, [isHighlighted]);
 
-  // Auto-expand when highlighted
-  useEffect(() => {
-    if (isHighlighted && collapsed) {
-      setCollapsed(false);
-    }
-  }, [isHighlighted]);
-
   const handleClick = useCallback(
     (e) => {
       e.stopPropagation();
-      if (isCollapsible) setCollapsed((c) => !c);
+      if (isCollapsible) setManualCollapsed((prev) => !(prev ?? collapsed));
       if (node.loc && onNodeClick) onNodeClick(node.loc);
     },
-    [isCollapsible, node.loc, onNodeClick]
+    [isCollapsible, node.loc, onNodeClick, collapsed]
   );
 
   const inlineText =
@@ -125,6 +173,7 @@ const TreeNode = React.memo(function TreeNode({
   const headerClass = [
     "tree-node-header",
     isHighlighted && "highlighted",
+    !isHighlighted && isOnHighlightPath && "highlighted-ancestor",
   ]
     .filter(Boolean)
     .join(" ");
@@ -154,6 +203,7 @@ const TreeNode = React.memo(function TreeNode({
               node={child}
               depth={depth + 1}
               highlightedNode={highlightedNode}
+              expandedAncestors={expandedAncestors}
               onNodeClick={onNodeClick}
             />
           ))}
