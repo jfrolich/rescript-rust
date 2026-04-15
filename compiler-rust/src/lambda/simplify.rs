@@ -524,9 +524,10 @@ fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
                         )
                     })
                     .collect(),
-                sw_failaction: switch.sw_failaction.as_ref().map(|lam| {
-                    Box::new(simplify_direct_function_applications_like_lets_dce(lam))
-                }),
+                sw_failaction: switch
+                    .sw_failaction
+                    .as_ref()
+                    .map(|lam| Box::new(simplify_direct_function_applications_like_lets_dce(lam))),
                 sw_names: switch.sw_names.clone(),
             },
         ),
@@ -543,9 +544,9 @@ fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
                     )
                 })
                 .collect(),
-            default.as_ref().map(|lam| {
-                Box::new(simplify_direct_function_applications_like_lets_dce(lam))
-            }),
+            default
+                .as_ref()
+                .map(|lam| Box::new(simplify_direct_function_applications_like_lets_dce(lam))),
         ),
         Lambda::LstaticRaise(id, args) => Lambda::LstaticRaise(
             *id,
@@ -637,20 +638,22 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 body_env.plain_strings.insert(id.clone(), string_value);
             }
             if let Some(substitution) = substitution_candidate(kind, original_value, &value) {
-                if binding_is_exported {
-                    if let Some(export_target) = exported_alias_target(&substitution) {
-                        let propagated = body_exports.get_or_insert_with(|| exports.clone());
-                        propagated.insert(export_target);
+                if !substitution_hits_assigned_free_variable(&substitution, body) {
+                    if binding_is_exported {
+                        if let Some(export_target) = exported_alias_target(&substitution) {
+                            let propagated = body_exports.get_or_insert_with(|| exports.clone());
+                            propagated.insert(export_target);
+                        }
                     }
-                }
-                if preserve_exported_eta_alias {
-                    if eta_reducible_module_field_read(&substitution) {
-                        body_env
-                            .call_substitutions
-                            .insert(id.clone(), substitution.clone());
+                    if preserve_exported_eta_alias {
+                        if eta_reducible_module_field_read(&substitution) {
+                            body_env
+                                .call_substitutions
+                                .insert(id.clone(), substitution.clone());
+                        }
+                    } else if !env.preserved_export_bindings.contains(id) {
+                        body_env.substitutions.insert(id.clone(), substitution);
                     }
-                } else if !env.preserved_export_bindings.contains(id) {
-                    body_env.substitutions.insert(id.clone(), substitution);
                 }
             }
             if kind != LetKind::Variable {
@@ -683,6 +686,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             {
                 let use_info = alias_use_info(id, &body);
                 if use_info.times == 1
+                    && !substitution_hits_assigned_free_variable(&value, &body)
                     && (!use_info.captured || matches!(value, Lambda::Lconst(_) | Lambda::Lvar(_)))
                 {
                     return substitute_alias_use(&body, id, &value);
@@ -1611,9 +1615,7 @@ fn simplify_primitive(
                 simplify_with_env(&adjusted, env, exports)
             }
         }
-        (Primitive::PjsFnMake(_), [arg]) if eta_reducible_module_field_read(arg) => {
-            arg.clone()
-        }
+        (Primitive::PjsFnMake(_), [arg]) if eta_reducible_module_field_read(arg) => arg.clone(),
         (Primitive::PjsFnMakeUnit, [Lambda::Lfunction(func)])
             if func.arity == 1
                 && matches!(func.params.as_slice(), [param] if param.name() == "param") =>
@@ -1779,7 +1781,11 @@ fn apply_extra_args_to_adjusted_js_fn_body(
     body
 }
 
-fn apply_extra_arg_to_adjusted_js_fn_body(body: Lambda, extra_arg: &Ident, loc: &Location) -> Lambda {
+fn apply_extra_arg_to_adjusted_js_fn_body(
+    body: Lambda,
+    extra_arg: &Ident,
+    loc: &Location,
+) -> Lambda {
     match body {
         Lambda::Lfunction(func)
             if func.params.len() == 1 && analysis::lfunction_can_be_inlined(&func) =>
@@ -1791,7 +1797,10 @@ fn apply_extra_arg_to_adjusted_js_fn_body(body: Lambda, extra_arg: &Ident, loc: 
             )
         }
         Lambda::Llet(kind, id, value, next)
-            if matches!(next.as_ref(), Lambda::Lfunction(_) | Lambda::Llet(_, _, _, _)) =>
+            if matches!(
+                next.as_ref(),
+                Lambda::Lfunction(_) | Lambda::Llet(_, _, _, _)
+            ) =>
         {
             Lambda::let_(
                 kind,
@@ -2004,6 +2013,83 @@ fn lambda_hits_variable(target: &Ident, lam: &Lambda) -> bool {
     }
 }
 
+fn lambda_assigns_variable(target: &Ident, lam: &Lambda) -> bool {
+    match lam {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lapply(apply) => {
+            lambda_assigns_variable(target, &apply.ap_func)
+                || apply
+                    .ap_args
+                    .iter()
+                    .any(|arg| lambda_assigns_variable(target, arg))
+        }
+        Lambda::Lfunction(func) => lambda_assigns_variable(target, &func.body),
+        Lambda::Llet(_, _, value, body) => {
+            lambda_assigns_variable(target, value) || lambda_assigns_variable(target, body)
+        }
+        Lambda::Lletrec(bindings, body) => {
+            lambda_assigns_variable(target, body)
+                || bindings
+                    .iter()
+                    .any(|(_, lam)| lambda_assigns_variable(target, lam))
+        }
+        Lambda::Lprim(info) => info
+            .args
+            .iter()
+            .any(|arg| lambda_assigns_variable(target, arg)),
+        Lambda::Lswitch(arg, switch) => {
+            lambda_assigns_variable(target, arg)
+                || switch
+                    .sw_consts
+                    .iter()
+                    .any(|(_, lam)| lambda_assigns_variable(target, lam))
+                || switch
+                    .sw_blocks
+                    .iter()
+                    .any(|(_, lam)| lambda_assigns_variable(target, lam))
+                || switch
+                    .sw_failaction
+                    .as_deref()
+                    .is_some_and(|lam| lambda_assigns_variable(target, lam))
+        }
+        Lambda::LstringSwitch(arg, cases, default) => {
+            lambda_assigns_variable(target, arg)
+                || cases
+                    .iter()
+                    .any(|(_, lam)| lambda_assigns_variable(target, lam))
+                || default
+                    .as_deref()
+                    .is_some_and(|lam| lambda_assigns_variable(target, lam))
+        }
+        Lambda::LstaticRaise(_, args) => {
+            args.iter().any(|arg| lambda_assigns_variable(target, arg))
+        }
+        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+            lambda_assigns_variable(target, body) || lambda_assigns_variable(target, handler)
+        }
+        Lambda::LifThenElse(cond, then_, else_) => {
+            lambda_assigns_variable(target, cond)
+                || lambda_assigns_variable(target, then_)
+                || lambda_assigns_variable(target, else_)
+        }
+        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+            lambda_assigns_variable(target, first) || lambda_assigns_variable(target, second)
+        }
+        Lambda::Lfor(_, start, end, _, body) => {
+            lambda_assigns_variable(target, start)
+                || lambda_assigns_variable(target, end)
+                || lambda_assigns_variable(target, body)
+        }
+        Lambda::Lassign(id, value) => id.same(target) || lambda_assigns_variable(target, value),
+    }
+}
+
+fn substitution_hits_assigned_free_variable(replacement: &Lambda, body: &Lambda) -> bool {
+    free_variables(replacement)
+        .iter()
+        .any(|ident| lambda_assigns_variable(ident, body))
+}
+
 fn lambda_hits_variable_through_env(target: &Ident, lam: &Lambda, env: &SimplifyEnv) -> bool {
     // OCaml's lam_pass_remove_alias avoids non-terminating re-inlining of
     // recursive applications such as g(g). On the Rust JS-backend path, the
@@ -2171,9 +2257,7 @@ fn inlineable_direct_wrapper_function(value: &Lambda) -> Option<LFunction> {
 }
 
 fn reduce_direct_wrapper_application_once(func: &Lambda, args: &[Lambda]) -> Option<Lambda> {
-    fn peel_direct_wrapper(
-        lam: &Lambda,
-    ) -> Option<(Vec<(LetKind, Ident, Lambda)>, LFunction)> {
+    fn peel_direct_wrapper(lam: &Lambda) -> Option<(Vec<(LetKind, Ident, Lambda)>, LFunction)> {
         if let Some(func) = inlineable_direct_wrapper_function(lam) {
             return Some((Vec::new(), func));
         }
@@ -2193,11 +2277,15 @@ fn reduce_direct_wrapper_application_once(func: &Lambda, args: &[Lambda]) -> Opt
         return None;
     }
 
-    let reduced =
-        beta_reduce::propagate_beta_reduce(&inline_func.params, &inline_func.body, args);
-    Some(bindings.into_iter().rev().fold(reduced, |body, (kind, id, value)| {
-        Lambda::let_(kind, id, value, body)
-    }))
+    let reduced = beta_reduce::propagate_beta_reduce(&inline_func.params, &inline_func.body, args);
+    Some(
+        bindings
+            .into_iter()
+            .rev()
+            .fold(reduced, |body, (kind, id, value)| {
+                Lambda::let_(kind, id, value, body)
+            }),
+    )
 }
 
 fn block_element_of_lambda(value: &Lambda) -> BlockElement {
@@ -3248,6 +3336,64 @@ mod tests {
     }
 
     #[test]
+    fn keeps_single_use_aliases_when_their_source_is_assigned_later() {
+        let a = Ident::create_local("a");
+        let b = Ident::create_local("b");
+        let tmp = Ident::create_local("tmp");
+        let lambda = Lambda::let_(
+            LetKind::Alias,
+            tmp.clone(),
+            Lambda::var(a.clone()),
+            Lambda::seq(
+                Lambda::assign(a.clone(), Lambda::var(b.clone())),
+                Lambda::assign(
+                    b.clone(),
+                    Lambda::prim(
+                        Primitive::Paddint,
+                        vec![Lambda::var(b.clone()), Lambda::var(tmp.clone())],
+                        Location::none(),
+                    ),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(kind, kept_tmp, kept_value, body) = &simplified else {
+            panic!("expected the alias binding to remain materialized, got {simplified:?}");
+        };
+        assert_eq!(*kind, LetKind::Alias);
+        assert!(kept_tmp.same(&tmp));
+        assert!(matches!(kept_value.as_ref(), Lambda::Lvar(id) if id.same(&a)));
+
+        let Lambda::Lsequence(first, second) = body.as_ref() else {
+            panic!("expected the body to stay as an assignment sequence, got {body:?}");
+        };
+        assert!(matches!(
+            first.as_ref(),
+            Lambda::Lassign(id, value)
+                if id.same(&a)
+                    && matches!(value.as_ref(), Lambda::Lvar(var) if var.same(&b))
+        ));
+        assert!(matches!(
+            second.as_ref(),
+            Lambda::Lassign(id, value)
+                if id.same(&b)
+                    && matches!(
+                        value.as_ref(),
+                        Lambda::Lprim(crate::lambda::PrimInfo {
+                            primitive: Primitive::Paddint,
+                            args,
+                            ..
+                        }) if matches!(
+                            args.as_slice(),
+                            [Lambda::Lvar(lhs), Lambda::Lvar(rhs)]
+                                if lhs.same(&b) && rhs.same(&tmp)
+                        )
+                    )
+        ));
+    }
+
+    #[test]
     fn eliminates_offsetref_updates_on_non_captured_ref_cells() {
         let cell = Ident::create_local("cell");
         let lambda = Lambda::let_(
@@ -3839,7 +3985,9 @@ mod tests {
                 (*body, true)
             }
             Lambda::Lprim(_) => (simplified, false),
-            other => panic!("expected the export block or a surviving `res` binding, got {other:?}"),
+            other => {
+                panic!("expected the export block or a surviving `res` binding, got {other:?}")
+            }
         };
 
         let Lambda::Lprim(crate::lambda::PrimInfo {
@@ -4059,7 +4207,9 @@ mod tests {
                 }
                 Lambda::LstringSwitch(scrutinee, cases, default) => {
                     contains_apply_to_direct_wrapper(scrutinee)
-                        || cases.iter().any(|(_, lam)| contains_apply_to_direct_wrapper(lam))
+                        || cases
+                            .iter()
+                            .any(|(_, lam)| contains_apply_to_direct_wrapper(lam))
                         || default
                             .as_deref()
                             .is_some_and(contains_apply_to_direct_wrapper)
@@ -4251,7 +4401,10 @@ mod tests {
                     ),
                     FunctionAttribute::default(),
                 )),
-                ap_args: vec![Lambda::const_(Constant::int(3)), Lambda::const_(Constant::int(5))],
+                ap_args: vec![
+                    Lambda::const_(Constant::int(3)),
+                    Lambda::const_(Constant::int(5)),
+                ],
                 ap_info: ApInfo {
                     loc: Location::none(),
                     inlined: InlineAttribute::Default,
@@ -4270,7 +4423,9 @@ mod tests {
 
         let simplified = simplify_for_js_backend(&lambda);
         let Lambda::Llet(kind, bound, value, body) = simplified else {
-            panic!("expected the Na-status let-wrapped returned function to stay let-bound after beta reduction");
+            panic!(
+                "expected the Na-status let-wrapped returned function to stay let-bound after beta reduction"
+            );
         };
         assert_eq!(kind, LetKind::StrictOpt);
         assert!(bound.same(&u));
@@ -4315,7 +4470,10 @@ mod tests {
                 u.clone(),
                 Box::new(Lambda::prim(
                     Primitive::Paddint,
-                    vec![Lambda::const_(Constant::int(3)), Lambda::const_(Constant::int(5))],
+                    vec![
+                        Lambda::const_(Constant::int(3)),
+                        Lambda::const_(Constant::int(5)),
+                    ],
                     Location::none(),
                 )),
                 Box::new(Lambda::function_(
@@ -4482,10 +4640,7 @@ mod tests {
                     contains_let(scrutinee)
                         || switch.sw_consts.iter().any(|(_, lam)| contains_let(lam))
                         || switch.sw_blocks.iter().any(|(_, lam)| contains_let(lam))
-                        || switch
-                            .sw_failaction
-                            .as_deref()
-                            .is_some_and(contains_let)
+                        || switch.sw_failaction.as_deref().is_some_and(contains_let)
                 }
                 Lambda::LstringSwitch(scrutinee, cases, default) => {
                     contains_let(scrutinee)
@@ -5255,10 +5410,7 @@ mod tests {
                             exported.clone(),
                             Lambda::prim(
                                 Primitive::Pstringadd,
-                                vec![
-                                    Lambda::var(a3),
-                                    Lambda::const_(Constant::string("world")),
-                                ],
+                                vec![Lambda::var(a3), Lambda::const_(Constant::string("world"))],
                                 Location::none(),
                             ),
                             export_block,
@@ -6150,7 +6302,8 @@ mod tests {
                                             0,
                                             FieldDbgInfo::Record {
                                                 name: "contents".to_string(),
-                                                mutable_flag: crate::parser::ast::MutableFlag::Mutable,
+                                                mutable_flag:
+                                                    crate::parser::ast::MutableFlag::Mutable,
                                             },
                                         ),
                                         vec![Lambda::var(inner.clone())],
@@ -6773,7 +6926,9 @@ mod tests {
             panic!("expected the outer uncurry apply to survive the final backend cleanup");
         };
         let Lambda::Lfunction(func) = apply.ap_func.as_ref() else {
-            panic!("expected the final cleanup pass to unwrap the surviving callee to a direct function, got {apply:?}");
+            panic!(
+                "expected the final cleanup pass to unwrap the surviving callee to a direct function, got {apply:?}"
+            );
         };
 
         assert_eq!(func.params.len(), 2);
@@ -6842,7 +6997,10 @@ mod tests {
                     ),
                     FunctionAttribute::default(),
                 )),
-                ap_args: vec![Lambda::const_(Constant::int(3)), Lambda::const_(Constant::int(5))],
+                ap_args: vec![
+                    Lambda::const_(Constant::int(3)),
+                    Lambda::const_(Constant::int(5)),
+                ],
                 ap_info: crate::lambda::ApInfo {
                     loc: Location::none(),
                     inlined: InlineAttribute::Default,
@@ -6949,7 +7107,9 @@ mod tests {
             panic!("expected the outer call to survive the final backend simplification sweep");
         };
         let Lambda::Lfunction(func) = apply.ap_func.as_ref() else {
-            panic!("expected the surviving callee to simplify to the returned function, got {apply:?}");
+            panic!(
+                "expected the surviving callee to simplify to the returned function, got {apply:?}"
+            );
         };
 
         assert_eq!(func.arity, 1);
@@ -6957,7 +7117,10 @@ mod tests {
         assert!(func.params[0].same(&f));
         assert!(matches!(
             func.body.as_ref(),
-            Lambda::Lconst(Constant::Int { i: 0, comment: None })
+            Lambda::Lconst(Constant::Int {
+                i: 0,
+                comment: None
+            })
         ));
         assert!(matches!(
             apply.ap_args.as_slice(),

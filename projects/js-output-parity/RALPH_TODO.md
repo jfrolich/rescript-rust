@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 498 / 657 JS snapshots passing, 0 compile errors, 159 output diffs
+**Status:** 500 / 657 JS snapshots passing, 0 compile errors, 157 output diffs
 
 ## Goal
 
@@ -35,11 +35,70 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **498 / 657**
+- JS snapshot parity: **500 / 657**
 - Compile errors: **0**
-- Output diffs: **159**
+- Output diffs: **157**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep single-use aliases materialized when their replacement
+  reads a binding that the body later assigns, so post-ref-elimination temps
+  like `let tmp = a` survive into JS lowering instead of collapsing to the
+  reassigned mutable variable
+- Active backend focus for this slice is **Phase 2: Port Post-Lowering Lambda
+  Backend Stages** from `PLAN.md`, because the drift sat in Rust's
+  `simplify_for_js_backend` pass between optimized-lambda parity and JS IR
+  lowering: the lambda dump for `fib.res` was already OCaml-aligned and still
+  contained `let tmp = a.contents`, but a later Rust backend-simplify sweep
+  ref-eliminated that to `let tmp = a` and then incorrectly substituted the
+  alias through a later `a := ...`
+- OCaml reference:
+  `compiler/core/lam_pass_remove_alias.ml`, especially the fact that the OCaml
+  alias pass flattens field reads but does not substitute plain aliases through
+  later assignments; the `-drawlambda` output for `tests/tests/src/fib.res`
+  also confirms both compilers still carry `let (tmp = field a) ... setfield b
+  (... tmp)` at the optimized-lambda boundary
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so both environment-level
+    alias substitutions and the single-use alias elimination path now refuse to
+    substitute when the replacement's free variables are assigned later in the
+    body
+  - added a focused simplify regression
+    `keeps_single_use_aliases_when_their_source_is_assigned_later`
+  - added a driver-level regression
+    `source_ref_aliases_survive_later_mutation_like_ocaml` to cover the final
+    `fib3` loop shape end to end
+- Verified focused guards for this slice:
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml keeps_single_use_aliases_when_their_source_is_assigned_later -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml source_ref_aliases_survive_later_mutation_like_ocaml -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml eliminates_non_captured_ref_cells_to_mutable_variables -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/fib.res`, diffing `/tmp/fib.mjs`
+    against the checked-in snapshot
+  - direct release repro for `tests/tests/src/test_while_closure.res`, diffing
+    `/tmp/test_while_closure.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/fib.res` now matches exactly: the loop keeps
+    `let tmp = a; a = b; b = b + tmp | 0;` like OCaml instead of collapsing the
+    carried alias to the reassigned `a`
+  - `tests/tests/src/test_while_closure.res` also now matches exactly: the
+    captured `j = n.contents` alias stays materialized instead of folding to the
+    later-mutated loop variable
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+- Topline impact:
+  - JS snapshot parity: **498 / 657** -> **500 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **159** -> **157** (**-2**)
+- Keep this change because it removes a Rust-only alias rewrite that OCaml's
+  backend does not perform across later assignments, fixes the concrete `fib`
+  temp-carrying bug plus another mutable-alias snapshot in the same cluster,
+  and improves the authoritative 657-file baseline by two files.
 
 Latest iteration on **2026-04-15**:
 

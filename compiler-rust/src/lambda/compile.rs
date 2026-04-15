@@ -30,8 +30,7 @@ use crate::lambda::primitive::{
 };
 use crate::lambda::subst;
 use crate::lambda::{
-    Apply, ApplyStatus, Lambda, LambdaSwitch, SwitchBlock, SwitchBlockType, SwitchCaseTag,
-    TagInfo,
+    Apply, ApplyStatus, Lambda, LambdaSwitch, SwitchBlock, SwitchBlockType, SwitchCaseTag, TagInfo,
 };
 
 /// Compilation result for an expression: prelude statements plus a value expression.
@@ -448,11 +447,7 @@ impl LambdaCompiler {
     }
 
     fn try_statement(&self, body: Block, exn: &Ident, handler: Block) -> Statement {
-        Statement::new(StatementDesc::Try(
-            body,
-            Some((exn.clone(), handler)),
-            None,
-        ))
+        Statement::new(StatementDesc::Try(body, Some((exn.clone(), handler)), None))
     }
 
     fn compile_expr(&mut self, lam: &Lambda) -> Compiled {
@@ -4394,9 +4389,10 @@ impl LambdaCompiler {
                 _ => Expression::undefined(false),
             },
             Pduprecord => match compiled_args.as_slice() {
-                [source] => {
-                    Expression::new(ExpressionDesc::Object(Some(Box::new(source.clone())), vec![]))
-                }
+                [source] => Expression::new(ExpressionDesc::Object(
+                    Some(Box::new(source.clone())),
+                    vec![],
+                )),
                 _ => Expression::undefined(false),
             },
             Pstringadd => {
@@ -8092,10 +8088,7 @@ fn flatten_and_mark_dead_program(
     program
 }
 
-fn collapse_sync_component_make_aliases(
-    block: Block,
-    export_set: &HashSet<Ident>,
-) -> Block {
+fn collapse_sync_component_make_aliases(block: Block, export_set: &HashSet<Ident>) -> Block {
     let mut rewritten = Vec::with_capacity(block.len());
     let mut index = 0;
 
@@ -8120,12 +8113,9 @@ fn collapse_sync_component_make_aliases(
         };
 
         let Some(Expression {
-            desc:
-                ExpressionDesc::Fun {
-                    async_,
-                    directive,
-                    ..
-                },
+            desc: ExpressionDesc::Fun {
+                async_, directive, ..
+            },
             ..
         }) = &function_decl.value
         else {
@@ -8147,7 +8137,10 @@ fn collapse_sync_component_make_aliases(
                 }) if id.same(&function_decl.ident)
             )
             || expression_mentions_ident(
-                function_decl.value.as_ref().expect("function value checked above"),
+                function_decl
+                    .value
+                    .as_ref()
+                    .expect("function value checked above"),
                 &function_decl.ident,
             )
             || statements_mention_ident(&block[(index + 2)..], &function_decl.ident)
@@ -8190,7 +8183,9 @@ fn is_descriptive_component_binding_name(name: &str) -> bool {
 }
 
 fn statements_mention_ident(stmts: &[Statement], target: &Ident) -> bool {
-    stmts.iter().any(|stmt| statement_mentions_ident(stmt, target))
+    stmts
+        .iter()
+        .any(|stmt| statement_mentions_ident(stmt, target))
 }
 
 fn statement_mentions_ident(stmt: &Statement, target: &Ident) -> bool {
@@ -8290,7 +8285,9 @@ fn expression_mentions_ident(expr: &Expression, target: &Ident) -> bool {
         | ExpressionDesc::New(func, Some(args))
         | ExpressionDesc::TaggedTemplate(func, _, args) => {
             expression_mentions_ident(func, target)
-                || args.iter().any(|arg| expression_mentions_ident(arg, target))
+                || args
+                    .iter()
+                    .any(|arg| expression_mentions_ident(arg, target))
         }
         ExpressionDesc::Fun { params, body, .. } => {
             params.iter().any(|param| param.same(target)) || statements_mention_ident(body, target)
@@ -8300,7 +8297,9 @@ fn expression_mentions_ident(expr: &Expression, target: &Ident) -> bool {
             .any(|item| expression_mentions_ident(item, target)),
         ExpressionDesc::CamlBlock(items, _, tag, _) => {
             expression_mentions_ident(tag, target)
-                || items.iter().any(|item| expression_mentions_ident(item, target))
+                || items
+                    .iter()
+                    .any(|item| expression_mentions_ident(item, target))
         }
         ExpressionDesc::Object(dup, props) => {
             dup.as_deref()
@@ -8451,16 +8450,9 @@ fn flatten_and_mark_dead_statement(
             Statement {
                 desc: StatementDesc::Variable(VariableDeclaration {
                     ident: decl.ident,
-                    value: decl
-                        .value
-                        .map(|value| {
-                            flatten_and_mark_dead_expression(
-                                value,
-                                id_gen,
-                                substitution,
-                                jsx_preserve,
-                            )
-                        }),
+                    value: decl.value.map(|value| {
+                        flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
+                    }),
                     property: decl.property,
                     ident_info: decl.ident_info,
                 }),
@@ -8913,12 +8905,7 @@ fn flatten_and_mark_dead_expression(
                 .map(|(name, value)| {
                     (
                         name,
-                        flatten_and_mark_dead_expression(
-                            value,
-                            id_gen,
-                            substitution,
-                            jsx_preserve,
-                        ),
+                        flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve),
                     )
                 })
                 .collect(),
@@ -11907,8 +11894,8 @@ fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option<String> {
 mod tests {
     use super::*;
     use crate::cmi::persistent_env::PersistentEnv;
-    use crate::js_ir::{ModulePathResolver, print_block, print_deps_program, print_expression};
     use crate::js_ir::printer::print_deps_program_with_directives;
+    use crate::js_ir::{ModulePathResolver, print_block, print_deps_program, print_expression};
     use crate::lambda::constant::{Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo};
     use crate::lambda::primitive::{
         ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
@@ -13873,12 +13860,17 @@ mod tests {
             vec![StringClause {
                 tag_type: crate::lambda::SwitchCaseTag::String("a".to_string()),
                 clause: CaseClause {
-                    body: vec![Statement::exp(Expression::string("a".to_string())), Statement::break_()],
+                    body: vec![
+                        Statement::exp(Expression::string("a".to_string())),
+                        Statement::break_(),
+                    ],
                     should_break: false,
                     comment: None,
                 },
             }],
-            Some(vec![Statement::throw(Expression::string("boom".to_string()))]),
+            Some(vec![Statement::throw(Expression::string(
+                "boom".to_string(),
+            ))]),
         ))];
 
         assert!(block_terminates(&block));
@@ -16480,7 +16472,10 @@ mod tests {
                 Lambda::Lapply(Apply {
                     ap_func: Box::new(Lambda::Lapply(Apply {
                         ap_func: Box::new(Lambda::var(gg)),
-                        ap_args: vec![Lambda::const_(Constant::int(3)), Lambda::const_(Constant::int(5))],
+                        ap_args: vec![
+                            Lambda::const_(Constant::int(3)),
+                            Lambda::const_(Constant::int(5)),
+                        ],
                         ap_info: ApInfo {
                             loc: loc.clone(),
                             inlined: InlineAttribute::Default,
@@ -16581,7 +16576,10 @@ mod tests {
                     Lambda::Lapply(Apply {
                         ap_func: Box::new(Lambda::Lapply(Apply {
                             ap_func: Box::new(Lambda::var(g1)),
-                            ap_args: vec![Lambda::const_(Constant::int(3)), Lambda::const_(Constant::int(4))],
+                            ap_args: vec![
+                                Lambda::const_(Constant::int(3)),
+                                Lambda::const_(Constant::int(4)),
+                            ],
                             ap_info: ApInfo {
                                 loc: loc.clone(),
                                 inlined: InlineAttribute::Default,
@@ -17507,35 +17505,38 @@ mod tests {
         let dead_pure = Ident::create_local("deadPure");
         let dead_non_pure = Ident::create_local("deadNonPure");
         let callback = Ident::create_local("callback");
-        let deps = apply_js_flatten_and_mark_dead_pass(DepsProgram {
-            program: Program::new(
-                vec![
-                    Statement::variable(VariableDeclaration {
-                        ident: dead_pure,
-                        value: Some(Expression::number(Number::int(1))),
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo {
-                            used_stats: UsedStats::DeadPure,
-                        },
-                    }),
-                    Statement::variable(VariableDeclaration {
-                        ident: dead_non_pure,
-                        value: Some(Expression::call(
-                            Expression::var(callback.clone()),
-                            vec![],
-                            CallInfo::default(),
-                        )),
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo {
-                            used_stats: UsedStats::DeadNonPure,
-                        },
-                    }),
-                ],
-                vec![],
-            ),
-            modules: vec![],
-            side_effect: None,
-        }, false);
+        let deps = apply_js_flatten_and_mark_dead_pass(
+            DepsProgram {
+                program: Program::new(
+                    vec![
+                        Statement::variable(VariableDeclaration {
+                            ident: dead_pure,
+                            value: Some(Expression::number(Number::int(1))),
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo {
+                                used_stats: UsedStats::DeadPure,
+                            },
+                        }),
+                        Statement::variable(VariableDeclaration {
+                            ident: dead_non_pure,
+                            value: Some(Expression::call(
+                                Expression::var(callback.clone()),
+                                vec![],
+                                CallInfo::default(),
+                            )),
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo {
+                                used_stats: UsedStats::DeadNonPure,
+                            },
+                        }),
+                    ],
+                    vec![],
+                ),
+                modules: vec![],
+                side_effect: None,
+            },
+            false,
+        );
 
         let [first, second] = deps.program.block.as_slice() else {
             panic!("expected two rewritten statements");
@@ -17571,42 +17572,45 @@ mod tests {
         let tuple = Ident::create_local("tuple");
         let field = Ident::create_local("field");
         let callback = Ident::create_local("callback");
-        let deps = apply_js_flatten_and_mark_dead_pass(DepsProgram {
-            program: Program::new(
-                vec![
-                    Statement::variable(VariableDeclaration {
-                        ident: tuple.clone(),
-                        value: Some(Expression::new(ExpressionDesc::CamlBlock(
-                            vec![
-                                Expression::call(
-                                    Expression::var(callback.clone()),
-                                    vec![],
-                                    CallInfo::default(),
-                                ),
-                                Expression::number(Number::int(2)),
-                            ],
-                            MutableFlag::Immutable,
-                            Box::new(Expression::number(Number::int(0))),
-                            TagInfo::tuple(),
-                        ))),
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    }),
-                    Statement::variable(VariableDeclaration {
-                        ident: field,
-                        value: Some(Expression::new(ExpressionDesc::ArrayIndex(
-                            Box::new(Expression::var(tuple.clone())),
-                            Box::new(Expression::number(Number::int(1))),
-                        ))),
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    }),
-                ],
-                vec![],
-            ),
-            modules: vec![],
-            side_effect: None,
-        }, false);
+        let deps = apply_js_flatten_and_mark_dead_pass(
+            DepsProgram {
+                program: Program::new(
+                    vec![
+                        Statement::variable(VariableDeclaration {
+                            ident: tuple.clone(),
+                            value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                                vec![
+                                    Expression::call(
+                                        Expression::var(callback.clone()),
+                                        vec![],
+                                        CallInfo::default(),
+                                    ),
+                                    Expression::number(Number::int(2)),
+                                ],
+                                MutableFlag::Immutable,
+                                Box::new(Expression::number(Number::int(0))),
+                                TagInfo::tuple(),
+                            ))),
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo::default(),
+                        }),
+                        Statement::variable(VariableDeclaration {
+                            ident: field,
+                            value: Some(Expression::new(ExpressionDesc::ArrayIndex(
+                                Box::new(Expression::var(tuple.clone())),
+                                Box::new(Expression::number(Number::int(1))),
+                            ))),
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo::default(),
+                        }),
+                    ],
+                    vec![],
+                ),
+                modules: vec![],
+                side_effect: None,
+            },
+            false,
+        );
 
         let [tuple_stmt, field_stmt] = deps.program.block.as_slice() else {
             panic!("expected the tuple binding and the rewritten projection");
@@ -17690,36 +17694,39 @@ mod tests {
         let module = Ident::create_local("M");
         let eq = Ident::create_local("Eq");
         let projected = Ident::create_local("EQ");
-        let deps = apply_js_flatten_and_mark_dead_pass(DepsProgram {
-            program: Program::new(
-                vec![
-                    Statement::variable(VariableDeclaration {
-                        ident: module.clone(),
-                        value: Some(Expression::new(ExpressionDesc::CamlBlock(
-                            vec![Expression::var(eq.clone())],
-                            MutableFlag::Immutable,
-                            Box::new(Expression::number(Number::int(0))),
-                            TagInfo::Module(vec!["Eq".to_string()]),
-                        ))),
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    }),
-                    Statement::variable(VariableDeclaration {
-                        ident: projected,
-                        value: Some(Expression::new(ExpressionDesc::StaticIndex(
-                            Box::new(Expression::var(module.clone())),
-                            "Eq".to_string(),
-                            Some(0),
-                        ))),
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    }),
-                ],
-                vec![],
-            ),
-            modules: vec![],
-            side_effect: None,
-        }, false);
+        let deps = apply_js_flatten_and_mark_dead_pass(
+            DepsProgram {
+                program: Program::new(
+                    vec![
+                        Statement::variable(VariableDeclaration {
+                            ident: module.clone(),
+                            value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                                vec![Expression::var(eq.clone())],
+                                MutableFlag::Immutable,
+                                Box::new(Expression::number(Number::int(0))),
+                                TagInfo::Module(vec!["Eq".to_string()]),
+                            ))),
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo::default(),
+                        }),
+                        Statement::variable(VariableDeclaration {
+                            ident: projected,
+                            value: Some(Expression::new(ExpressionDesc::StaticIndex(
+                                Box::new(Expression::var(module.clone())),
+                                "Eq".to_string(),
+                                Some(0),
+                            ))),
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo::default(),
+                        }),
+                    ],
+                    vec![],
+                ),
+                modules: vec![],
+                side_effect: None,
+            },
+            false,
+        );
 
         let [module_stmt, projected_stmt] = deps.program.block.as_slice() else {
             panic!("expected the module binding and the rewritten projection");
@@ -17767,60 +17774,63 @@ mod tests {
         let module = Ident::create_local("Foo");
         let component = Ident::create_local("Async_jsx$Foo");
         let rendered = print_deps_program_with_directives(
-            &apply_js_flatten_and_mark_dead_pass(DepsProgram {
-                program: Program::new(
-                    vec![
-                        Statement::variable(VariableDeclaration {
-                            ident: module.clone(),
-                            value: Some(Expression::new(ExpressionDesc::CamlBlock(
-                                vec![Expression::var(component.clone())],
-                                MutableFlag::Immutable,
-                                Box::new(Expression::number(Number::int(0))),
-                                TagInfo::Module(vec!["make".to_string()]),
-                            ))),
-                            property: LetKind::Strict,
-                            ident_info: IdentInfo::default(),
-                        }),
-                        Statement::exp(Expression::call(
-                            Expression::qualified(
-                                ModuleId {
-                                    id: Ident::create_persistent("JsxRuntime"),
-                                    kind: Kind::External {
-                                        name: "react/jsx-runtime".to_string(),
-                                        default: false,
-                                        import_attributes: None,
-                                    },
-                                    dynamic_import: false,
-                                },
-                                Some("jsx".to_string()),
-                            ),
-                            vec![
-                                Expression::new(ExpressionDesc::StaticIndex(
-                                    Box::new(Expression::var(module.clone())),
-                                    "make".to_string(),
-                                    Some(0),
-                                )),
-                                Expression::new(ExpressionDesc::CamlBlock(
-                                    vec![],
+            &apply_js_flatten_and_mark_dead_pass(
+                DepsProgram {
+                    program: Program::new(
+                        vec![
+                            Statement::variable(VariableDeclaration {
+                                ident: module.clone(),
+                                value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                                    vec![Expression::var(component.clone())],
                                     MutableFlag::Immutable,
                                     Box::new(Expression::number(Number::int(0))),
-                                    TagInfo::record(
+                                    TagInfo::Module(vec!["make".to_string()]),
+                                ))),
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            }),
+                            Statement::exp(Expression::call(
+                                Expression::qualified(
+                                    ModuleId {
+                                        id: Ident::create_persistent("JsxRuntime"),
+                                        kind: Kind::External {
+                                            name: "react/jsx-runtime".to_string(),
+                                            default: false,
+                                            import_attributes: None,
+                                        },
+                                        dynamic_import: false,
+                                    },
+                                    Some("jsx".to_string()),
+                                ),
+                                vec![
+                                    Expression::new(ExpressionDesc::StaticIndex(
+                                        Box::new(Expression::var(module.clone())),
+                                        "make".to_string(),
+                                        Some(0),
+                                    )),
+                                    Expression::new(ExpressionDesc::CamlBlock(
                                         vec![],
-                                        crate::parser::ast::MutableFlag::Immutable,
-                                    ),
-                                )),
-                            ],
-                            CallInfo {
-                                call_transformed_jsx: true,
-                                ..CallInfo::default()
-                            },
-                        )),
-                    ],
-                    vec![],
-                ),
-                modules: vec![],
-                side_effect: None,
-            }, true),
+                                        MutableFlag::Immutable,
+                                        Box::new(Expression::number(Number::int(0))),
+                                        TagInfo::record(
+                                            vec![],
+                                            crate::parser::ast::MutableFlag::Immutable,
+                                        ),
+                                    )),
+                                ],
+                                CallInfo {
+                                    call_transformed_jsx: true,
+                                    ..CallInfo::default()
+                                },
+                            )),
+                        ],
+                        vec![],
+                    ),
+                    modules: vec![],
+                    side_effect: None,
+                },
+                true,
+            ),
             None,
             &[],
             false,
@@ -17842,60 +17852,63 @@ mod tests {
         let module = Ident::create_local("Foo");
         let component = Ident::create_local("Async_jsx$Foo");
         let rendered = print_deps_program(
-            &apply_js_flatten_and_mark_dead_pass(DepsProgram {
-                program: Program::new(
-                    vec![
-                        Statement::variable(VariableDeclaration {
-                            ident: module.clone(),
-                            value: Some(Expression::new(ExpressionDesc::CamlBlock(
-                                vec![Expression::var(component.clone())],
-                                MutableFlag::Immutable,
-                                Box::new(Expression::number(Number::int(0))),
-                                TagInfo::Module(vec!["make".to_string()]),
-                            ))),
-                            property: LetKind::Strict,
-                            ident_info: IdentInfo::default(),
-                        }),
-                        Statement::exp(Expression::call(
-                            Expression::qualified(
-                                ModuleId {
-                                    id: Ident::create_persistent("JsxRuntime"),
-                                    kind: Kind::External {
-                                        name: "react/jsx-runtime".to_string(),
-                                        default: false,
-                                        import_attributes: None,
-                                    },
-                                    dynamic_import: false,
-                                },
-                                Some("jsx".to_string()),
-                            ),
-                            vec![
-                                Expression::new(ExpressionDesc::StaticIndex(
-                                    Box::new(Expression::var(module.clone())),
-                                    "make".to_string(),
-                                    Some(0),
-                                )),
-                                Expression::new(ExpressionDesc::CamlBlock(
-                                    vec![],
+            &apply_js_flatten_and_mark_dead_pass(
+                DepsProgram {
+                    program: Program::new(
+                        vec![
+                            Statement::variable(VariableDeclaration {
+                                ident: module.clone(),
+                                value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                                    vec![Expression::var(component.clone())],
                                     MutableFlag::Immutable,
                                     Box::new(Expression::number(Number::int(0))),
-                                    TagInfo::record(
+                                    TagInfo::Module(vec!["make".to_string()]),
+                                ))),
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            }),
+                            Statement::exp(Expression::call(
+                                Expression::qualified(
+                                    ModuleId {
+                                        id: Ident::create_persistent("JsxRuntime"),
+                                        kind: Kind::External {
+                                            name: "react/jsx-runtime".to_string(),
+                                            default: false,
+                                            import_attributes: None,
+                                        },
+                                        dynamic_import: false,
+                                    },
+                                    Some("jsx".to_string()),
+                                ),
+                                vec![
+                                    Expression::new(ExpressionDesc::StaticIndex(
+                                        Box::new(Expression::var(module.clone())),
+                                        "make".to_string(),
+                                        Some(0),
+                                    )),
+                                    Expression::new(ExpressionDesc::CamlBlock(
                                         vec![],
-                                        crate::parser::ast::MutableFlag::Immutable,
-                                    ),
-                                )),
-                            ],
-                            CallInfo {
-                                call_transformed_jsx: true,
-                                ..CallInfo::default()
-                            },
-                        )),
-                    ],
-                    vec![],
-                ),
-                modules: vec![],
-                side_effect: None,
-            }, false),
+                                        MutableFlag::Immutable,
+                                        Box::new(Expression::number(Number::int(0))),
+                                        TagInfo::record(
+                                            vec![],
+                                            crate::parser::ast::MutableFlag::Immutable,
+                                        ),
+                                    )),
+                                ],
+                                CallInfo {
+                                    call_transformed_jsx: true,
+                                    ..CallInfo::default()
+                                },
+                            )),
+                        ],
+                        vec![],
+                    ),
+                    modules: vec![],
+                    side_effect: None,
+                },
+                false,
+            ),
             None,
         );
 
@@ -18046,47 +18059,50 @@ mod tests {
     #[test]
     fn js_flatten_and_mark_dead_keeps_identity_optional_record_fields_inline() {
         let record = Ident::create_local("x");
-        let deps = apply_js_flatten_and_mark_dead_pass(DepsProgram {
-            program: Program::new(
-                vec![Statement::variable(VariableDeclaration {
-                    ident: record.clone(),
-                    value: Some(Expression::new(ExpressionDesc::CamlBlock(
-                        vec![
-                            Expression::undefined(false),
-                            Expression::new(ExpressionDesc::OptionalBlock(
-                                Box::new(Expression::string("test".to_string())),
-                                true,
-                            )),
-                            Expression::undefined(false),
-                            Expression::undefined(false),
-                            Expression::new(ExpressionDesc::OptionalBlock(
-                                Box::new(Expression::string("test".to_string())),
-                                true,
-                            )),
-                            Expression::undefined(false),
-                        ],
-                        MutableFlag::Immutable,
-                        Box::new(Expression::number(Number::int(0))),
-                        TagInfo::Record {
-                            fields: vec![
-                                ("id".to_string(), true),
-                                ("name".to_string(), true),
-                                ("title".to_string(), true),
-                                ("className".to_string(), true),
-                                ("x".to_string(), true),
-                                ("y".to_string(), true),
+        let deps = apply_js_flatten_and_mark_dead_pass(
+            DepsProgram {
+                program: Program::new(
+                    vec![Statement::variable(VariableDeclaration {
+                        ident: record.clone(),
+                        value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                            vec![
+                                Expression::undefined(false),
+                                Expression::new(ExpressionDesc::OptionalBlock(
+                                    Box::new(Expression::string("test".to_string())),
+                                    true,
+                                )),
+                                Expression::undefined(false),
+                                Expression::undefined(false),
+                                Expression::new(ExpressionDesc::OptionalBlock(
+                                    Box::new(Expression::string("test".to_string())),
+                                    true,
+                                )),
+                                Expression::undefined(false),
                             ],
-                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                        },
-                    ))),
-                    property: LetKind::Strict,
-                    ident_info: IdentInfo::default(),
-                })],
-                vec![],
-            ),
-            modules: vec![],
-            side_effect: None,
-        }, false);
+                            MutableFlag::Immutable,
+                            Box::new(Expression::number(Number::int(0))),
+                            TagInfo::Record {
+                                fields: vec![
+                                    ("id".to_string(), true),
+                                    ("name".to_string(), true),
+                                    ("title".to_string(), true),
+                                    ("className".to_string(), true),
+                                    ("x".to_string(), true),
+                                    ("y".to_string(), true),
+                                ],
+                                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                            },
+                        ))),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    })],
+                    vec![],
+                ),
+                modules: vec![],
+                side_effect: None,
+            },
+            false,
+        );
 
         let [record_stmt] = deps.program.block.as_slice() else {
             panic!("expected the record binding to stay as a single declaration");
@@ -18141,41 +18157,44 @@ mod tests {
         let run = Ident::create_local("run");
         let unused = Ident::create_local("unused");
         let used = Ident::create_local("used");
-        let deps = apply_js_flatten_and_mark_dead_pass(DepsProgram {
-            program: Program::new(
-                vec![Statement::variable(VariableDeclaration {
-                    ident: run,
-                    value: Some(Expression::new(ExpressionDesc::Fun {
-                        is_method: false,
-                        params: vec![],
-                        body: vec![
-                            Statement::variable(VariableDeclaration {
-                                ident: unused.clone(),
-                                value: Some(Expression::number(Number::int(1))),
-                                property: LetKind::Strict,
-                                ident_info: IdentInfo::default(),
-                            }),
-                            Statement::variable(VariableDeclaration {
-                                ident: used.clone(),
-                                value: Some(Expression::number(Number::int(2))),
-                                property: LetKind::Strict,
-                                ident_info: IdentInfo::default(),
-                            }),
-                            Statement::return_(Expression::var(used.clone())),
-                        ],
-                        env: Default::default(),
-                        return_unit: false,
-                        async_: false,
-                        directive: None,
-                    })),
-                    property: LetKind::Strict,
-                    ident_info: IdentInfo::default(),
-                })],
-                vec![],
-            ),
-            modules: vec![],
-            side_effect: None,
-        }, false);
+        let deps = apply_js_flatten_and_mark_dead_pass(
+            DepsProgram {
+                program: Program::new(
+                    vec![Statement::variable(VariableDeclaration {
+                        ident: run,
+                        value: Some(Expression::new(ExpressionDesc::Fun {
+                            is_method: false,
+                            params: vec![],
+                            body: vec![
+                                Statement::variable(VariableDeclaration {
+                                    ident: unused.clone(),
+                                    value: Some(Expression::number(Number::int(1))),
+                                    property: LetKind::Strict,
+                                    ident_info: IdentInfo::default(),
+                                }),
+                                Statement::variable(VariableDeclaration {
+                                    ident: used.clone(),
+                                    value: Some(Expression::number(Number::int(2))),
+                                    property: LetKind::Strict,
+                                    ident_info: IdentInfo::default(),
+                                }),
+                                Statement::return_(Expression::var(used.clone())),
+                            ],
+                            env: Default::default(),
+                            return_unit: false,
+                            async_: false,
+                            directive: None,
+                        })),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    })],
+                    vec![],
+                ),
+                modules: vec![],
+                side_effect: None,
+            },
+            false,
+        );
 
         let [stmt] = deps.program.block.as_slice() else {
             panic!("expected one top-level function binding");
@@ -18865,12 +18884,42 @@ mod tests {
 let x = json`some random ${"string"}`
 "#;
 
-        let output =
-            crate::driver::compile_source_to_js(source, "json_template_test.res").unwrap();
+        let output = crate::driver::compile_source_to_js(source, "json_template_test.res").unwrap();
 
         assert!(
             output.contains("let x = \"some random \" + \"string\";"),
             "expected ordinary string interpolation fallback, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn source_ref_aliases_survive_later_mutation_like_ocaml() {
+        let source = r#"
+let fib3 = n => {
+  let a = ref(1)
+  let b = ref(1)
+  for i in 1 to n {
+    let tmp = a.contents
+    a := b.contents
+    b := b.contents + tmp
+  }
+  a.contents
+}
+"#;
+
+        let output = crate::driver::compile_source_to_js(source, "fib_ref_alias_test.res").unwrap();
+
+        assert!(
+            output.contains("let tmp = a;"),
+            "expected the loop alias to remain materialized, got:\n{output}"
+        );
+        assert!(
+            output.contains("b = b + tmp | 0;"),
+            "expected the carried temp to feed the second assignment, got:\n{output}"
+        );
+        assert!(
+            !output.contains("b = b + a | 0;"),
+            "did not expect the carried temp to collapse to the reassigned binding:\n{output}"
         );
     }
 
@@ -20001,7 +20050,11 @@ let x = json`some random ${"string"}`
     fn int32_band_drops_redundant_bor_on_left_operand() {
         let value = Ident::create_local("value");
         let expr = int32_band(
-            to_int32(Expression::bin(BinOp::Plus, Expression::var(value), int_expr(1))),
+            to_int32(Expression::bin(
+                BinOp::Plus,
+                Expression::var(value),
+                int_expr(1),
+            )),
             int_expr(0x7fff_ffff),
         );
 
