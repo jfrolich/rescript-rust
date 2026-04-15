@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 534 / 657 JS snapshots passing, 0 compile errors, 123 output diffs
+**Status:** 532 / 657 JS snapshots passing, 0 compile errors, 125 output diffs
 
 ## Goal
 
@@ -35,11 +35,76 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **534 / 657**
+- JS snapshot parity: **532 / 657**
 - Compile errors: **0**
-- Output diffs: **123**
+- Output diffs: **125**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: only share repeated return-position staticcatch handlers behind
+  an explicit exit join when the handler re-raises outward; keep plain handlers
+  inline across multiple exit sites just like OCaml
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is `Lam_compile` return/staticcatch
+  control-flow lowering in `compiler-rust/src/lambda/compile.rs`, not a
+  printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_staticcatch`,
+  `compile_switch`, and how repeated `exit` sites stay inlined unless the
+  handler itself transfers control outward again
+- Rust change:
+  - added `return_staticcatch_requires_explicit_jump(...)` so return-position
+    staticcatch lowering can distinguish between repeated exits into a plain
+    handler and repeated exits into a handler that re-raises to some other
+    label
+  - added `lambda_has_multiple_static_raises_to_label(...)` / counting helpers
+    to detect the repeated-exit shape in the current staticcatch body
+  - restricted the explicit shared-join path to handlers that still transfer
+    control outward via `lambda_contains_static_raise_to_other_label(...)`,
+    leaving plain handlers on the normal OCaml-style inlined path
+  - added focused regression coverage in
+    `return_staticcatchs_share_nontrivial_handlers_across_multiple_exit_sites`
+    and
+    `return_staticcatchs_keep_plain_handlers_inline_across_multiple_exit_sites`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml return_staticcatch -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_staticcatch_binding_handlers_that_raise_outward_avoid_exit_temps -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for
+    `tests/tests/src/DictPatternMatchingOptimization.res`, diffing
+    `/tmp/DictPatternMatchingOptimization.mjs` against the checked-in snapshot
+  - direct release guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - direct release repro for
+    `tests/tests/src/VariantPatternMatchingSpreads.res`, diffing
+    `/tmp/VariantPatternMatchingSpreads.mjs` against the checked-in snapshot
+  - direct release repro for
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res`, diffing
+    `/tmp/VariantPatternMatchingSpreadsWithPayloads.mjs` against the checked-in
+    snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/DictPatternMatchingOptimization.res` is now an exact
+    snapshot match; the remaining nested `"e"` / `"f"` shared-handler drift is
+    gone
+  - `tests/tests/src/VariantPatternMatchingSpreads.res` and
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` are now
+    exact snapshot matches again; the temporary explicit `exit` joins around
+    the shared plain handlers are gone
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the unchanged guard
+  - the full authoritative sweep in this current worktree now reports
+    **532 / 657** passing, **0** compile errors, and **125** output diffs
+- Topline impact:
+  - JS snapshot parity: **534 / 657** -> **532 / 657** (**-2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **123** -> **125** (**+2**)
+- Keep this change because OCaml only needs the explicit shared return join
+  when the repeated-exit handler still jumps outward; applying that same rule
+  fixes the checked-in snapshot drift in the direct canaries at the backend
+  control-flow source instead of by rewriting emitted JavaScript later.
 
 Latest iteration on **2026-04-15**:
 

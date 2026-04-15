@@ -1261,7 +1261,9 @@ impl LambdaCompiler {
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 if (self.return_unit_stack.last().copied() == Some(true) && !bindings.is_empty())
-                    || self.staticcatch_requires_explicit_jump(bindings, handler)
+                    || self.return_staticcatch_requires_explicit_jump(
+                        *label, bindings, body, handler,
+                    )
                 {
                     self.compile_staticcatch_return_block(*label, bindings, body, handler)
                 } else {
@@ -1690,7 +1692,9 @@ impl LambdaCompiler {
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 if (self.return_unit_stack.last().copied() == Some(true) && !bindings.is_empty())
-                    || self.staticcatch_requires_explicit_jump(bindings, handler)
+                    || self.return_staticcatch_requires_explicit_jump(
+                        *label, bindings, body, handler,
+                    )
                 {
                     self.compile_staticcatch_tail_loop_return_block(
                         *label,
@@ -6709,6 +6713,18 @@ impl LambdaCompiler {
         self.lambda_requires_explicit_staticcatch_jump(handler)
     }
 
+    fn return_staticcatch_requires_explicit_jump(
+        &self,
+        label: i32,
+        bindings: &[Ident],
+        body: &Lambda,
+        handler: &Lambda,
+    ) -> bool {
+        self.lambda_requires_explicit_staticcatch_jump(handler)
+            || (lambda_has_multiple_static_raises_to_label(body, label, bindings.len())
+                && lambda_contains_static_raise_to_other_label(handler, label))
+    }
+
     fn active_static_raise_target_exists(&self, label: i32, arity: usize) -> bool {
         self.static_jump_handlers
             .iter()
@@ -8706,6 +8722,92 @@ fn string_switch_cases_contain_static_raise_to_label(
     cases
         .iter()
         .any(|(_, body)| lambda_contains_static_raise_to_label(body, label, arity))
+}
+
+fn lambda_has_multiple_static_raises_to_label(lam: &Lambda, label: i32, arity: usize) -> bool {
+    lambda_static_raise_count_to_label(lam, label, arity) >= 2
+}
+
+fn lambda_static_raise_count_to_label(lam: &Lambda, label: i32, arity: usize) -> usize {
+    let add_count = |left: usize, right: usize| left.saturating_add(right).min(2);
+
+    match lam {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => 0,
+        Lambda::Lapply(apply) => apply.ap_args.iter().fold(
+            lambda_static_raise_count_to_label(&apply.ap_func, label, arity),
+            |count, arg| add_count(count, lambda_static_raise_count_to_label(arg, label, arity)),
+        ),
+        Lambda::Lfunction(_) => 0,
+        Lambda::Llet(_, _, value, body) => add_count(
+            lambda_static_raise_count_to_label(value, label, arity),
+            lambda_static_raise_count_to_label(body, label, arity),
+        ),
+        Lambda::Lletrec(bindings, body) => bindings.iter().fold(
+            lambda_static_raise_count_to_label(body, label, arity),
+            |count, (_, value)| {
+                add_count(count, lambda_static_raise_count_to_label(value, label, arity))
+            },
+        ),
+        Lambda::Lprim(info) => info.args.iter().fold(0, |count, arg| {
+            add_count(count, lambda_static_raise_count_to_label(arg, label, arity))
+        }),
+        Lambda::Lswitch(scrut, switch) => {
+            let mut count = lambda_static_raise_count_to_label(scrut, label, arity);
+            for (_, body) in &switch.sw_consts {
+                count = add_count(count, lambda_static_raise_count_to_label(body, label, arity));
+            }
+            for (_, body) in &switch.sw_blocks {
+                count = add_count(count, lambda_static_raise_count_to_label(body, label, arity));
+            }
+            if let Some(body) = switch.sw_failaction.as_deref() {
+                count = add_count(count, lambda_static_raise_count_to_label(body, label, arity));
+            }
+            count
+        }
+        Lambda::LstringSwitch(scrut, cases, default) => {
+            let mut count = lambda_static_raise_count_to_label(scrut, label, arity);
+            for (_, body) in cases {
+                count = add_count(count, lambda_static_raise_count_to_label(body, label, arity));
+            }
+            if let Some(body) = default.as_deref() {
+                count = add_count(count, lambda_static_raise_count_to_label(body, label, arity));
+            }
+            count
+        }
+        Lambda::LstaticRaise(raise_label, args) => {
+            let self_count = usize::from(*raise_label == label && args.len() == arity);
+            args.iter().fold(self_count, |count, arg| {
+                add_count(count, lambda_static_raise_count_to_label(arg, label, arity))
+            })
+        }
+        Lambda::LstaticCatch(body, (_, _), handler) | Lambda::LtryWith(body, _, handler) => add_count(
+            lambda_static_raise_count_to_label(body, label, arity),
+            lambda_static_raise_count_to_label(handler, label, arity),
+        ),
+        Lambda::Lsequence(first, second) => add_count(
+            lambda_static_raise_count_to_label(first, label, arity),
+            lambda_static_raise_count_to_label(second, label, arity),
+        ),
+        Lambda::Lwhile(cond, body) => add_count(
+            lambda_static_raise_count_to_label(cond, label, arity),
+            lambda_static_raise_count_to_label(body, label, arity),
+        ),
+        Lambda::Lfor(_, start, finish, _, body) => {
+            let count = add_count(
+                lambda_static_raise_count_to_label(start, label, arity),
+                lambda_static_raise_count_to_label(finish, label, arity),
+            );
+            add_count(count, lambda_static_raise_count_to_label(body, label, arity))
+        }
+        Lambda::Lassign(_, value) => lambda_static_raise_count_to_label(value, label, arity),
+        Lambda::LifThenElse(cond, then_, else_) => {
+            let count = add_count(
+                lambda_static_raise_count_to_label(cond, label, arity),
+                lambda_static_raise_count_to_label(then_, label, arity),
+            );
+            add_count(count, lambda_static_raise_count_to_label(else_, label, arity))
+        }
+    }
 }
 
 fn lambda_contains_static_raise_to_other_label(lam: &Lambda, label: i32) -> bool {
@@ -16370,6 +16472,93 @@ mod tests {
                     && rendered.contains("return 0;")
                     && rendered.contains("return 1;")),
             "expected the outward handler raise to lower directly instead of through an exit temp:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn return_staticcatchs_share_nontrivial_handlers_across_multiple_exit_sites() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let kind = Ident::create_local("kind");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::LstaticCatch(
+                Box::new(Lambda::if_(
+                    Lambda::var(cond.clone()),
+                    Lambda::static_raise(2, Vec::new()),
+                    Lambda::LstringSwitch(
+                        Box::new(Lambda::var(kind.clone())),
+                        vec![("e".to_string(), Lambda::const_(Constant::int(4)))],
+                        Some(Box::new(Lambda::static_raise(2, Vec::new()))),
+                    ),
+                )),
+                (2, vec![]),
+                Box::new(Lambda::LstringSwitch(
+                    Box::new(Lambda::var(kind.clone())),
+                    vec![("f".to_string(), Lambda::const_(Constant::int(5)))],
+                    Some(Box::new(Lambda::static_raise(1, Vec::new()))),
+                )),
+            )),
+            (1, vec![]),
+            Box::new(Lambda::const_(Constant::int(6))),
+        ));
+
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains("let exit = 0;"),
+            "expected repeated exits to share the handler behind an exit temp:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("if (exit ==="),
+            "expected the shared handler to stay after an explicit exit test:\n{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("=== \"f\"").count(),
+            1,
+            "expected the nontrivial handler to be emitted once:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn return_staticcatchs_keep_plain_handlers_inline_across_multiple_exit_sites() {
+        let mut compiler = LambdaCompiler::new();
+        let kind = Ident::create_local("kind");
+        let do_with_b = Ident::create_local("doWithB");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::LstringSwitch(
+                Box::new(Lambda::var(kind.clone())),
+                vec![
+                    ("four".to_string(), Lambda::static_raise(2, Vec::new())),
+                    ("five".to_string(), Lambda::static_raise(2, Vec::new())),
+                    ("six".to_string(), Lambda::const_(Constant::int(6))),
+                ],
+                Some(Box::new(Lambda::const_(Constant::int(7)))),
+            )),
+            (2, vec![]),
+            Box::new(Lambda::apply(
+                Lambda::var(do_with_b.clone()),
+                vec![Lambda::var(kind.clone())],
+                ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                false,
+            )),
+        ));
+
+        let rendered = print_block(&block);
+        assert!(
+            !rendered.contains("let exit ="),
+            "plain multi-exit handlers should stay inline without an exit temp:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("case \"four\" :") && rendered.contains("case \"five\" :"),
+            "expected grouped inline cases for the shared handler:\n{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("return doWithB(kind);").count(),
+            1,
+            "expected the shared plain handler to stay inline in the switch:\n{rendered}"
         );
     }
 
