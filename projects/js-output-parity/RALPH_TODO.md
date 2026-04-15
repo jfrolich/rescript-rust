@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 503 / 657 JS snapshots passing, 0 compile errors, 154 output diffs
+**Status:** 498 / 657 JS snapshots passing, 0 compile errors, 159 output diffs
 
 ## Goal
 
@@ -35,11 +35,62 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **503 / 657**
+- JS snapshot parity: **498 / 657**
 - Compile errors: **0**
-- Output diffs: **154**
+- Output diffs: **159**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: collapse nested unit-return guards in the JS IR / dumper path
+  so `LargeUnboxedVariantOptimization.res` lowers to the same single
+  `if (key === "space" && state.active)` guard as OCaml instead of preserving a
+  large literal-membership residue and then printing a nested `if` plus a
+  trailing unit return
+- Active backend focus for this slice is **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`, because optimized-lambda was already green and the remaining drift
+  on this small internal file sat downstream in Rust's `js_exp_make` /
+  `js_stmt_make` / `js_dump` equivalents
+- OCaml reference:
+  `compiler/core/js_exp_make.ml`,
+  `compiler/core/js_stmt_make.ml`, and
+  `compiler/core/js_dump.ml`
+- Rust change:
+  - updated `compiler-rust/src/js_ir/mod.rs` so boolean simplification can
+    still absorb large conjunction/disjunction membership cases when the shared
+    literal sits deeper than the recursive simplifier's normal fixed-point walk
+  - updated `compiler-rust/src/js_ir/printer.rs` so function bodies shaped like
+    `nested if; return undefined` collapse to the same merged guard before the
+    trailing unit return is elided
+  - added focused regressions:
+    `test_js_or_absorbs_large_conjunction_membership_against_same_literal_like_ocaml`,
+    `test_print_unit_function_body_with_trailing_return_merges_nested_if_like_ocaml`,
+    and the existing nested-if printer guards continue to cover direct and
+    block-wrapped forms
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml literal_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_unit_function_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/LargeUnboxedVariantOptimization.res`,
+    diffing `/tmp/LargeUnboxedVariantOptimization.mjs` against the checked-in
+    snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/LargeUnboxedVariantOptimization.res` now matches exactly:
+    the backend emits the single merged `key === "space" && state.active` guard
+    expected by the checked-in snapshot
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+- Topline impact:
+  - JS snapshot parity: **497 / 657** -> **498 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **160** -> **159** (**-1**)
+- Keep this change because it ports a real OCaml-aligned boolean/statement
+  simplification cluster in the downstream JS backend and removes a concrete
+  emitted-JS drift without perturbing the stable `ExternalShadow` guard.
 
 Latest iteration on **2026-04-15**:
 

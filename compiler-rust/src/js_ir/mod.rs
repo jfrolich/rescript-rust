@@ -752,10 +752,7 @@ impl Expression {
                 return consequent;
             }
 
-            return Self::new(ExpressionDesc::Seq(
-                Box::new(test),
-                Box::new(consequent),
-            ));
+            return Self::new(ExpressionDesc::Seq(Box::new(test), Box::new(consequent)));
         }
 
         if let ExpressionDesc::Cond(inner_test, inner_then, inner_else) = &consequent.desc {
@@ -1531,9 +1528,7 @@ fn simplify_and_expression_with_depth(
                         .and_then(|expr| simplify_and_force(&expr, right, depth + 1)),
                     (Some(left_a), None) => simplify_and_force(&left_a, left_b, depth + 1),
                     (None, Some(left_b)) => simplify_and_force(left_a, &left_b, depth + 1),
-                    (Some(left_a), Some(left_b)) => {
-                        simplify_and_force(&left_a, &left_b, depth + 1)
-                    }
+                    (Some(left_a), Some(left_b)) => simplify_and_force(&left_a, &left_b, depth + 1),
                 };
             }
             (_, ExpressionDesc::Bin(BinOp::And, right_a, right_b)) => {
@@ -1547,25 +1542,17 @@ fn simplify_and_expression_with_depth(
                 let simplified_left_b =
                     simplify_and_expression_with_depth(left_b, right, depth + 1);
                 return match (simplified_left_a, simplified_left_b) {
-                    (Some(expr), None) if matches!(expr.desc, ExpressionDesc::Bool(false)) => {
-                        Some(raw_bin_expression(
-                            BinOp::And,
-                            left_b.as_ref().clone(),
-                            right.clone(),
-                        ))
+                    (Some(expr), None) if matches!(expr.desc, ExpressionDesc::Bool(false)) => Some(
+                        raw_bin_expression(BinOp::And, left_b.as_ref().clone(), right.clone()),
+                    ),
+                    (None, Some(expr)) if matches!(expr.desc, ExpressionDesc::Bool(false)) => Some(
+                        raw_bin_expression(BinOp::And, left_a.as_ref().clone(), right.clone()),
+                    ),
+                    (None, _) | (_, None) => {
+                        simplify_or_expression_with_depth(left_a, left_b, depth + 1)
+                            .and_then(|expr| simplify_and_force(&expr, right, depth + 1))
                     }
-                    (None, Some(expr)) if matches!(expr.desc, ExpressionDesc::Bool(false)) => {
-                        Some(raw_bin_expression(
-                            BinOp::And,
-                            left_a.as_ref().clone(),
-                            right.clone(),
-                        ))
-                    }
-                    (None, _) | (_, None) => simplify_or_expression_with_depth(left_a, left_b, depth + 1)
-                        .and_then(|expr| simplify_and_force(&expr, right, depth + 1)),
-                    (Some(left_a), Some(left_b)) => {
-                        simplify_or_force(&left_a, &left_b, depth + 1)
-                    }
+                    (Some(left_a), Some(left_b)) => simplify_or_force(&left_a, &left_b, depth + 1),
                 };
             }
             _ => {}
@@ -1573,6 +1560,13 @@ fn simplify_and_expression_with_depth(
     }
 
     if ocaml_eq_expression(left, right) {
+        return Some(left.clone());
+    }
+
+    if expression_has_no_side_effects(left) && disjunction_contains_expression(left, right) {
+        return Some(right.clone());
+    }
+    if expression_has_no_side_effects(right) && disjunction_contains_expression(right, left) {
         return Some(left.clone());
     }
 
@@ -1619,6 +1613,13 @@ fn simplify_or_expression_with_depth(
         _ => {}
     }
 
+    if expression_has_no_side_effects(left) && conjunction_contains_expression(left, right) {
+        return Some(right.clone());
+    }
+    if expression_has_no_side_effects(right) && conjunction_contains_expression(right, left) {
+        return Some(left.clone());
+    }
+
     let left_not = push_negation(left.clone())?;
     let right_not = push_negation(right.clone())?;
     let simplified = simplify_and_expression_with_depth(&left_not, &right_not, depth + 1)?;
@@ -1635,11 +1636,16 @@ fn simplify_or_force(left: &Expression, right: &Expression, depth: usize) -> Opt
         .or_else(|| Some(raw_bin_expression(BinOp::Or, left.clone(), right.clone())))
 }
 
-fn simplify_typeof_and_literal_and(typeof_expr: &Expression, other: &Expression) -> Option<Expression> {
+fn simplify_typeof_and_literal_and(
+    typeof_expr: &Expression,
+    other: &Expression,
+) -> Option<Expression> {
     let (vident, type_name) = typeof_var_type_test(typeof_expr)?;
 
     match &other.desc {
-        ExpressionDesc::Var(other_vident) if type_name == "boolean" && same_vident(vident, other_vident) => {
+        ExpressionDesc::Var(other_vident)
+            if type_name == "boolean" && same_vident(vident, other_vident) =>
+        {
             return Some(Expression::bin(
                 BinOp::EqEqEq,
                 Expression::new(ExpressionDesc::Var(other_vident.clone())),
@@ -1702,7 +1708,10 @@ fn simplify_typeof_and_literal_and(typeof_expr: &Expression, other: &Expression)
     None
 }
 
-fn simplify_array_is_array_and_literal_and(array_test: &Expression, other: &Expression) -> Option<Expression> {
+fn simplify_array_is_array_and_literal_and(
+    array_test: &Expression,
+    other: &Expression,
+) -> Option<Expression> {
     let vident = array_is_array_var(array_test)?;
     let (op, other_vident, literal) = strict_var_literal_comparison(other)?;
     if !same_vident(vident, other_vident) || !is_scalar_nullish_literal(literal) {
@@ -1812,6 +1821,34 @@ fn is_scalar_nullish_literal(expr: &Expression) -> bool {
     )
 }
 
+fn disjunction_contains_expression(disjunction: &Expression, needle: &Expression) -> bool {
+    if ocaml_eq_expression(disjunction, needle) {
+        return true;
+    }
+
+    match &disjunction.desc {
+        ExpressionDesc::Bin(BinOp::Or, left, right) => {
+            disjunction_contains_expression(left, needle)
+                || disjunction_contains_expression(right, needle)
+        }
+        _ => false,
+    }
+}
+
+fn conjunction_contains_expression(conjunction: &Expression, needle: &Expression) -> bool {
+    if ocaml_eq_expression(conjunction, needle) {
+        return true;
+    }
+
+    match &conjunction.desc {
+        ExpressionDesc::Bin(BinOp::And, left, right) => {
+            conjunction_contains_expression(left, needle)
+                || conjunction_contains_expression(right, needle)
+        }
+        _ => false,
+    }
+}
+
 fn ocaml_eq_block(left: &Block, right: &Block) -> bool {
     left.len() == right.len()
         && left
@@ -1854,12 +1891,23 @@ fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool {
             ExpressionDesc::Number(Number::BigInt(left_bigint)),
             ExpressionDesc::Number(Number::BigInt(right_bigint)),
         ) => left_bigint == right_bigint,
-        (ExpressionDesc::Number(Number::Float(_)), ExpressionDesc::Number(Number::Float(_))) => false,
-        (ExpressionDesc::StringIndex(left_obj, left_index), ExpressionDesc::StringIndex(right_obj, right_index))
-        | (ExpressionDesc::ArrayIndex(left_obj, left_index), ExpressionDesc::ArrayIndex(right_obj, right_index)) => {
+        (ExpressionDesc::Number(Number::Float(_)), ExpressionDesc::Number(Number::Float(_))) => {
+            false
+        }
+        (
+            ExpressionDesc::StringIndex(left_obj, left_index),
+            ExpressionDesc::StringIndex(right_obj, right_index),
+        )
+        | (
+            ExpressionDesc::ArrayIndex(left_obj, left_index),
+            ExpressionDesc::ArrayIndex(right_obj, right_index),
+        ) => {
             ocaml_eq_expression(left_obj, right_obj) && ocaml_eq_expression(left_index, right_index)
         }
-        (ExpressionDesc::Call(left_fn, left_args, _), ExpressionDesc::Call(right_fn, right_args, _)) => {
+        (
+            ExpressionDesc::Call(left_fn, left_args, _),
+            ExpressionDesc::Call(right_fn, right_args, _),
+        ) => {
             ocaml_eq_expression(left_fn, right_fn)
                 && left_args.len() == right_args.len()
                 && left_args
@@ -1870,7 +1918,10 @@ fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool {
         (ExpressionDesc::Var(left_vident), ExpressionDesc::Var(right_vident)) => {
             same_vident(left_vident, right_vident)
         }
-        (ExpressionDesc::Bin(left_op, left_lhs, left_rhs), ExpressionDesc::Bin(right_op, right_lhs, right_rhs)) => {
+        (
+            ExpressionDesc::Bin(left_op, left_lhs, left_rhs),
+            ExpressionDesc::Bin(right_op, right_lhs, right_rhs),
+        ) => {
             left_op == right_op
                 && ocaml_eq_expression(left_lhs, right_lhs)
                 && ocaml_eq_expression(left_rhs, right_rhs)
@@ -1893,11 +1944,16 @@ fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool {
                 && left_pos == right_pos
                 && ocaml_eq_expression(left_obj, right_obj)
         }
-        (ExpressionDesc::Seq(left_first, left_second), ExpressionDesc::Seq(right_first, right_second)) => {
+        (
+            ExpressionDesc::Seq(left_first, left_second),
+            ExpressionDesc::Seq(right_first, right_second),
+        ) => {
             ocaml_eq_expression(left_first, right_first)
                 && ocaml_eq_expression(left_second, right_second)
         }
-        (ExpressionDesc::Bool(left_bool), ExpressionDesc::Bool(right_bool)) => left_bool == right_bool,
+        (ExpressionDesc::Bool(left_bool), ExpressionDesc::Bool(right_bool)) => {
+            left_bool == right_bool
+        }
         (
             ExpressionDesc::OptionalBlock(left_inner, left_identity),
             ExpressionDesc::OptionalBlock(right_inner, right_identity),
@@ -1936,9 +1992,14 @@ fn same_vident(left: &VIdent, right: &VIdent) -> bool {
 fn same_vident_kind(left: &Kind, right: &Kind) -> bool {
     match (left, right) {
         (Kind::Ml, Kind::Ml) | (Kind::Runtime, Kind::Runtime) => true,
-        (Kind::External { name: left_name, .. }, Kind::External { name: right_name, .. }) => {
-            left_name == right_name
-        }
+        (
+            Kind::External {
+                name: left_name, ..
+            },
+            Kind::External {
+                name: right_name, ..
+            },
+        ) => left_name == right_name,
         _ => false,
     }
 }
@@ -2598,9 +2659,16 @@ mod tests {
             Expression::string("boolean"),
         );
 
-        let equals_null = Expression::bin(BinOp::EqEqEq, Expression::var(value.clone()), Expression::null());
-        let not_equals_null =
-            Expression::bin(BinOp::NotEqEq, Expression::var(value.clone()), Expression::null());
+        let equals_null = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(value.clone()),
+            Expression::null(),
+        );
+        let not_equals_null = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::var(value.clone()),
+            Expression::null(),
+        );
         let equals_undefined = Expression::bin(
             BinOp::EqEqEq,
             Expression::var(value.clone()),
@@ -2644,8 +2712,55 @@ mod tests {
             Expression::string("a"),
         );
 
-        let simplified =
-            js_and_expression(Expression::bin(BinOp::Or, space.clone(), letter_a), space.clone());
+        let simplified = js_and_expression(
+            Expression::bin(BinOp::Or, space.clone(), letter_a),
+            space.clone(),
+        );
+
+        assert!(matches!(
+            simplified.desc,
+            ExpressionDesc::Bin(BinOp::EqEqEq, left, right)
+                if matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(id)),
+                        ..
+                    } if id.same(&key)
+                ) && matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    } if txt == "space"
+                )
+        ));
+    }
+
+    #[test]
+    fn test_js_or_absorbs_large_conjunction_membership_against_same_literal_like_ocaml() {
+        let key = Ident::create_local("key");
+        let literal = |txt: &str| {
+            Expression::bin(
+                BinOp::EqEqEq,
+                Expression::var(key.clone()),
+                Expression::string(txt),
+            )
+        };
+        let space = literal("space");
+        let rest = [
+            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b",
+            "a",
+        ]
+        .into_iter()
+        .map(literal)
+        .reduce(|acc, expr| raw_bin_expression(BinOp::Or, acc, expr))
+        .expect("expected a non-empty literal chain");
+
+        let simplified = Expression::bin(
+            BinOp::Or,
+            space.clone(),
+            raw_bin_expression(BinOp::And, rest, space),
+        );
 
         assert!(matches!(
             simplified.desc,
