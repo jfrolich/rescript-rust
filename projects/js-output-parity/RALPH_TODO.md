@@ -43,6 +43,60 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: port OCaml's mixed untagged literal-dispatch ordering and keep
+  residual `typeof` branches as real string switches after earlier runtime
+  `instanceof` splits instead of collapsing them into Rust-only small
+  `if`/`else` tails
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is `Lam_compile` / dynamic-check
+  lowering in `compiler-rust/src/lambda/compile.rs`, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `get_literal_cases`,
+  `get_block_cases`, and the mixed untagged path in `compile_switch`, together
+  with `compiler/ml/ast_untagged_variants.ml`'s
+  `DynamicChecks.is_a_literal_case`
+- Rust change:
+  - reversed `sw_names.consts` / `sw_names.blocks` collection for untagged
+    dispatch metadata so the Rust lowering sees the same reversed case lists
+    that OCaml builds with `Ext_array.iter` + cons
+  - ported OCaml's exact recursive `List.rev` literal-case disjunction and its
+    overlap `fold_right` behavior in `literal_case_dispatch_test(...)` instead
+    of using a simpler Rust reduction that reordered emitted operands
+  - kept residual `typeof` tails on the string-switch path whenever a mixed
+    untagged block dispatch already emitted earlier runtime checks; this avoids
+    shrinking the tail into a Rust-only small switch after `Array.isArray(...)`
+    or other runtime-test cases have already split control flow
+  - added `compile_small_untagged_block_switch_effect(...)` and focused
+    regression coverage for both the mixed `typeof` tail shape and the literal
+    ordering
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml untagged_literal_dispatch_keeps_ocaml_case_order -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/UntaggedVariants.res` no longer shows the earlier
+    literal-order drift in `classify$3`, `classify$6`, `checkEnum`, or
+    `checkEnum$1`; the remaining diff in that file is now down to the deeper
+    guard-shape mismatches in `check$1` and `printLength`
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the broader unchanged guard
+  - the full authoritative sweep in this current worktree still reports
+    **537 / 657** passing, **0** compile errors, and **120** output diffs
+- Topline impact in this current worktree:
+  - JS snapshot parity: **537 / 657** -> **537 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **120** -> **120** (**no change**)
+- Keep this change because it is a direct OCaml backend port: both the reversed
+  case-list construction and the literal-dispatch expression shape come from
+  `Lam_compile` / `DynamicChecks.is_a_literal_case`, and preserving the mixed
+  `typeof` tail as a real switch removes Rust-only lowering drift without
+  patching the final emitted JavaScript.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: align statement-valued `if` / `switch` / `trywith` result temp
   names with OCaml's plain `Ext_ident.create_tmp ()` temps instead of emitting
   Rust-only names like `ifres`, `switch`, and `tryres`
