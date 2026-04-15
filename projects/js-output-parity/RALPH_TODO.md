@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 501 / 657 JS snapshots passing, 0 compile errors, 156 output diffs
+**Status:** 503 / 657 JS snapshots passing, 0 compile errors, 154 output diffs
 
 ## Goal
 
@@ -35,11 +35,65 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **501 / 657**
+- JS snapshot parity: **503 / 657**
 - Compile errors: **0**
-- Output diffs: **156**
+- Output diffs: **154**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: port OCaml's `record_assign` dead-temporary-write collapse so
+  record-field writes to pure fresh literals return the RHS value instead of
+  materializing a dead `({x: ...}).field = ...` assignment in emitted JS, while
+  still keeping assignments whose target construction has effects
+- Active backend focus for this slice is **Phase 3: Port JS IR Lowering And
+  Metadata** from `PLAN.md`, because the optimized-lambda boundary was already
+  green and the drift sat in Rust's `Psetfield` lowering in
+  `compiler-rust/src/lambda/compile.rs`, where `compile_set_field` still always
+  emitted a property assignment instead of mirroring OCaml's
+  `Js_of_lam_block.set_field` / `Js_exp_make.record_assign` behavior for pure
+  temporary blocks
+- OCaml reference:
+  `compiler/core/lam_compile_primitive.ml`,
+  `compiler/core/js_of_lam_block.ml`, and
+  `compiler/core/js_exp_make.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so `compile_set_field`
+    returns the RHS directly when the target is a pure temporary `Array` or
+    `CamlBlock`, matching OCaml's `record_assign` / `assign_by_exp`
+    short-circuit instead of always emitting `target.field = value`
+  - added focused regressions
+    `top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_effects`,
+    `source_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_effects`,
+    and
+    `source_record_field_assignments_on_impure_fresh_literals_keep_the_assignment`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_effects -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml source_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_effects -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml source_record_field_assignments_on_impure_fresh_literals_keep_the_assignment -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact direct release repro for `tests/tests/src/gpr_4025_test.res`,
+    diffing `/tmp/gpr_4025_test.mjs` against the checked-in snapshot
+  - unchanged broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_4025_test.res` now matches exactly: the dead
+    top-level assignment to a pure fresh record literal is gone, while the
+    later function-local impure-target assignment stays materialized
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - the full authoritative sweep improved by two files, indicating the same
+    pure-temporary-setfield rule cleared another snapshot in the same cluster
+- Topline impact:
+  - JS snapshot parity: **501 / 657** -> **503 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **156** -> **154** (**-2**)
+- Keep this change because it ports OCaml's `record_assign` /
+  `Js_of_lam_block.set_field` dead-write elimination into Rust's `Psetfield`
+  lowering, fixes a real emitted-JS drift on `gpr_4025_test`, and improves the
+  authoritative baseline without perturbing the stable `ExternalShadow` guard.
 
 Latest iteration on **2026-04-15**:
 

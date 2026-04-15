@@ -4836,6 +4836,15 @@ impl LambdaCompiler {
         target: &Expression,
         value: &Expression,
     ) -> Expression {
+        if js_expr_no_side_effects(target)
+            && matches!(
+                target.desc,
+                ExpressionDesc::Array(_, _) | ExpressionDesc::CamlBlock(_, _, _, _)
+            )
+        {
+            return value.clone();
+        }
+
         let field = match info {
             crate::lambda::compat::SetFieldDbgInfo::RecordSet(name)
             | crate::lambda::compat::SetFieldDbgInfo::RecordInlineSet(name)
@@ -18882,6 +18891,103 @@ mod tests {
         let program = compiler.compile_program(&lam);
         let rendered = print_block(&program.block);
         assert_eq!(rendered, "student1.name = \"Mary\";");
+    }
+
+    #[test]
+    fn top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_effects() {
+        let mut compiler = LambdaCompiler::new();
+        let lam = Lambda::seq(
+            Lambda::prim(
+                Primitive::Psetfield(0, SetFieldDbgInfo::RecordSet("x".to_string())),
+                vec![
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::Record {
+                                fields: vec![("x".to_string(), false)],
+                                mutable_flag: crate::parser::ast::MutableFlag::Mutable,
+                            },
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::const_(Constant::int(3))],
+                        Location::none(),
+                    ),
+                    Lambda::Lsequence(
+                        Box::new(Lambda::prim(
+                            Primitive::PrawJsCode(crate::lambda::primitive::JsRawInfo {
+                                code: "console.log(\"hi\")".to_string(),
+                                is_stmt: true,
+                            }),
+                            vec![],
+                            Location::none(),
+                        )),
+                        Box::new(Lambda::const_(Constant::int(2))),
+                    ),
+                ],
+                Location::none(),
+            ),
+            Lambda::unit(),
+        );
+
+        let rendered = print_block(&compiler.compile_program(&lam).block);
+        assert!(
+            rendered.contains("console.log(\"hi\")"),
+            "expected the sequenced logging effect to remain, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(".x = 2;"),
+            "did not expect a dead assignment to a pure fresh record literal, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn source_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_effects() {
+        let source = r#"
+@val external log: string => unit = "console.log"
+type u = {mutable x: int}
+
+{x: 3}.x = {
+  log("hi")
+  2
+}
+"#;
+
+        let output = crate::driver::compile_source_to_js(source, "fresh_record_set.res").unwrap();
+        assert!(
+            output.contains("console.log(\"hi\");"),
+            "expected the RHS effect to survive source compilation, got:\n{output}"
+        );
+        assert!(
+            !output.contains("}).x = 2;"),
+            "did not expect a dead assignment to a pure fresh record literal, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn source_record_field_assignments_on_impure_fresh_literals_keep_the_assignment() {
+        let source = r#"
+@val external log: string => unit = "console.log"
+type u = {mutable x: int}
+
+let f = x =>
+  {
+    x: {
+      log("hi")
+      x
+    },
+  }.x = x + 1
+"#;
+
+        let output =
+            crate::driver::compile_source_to_js(source, "fresh_record_set_impure.res").unwrap();
+        assert!(
+            output.contains("console.log(\"hi\")"),
+            "expected the impure target initializer to stay visible, got:\n{output}"
+        );
+        assert!(
+            output.contains("}).x = x + 1 | 0;"),
+            "expected impure fresh-record assignments to stay materialized, got:\n{output}"
+        );
     }
 
     #[test]
