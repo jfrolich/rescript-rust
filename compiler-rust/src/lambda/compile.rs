@@ -9524,6 +9524,14 @@ fn is_simple_block_binding_item(expr: &Expression) -> bool {
         | ExpressionDesc::Bool(_)
         | ExpressionDesc::Undefined { .. } => true,
         ExpressionDesc::OptionalBlock(inner, true) => is_simple_block_binding_item(inner),
+        ExpressionDesc::CamlBlock(
+            items,
+            MutableFlag::Immutable,
+            _,
+            TagInfo::Constructor { .. },
+        ) => {
+            items.iter().all(is_simple_block_binding_item)
+        }
         _ => false,
     }
 }
@@ -9535,6 +9543,14 @@ fn is_simple_substituted_index_value(expr: &Expression) -> bool {
         | ExpressionDesc::Str { .. }
         | ExpressionDesc::Undefined { .. } => true,
         ExpressionDesc::OptionalBlock(inner, true) => is_simple_substituted_index_value(inner),
+        ExpressionDesc::CamlBlock(
+            items,
+            MutableFlag::Immutable,
+            _,
+            TagInfo::Constructor { .. },
+        ) => {
+            items.iter().all(is_simple_substituted_index_value)
+        }
         _ => false,
     }
 }
@@ -18294,6 +18310,96 @@ mod tests {
                 "expected the tuple projection to inline to the selected field, got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
+        let list = Ident::create_local("list");
+        let deps = apply_js_flatten_and_mark_dead_pass(
+            DepsProgram {
+                program: Program::new(
+                    vec![Statement::variable(VariableDeclaration {
+                        ident: list.clone(),
+                        value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                            vec![
+                                Expression::number(Number::int(2)),
+                                Expression::new(ExpressionDesc::CamlBlock(
+                                    vec![
+                                        Expression::number(Number::int(3)),
+                                        Expression::number(Number::int(0)),
+                                    ],
+                                    MutableFlag::Immutable,
+                                    Box::new(Expression::number(Number::int(0))),
+                                    TagInfo::Constructor {
+                                        name: "::".to_string(),
+                                        num_nonconst: 1,
+                                        tag: 0,
+                                        attrs: vec![],
+                                    },
+                                )),
+                            ],
+                            MutableFlag::Immutable,
+                            Box::new(Expression::number(Number::int(0))),
+                            TagInfo::Constructor {
+                                name: "::".to_string(),
+                                num_nonconst: 1,
+                                tag: 0,
+                                attrs: vec![],
+                            },
+                        ))),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    })],
+                    vec![],
+                ),
+                modules: vec![],
+                side_effect: None,
+            },
+            false,
+        );
+
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!("expected the list binding to remain");
+        };
+
+        let StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _),
+                    ..
+                }),
+            ..
+        }) = &stmt.desc
+        else {
+            panic!("expected the pure nested list binding to stay inline");
+        };
+        assert!(ident.same(&list));
+        assert!(matches!(
+            items.as_slice(),
+            [
+                Expression {
+                    desc: ExpressionDesc::Number(Number::Int { i: 2, .. }),
+                    ..
+                },
+                Expression {
+                    desc: ExpressionDesc::CamlBlock(inner, MutableFlag::Immutable, _, _),
+                    ..
+                }
+            ] if matches!(
+                inner.as_slice(),
+                [
+                    Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
+                        ..
+                    },
+                    Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
+                        ..
+                    }
+                ]
+            )
+        ));
     }
 
     #[test]

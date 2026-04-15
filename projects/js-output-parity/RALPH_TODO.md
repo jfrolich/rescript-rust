@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 510 / 657 JS snapshots passing, 0 compile errors, 147 output diffs
+**Status:** 512 / 657 JS snapshots passing, 0 compile errors, 145 output diffs
 
 ## Goal
 
@@ -35,11 +35,67 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **510 / 657**
+- JS snapshot parity: **512 / 657**
 - Compile errors: **0**
-- Output diffs: **147**
+- Output diffs: **145**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep pure nested immutable constructor blocks inline during
+  `js_pass_flatten_and_mark_dead` splitting, so list/constructor literals stop
+  being hoisted into synthetic helpers like `fake_y_1` while nested
+  record/module fields continue to follow the existing helper-materialization
+  path
+- Active backend focus for this slice is **Phase 4: Port JS Passes** from
+  `PLAN.md`, because the remaining drift sat in Rust's
+  `flatten_and_mark_dead` immutable-`CamlBlock` binding split in
+  `compiler-rust/src/lambda/compile.rs`, where nested constructor payloads were
+  still treated like arbitrary complex block items and hoisted even when the
+  checked-in OCaml snapshots kept the constructor tree inline
+- OCaml reference:
+  `compiler/core/js_pass_flatten_and_mark_dead.ml` and
+  `compiler/core/js_dump.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so the
+    `flatten_and_mark_dead` helper-splitting and substituted-index checks treat
+    nested immutable constructor `CamlBlock`s as inlineable simple items
+    recursively, while leaving nested records/modules non-simple and therefore
+    still helperized
+  - kept focused regression coverage on the constructor-inline case with
+    `js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml js_flatten_and_mark_dead_substitutes_immutable_caml_block_index_reads -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml js_flatten_and_mark_dead_substitutes_single_field_module_reads -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact direct release repro for `tests/tests/src/minimal_test.res`,
+    diffing `/tmp/minimal_test.mjs` against the checked-in snapshot
+  - unchanged broader guard repro for `tests/tests/src/RecordCoercion.res`,
+    diffing `/tmp/RecordCoercion.mjs` against the checked-in snapshot
+  - unchanged stable guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/minimal_test.res` now matches exactly again: the pure
+    nested cons tail stays inline inside `fake_y` instead of being spilled into
+    `fake_y_1`
+  - `tests/tests/src/RecordCoercion.res` remains exact, confirming nested
+    record/module materialization did not regress while fixing the constructor
+    case
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - the full authoritative sweep improved by two files, confirming the
+    constructor-inline rule clears more than the single direct repro without
+    reintroducing compile errors
+- Topline impact:
+  - JS snapshot parity: **510 / 657** -> **512 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **147** -> **145** (**-2**)
+- Keep this change because it removes a real emitted-JS drift on nested
+  constructor/list literals, preserves the stable record/module guard files,
+  and improves the authoritative baseline without reopening compile failures.
 
 Latest iteration on **2026-04-15**:
 
