@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 520 / 657 JS snapshots passing, 0 compile errors, 137 output diffs
+**Status:** 522 / 657 JS snapshots passing, 0 compile errors, 135 output diffs
 
 ## Goal
 
@@ -35,11 +35,67 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **520 / 657**
+- JS snapshot parity: **522 / 657**
 - Compile errors: **0**
-- Output diffs: **137**
+- Output diffs: **135**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: preserve OCaml's singleton-array indentation when the sole
+  element is itself a multiline expression, while explicitly avoiding the
+  broader multiline-array and parenthesized-object indentation changes that
+  regressed the canonical snapshot baseline
+- Active backend focus for this slice is **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; this is downstream `js_dump` formatting in
+  `compiler-rust/src/js_ir/printer.rs`, not typedtree, lambda, or JS-pass work
+- OCaml reference:
+  `compiler/core/js_dump.ml`, specifically the singleton-array dump path where
+  the surrounding bracket group preserves the nested object's inner indentation
+  without reindenting all multiline arrays or all parenthesized object chains
+- Rust change:
+  - updated `compiler-rust/src/js_ir/printer.rs` so the singleton-array branch
+    prints its sole element under one extra indent context, matching the OCaml
+    `[{\n    ...\n  }]` shape for nested object literals
+  - kept general multiline-array printing unchanged after the authoritative
+    harness showed that broad `level > 0` indentation regressed many unrelated
+    files
+  - reverted the experimental parenthesized-object indentation tweak after
+    snapshot checks showed it overindented `({ ... }).x` and `({ ... })["x"]`
+    chains broadly
+  - added focused regression coverage in
+    `test_print_singleton_array_preserves_nested_object_indentation_like_ocaml`,
+    `test_print_parenthesized_object_literal_preserves_group_indentation_like_ocaml`,
+    and
+    `test_print_new_call_with_multiline_array_argument_keeps_array_layout`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_singleton_array_preserves_nested_object_indentation_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_parenthesized_object_literal_preserves_group_indentation_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_new_call_with_multiline_array_argument_keeps_array_layout -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_array -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/gpr_4274_test.res`, diffing
+    `/tmp/gpr_4274_test.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_4274_test.res` is now an exact snapshot match again;
+    the singleton array containing an object literal keeps the OCaml inner
+    indentation
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as a
+    broader unchanged guard
+  - the full authoritative sweep in this worktree now reports **522 / 657**
+    passing, **0** compile errors, and **135** output diffs
+- Topline impact:
+  - JS snapshot parity: **521 / 657** -> **522 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **136** -> **135** (**-1**)
+- Keep this change because the singleton-array indent adjustment is the only
+  OCaml-backed printer tweak from this investigation that improved the
+  authoritative baseline; the broader array/object indentation experiments were
+  measured, found to regress parity, and removed.
 
 Latest iteration on **2026-04-15**:
 

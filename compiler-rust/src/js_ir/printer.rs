@@ -2208,7 +2208,7 @@ impl JsPrinter {
         self.write_char('[');
         match elements {
             [] => {}
-            [single] => self.print_expression(single, 1),
+            [single] => self.with_indent(1, |this| this.print_expression(single, 1)),
             _ => {
                 self.indent();
                 for (index, elem) in elements.iter().enumerate() {
@@ -3425,6 +3425,22 @@ mod tests {
             MutableFlag::Immutable,
         );
         assert_eq!(print_expression(&expr), "[\n  1,\n  2,\n  3\n]");
+    }
+
+    #[test]
+    fn test_print_singleton_array_preserves_nested_object_indentation_like_ocaml() {
+        let expr = Expression::array(
+            vec![Expression::new(ExpressionDesc::Object(
+                None,
+                vec![(
+                    PropertyName::lit("foo"),
+                    Expression::number(Number::int(1)),
+                )],
+            ))],
+            MutableFlag::Immutable,
+        );
+
+        assert_eq!(print_expression(&expr), "[{\n    foo: 1\n  }]");
     }
 
     #[test]
@@ -4940,6 +4956,45 @@ mod tests {
         )));
 
         assert_eq!(rendered, "{\n  MyWeirdProp: 1\n}");
+    }
+
+    #[test]
+    fn test_print_parenthesized_object_literal_preserves_group_indentation_like_ocaml() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::ArrayIndex(
+            Box::new(Expression::new(ExpressionDesc::Object(
+                None,
+                vec![
+                    (
+                        PropertyName::lit("foo"),
+                        Expression::number(Number::int(43)),
+                    ),
+                    (
+                        PropertyName::lit("bar"),
+                        Expression::number(Number::int(86)),
+                    ),
+                ],
+            ))),
+            Box::new(Expression::string("foo")),
+        )));
+
+        assert_eq!(rendered, "({\n  foo: 43,\n  bar: 86\n})[\"foo\"]");
+    }
+
+    #[test]
+    fn test_print_new_call_with_multiline_array_argument_keeps_array_layout() {
+        let rendered = print_expression(&Expression::new(ExpressionDesc::New(
+            Box::new(Expression::var(Ident::create_local("BigInt64Array"))),
+            Some(vec![Expression::array(
+                vec![
+                    Expression::var(Ident::create_local("num1")),
+                    Expression::var(Ident::create_local("num2")),
+                ],
+                MutableFlag::Immutable,
+            )]),
+        )));
+
+        assert!(rendered.starts_with("new $$BigInt64Array(["));
+        assert!(rendered.contains("[\n  num1,\n  num2\n])"));
     }
 
     #[test]
