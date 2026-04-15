@@ -839,13 +839,14 @@ impl Expression {
         }
 
         if matches!(alternate.desc, ExpressionDesc::Bool(false)) {
-            if let Some(expr) = simplify_and_expression(&test, &consequent) {
+            if let Some(expr) = simplify_and_if_no_side_effects(&test, &consequent) {
                 return expr;
             }
         }
 
         if matches!(consequent.desc, ExpressionDesc::Bool(false)) {
-            if let Some(expr) = simplify_and_expression(&Expression::not(test.clone()), &alternate)
+            if let Some(expr) =
+                simplify_and_if_no_side_effects(&Expression::not(test.clone()), &alternate)
             {
                 return expr;
             }
@@ -1525,13 +1526,103 @@ fn raw_bin_expression(op: BinOp, left: Expression, right: Expression) -> Express
 const JS_SIMPLIFY_MAX_DEPTH: usize = 10;
 
 fn js_and_expression(left: Expression, right: Expression) -> Expression {
-    simplify_and_expression(&left, &right)
+    match (&left.desc, &right.desc) {
+        (ExpressionDesc::Var(left_vident), ExpressionDesc::Var(right_vident))
+            if same_vident(left_vident, right_vident) =>
+        {
+            return left;
+        }
+        (
+            ExpressionDesc::Var(left_vident),
+            ExpressionDesc::Bin(BinOp::And, right_left, _),
+        ) if matches!(&right_left.desc, ExpressionDesc::Var(right_vident) if same_vident(left_vident, right_vident)) =>
+        {
+            return right;
+        }
+        (
+            ExpressionDesc::Var(left_vident),
+            ExpressionDesc::Bin(BinOp::And, right_left, right_right),
+        ) if matches!(&right_right.desc, ExpressionDesc::Var(right_vident) if same_vident(left_vident, right_vident)) =>
+        {
+            return raw_bin_expression(
+                BinOp::And,
+                right_right.as_ref().clone(),
+                right_left.as_ref().clone(),
+            );
+        }
+        (
+            ExpressionDesc::Bin(BinOp::NotEqEq, left_lhs, left_rhs),
+            ExpressionDesc::Bin(BinOp::EqEqEq, right_lhs, right_rhs),
+        ) if matches!(
+            (
+                &left_lhs.desc,
+                &left_rhs.desc,
+                &right_lhs.desc,
+                &right_rhs.desc,
+            ),
+            (
+                ExpressionDesc::Var(left_vident),
+                ExpressionDesc::Undefined { .. },
+                ExpressionDesc::Var(right_vident),
+                ExpressionDesc::Str { .. } | ExpressionDesc::Number(_),
+            ) if same_vident(left_vident, right_vident)
+        ) =>
+        {
+            return right;
+        }
+        _ => {}
+    }
+
+    simplify_and_if_no_side_effects(&left, &right)
         .unwrap_or_else(|| raw_bin_expression(BinOp::And, left, right))
 }
 
 fn js_or_expression(left: Expression, right: Expression) -> Expression {
-    simplify_or_expression(&left, &right)
+    match (&left.desc, &right.desc) {
+        (ExpressionDesc::Var(left_vident), ExpressionDesc::Var(right_vident))
+            if same_vident(left_vident, right_vident) =>
+        {
+            return left;
+        }
+        (
+            ExpressionDesc::Var(left_vident),
+            ExpressionDesc::Bin(BinOp::Or, right_left, _),
+        ) if matches!(&right_left.desc, ExpressionDesc::Var(right_vident) if same_vident(left_vident, right_vident)) =>
+        {
+            return right;
+        }
+        (
+            ExpressionDesc::Var(left_vident),
+            ExpressionDesc::Bin(BinOp::Or, right_left, right_right),
+        ) if matches!(&right_right.desc, ExpressionDesc::Var(right_vident) if same_vident(left_vident, right_vident)) =>
+        {
+            return raw_bin_expression(
+                BinOp::Or,
+                right_right.as_ref().clone(),
+                right_left.as_ref().clone(),
+            );
+        }
+        _ => {}
+    }
+
+    simplify_or_if_no_side_effects(&left, &right)
         .unwrap_or_else(|| raw_bin_expression(BinOp::Or, left, right))
+}
+
+fn simplify_and_if_no_side_effects(left: &Expression, right: &Expression) -> Option<Expression> {
+    if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
+        simplify_and_expression(left, right)
+    } else {
+        None
+    }
+}
+
+fn simplify_or_if_no_side_effects(left: &Expression, right: &Expression) -> Option<Expression> {
+    if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
+        simplify_or_expression(left, right)
+    } else {
+        None
+    }
 }
 
 fn simplify_and_expression(left: &Expression, right: &Expression) -> Option<Expression> {
@@ -2873,6 +2964,48 @@ mod tests {
         assert!(matches!(
             js_and_expression(array_is_array, not_equals_undefined).desc,
             ExpressionDesc::Call(_, _, _)
+        ));
+    }
+
+    #[test]
+    fn test_js_and_keeps_duplicate_effectful_calls_like_ocaml() {
+        let call = Expression::call(
+            Expression::var(Ident::create_persistent("equal")),
+            vec![Expression::number(Number::int(1))],
+            CallInfo::default(),
+        );
+
+        assert!(matches!(
+            js_and_expression(call.clone(), call).desc,
+            ExpressionDesc::Bin(BinOp::And, _, _)
+        ));
+    }
+
+    #[test]
+    fn test_js_or_keeps_duplicate_effectful_calls_like_ocaml() {
+        let call = Expression::call(
+            Expression::var(Ident::create_persistent("equal")),
+            vec![Expression::number(Number::int(1))],
+            CallInfo::default(),
+        );
+
+        assert!(matches!(
+            js_or_expression(call.clone(), call).desc,
+            ExpressionDesc::Bin(BinOp::Or, _, _)
+        ));
+    }
+
+    #[test]
+    fn test_cond_keeps_duplicate_effectful_calls_instead_of_collapsing_to_and() {
+        let call = Expression::call(
+            Expression::var(Ident::create_persistent("equal")),
+            vec![Expression::number(Number::int(1))],
+            CallInfo::default(),
+        );
+
+        assert!(matches!(
+            Expression::cond(call.clone(), call, Expression::bool(false)).desc,
+            ExpressionDesc::Cond(_, _, _)
         ));
     }
 

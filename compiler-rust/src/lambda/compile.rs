@@ -20875,20 +20875,15 @@ let fib3 = n => {
     fn lowers_psome_not_nest_to_identity_optional_block() {
         let mut compiler = LambdaCompiler::new();
         let value = Ident::create_local("value");
-        let program = compiler.compile_program(&Lambda::prim(
+        let compiled = compiler.compile_expr(&Lambda::prim(
             Primitive::PsomeNotNest,
             vec![Lambda::var(value.clone())],
             Location::none(),
         ));
 
-        let [stmt] = program.block.as_slice() else {
-            panic!("expected a single expression statement");
-        };
-        match &stmt.desc {
-            StatementDesc::Exp(Expression {
-                desc: ExpressionDesc::OptionalBlock(inner, true),
-                ..
-            }) => {
+        assert!(compiled.prelude.is_empty());
+        match &compiled.expr.desc {
+            ExpressionDesc::OptionalBlock(inner, true) => {
                 assert!(matches!(
                     inner.as_ref(),
                     Expression {
@@ -20898,6 +20893,30 @@ let fib3 = n => {
                 ));
             }
             other => panic!("expected identity optional block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_psome_immediates_to_identity_optional_block_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Psome,
+            vec![Lambda::const_(Constant::int(3))],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        match &compiled.expr.desc {
+            ExpressionDesc::OptionalBlock(inner, true) => {
+                assert!(matches!(
+                    inner.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected identity optional block for an immediate, got {other:?}"),
         }
     }
 

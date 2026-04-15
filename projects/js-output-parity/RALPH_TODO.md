@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 516 / 657 JS snapshots passing, 0 compile errors, 141 output diffs
+**Status:** 517 / 657 JS snapshots passing, 0 compile errors, 140 output diffs
 
 ## Goal
 
@@ -35,11 +35,69 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **516 / 657**
+- JS snapshot parity: **517 / 657**
 - Compile errors: **0**
-- Output diffs: **141**
+- Output diffs: **140**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: port OCaml's `js_exp_make.and_`, `or_`, and `econd`
+  side-effect gate so Rust stops applying JS-expression `&&` / `||`
+  simplifications in effectful contexts where the OCaml backend keeps the
+  original short-circuit structure
+- Active backend focus for this slice is **Phase 4: Port JS Passes** from
+  `PLAN.md`, because the remaining emitted-JS drift sat in
+  `compiler-rust/src/js_ir/mod.rs`, where `js_and_expression`,
+  `js_or_expression`, and the `cond -> &&` fold were calling the recursive
+  simplifier unconditionally instead of matching OCaml's
+  `js_exp_make.simplify_and` / `simplify_or` guard on `no_side_effect`
+- OCaml reference:
+  `compiler/core/js_exp_make.ml`
+- Rust change:
+  - updated `compiler-rust/src/js_ir/mod.rs` so `js_and_expression` and
+    `js_or_expression` first follow OCaml's direct `Var`-dedup / reorder
+    cases and otherwise only invoke the recursive simplifier when both sides
+    are side-effect-free
+  - updated `Expression::cond` in `compiler-rust/src/js_ir/mod.rs` so the
+    `if test then expr else false` and `if test then false else expr` folds
+    also go through the same OCaml-style side-effect gate instead of
+    simplifying effectful duplicates
+  - added focused regressions covering duplicate effectful calls through
+    `&&`, `||`, and `cond`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_js_and_ -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml duplicate_effectful_calls -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact direct release repro for `tests/tests/src/option_repr_test.res`
+    via the checked-in `.ast` + `compiler-args` path, diffing
+    `tests/tests/lib/bs/src/option_repr_test.mjs` against
+    `/tmp/option_repr_test.mjs`
+  - unchanged broader guard repro for `tests/tests/src/test_zero_nullable.res`
+    via the same `.ast` path, diffing
+    `tests/tests/lib/bs/src/test_zero_nullable.mjs` against
+    `/tmp/test_zero_nullable.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `option_repr_test` still over-simplifies one duplicated
+    `Primitive_object.equal(...)` motif elsewhere in the Rust pipeline, so
+    this slice did not clear that direct repro by itself
+  - `test_zero_nullable` remained unchanged as a broader guard, confirming
+    the OCaml-aligned `and_/or_/econd` gating did not disturb the existing
+    nullable-option drift cluster
+  - the full authoritative sweep still improved by one file, confirming the
+    pass-level gate removes at least one real over-simplification without
+    reopening compile errors
+- Topline impact:
+  - JS snapshot parity: **516 / 657** -> **517 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **141** -> **140** (**-1**)
+- Keep this change because it directly matches OCaml's `js_exp_make`
+  side-effect gate for `and_`, `or_`, and `econd`, improves the authoritative
+  baseline, and isolates the remaining `option_repr_test` collapse as a later
+  pass interaction rather than a reason to keep Rust's core JS-expression
+  builder more aggressive than OCaml.
 
 Latest iteration on **2026-04-15**:
 
