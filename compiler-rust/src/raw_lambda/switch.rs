@@ -45,6 +45,18 @@ impl ActionStore {
         }
     }
 
+    /// Build an action store from an already-indexed action array without
+    /// re-running deduplication. This is used when `matching.rs` has already
+    /// assigned stable case indices and we must preserve those slots exactly.
+    pub fn from_exact_actions(acts: Vec<(bool, RawLambda)>) -> Self {
+        let next = acts.len();
+        ActionStore {
+            map: HashMap::new(),
+            acts,
+            next,
+        }
+    }
+
     fn add(&mut self, must_share: bool, act: RawLambda) -> usize {
         let i = self.next;
         self.acts.push((must_share, act));
@@ -1091,6 +1103,35 @@ pub fn test_sequence(
     let mut compiler = SwitchCompiler::new(false);
     let result = compiler.c_test(0, &arg, cases, &actions);
     wrap_handlers(result, handlers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_exact_actions_preserves_sparse_case_indices() {
+        let store = ActionStore::from_exact_actions(vec![
+            (false, RawLambda::const_(Constant::int(0))),
+            (false, RawLambda::const_(Constant::int(1))),
+            (true, RawLambda::const_(Constant::int(2))),
+        ]);
+        let shared = store.act_get_shared();
+
+        assert_eq!(shared.len(), 3);
+        match &shared[0] {
+            Shared::Single(lam) => assert!(matches!(lam, RawLambda::Lconst(_))),
+            Shared::Shared(_) => panic!("slot 0 unexpectedly marked shared"),
+        }
+        match &shared[1] {
+            Shared::Single(lam) => assert!(matches!(lam, RawLambda::Lconst(_))),
+            Shared::Shared(_) => panic!("slot 1 unexpectedly marked shared"),
+        }
+        match &shared[2] {
+            Shared::Shared(lam) => assert!(matches!(lam, RawLambda::Lconst(_))),
+            Shared::Single(_) => panic!("slot 2 unexpectedly lost shared marker"),
+        }
+    }
 }
 
 // ── Interval conversion (port of matching.ml's as_interval) ───────────

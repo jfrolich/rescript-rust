@@ -5848,20 +5848,18 @@ pub fn call_switcher(
 ) -> RawLambda {
     let (edges, (cases, store)) = as_interval(fail, low, high, int_lambda_list);
 
-    // Convert StoreExp to switch::ActionStore, preserving sharing info.
-    // zyva will handle the shared action processing (abstract_shared).
+    // Convert StoreExp to switch::ActionStore without re-deduplicating the
+    // already-indexed actions. The interval cases refer to StoreExp indices
+    // directly, so collapsing slots here would invalidate those indices.
     let acts = store.act_get_shared();
-    let mut action_store = crate::raw_lambda::switch::ActionStore::new();
-    for act in acts {
-        match act {
-            SharedAction::Single(a) => {
-                action_store.act_store(a);
-            }
-            SharedAction::Shared(a) => {
-                action_store.act_store_shared(a);
-            }
-        }
-    }
+    let action_store = crate::raw_lambda::switch::ActionStore::from_exact_actions(
+        acts.into_iter()
+            .map(|act| match act {
+                SharedAction::Single(a) => (false, a),
+                SharedAction::Shared(a) => (true, a),
+            })
+            .collect(),
+    );
 
     // Call the switch compiler — it handles shared actions internally via abstract_shared
     crate::raw_lambda::switch::zyva(

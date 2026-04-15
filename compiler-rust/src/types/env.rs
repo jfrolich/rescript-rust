@@ -1015,7 +1015,19 @@ impl Env {
                 }
             }
             Path::Pident(_) => path.clone(),
-            Path::Papply(_, _) => panic!("normalize_path_prefix called on Papply"),
+            Path::Papply(p1, p2) => {
+                // Papply paths arise from functor applications (e.g., Belt.Array(X)).
+                // OCaml's normalize_path_prefix asserts false here, but the Rust
+                // compiler can reach this path via `include Belt.Array`. Normalize
+                // both sub-paths gracefully instead of panicking.
+                let n1 = self.normalize_path(p1);
+                let n2 = self.normalize_path(p2);
+                if n1 == **p1 && n2 == **p2 {
+                    path.clone()
+                } else {
+                    Path::Papply(Box::new(n1), Box::new(n2))
+                }
+            }
         }
     }
 
