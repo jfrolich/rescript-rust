@@ -43,6 +43,73 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: keep empty shared-fallthrough nested `if` merges out of the
+  generic JS IR simplifier, and only collapse them in the final unit-return
+  function-tail printer path where OCaml actually has the trailing-return
+  context to prove the merge is safe
+- Active backend focus for this slice is **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; this is downstream `js_stmt_make` / `js_dump` behavior in
+  `compiler-rust/src/js_ir/mod.rs` and `compiler-rust/src/js_ir/printer.rs`,
+  not typedtree or lambda parity work
+- OCaml reference:
+  `compiler/core/js_stmt_make.ml` and `compiler/core/js_dump.ml`, where the
+  nested-guard collapse is tied to final statement / trailing-unit-return
+  context rather than being applied as a generic IR rewrite
+- Rust change:
+  - updated `compiler-rust/src/js_ir/mod.rs` so `simplify_if_statement(...)`
+    no longer merges nested `if` trees when the shared branch is empty; later
+    fallthrough statements can still change the emitted JS shape in that case
+  - updated `compiler-rust/src/js_ir/printer.rs` so the OCaml-aligned
+    function-tail merge still applies for `return_unit` bodies with a trailing
+    `return undefined`, even when the nested inner `if` falls through via an
+    empty else instead of an explicit `return undefined`
+  - added focused regression coverage in
+    `test_if_statement_preserves_single_block_wrapped_nested_if_when_shared_else_is_empty`
+    and
+    `test_print_unit_function_body_with_trailing_return_merges_nested_if_without_inner_else`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_preserves_single_block_wrapped_nested_if_when_shared_else_is_empty -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_unit_function_body_with_trailing_return_merges_nested_if_without_inner_else -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_unit_function_body_with_trailing_return_merges_nested_if_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res`, diffing
+    `/tmp/VariantPatternMatchingSpreadsWithPayloads.mjs` against the checked-in
+    snapshot
+  - direct guard repro for
+    `tests/tests/src/LargeUnboxedVariantOptimization.res`, diffing
+    `/tmp/LargeUnboxedVariantOptimization.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - direct sibling guard repro for
+    `tests/tests/src/VariantPatternMatchingSpreads.res`, diffing
+    `/tmp/VariantPatternMatchingSpreads.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` no longer
+    emits the Rust-only `typeof b !== "object" && b === "One"` collapse in
+    `doWithB`; the file now keeps the outer object split and the inner
+    literal-test nested `if`, matching the OCaml branch structure more closely
+  - `tests/tests/src/LargeUnboxedVariantOptimization.res` remained an exact
+    snapshot match, so the OCaml-backed tail-unit-return merge still works for
+    the original function-tail case that justified it
+  - `tests/tests/src/ExternalShadow.res` and
+    `tests/tests/src/VariantPatternMatchingSpreads.res` remained exact snapshot
+    matches as unchanged guards
+  - the full authoritative sweep in this worktree remains **520 / 657**
+    passing, **0** compile errors, and **137** output diffs
+- Topline impact:
+  - JS snapshot parity: **520 / 657** -> **520 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **137** -> **137** (**no change**)
+- Keep this change because the empty-else nested-guard collapse was a
+  Rust-only generic simplification; moving it into the final tail-printing
+  context preserves the OCaml-backed `LargeUnboxedVariantOptimization` merge
+  while removing the spurious `&&` collapse from
+  `VariantPatternMatchingSpreadsWithPayloads`.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: make the small untagged block-switch fast paths reuse OCaml's
   full runtime equality check for the first case, instead of collapsing
   one-case/default and two-case/complete object matches down to a plain

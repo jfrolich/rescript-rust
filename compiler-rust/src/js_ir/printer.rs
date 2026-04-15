@@ -545,15 +545,15 @@ impl JsPrinter {
 
             StatementDesc::ForRange(init, end, id, direction, body) => {
                 let id_name = self.ident_name(id);
-                let finish_binding = for_range_finish_needs_binding(end)
-                    .then(|| self.fresh_scoped_name(format!("{}_finish", convert_ident_name(id.name()))));
+                let finish_binding = for_range_finish_needs_binding(end).then(|| {
+                    self.fresh_scoped_name(format!("{}_finish", convert_ident_name(id.name())))
+                });
                 let mut reserved_printed_names = vec![id_name.clone()];
                 if let Some(finish_name) = &finish_binding {
                     reserved_printed_names.push(finish_name.clone());
                 }
 
                 self.with_local_ident_scope(&reserved_printed_names, |this| {
-
                     this.write("for ");
                     this.write_char('(');
 
@@ -2395,11 +2395,10 @@ impl JsPrinter {
                 self.print_function_tail_statement(&inner[0], return_unit);
             }
             StatementDesc::If(cond, then_, else_)
-                if else_.is_empty()
-                    && try_tail_nested_if_merge(then_).is_some() =>
+                if else_.is_empty() && try_tail_nested_if_merge(then_, return_unit).is_some() =>
             {
                 let (inner_cond, inner_then, inner_else) =
-                    try_tail_nested_if_merge(then_).expect("checked above");
+                    try_tail_nested_if_merge(then_, return_unit).expect("checked above");
                 self.print_function_tail_statement(
                     &Statement {
                         desc: StatementDesc::If(
@@ -2439,13 +2438,19 @@ impl JsPrinter {
     }
 }
 
-fn try_tail_nested_if_merge(block: &Block) -> Option<(Expression, Block, Block)> {
+fn try_tail_nested_if_merge(
+    block: &Block,
+    allow_empty_else: bool,
+) -> Option<(Expression, Block, Block)> {
     let [stmt] = block.as_slice() else {
         return None;
     };
     match &stmt.desc {
-        StatementDesc::Block(inner) => try_tail_nested_if_merge(inner),
-        StatementDesc::If(cond, then_, else_) if else_is_single_return_undefined(else_) => {
+        StatementDesc::Block(inner) => try_tail_nested_if_merge(inner, allow_empty_else),
+        StatementDesc::If(cond, then_, else_)
+            if else_is_single_return_undefined(else_)
+                || (allow_empty_else && else_.is_empty()) =>
+        {
             Some((cond.clone(), then_.clone(), else_.clone()))
         }
         _ => None,
@@ -2465,8 +2470,8 @@ fn try_function_body_trailing_return_nested_if_merge(
             try_function_body_trailing_return_nested_if_merge(&inner[0], trailing_return)
         }
         StatementDesc::If(cond, then_, else_) if else_.is_empty() => {
-            let (inner_cond, inner_then, inner_else) = try_tail_nested_if_merge(then_)?;
-            if !return_is_undefined_block(&inner_else) {
+            let (inner_cond, inner_then, inner_else) = try_tail_nested_if_merge(then_, true)?;
+            if !inner_else.is_empty() && !return_is_undefined_block(&inner_else) {
                 return None;
             }
             Some(Statement {
@@ -3358,9 +3363,8 @@ mod tests {
 
         assert!(rendered.contains("for (let i = 0, i_finish = finishExpr(1); i < i_finish; ++i)"));
         assert!(
-            rendered.contains(
-                "for (let i$1 = 0, i_finish$1 = finishExpr(2); i$1 < i_finish$1; ++i$1)"
-            ),
+            rendered
+                .contains("for (let i$1 = 0, i_finish$1 = finishExpr(2); i$1 < i_finish$1; ++i$1)"),
             "expected sibling loop finish temp to keep the OCaml-style suffix, got:\n{rendered}"
         );
     }
@@ -4458,6 +4462,62 @@ mod tests {
                                 Statement::return_(Expression::undefined(true)),
                             ],
                             vec![Statement::return_(Expression::undefined(true))],
+                        ))],
+                        vec![],
+                    )),
+                    Statement::return_(Expression::undefined(true)),
+                ],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
+        assert!(rendered.contains("doAction(state);"));
+        assert!(rendered.contains("return;"));
+        assert!(!rendered.contains("if (state.active)"));
+        assert!(!rendered.contains("else"));
+    }
+
+    #[test]
+    fn test_print_unit_function_body_with_trailing_return_merges_nested_if_without_inner_else() {
+        let handle_key = Ident::create_local("handleKey");
+        let state = Ident::create_local("state");
+        let key = Ident::create_local("key");
+        let do_action = Ident::create_local("doAction");
+        let key_is_space = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(key.clone()),
+            Expression::string("space"),
+        );
+        let state_active = Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(Expression::var(state.clone())),
+            "active".to_string(),
+            None,
+        ));
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: handle_key,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![state.clone(), key.clone()],
+                body: vec![
+                    Statement::new(StatementDesc::If(
+                        key_is_space,
+                        vec![Statement::new(StatementDesc::If(
+                            state_active,
+                            vec![
+                                Statement::exp(Expression::call(
+                                    Expression::var(do_action),
+                                    vec![Expression::var(state)],
+                                    CallInfo::default(),
+                                )),
+                                Statement::return_(Expression::undefined(true)),
+                            ],
+                            vec![],
                         ))],
                         vec![],
                     )),

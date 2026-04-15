@@ -683,14 +683,19 @@ impl Expression {
     /// Create a `.length` expression with OCaml-aligned constant folding.
     pub fn length(target: Expression, object: LengthObject) -> Self {
         match (&target.desc, object) {
-            (ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _, _), LengthObject::Array)
-                if expression_has_no_side_effects(&target) =>
-            {
+            (
+                ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _, _),
+                LengthObject::Array,
+            ) if expression_has_no_side_effects(&target) => {
                 Expression::number(Number::int(items.len() as i32))
             }
-            (ExpressionDesc::Str { txt, delim: Delim::None }, LengthObject::String) => {
-                Expression::number(Number::int(txt.len() as i32))
-            }
+            (
+                ExpressionDesc::Str {
+                    txt,
+                    delim: Delim::None,
+                },
+                LengthObject::String,
+            ) => Expression::number(Number::int(txt.len() as i32)),
             (
                 ExpressionDesc::Fun {
                     is_method, params, ..
@@ -1385,7 +1390,9 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
     }
 
     if let Some((nested_cond, nested_then, nested_else)) = single_if_block(&then_) {
-        if ocaml_eq_block(nested_else, &else_) {
+        // Keep empty shared fallthrough blocks intact here. They need function-tail
+        // context to merge safely, otherwise later statements can change the meaning.
+        if !nested_else.is_empty() && ocaml_eq_block(nested_else, &else_) {
             return simplify_if_statement(
                 js_and_expression(cond, nested_cond.clone()),
                 nested_then.clone(),
@@ -1393,7 +1400,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
             );
         }
 
-        if ocaml_eq_block(nested_then, &else_) {
+        if !nested_then.is_empty() && ocaml_eq_block(nested_then, &else_) {
             return simplify_if_statement(
                 js_and_expression(cond, Expression::not(nested_cond.clone())),
                 nested_else.clone(),
@@ -1403,7 +1410,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
     }
 
     if let Some((nested_cond, nested_then, nested_else)) = single_if_block(&else_) {
-        if ocaml_eq_block(&then_, nested_then) {
+        if !then_.is_empty() && !nested_then.is_empty() && ocaml_eq_block(&then_, nested_then) {
             return simplify_if_statement(
                 js_or_expression(cond, nested_cond.clone()),
                 then_,
@@ -1411,7 +1418,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
             );
         }
 
-        if ocaml_eq_block(&then_, nested_else) {
+        if !then_.is_empty() && !nested_else.is_empty() && ocaml_eq_block(&then_, nested_else) {
             return simplify_if_statement(
                 js_or_expression(cond, Expression::not(nested_cond.clone())),
                 then_,
@@ -1532,10 +1539,7 @@ fn js_and_expression(left: Expression, right: Expression) -> Expression {
         {
             return left;
         }
-        (
-            ExpressionDesc::Var(left_vident),
-            ExpressionDesc::Bin(BinOp::And, right_left, _),
-        ) if matches!(&right_left.desc, ExpressionDesc::Var(right_vident) if same_vident(left_vident, right_vident)) =>
+        (ExpressionDesc::Var(left_vident), ExpressionDesc::Bin(BinOp::And, right_left, _)) if matches!(&right_left.desc, ExpressionDesc::Var(right_vident) if same_vident(left_vident, right_vident)) =>
         {
             return right;
         }
@@ -1584,10 +1588,7 @@ fn js_or_expression(left: Expression, right: Expression) -> Expression {
         {
             return left;
         }
-        (
-            ExpressionDesc::Var(left_vident),
-            ExpressionDesc::Bin(BinOp::Or, right_left, _),
-        ) if matches!(&right_left.desc, ExpressionDesc::Var(right_vident) if same_vident(left_vident, right_vident)) =>
+        (ExpressionDesc::Var(left_vident), ExpressionDesc::Bin(BinOp::Or, right_left, _)) if matches!(&right_left.desc, ExpressionDesc::Var(right_vident) if same_vident(left_vident, right_vident)) =>
         {
             return right;
         }
@@ -2359,10 +2360,7 @@ mod tests {
 
     #[test]
     fn test_string_length_folds_plain_string_literals_like_ocaml() {
-        let expr = Expression::length(
-            Expression::string("hello"),
-            LengthObject::String,
-        );
+        let expr = Expression::length(Expression::string("hello"), LengthObject::String);
 
         assert!(matches!(
             expr.desc,
@@ -2375,10 +2373,7 @@ mod tests {
         let expr = Expression::length(
             Expression::new(ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![
-                    Ident::create_local("x"),
-                    Ident::create_local("y"),
-                ],
+                params: vec![Ident::create_local("x"), Ident::create_local("y")],
                 body: vec![],
                 env: Default::default(),
                 return_unit: false,
@@ -2799,7 +2794,7 @@ mod tests {
     }
 
     #[test]
-    fn test_if_statement_merges_single_block_wrapped_nested_if_like_ocaml() {
+    fn test_if_statement_preserves_single_block_wrapped_nested_if_when_shared_else_is_empty() {
         let key = Ident::create_local("key");
         let dispatch = Expression::bin(
             BinOp::Or,
@@ -2829,16 +2824,47 @@ mod tests {
             vec![],
         );
 
-        let (test, then_block, else_block) = match &stmt.desc {
-            StatementDesc::If(test, then_block, else_block) => (test, then_block, else_block),
-            StatementDesc::Block(block) => single_if_block(block)
-                .unwrap_or_else(|| panic!("expected the nested if to collapse into a single if")),
-            other => panic!("expected the nested if to collapse into a single if, got {other:?}"),
+        let StatementDesc::If(test, then_block, else_block) = &stmt.desc else {
+            panic!("expected the outer guard to stay nested, got {stmt:?}");
         };
 
         assert!(else_block.is_empty());
         assert!(matches!(
             &test.desc,
+            ExpressionDesc::Bin(BinOp::Or, left, right)
+                if matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Bin(BinOp::EqEqEq, lhs, rhs),
+                        ..
+                    } if matches!(
+                        (&lhs.desc, &rhs.desc),
+                        (
+                            ExpressionDesc::Var(VIdent::Id(id)),
+                            ExpressionDesc::Str { txt, .. }
+                        ) if id.same(&key) && txt == "space"
+                    )
+                ) && matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Bin(BinOp::EqEqEq, lhs, rhs),
+                        ..
+                    } if matches!(
+                        (&lhs.desc, &rhs.desc),
+                        (
+                            ExpressionDesc::Var(VIdent::Id(id)),
+                            ExpressionDesc::Str { txt, .. }
+                        ) if id.same(&key) && txt == "a"
+                    )
+                )
+        ));
+        let (inner_test, inner_then, inner_else) = match single_if_block(then_block) {
+            Some(parts) => parts,
+            None => panic!("expected the then branch to keep the nested if"),
+        };
+        assert!(inner_else.is_empty());
+        assert!(matches!(
+            &inner_test.desc,
             ExpressionDesc::Bin(BinOp::EqEqEq, left, right)
                 if matches!(
                     left.as_ref(),
@@ -2855,7 +2881,7 @@ mod tests {
                 )
         ));
         assert!(matches!(
-            then_block.as_slice(),
+            inner_then.as_slice(),
             [Statement {
                 desc: StatementDesc::Return(Expression {
                     desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
@@ -3023,7 +3049,11 @@ mod tests {
                     )))),
                     Expression::string("object"),
                 ),
-                Expression::bin(BinOp::NotEqEq, Expression::var(value.clone()), Expression::null()),
+                Expression::bin(
+                    BinOp::NotEqEq,
+                    Expression::var(value.clone()),
+                    Expression::null(),
+                ),
             ),
             Expression::not(Expression::call(
                 Expression::new(ExpressionDesc::StaticIndex(
@@ -3105,8 +3135,7 @@ mod tests {
         };
         let space = literal("space");
         let rest = [
-            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b",
-            "a",
+            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b", "a",
         ]
         .into_iter()
         .map(literal)
