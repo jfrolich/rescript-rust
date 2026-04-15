@@ -219,7 +219,7 @@ pub struct TypeContext<'a> {
     resolved_child_module_path_cache: RefCell<ahash::AHashMap<(Path, String), Path>>,
 
     /// Cached full normalize_path results keyed by environment identity.
-    normalized_path_full_cache: RefCell<ahash::AHashMap<(Option<u64>, Path), Path>>,
+    normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
 
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
@@ -580,7 +580,7 @@ impl<'a> TypeContext<'a> {
     /// Cache a normalized path for a specific environment identity.
     pub(crate) fn register_normalized_path_full(
         &self,
-        env_id: Option<u64>,
+        env_id: u64,
         original_path: &Path,
         normalized_path: Path,
     ) {
@@ -592,7 +592,7 @@ impl<'a> TypeContext<'a> {
     /// Look up a cached normalized path for a specific environment identity.
     pub(crate) fn find_normalized_path_full(
         &self,
-        env_id: Option<u64>,
+        env_id: u64,
         original_path: &Path,
     ) -> Option<Path> {
         self.normalized_path_full_cache

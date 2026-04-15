@@ -220,6 +220,7 @@ fn convert_located_stridx(loc: &Located<StrIdx>, arena: &ParseArena) -> Located<
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PackageCoercionCacheKey {
+    env_id: u64,
     packed_module_path: Path,
     package_path: Path,
     package_lids: Vec<Longident>,
@@ -13859,6 +13860,7 @@ fn type_pack(
     };
     let package_coercion_key = if pack_args_rebuilt_from_path {
         packed_module_path.as_ref().map(|packed_module_path| PackageCoercionCacheKey {
+            env_id: env.id(),
             packed_module_path: packed_module_path.clone(),
             package_path: pack_path.clone(),
             package_lids: pack_lids.clone(),
