@@ -11711,17 +11711,22 @@ fn inline_record_decl_from_variant_type<'a>(
                 return None;
             };
             let inline_params = inline_record_type_params(ctx, &type_decl.type_params, labels);
+            let inline_repr = if type_decl.type_unboxed.unboxed {
+                crate::types::RecordRepresentation::RecordUnboxed(false)
+            } else {
+                crate::types::RecordRepresentation::RecordInlined {
+                    tag: block_tag,
+                    name: cstr_name.to_string(),
+                    num_nonconsts,
+                    attrs: cd.cd_attributes.clone(),
+                }
+            };
             return Some(crate::types::TypeDeclaration {
                 type_params: inline_params.clone(),
                 type_arity: inline_params.len() as i32,
                 type_kind: crate::types::TypeKind::TypeRecord(
                     labels.clone(),
-                    crate::types::RecordRepresentation::RecordInlined {
-                        tag: block_tag,
-                        name: cstr_name.to_string(),
-                        num_nonconsts,
-                        attrs: cd.cd_attributes.clone(),
-                    },
+                    inline_repr,
                 ),
                 type_private: type_decl.type_private,
                 type_manifest: None,
@@ -16387,11 +16392,15 @@ fn lookup_constructor_in_module<'b>(
                                             type_arity: inline_params.len() as i32,
                                             type_kind: crate::types::TypeKind::TypeRecord(
                                                 labels.clone(),
-                                                crate::types::RecordRepresentation::RecordInlined {
-                                                    tag: block_idx,
-                                                    name: cstr_name.to_string(),
-                                                    num_nonconsts,
-                                                    attrs: cd.cd_attributes.clone(),
+                                                if type_decl.type_unboxed.unboxed {
+                                                    crate::types::RecordRepresentation::RecordUnboxed(false)
+                                                } else {
+                                                    crate::types::RecordRepresentation::RecordInlined {
+                                                        tag: block_idx,
+                                                        name: cstr_name.to_string(),
+                                                        num_nonconsts,
+                                                        attrs: cd.cd_attributes.clone(),
+                                                    }
                                                 },
                                             ),
                                             type_private: type_decl.type_private,
@@ -18471,11 +18480,15 @@ fn lookup_constructor_by_expected_type<'b>(
                             type_arity: inline_params.len() as i32,
                             type_kind: crate::types::TypeKind::TypeRecord(
                                 copied_labels,
-                                crate::types::RecordRepresentation::RecordInlined {
-                                    tag: block_idx,
-                                    name: cstr_name.to_string(),
-                                    num_nonconsts,
-                                    attrs: cd.cd_attributes.clone(),
+                                if concrete_type_decl.type_unboxed.unboxed {
+                                    crate::types::RecordRepresentation::RecordUnboxed(false)
+                                } else {
+                                    crate::types::RecordRepresentation::RecordInlined {
+                                        tag: block_idx,
+                                        name: cstr_name.to_string(),
+                                        num_nonconsts,
+                                        attrs: cd.cd_attributes.clone(),
+                                    }
                                 },
                             ),
                             type_private: concrete_type_decl.type_private,
@@ -19900,11 +19913,15 @@ fn lookup_type_decl_for_path<'a>(
                                 type_arity: inline_params.len() as i32,
                                 type_kind: crate::types::TypeKind::TypeRecord(
                                     labels.clone(),
-                                    crate::types::RecordRepresentation::RecordInlined {
-                                        tag: block_idx,
-                                        name: type_name.to_string(),
-                                        num_nonconsts,
-                                        attrs: cd.cd_attributes.clone(),
+                                    if parent_decl.type_unboxed.unboxed {
+                                        crate::types::RecordRepresentation::RecordUnboxed(false)
+                                    } else {
+                                        crate::types::RecordRepresentation::RecordInlined {
+                                            tag: block_idx,
+                                            name: type_name.to_string(),
+                                            num_nonconsts,
+                                            attrs: cd.cd_attributes.clone(),
+                                        }
                                     },
                                 ),
                                 type_private: parent_decl.type_private,
