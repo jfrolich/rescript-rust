@@ -1,7 +1,24 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 522 / 657 with 8 unrelated compile errors and 127 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 521 / 657 with 8 unrelated compile errors and 128 output diffs
+
+## Branch Reset (2026-04-16)
+
+The `typechecker-performance` branch was hard-reset to the tip of the `demo`
+branch (`a83f51687`). The demo branch merged `typechecker-performance`,
+`integrated-build`, and additional JS output fixes into one lineage. Your
+uncommitted JS parity work was stashed and re-applied cleanly on top.
+
+**What this means for you:**
+- The git history now includes commits from `integrated-build` and other
+  merged branches (build system changes, SimplifyEnv refactors, etc.)
+- All prior JS output parity commits are still present (they were in the merge)
+- **Parity likely dropped** because the merge had significant file overlap and
+  some JS output fixes were lost in conflict resolution. You may need to
+  re-apply fixes that were previously working.
+- You should **rebuild the Rust compiler** and **re-run the full parity suite**
+  to get a fresh baseline before continuing work, since the base has changed
 
 ## Goal
 
@@ -47,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **522 / 657**
+- JS snapshot parity: **521 / 657**
 - Compile errors: **8**
-- Output diffs: **127**
+- Output diffs: **128**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -59,10 +76,64 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `522 / 657` unless the
+Do **not** replace the recorded project baseline with `521 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: keep OCaml's explicit boolean-false literal-membership guard
+  in nested untagged refinements, but narrow the earlier positive
+  `return undefined` preservation so only await-bearing tails stay in the
+  positive `if (cond) { ...; return; }` form
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this change stays in `compiler-rust/src/js_ir/mod.rs`, not a
+  printer rewrite
+- OCaml reference:
+  `compiler/core/js_stmt_make.ml` and `compiler/core/js_exp_make.ml`
+  for nested `if_` merges and the emitted guard shapes visible in the checked-in
+  `Import.mjs` and `UntaggedVariants.mjs` snapshots
+- Rust change:
+  - added `preserves_literal_membership_guard(...)` plus
+    `collect_same_var_literal_membership_terms(...)` so the
+    `x === undefined || x === null || x === false || x === true` guard is kept
+    when the nested refinement is specifically `x === false`
+  - replaced the broader
+    `statement_has_nontrivial_prefix_output(...)` heuristic with
+    `statement_contains_await(...)` / `expression_contains_await(...)`, so only
+    await-bearing prefixes keep the positive `return undefined` tail shape
+  - added focused regression coverage in
+    `test_if_statement_keeps_explicit_literal_membership_guards`,
+    `test_if_statement_keeps_positive_await_return_tail`, and
+    `test_if_statement_rewrites_sync_return_undefined_tail_to_negative_guard`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_ -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_keeps_positive_await_return_tail -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 30 ./scripts/test_js_single.sh Import`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants --diff`
+  - `timeout 30 ./scripts/test_js_single.sh reasonReactRouter --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/Import.res` still matches its checked-in snapshot; the
+    async `await import(...)` option tail keeps the OCaml-aligned positive guard
+  - `tests/tests/src/UntaggedVariants.res` now matches again for
+    `ObjectAndNull.printLength`, and the earlier `match$1 === false`
+    literal-membership collapse is gone; one remaining hunk is left in the
+    deeper nested `typeof match$4 === "number"` return tail
+  - `tests/tests/src/ExternalShadow.res` remained exact, and
+    `reasonReactRouter` still shows broader control-flow drift outside this
+    narrowed slice
+- Topline impact in this current worktree:
+  - JS snapshot parity: **521 / 657** -> **521 / 657** (**no change**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **128** -> **128** (**no change**)
+- Keep this change because both adjustments remove Rust-only guard-shape
+  rewrites in `js_ir`: synchronous tails now fall back to OCaml's negative
+  early-return form, while the explicit boolean-false refinement guard stays
+  materialized where the checked-in OCaml snapshot still emits it.
 
 Latest iteration on **2026-04-16**:
 

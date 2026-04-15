@@ -1430,9 +1430,15 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
 
     if let Some((nested_cond, nested_then, nested_else)) = single_if_block(&then_) {
         let preserve_refinement_guard = preserves_typeof_refinement_guard(&cond, nested_cond);
+        let preserve_literal_membership_guard =
+            preserves_literal_membership_guard(&cond, nested_cond);
         // Keep empty shared fallthrough blocks intact here. They need function-tail
         // context to merge safely, otherwise later statements can change the meaning.
-        if !preserve_refinement_guard && !nested_else.is_empty() && ocaml_eq_block(nested_else, &else_) {
+        if !preserve_refinement_guard
+            && !preserve_literal_membership_guard
+            && !nested_else.is_empty()
+            && ocaml_eq_block(nested_else, &else_)
+        {
             return simplify_if_statement(
                 js_and_expression(cond, nested_cond.clone()),
                 nested_then.clone(),
@@ -1441,6 +1447,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         }
 
         if !preserve_refinement_guard
+            && !preserve_literal_membership_guard
             && !nested_then.is_empty()
             && ocaml_eq_block(nested_then, &else_)
         {
@@ -1556,14 +1563,6 @@ fn single_statement(block: &Block) -> Option<&Statement> {
     Some(stmt)
 }
 
-fn statement_has_nontrivial_prefix_output(stmt: &Statement) -> bool {
-    match &stmt.desc {
-        StatementDesc::Block(inner) => inner.iter().any(statement_has_nontrivial_prefix_output),
-        StatementDesc::Exp(expr) => !expression_stmt_is_trivial(expr),
-        _ => true,
-    }
-}
-
 fn preserves_positive_return_undefined_tail(then_: &Block, else_ret: &Expression) -> bool {
     if !matches!(else_ret.desc, ExpressionDesc::Undefined { .. }) {
         return false;
@@ -1575,7 +1574,119 @@ fn preserves_positive_return_undefined_tail(then_: &Block, else_ret: &Expression
         return false;
     }
 
-    prefix.iter().any(statement_has_nontrivial_prefix_output)
+    prefix.iter().any(statement_contains_await)
+}
+
+fn statement_contains_await(stmt: &Statement) -> bool {
+    match &stmt.desc {
+        StatementDesc::Block(inner) => inner.iter().any(statement_contains_await),
+        StatementDesc::Variable(decl) => decl.value.as_ref().is_some_and(expression_contains_await),
+        StatementDesc::Exp(expr)
+        | StatementDesc::Return(expr)
+        | StatementDesc::Throw(expr) => expression_contains_await(expr),
+        StatementDesc::If(cond, then_block, else_block) => {
+            expression_contains_await(cond)
+                || then_block.iter().any(statement_contains_await)
+                || else_block.iter().any(statement_contains_await)
+        }
+        StatementDesc::While(cond, body) => {
+            expression_contains_await(cond) || body.iter().any(statement_contains_await)
+        }
+        StatementDesc::ForRange(start, finish, _, _, body) => {
+            start.as_ref().is_some_and(expression_contains_await)
+                || expression_contains_await(finish)
+                || body.iter().any(statement_contains_await)
+        }
+        StatementDesc::IntSwitch(expr, clauses, default) => {
+            expression_contains_await(expr)
+                || clauses
+                    .iter()
+                    .any(|(_, clause)| clause.body.iter().any(statement_contains_await))
+                || default
+                    .as_ref()
+                    .is_some_and(|block| block.iter().any(statement_contains_await))
+        }
+        StatementDesc::StringSwitch(expr, clauses, default) => {
+            expression_contains_await(expr)
+                || clauses
+                    .iter()
+                    .any(|clause| clause.clause.body.iter().any(statement_contains_await))
+                || default
+                    .as_ref()
+                    .is_some_and(|block| block.iter().any(statement_contains_await))
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            body.iter().any(statement_contains_await)
+                || catch
+                    .as_ref()
+                    .is_some_and(|(_, block)| block.iter().any(statement_contains_await))
+                || finally
+                    .as_ref()
+                    .is_some_and(|block| block.iter().any(statement_contains_await))
+        }
+        StatementDesc::Continue | StatementDesc::Break | StatementDesc::Debugger => false,
+    }
+}
+
+fn expression_contains_await(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Await(_) => true,
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::Spread(inner) => expression_contains_await(inner),
+        ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::In(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right)
+        | ExpressionDesc::FlatCall(left, right) => {
+            expression_contains_await(left) || expression_contains_await(right)
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            expression_contains_await(test)
+                || expression_contains_await(consequent)
+                || expression_contains_await(alternate)
+        }
+        ExpressionDesc::Call(func, args, _) => {
+            expression_contains_await(func) || args.iter().any(expression_contains_await)
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            expression_contains_await(tag)
+                || strings.iter().any(expression_contains_await)
+                || values.iter().any(expression_contains_await)
+        }
+        ExpressionDesc::StaticIndex(target, _, _) => expression_contains_await(target),
+        ExpressionDesc::New(target, args) => {
+            expression_contains_await(target)
+                || args
+                    .as_ref()
+                    .is_some_and(|args| args.iter().any(expression_contains_await))
+        }
+        ExpressionDesc::Array(items, _) => items.iter().any(expression_contains_await),
+        ExpressionDesc::Object(dup, props) => {
+            dup.as_deref().is_some_and(expression_contains_await)
+                || props
+                    .iter()
+                    .any(|(_, value)| expression_contains_await(value))
+        }
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            items.iter().any(expression_contains_await) || expression_contains_await(tag)
+        }
+        ExpressionDesc::Fun { .. }
+        | ExpressionDesc::Var(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::RawJsCode(_)
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null => false,
+    }
 }
 
 fn expression_stmt_is_trivial(expr: &Expression) -> bool {
@@ -1602,6 +1713,73 @@ fn preserves_typeof_refinement_guard(outer_cond: &Expression, inner_cond: &Expre
 
     literal_matches_type_name(literal, type_name)
         || (type_name == "object" && matches!(literal.desc, ExpressionDesc::Null))
+}
+
+fn preserves_literal_membership_guard(outer_cond: &Expression, inner_cond: &Expression) -> bool {
+    let Some((inner_op, inner_vident, inner_literal)) = strict_var_literal_comparison(inner_cond)
+    else {
+        return false;
+    };
+    if inner_op != BinOp::EqEqEq {
+        return false;
+    }
+    if !matches!(inner_literal.desc, ExpressionDesc::Bool(false)) {
+        return false;
+    }
+
+    let mut saw_inner_literal = false;
+    let mut saw_other_literal = false;
+    if !collect_same_var_literal_membership_terms(
+        outer_cond,
+        inner_vident,
+        inner_literal,
+        &mut saw_inner_literal,
+        &mut saw_other_literal,
+    ) {
+        return false;
+    }
+
+    saw_inner_literal && saw_other_literal
+}
+
+fn collect_same_var_literal_membership_terms(
+    expr: &Expression,
+    expected_vident: &VIdent,
+    inner_literal: &Expression,
+    saw_inner_literal: &mut bool,
+    saw_other_literal: &mut bool,
+) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Bin(BinOp::Or, left, right) => {
+            collect_same_var_literal_membership_terms(
+                left,
+                expected_vident,
+                inner_literal,
+                saw_inner_literal,
+                saw_other_literal,
+            ) && collect_same_var_literal_membership_terms(
+                right,
+                expected_vident,
+                inner_literal,
+                saw_inner_literal,
+                saw_other_literal,
+            )
+        }
+        _ => {
+            let Some((op, vident, literal)) = strict_var_literal_comparison(expr) else {
+                return false;
+            };
+            if op != BinOp::EqEqEq || !same_vident(vident, expected_vident) {
+                return false;
+            }
+            if ocaml_eq_expression(literal, inner_literal) {
+                *saw_inner_literal = true;
+            } else {
+                *saw_other_literal = true;
+            }
+            true
+        }
+    }
 }
 
 fn negate_condition(cond: Expression) -> Expression {
@@ -2991,13 +3169,97 @@ mod tests {
     }
 
     #[test]
-    fn test_if_statement_keeps_positive_multi_statement_return_tail() {
-        let cond = Expression::var(Ident::create_local("value"));
-        let effect = Statement::exp(Expression::call(
-            Expression::var(Ident::create_local("load")),
+    fn test_if_statement_keeps_explicit_literal_membership_guards() {
+        let value = Ident::create_local("value");
+        let outer_cond = raw_bin_expression(
+            BinOp::Or,
+            raw_bin_expression(
+                BinOp::Or,
+                Expression::bin(
+                    BinOp::EqEqEq,
+                    Expression::var(value.clone()),
+                    Expression::undefined(true),
+                ),
+                Expression::bin(
+                    BinOp::EqEqEq,
+                    Expression::var(value.clone()),
+                    Expression::null(),
+                ),
+            ),
+            raw_bin_expression(
+                BinOp::Or,
+                Expression::bin(
+                    BinOp::EqEqEq,
+                    Expression::var(value.clone()),
+                    Expression::bool(false),
+                ),
+                Expression::bin(
+                    BinOp::EqEqEq,
+                    Expression::var(value.clone()),
+                    Expression::bool(true),
+                ),
+            ),
+        );
+        let inner_cond = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(value.clone()),
+            Expression::bool(false),
+        );
+        let success = Expression::call(
+            Expression::var(Ident::create_local("success")),
             vec![],
             CallInfo::default(),
-        ));
+        );
+        let failure_expr = Expression::call(
+            Expression::var(Ident::create_local("failure")),
+            vec![],
+            CallInfo::default(),
+        );
+        let success_block = vec![
+            Statement::exp(success),
+            Statement::return_(Expression::undefined(true)),
+        ];
+        let failure_block = vec![
+            Statement::exp(failure_expr.clone()),
+            Statement::return_(Expression::undefined(true)),
+        ];
+
+        assert!(
+            preserves_literal_membership_guard(&outer_cond, &inner_cond),
+            "expected literal membership detection to trigger for {outer_cond:#?} / {inner_cond:#?}"
+        );
+
+        let stmt = Statement::if_(
+            outer_cond.clone(),
+            vec![Statement::new(StatementDesc::If(
+                inner_cond.clone(),
+                success_block,
+                failure_block.clone(),
+            ))],
+            failure_block,
+        );
+
+        let StatementDesc::If(test, then_block, else_block) = &stmt.desc else {
+            panic!("expected the explicit outer literal membership guard to stay materialized");
+        };
+        assert!(ocaml_eq_expression(test, &outer_cond));
+        let Some((nested_test, _, nested_else)) = single_if_block(then_block) else {
+            panic!("expected the literal membership branch to keep the nested refinement");
+        };
+        assert!(ocaml_eq_expression(nested_test, &inner_cond));
+        assert!(ocaml_eq_block(nested_else, else_block));
+    }
+
+    #[test]
+    fn test_if_statement_keeps_positive_await_return_tail() {
+        let cond = Expression::var(Ident::create_local("value"));
+        let effect = Statement::exp(Expression::new(ExpressionDesc::Await(Box::new(
+            Expression::call(
+                Expression::var(Ident::create_local("load")),
+                vec![],
+                CallInfo::default(),
+            ),
+        ))));
         let then_block = vec![
             effect,
             Statement::return_(Expression::undefined(true)),
@@ -3010,8 +3272,76 @@ mod tests {
             panic!("expected the positive return tail to stay as an if statement: {stmt:#?}");
         };
         assert!(ocaml_eq_expression(test, &cond));
-        assert!(ocaml_eq_block(kept_then, &then_block));
+        assert!(matches!(
+            kept_then.as_slice(),
+            [
+                Statement {
+                    desc: StatementDesc::Exp(Expression {
+                        desc: ExpressionDesc::Await(_),
+                        ..
+                    }),
+                    ..
+                },
+                Statement {
+                    desc: StatementDesc::Return(Expression {
+                        desc: ExpressionDesc::Undefined { .. },
+                        ..
+                    }),
+                    ..
+                }
+            ]
+        ));
         assert!(ocaml_eq_block(kept_else, &else_block));
+    }
+
+    #[test]
+    fn test_if_statement_rewrites_sync_return_undefined_tail_to_negative_guard() {
+        let cond = Expression::var(Ident::create_local("value"));
+        let effect = Statement::exp(Expression::call(
+            Expression::var(Ident::create_local("load")),
+            vec![],
+            CallInfo::default(),
+        ));
+        let then_block = vec![
+            effect,
+            Statement::return_(Expression::undefined(true)),
+        ];
+        let else_block = vec![Statement::return_(Expression::undefined(true))];
+
+        let stmt = Statement::if_(cond.clone(), then_block, else_block);
+
+        let StatementDesc::Block(block) = &stmt.desc else {
+            panic!("expected a negative guard block for sync tails: {stmt:#?}");
+        };
+        let [guard, fallthrough, return_stmt] = block.as_slice() else {
+            panic!("expected guard + fallthrough effect + trailing return");
+        };
+        assert!(matches!(
+            &guard.desc,
+            StatementDesc::If(test, then_block, else_block)
+                if matches!(
+                    &test.desc,
+                    ExpressionDesc::JsNot(inner)
+                        if ocaml_eq_expression(inner, &cond)
+                ) && matches!(
+                    then_block.as_slice(),
+                    [Statement {
+                        desc: StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Undefined { .. },
+                            ..
+                        }),
+                        ..
+                    }]
+                ) && else_block.is_empty()
+        ));
+        assert!(matches!(fallthrough.desc, StatementDesc::Exp(_)));
+        assert!(matches!(
+            return_stmt.desc,
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Undefined { .. },
+                ..
+            })
+        ));
     }
 
     #[test]
