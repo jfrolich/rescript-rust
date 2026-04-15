@@ -640,11 +640,17 @@ impl LambdaCompiler {
             }
             Lambda::Lassign(id, value) => {
                 let compiled = self.compile_expr(value);
-                let prelude = compiled.prelude;
-                let assign = Expression::bin(BinOp::Eq, Expression::var(id.clone()), compiled.expr);
+                let mut prelude = compiled.prelude;
+                if !block_terminates(&prelude) {
+                    prelude.push(Statement::exp(Expression::bin(
+                        BinOp::Eq,
+                        Expression::var(id.clone()),
+                        compiled.expr,
+                    )));
+                }
                 Compiled {
                     prelude,
-                    expr: assign,
+                    expr: Expression::undefined(false),
                 }
             }
         }
@@ -21481,6 +21487,49 @@ let fib3 = n => {
             !rendered.contains("let even;") && !rendered.contains("let odd;"),
             "unexpected recursive placeholders remained:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn lassign_expression_lowers_to_statement_prelude_and_unit_value() {
+        let mut compiler = LambdaCompiler::new();
+        let cell = Ident::create_local("cell");
+        let compiled = compiler.compile_expr(&Lambda::Lassign(
+            cell.clone(),
+            Box::new(Lambda::prim(
+                Primitive::Poffsetint(1),
+                vec![Lambda::var(cell.clone())],
+                Location::none(),
+            )),
+        ));
+
+        assert_eq!(print_block(&compiled.prelude), "cell = cell + 1 | 0;");
+        assert!(matches!(
+            compiled.expr,
+            Expression {
+                desc: ExpressionDesc::Undefined { is_unit: false },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn let_bindings_of_unit_lassigns_emit_effects_before_undefined_declarations() {
+        let mut compiler = LambdaCompiler::new();
+        let u = Ident::create_local("u");
+        let v = Ident::create_local("v");
+        let block = compiler.compile_let_binding(
+            LetKind::Strict,
+            &v,
+            &Lambda::Lassign(
+                u.clone(),
+                Box::new(Lambda::prim(
+                    Primitive::Poffsetint(1),
+                    vec![Lambda::var(u.clone())],
+                    Location::none(),
+                )),
+            ),
+        );
+        assert_eq!(print_block(&block), "u = u + 1 | 0;\n\nlet v;");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 503 / 657 JS snapshots passing, 0 compile errors, 154 output diffs
+**Status:** 504 / 657 JS snapshots passing, 0 compile errors, 153 output diffs
 
 ## Goal
 
@@ -35,11 +35,60 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **503 / 657**
+- JS snapshot parity: **504 / 657**
 - Compile errors: **0**
-- Output diffs: **154**
+- Output diffs: **153**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: lower `Lassign` through the same statement-plus-`unit` path as
+  OCaml's `compile_assign`, so let-bound and exported unit assignments stop
+  materializing value-producing JS assignment expressions like
+  `let v = u = u + 1 | 0`
+- Active backend focus for this slice is **Phase 3: Port JS IR Lowering And
+  Metadata** from `PLAN.md`, because the optimized-lambda boundary was already
+  green and the emitted-JS drift sat in Rust's `Lambda::Lassign` lowering in
+  `compiler-rust/src/lambda/compile.rs`, where assignments were still compiled
+  as expression values instead of following OCaml's statement/value split
+- OCaml reference:
+  `compiler/core/lam_compile.ml` and
+  `compiler/core/js_output.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so `Lambda::Lassign` emits
+    the assignment into the prelude and returns `undefined`, matching OCaml's
+    `compile_assign` / `output_of_block_and_expression` unit semantics instead
+    of treating assignment as a value-producing JS expression
+  - added focused regressions
+    `lassign_expression_lowers_to_statement_prelude_and_unit_value`
+    and
+    `let_bindings_of_unit_lassigns_emit_effects_before_undefined_declarations`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lassign_expression_lowers_to_statement_prelude_and_unit_value -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml let_bindings_of_unit_lassigns_emit_effects_before_undefined_declarations -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact direct release repro for `tests/tests/src/test_incr_ref.res`,
+    diffing `/tmp/test_incr_ref.mjs` against the checked-in snapshot
+  - unchanged broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_incr_ref.res` now matches exactly again: Rust emits
+    the mutation as `u = u + 1 | 0;` followed by `let v;`, matching the
+    checked-in OCaml snapshot instead of exporting the assignment result
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - the full authoritative sweep improved by one file, confirming the unit
+    assignment/export cluster shrank without perturbing the stable guard
+- Topline impact:
+  - JS snapshot parity: **503 / 657** -> **504 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **154** -> **153** (**-1**)
+- Keep this change because it matches OCaml's `compile_assign` lowering for
+  `Lassign`, fixes a real emitted-JS semantic drift on `test_incr_ref`, and
+  improves the authoritative baseline without perturbing the stable
+  `ExternalShadow` guard.
 
 Latest iteration on **2026-04-15**:
 
