@@ -6064,55 +6064,6 @@ fn type_application(
                 } else {
                     tctx.set_unify_env(env);
                 }
-                let preserved_local_ident_flat_alias = if !enforce_optional {
-                    match &typed_arg.exp_desc {
-                        ExpressionDesc::Texp_ident(Path::Pident(_), _, desc) => {
-                            let desc_repr = ctx.repr(desc.val_type);
-                            let unify_repr = ctx.repr(unify_ty);
-                            let desc_snapshot = ctx.get_desc(desc_repr);
-                            let unify_snapshot = ctx.get_desc(unify_repr);
-                            let preserved = match (&*desc_snapshot, &*unify_snapshot) {
-                                (
-                                    TypeDesc::Tconstr {
-                                        path: desc_path,
-                                        args: desc_args,
-                                        ..
-                                    },
-                                    TypeDesc::Tconstr {
-                                        path: unify_path,
-                                        args: unify_args,
-                                        ..
-                                    },
-                                ) => {
-                                    let desc_segments = desc_path.name().split('.').count();
-                                    desc_path.head().is_persistent()
-                                        && unify_path.head().is_persistent()
-                                        && desc_segments >= 3
-                                        && desc_args.len() == unify_args.len()
-                                        && crate::types::ctype::flattened_alias_paths_equivalent(
-                                            ctx,
-                                            env,
-                                            desc_path,
-                                            unify_path,
-                                            desc_args.len(),
-                                        )
-                                        && ctx.repr(desc.val_type) != ctx.repr(unify_ty)
-                                }
-                                _ => false,
-                            };
-                            drop(desc_snapshot);
-                            drop(unify_snapshot);
-                            if preserved {
-                                Some(crate::types::ctype::subst_identity_copy(ctx, desc.val_type))
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
                 // OCaml's type_unknown_args only calls type_expect (no
                 // subsequent unify_exp). Skip the post-unify for that path
                 // to preserve separate physical nodes in the typed tree.
@@ -6124,9 +6075,6 @@ fn type_application(
                         unify_ty,
                         Some(TypeClashContext::FunctionCall),
                     )?;
-                }
-                if let Some(preserved_ty) = preserved_local_ident_flat_alias {
-                    typed_arg.exp_type = preserved_ty;
                 }
                 let typed_arg = if enforce_optional {
                     let wrapped_loc = typed_arg.exp_loc;
@@ -12956,7 +12904,7 @@ fn resolve_letmodule_alias_root(env: &Env, module_id: &Ident) -> Option<Path> {
     resolve_alias_root_from_module_type(env, &md.md_type, &mut visited)
 }
 
-fn resolve_letmodule_direct_type_family_root<'a>(
+pub(crate) fn resolve_letmodule_direct_type_family_root<'a>(
     ctx: &'a TypeContext<'a>,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
