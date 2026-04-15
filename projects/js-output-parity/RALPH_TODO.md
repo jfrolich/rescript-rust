@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 516 / 657 JS snapshots passing, 0 compile errors, 141 output diffs
+**Status:** 518 / 657 JS snapshots passing, 0 compile errors, 139 output diffs
 
 ## Goal
 
@@ -35,11 +35,78 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **516 / 657**
+- JS snapshot parity: **518 / 657**
 - Compile errors: **0**
-- Output diffs: **141**
+- Output diffs: **139**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: narrow the plain-handler fallthrough rule for nested
+  `staticcatch` return switches so Rust only peels the plain handler out of
+  the switch when an explicit case body re-raises the current label, matching
+  OCaml's flattened-handler behavior instead of also hoisting failaction-only
+  defaults
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is still `Lam_compile`
+  control-flow lowering after optimized lambda parity, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `flat_catches`,
+  `flatten_nested_caches`, `compile_staticcatch`, and the
+  `compile_general_cases` default-arm behavior after handler flattening
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so
+    `uses_fallthrough_staticcatch_return(...)` only keeps a plain handler
+    outside the switch when some non-default `switch` / `stringswitch` case
+    body re-raises the current label; a failaction-only raise now stays as the
+    switch default again
+  - added small helper scans for explicit case-body raises to the current
+    label and rewrote the named-variant regression to expect the plain inner
+    handler as the `default:` arm instead of post-switch fallthrough
+  - kept the focused `gpr_1438` regressions intact so the real
+    `PjsFnMake(1)` fallthrough shape still stays outside the switch where
+    OCaml does
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_named_variant_return_switches_keep_plain_inner_handlers_as_default_arms -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_plain_int_return_switches_can_fall_through_like_gpr_1438 -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/VariantPatternMatchingSpreads.res`,
+    diffing `/tmp/VariantPatternMatchingSpreads.mjs` against the checked-in
+    snapshot
+  - direct guard repro for `tests/tests/src/gpr_1438.res`, diffing
+    `/tmp/gpr_1438.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - direct sibling repro for
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res`, diffing
+    `/tmp/VariantPatternMatchingSpreadsWithPayloads.mjs` against the
+    checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/VariantPatternMatchingSpreads.res` now matches its
+    checked-in `.mjs` snapshot exactly again; the inner plain handler stays in
+    the `default:` arm instead of reappearing as post-switch `doWithA(d);`
+    fallthrough
+  - `tests/tests/src/gpr_1438.res` still matches its checked-in `.mjs`
+    snapshot exactly, so the narrower rule keeps the real fallthrough case
+    outside the switch where OCaml does
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as a
+    broader guard
+  - `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` narrowed
+    to the separate nested-`if` / shared-else merge in `doWithB`; its
+    `lookup2` plain-handler default-arm regression is gone
+  - the full authoritative sweep in this worktree now reports **518 / 657**
+    passing, **0** compile errors, and **139** output diffs
+- Topline impact:
+  - JS snapshot parity: **516 / 657** -> **518 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **141** -> **139** (**-2**)
+- Keep this change because it restores the OCaml distinction between
+  failaction-only defaults and real explicit-case fallthrough when nested
+  `staticcatch` handlers are flattened, recovering the
+  `VariantPatternMatchingSpreads` family without regressing `gpr_1438`.
 
 Latest iteration on **2026-04-15**:
 
@@ -95,6 +162,63 @@ Latest iteration on **2026-04-15**:
   for `gpr_1438` and reopens the remaining `VariantPatternMatchingSpreads`
   sibling drift as the narrower control-flow rule that still needs to be
   ported.
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep untagged `Object` block cases inside the `typeof`
+  dispatch and only hoist `InstanceType` cases into runtime `if` checks,
+  matching OCaml's `compile_untagged_cases` partitioning instead of Rust's
+  extra object-hoisting logic
+- Active backend focus for this slice is **Phase 3: Port JS IR Lowering And
+  Metadata** from `PLAN.md`, because the remaining emitted-JS drift in
+  `tests/tests/src/UntaggedVariants.res` came from
+  `compiler-rust/src/lambda/compile.rs`, where Rust was lowering mixed
+  untagged object/instance switches differently from
+  `compiler/core/lam_compile.ml`
+- OCaml reference:
+  `compiler/core/lam_compile.ml`,
+  `compiler/ml/ast_untagged_variants.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so
+    `compile_untagged_block_switch_{assignment,return,effect}_statements`
+    keeps `SwitchBlockType::Object` inside the `typeof` switch and only lifts
+    `SwitchBlockType::Instance(_)` cases into outer runtime checks, matching
+    OCaml's `compile_untagged_cases`
+  - kept the existing `builtin_untagged_block_test` object runtime guard for
+    direct single-case equality checks, so only the lowering boundary changed,
+    not the object test semantics themselves
+  - added a focused regression that pins the OCaml-style `Array.isArray(...)`
+    split followed by a `switch (typeof value)` containing the `"object"`
+    clause
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml object_and_array_untagged_return_switches_keep_object_inside_typeof_switch_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml builtin_untagged_object_switches_use_plain_object_check_after_array_split -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact direct release repro for `tests/tests/src/UntaggedVariants.res`,
+    diffing `tests/tests/src/UntaggedVariants.mjs` against
+    `/tmp/UntaggedVariants.mjs`
+  - unchanged broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `tests/tests/src/ExternalShadow.mjs` against
+    `/tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `UntaggedVariants.res` no longer emits the Rust-only object-hoisted
+    `JSONObject` branch shape; the `Json.classify` path now matches OCaml's
+    `Array.isArray(...)` split followed by a `typeof` switch that still owns
+    the object case
+  - `ExternalShadow.res` remained an exact snapshot match as a broader guard
+  - the full authoritative sweep regressed by one file because the remaining
+    untagged-literal ordering and control-shape drift is still unresolved, but
+    that is a separate cluster from the object/instance routing this slice
+    fixed
+- Topline impact:
+  - JS snapshot parity: **517 / 657** -> **516 / 657** (**-1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **140** -> **141** (**+1**)
+- Keep this change because it directly matches OCaml's `compile_untagged_cases`
+  structure for mixed object/instance block dispatch, removes a real
+  `UntaggedVariants` backend mismatch, and leaves the remaining regression in a
+  separate literal-ordering cluster that needs its own follow-up slice.
 
 Latest iteration on **2026-04-15**:
 

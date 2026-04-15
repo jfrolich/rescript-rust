@@ -1369,6 +1369,12 @@ impl LambdaCompiler {
                 }
                 _ if !lambda_contains_static_raise(handler)
                     && !lambda_contains_staticcatch(handler)
+                    && switch_cases_contain_static_raise_to_label(
+                        &switch.sw_consts,
+                        &switch.sw_blocks,
+                        label,
+                        bindings.len(),
+                    )
                     && lambda_contains_static_raise_to_label(body, label, bindings.len())
                     && lambda_contains_static_raise_to_other_label(body, label) =>
                 {
@@ -1400,6 +1406,11 @@ impl LambdaCompiler {
                 }
                 _ if !lambda_contains_static_raise(handler)
                     && !lambda_contains_staticcatch(handler)
+                    && string_switch_cases_contain_static_raise_to_label(
+                        cases,
+                        label,
+                        bindings.len(),
+                    )
                     && lambda_contains_static_raise_to_label(body, label, bindings.len())
                     && lambda_contains_static_raise_to_other_label(body, label) =>
                 {
@@ -8432,6 +8443,30 @@ fn lambda_contains_static_raise_to_label(lam: &Lambda, label: i32, arity: usize)
                 || lambda_contains_static_raise_to_label(else_, label, arity)
         }
     }
+}
+
+fn switch_cases_contain_static_raise_to_label(
+    const_cases: &[(i32, Lambda)],
+    block_cases: &[(i32, Lambda)],
+    label: i32,
+    arity: usize,
+) -> bool {
+    const_cases
+        .iter()
+        .any(|(_, body)| lambda_contains_static_raise_to_label(body, label, arity))
+        || block_cases
+            .iter()
+            .any(|(_, body)| lambda_contains_static_raise_to_label(body, label, arity))
+}
+
+fn string_switch_cases_contain_static_raise_to_label(
+    cases: &[(String, Lambda)],
+    label: i32,
+    arity: usize,
+) -> bool {
+    cases
+        .iter()
+        .any(|(_, body)| lambda_contains_static_raise_to_label(body, label, arity))
 }
 
 fn lambda_contains_static_raise_to_other_label(lam: &Lambda, label: i32) -> bool {
@@ -16153,7 +16188,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_named_variant_return_switches_allow_plain_inner_handlers_to_fall_through() {
+    fn nested_named_variant_return_switches_keep_plain_inner_handlers_as_default_arms() {
         let mut compiler = LambdaCompiler::new();
         let action = Ident::create_local("action");
         let block = compiler.compile_return_block(&Lambda::LstaticCatch(
@@ -16194,11 +16229,11 @@ mod tests {
         ));
         let rendered = print_block(&block);
 
-        let [switch_stmt, handler_return] = block.as_slice() else {
-            panic!("expected a switch followed by the inner fallthrough handler:\n{rendered}");
+        let [switch_stmt] = block.as_slice() else {
+            panic!("expected a single switch with the plain handler kept as the default arm:\n{rendered}");
         };
-        let StatementDesc::StringSwitch(test, clauses, None) = &switch_stmt.desc else {
-            panic!("expected the innermost plain handler to move outside the switch:\n{rendered}");
+        let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
+            panic!("expected the innermost plain handler to stay in the switch default:\n{rendered}");
         };
         assert!(matches!(
             test,
@@ -16220,11 +16255,7 @@ mod tests {
         assert_switch_case_returns_int_result(&clauses[1].clause.body, 20);
         assert!(clauses[2].clause.body.is_empty());
         assert_switch_case_returns_int_result(&clauses[3].clause.body, 30);
-
-        match &handler_return.desc {
-            StatementDesc::Return(expr) => assert_int_expr(expr, 10),
-            other => panic!("expected the outer fallthrough return, got {other:?}"),
-        }
+        assert_switch_default_returns_int_result(default_block, 10);
     }
 
     fn gpr_1438_switch_cases(b: &Ident, c: &Ident, d: &Ident, e: &Ident) -> Vec<(i32, Lambda)> {
