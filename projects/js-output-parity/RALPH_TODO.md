@@ -43,6 +43,64 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: make the small untagged block-switch fast paths reuse OCaml's
+  full runtime equality check for the first case, instead of collapsing
+  one-case/default and two-case/complete object matches down to a plain
+  `typeof` test that loses the null/array exclusions and flips case order
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is still `Lam_compile`
+  untagged-switch lowering after optimized lambda parity, specifically the
+  `compile_general_cases` small-case path using `mk_eq` /
+  `DynamicChecks.add_runtime_type_check` rather than a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`,
+  `compiler/ml/ast_untagged_variants.ml`,
+  `compiler/core/js_exp_make.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so small untagged
+    block-switch assignment/return fast paths now test the first case with the
+    same full object/instance/null runtime guard that OCaml's
+    `compile_general_cases` reaches through `mk_eq`, instead of routing those
+    shapes through the Rust-only plain-`typeof` shortcut
+  - added focused regression coverage for value switches that must keep
+    OCaml's `typeof ... === "object" && ... !== null && !Array.isArray(...)`
+    guard, and for complete two-case object-vs-array return switches that must
+    preserve the source-case order instead of flipping to an Array-first split
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml untagged_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/DictPatternMatchingOptimization.res`,
+    diffing `/tmp/DictPatternMatchingOptimization.mjs` against the checked-in
+    snapshot
+  - direct release repro for `tests/tests/src/json_decorders.res`, diffing
+    `/tmp/json_decorders.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/DictPatternMatchingOptimization.res` now restores the
+    OCaml object/null/array runtime guard at the top of `decode`; the file
+    still fails overall because later nested default/fallthrough shaping in the
+    same decision tree remains different
+  - `tests/tests/src/json_decorders.res` now restores the same OCaml-style
+    object/null/array guard in `decodeUser`; it still fails overall because the
+    remaining nested guard layout after that first test is still downstream
+    drift
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as a
+    broader guard
+  - the full authoritative sweep in this worktree remains **520 / 657**
+    passing, **0** compile errors, and **137** output diffs
+- Topline impact:
+  - JS snapshot parity: **520 / 657** -> **520 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **137** -> **137** (**no change**)
+- Keep this change because the small-case untagged object guard now matches
+  OCaml's `compile_general_cases` / `DynamicChecks.add_runtime_type_check`
+  behavior exactly; the remaining drift is in later control-flow shaping, not
+  in the restored runtime test itself.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: route incomplete named-variant payload-only/default dispatches
   through the same literal-vs-block split that OCaml uses, instead of taking a
   Rust-only payload-fast-path whenever the explicit cases happen to live only

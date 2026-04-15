@@ -2724,6 +2724,15 @@ impl LambdaCompiler {
                 .map(|fallback| self.compile_assign_to_target_block(result, fallback))
                 .unwrap_or_default();
         };
+        if let Some(block) = self.compile_small_untagged_block_switch_assignment(
+            result,
+            scrut_expr.clone(),
+            switch,
+            &block_cases,
+            has_null_case,
+        ) {
+            return block;
+        }
         let all_block_types = self.untagged_block_types(switch).unwrap_or_default();
         if let Some((_, body)) = block_cases
             .iter()
@@ -2782,6 +2791,60 @@ impl LambdaCompiler {
         tail
     }
 
+    fn compile_small_untagged_block_switch_assignment(
+        &mut self,
+        result: &Ident,
+        scrut_expr: Expression,
+        switch: &LambdaSwitch,
+        block_cases: &[(&SwitchBlock, &Lambda)],
+        has_null_case: bool,
+    ) -> Option<Block> {
+        let all_block_types = self.untagged_block_types(switch).unwrap_or_default();
+        let default = self.block_switch_default(switch);
+
+        match block_cases {
+            [] => Some(
+                default
+                    .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                    .unwrap_or_default(),
+            ),
+            [(_, body)] if self.block_switch_complete(switch) && default.is_none() => {
+                Some(self.compile_assign_to_target_block(result, body))
+            }
+            [(case, body)] => {
+                let cond = self.builtin_untagged_block_test(
+                    scrut_expr,
+                    case,
+                    &all_block_types,
+                    has_null_case,
+                )?;
+                Some(vec![Statement::if_(
+                    cond,
+                    self.compile_assign_to_target_block(result, body),
+                    default
+                        .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                        .unwrap_or_default(),
+                )])
+            }
+            [(case, then_body), (_, else_body)]
+                if self.block_switch_complete(switch) && default.is_none() =>
+            {
+                let cond = self.builtin_untagged_block_test(
+                    scrut_expr,
+                    case,
+                    &all_block_types,
+                    has_null_case,
+                )?;
+                Some(vec![Statement::if_(
+                    cond,
+                    self.compile_assign_to_target_block(result, then_body),
+                    self.compile_assign_to_target_block(result, else_body),
+                )])
+            }
+            _ => None,
+        }
+    }
+
     fn compile_untagged_block_switch_return_statements(
         &mut self,
         scrut_expr: Expression,
@@ -2794,6 +2857,14 @@ impl LambdaCompiler {
                 .map(|fallback| self.compile_return_block(fallback))
                 .unwrap_or_default();
         };
+        if let Some(block) = self.compile_small_untagged_block_switch_return(
+            scrut_expr.clone(),
+            switch,
+            &block_cases,
+            has_null_case,
+        ) {
+            return block;
+        }
         let all_block_types = self.untagged_block_types(switch).unwrap_or_default();
         if let Some((_, body)) = block_cases
             .iter()
@@ -2845,6 +2916,59 @@ impl LambdaCompiler {
         }
 
         tail
+    }
+
+    fn compile_small_untagged_block_switch_return(
+        &mut self,
+        scrut_expr: Expression,
+        switch: &LambdaSwitch,
+        block_cases: &[(&SwitchBlock, &Lambda)],
+        has_null_case: bool,
+    ) -> Option<Block> {
+        let all_block_types = self.untagged_block_types(switch).unwrap_or_default();
+        let default = self.block_switch_default(switch);
+
+        match block_cases {
+            [] => Some(
+                default
+                    .map(|fallback| self.compile_return_block(fallback))
+                    .unwrap_or_default(),
+            ),
+            [(_, body)] if self.block_switch_complete(switch) && default.is_none() => {
+                Some(self.compile_return_block(body))
+            }
+            [(case, body)] => {
+                let cond = self.builtin_untagged_block_test(
+                    scrut_expr,
+                    case,
+                    &all_block_types,
+                    has_null_case,
+                )?;
+                Some(vec![Statement::if_(
+                    cond,
+                    self.compile_return_block(body),
+                    default
+                        .map(|fallback| self.compile_return_block(fallback))
+                        .unwrap_or_default(),
+                )])
+            }
+            [(case, then_body), (_, else_body)]
+                if self.block_switch_complete(switch) && default.is_none() =>
+            {
+                let cond = self.builtin_untagged_block_test(
+                    scrut_expr,
+                    case,
+                    &all_block_types,
+                    has_null_case,
+                )?;
+                Some(vec![Statement::if_(
+                    cond,
+                    self.compile_return_block(then_body),
+                    self.compile_return_block(else_body),
+                )])
+            }
+            _ => None,
+        }
     }
 
     fn compile_untagged_block_switch_effect_statements(
@@ -18073,6 +18197,94 @@ mod tests {
             ]
         );
         assert_switch_case_returns_int_result(&clauses[2].clause.body, 3);
+    }
+
+    #[test]
+    fn small_untagged_object_value_switches_keep_ocaml_runtime_guards() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let compiled = compiler.compile_expr(&Lambda::Lswitch(
+            Box::new(Lambda::var(value.clone())),
+            LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![],
+                sw_blocks_full: false,
+                sw_blocks: vec![(0, Lambda::const_(Constant::int(1)))],
+                sw_failaction: Some(Box::new(Lambda::const_(Constant::int(0)))),
+                sw_names: Some(SwitchNames {
+                    consts: vec![crate::lambda::SwitchTag {
+                        name: "Null".to_string(),
+                        tag_type: Some(crate::lambda::SwitchCaseTag::Null),
+                    }],
+                    blocks: vec![
+                        crate::lambda::SwitchBlock {
+                            tag: crate::lambda::SwitchTag::named("Object"),
+                            tag_name: None,
+                            block_type: Some(crate::lambda::SwitchBlockType::Object),
+                        },
+                        crate::lambda::SwitchBlock {
+                            tag: crate::lambda::SwitchTag::named("Array"),
+                            tag_name: None,
+                            block_type: Some(crate::lambda::SwitchBlockType::Instance(
+                                "Array".to_string(),
+                            )),
+                        },
+                    ],
+                }),
+            },
+        ));
+
+        let rendered = print_block(&compiled.prelude);
+        assert!(
+            rendered.contains("typeof value === \"object\" && value !== null && !Array.isArray(value)"),
+            "expected the small object switch to keep OCaml's object/null/array runtime guard:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn complete_object_then_array_untagged_return_switches_preserve_case_order() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let block = compiler.compile_untagged_variant_switch_return_statements(
+            Expression::var(value.clone()),
+            &LambdaSwitch {
+                sw_consts_full: true,
+                sw_consts: vec![],
+                sw_blocks_full: true,
+                sw_blocks: vec![
+                    (0, Lambda::const_(Constant::int(1))),
+                    (1, Lambda::const_(Constant::int(2))),
+                ],
+                sw_failaction: None,
+                sw_names: Some(SwitchNames {
+                    consts: vec![],
+                    blocks: vec![
+                        crate::lambda::SwitchBlock {
+                            tag: crate::lambda::SwitchTag::named("Object"),
+                            tag_name: None,
+                            block_type: Some(crate::lambda::SwitchBlockType::Object),
+                        },
+                        crate::lambda::SwitchBlock {
+                            tag: crate::lambda::SwitchTag::named("Array"),
+                            tag_name: None,
+                            block_type: Some(crate::lambda::SwitchBlockType::Instance(
+                                "Array".to_string(),
+                            )),
+                        },
+                    ],
+                }),
+            },
+        );
+
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains("typeof value === \"object\" && !Array.isArray(value)"),
+            "expected the object-first two-case switch to keep the first case test:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("if (Array.isArray(value))"),
+            "expected the object-first two-case switch not to flip to an Array-first split:\n{rendered}"
+        );
     }
 
     fn single_complete_array_block_switch(
