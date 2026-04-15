@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 532 / 657 JS snapshots passing, 0 compile errors, 125 output diffs
+**Status:** 533 / 657 JS snapshots passing, 0 compile errors, 124 output diffs
 
 ## Goal
 
@@ -35,11 +35,58 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **532 / 657**
+- JS snapshot parity: **533 / 657**
 - Compile errors: **0**
-- Output diffs: **125**
+- Output diffs: **124**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: match OCaml's `Lam_compile` switch-scrutinee temp binding names
+  by using `Ext_ident.create_tmp ()` semantics for non-trivial scrutinees
+  instead of materializing a user-visible `match` temp in Rust output
+- Active backend focus for this slice is **Phase 3: Port JS IR Lowering And
+  Metadata** from `PLAN.md`; this is `Lam_compile` lowering behavior in
+  `compiler-rust/src/lambda/compile.rs`, not a printer-only rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml` and `compiler/ext/ext_ident.ml`
+- Rust change:
+  - updated `bind_switch_scrutinee_once(...)` to use
+    `self.fresh_ident("tmp")`, matching OCaml's
+    `Ext_ident.create_tmp ()` default instead of inventing a `match` temp name
+  - added focused regression coverage in
+    `bind_switch_scrutinee_once_uses_tmp_name_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml bind_switch_scrutinee_once_uses_tmp_name_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/pq_test.res`, diffing
+    `/tmp/pq_test.mjs` against the checked-in snapshot
+  - direct release guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - direct release spot-check for
+    `tests/tests/src/DictPatternMatchingOptimization.res`, confirming the
+    remaining diff there is a separate control-flow-shape issue rather than the
+    `match` temp-name drift this slice targets
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/pq_test.res` is now an exact snapshot match; it dropped
+    out of the diff artifact set after the release rebuild
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the unchanged guard
+  - the full authoritative sweep in this worktree now reports
+    **533 / 657** passing, **0** compile errors, and **124** output diffs
+  - `tests/tests/src/DictPatternMatchingOptimization.res` remains in the diff
+    set, but its surviving mismatch is control-flow structure after the object
+    parse guard rather than the scrutinee temp name
+- Topline impact:
+  - JS snapshot parity: **532 / 657** -> **533 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **125** -> **124** (**-1**)
+- Keep this change because OCaml already binds non-variable switch scrutinees
+  through `Ext_ident.create_tmp ()`; moving Rust to the same naming rule fixes
+  the backend lowering at the source instead of papering over the emitted
+  JavaScript later.
 
 Latest iteration on **2026-04-15**:
 

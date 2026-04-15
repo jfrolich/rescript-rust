@@ -3279,7 +3279,7 @@ impl LambdaCompiler {
             return (prelude, expr);
         }
 
-        let ident = self.fresh_ident("match");
+        let ident = self.fresh_ident("tmp");
         prelude.push(Statement::variable(VariableDeclaration {
             ident: ident.clone(),
             value: Some(expr),
@@ -22031,6 +22031,41 @@ let fib3 = n => {
                 ));
             }
             other => panic!("expected an object literal expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bind_switch_scrutinee_once_uses_tmp_name_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let (prelude, expr) = compiler.bind_switch_scrutinee_once(
+            vec![],
+            Expression::call(
+                Expression::var(Ident::create_local("compute")),
+                vec![Expression::number(Number::int(1))],
+                CallInfo::default(),
+            ),
+        );
+
+        let ExpressionDesc::Var(crate::js_ir::VIdent::Id(tmp_ident)) = &expr.desc else {
+            panic!("expected the bound scrutinee expression to become a temp variable");
+        };
+        assert_eq!(tmp_ident.name(), "tmp");
+
+        let [stmt] = prelude.as_slice() else {
+            panic!("expected a single temp binding statement");
+        };
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
+                assert!(ident.same(tmp_ident));
+                assert!(matches!(
+                    value,
+                    Some(Expression {
+                        desc: ExpressionDesc::Call(_, args, _),
+                        ..
+                    }) if args.len() == 1
+                ));
+            }
+            other => panic!("expected a temp binding variable statement, got {other:?}"),
         }
     }
 
