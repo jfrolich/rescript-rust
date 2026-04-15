@@ -1076,6 +1076,31 @@ cargo build --release --manifest-path compiler-rust/Cargo.toml
 **IMPORTANT**: Always run the full suite (`test_js_output_parity.sh`) before committing.
 It runs all 657 files in ~50 seconds and is the only way to catch regressions.
 
+#### Parallel Agents
+
+To maximize throughput, run **~4 agents simultaneously** in separate worktrees, each
+working on a different triage category. Categories are independent — fixing temp variable
+naming won't conflict with fixing recursive module lowering.
+
+Setup:
+```bash
+# Each agent should work in its own worktree to avoid conflicts
+# The agent spawner should assign each agent a different category from the triage output
+
+# Agent 1: fix cond-simplify (38 files)
+# Agent 2: fix temp-var-naming (14 files)
+# Agent 3: fix switch-fallthrough (10 files)
+# Agent 4: fix recursive-module (8 files)
+```
+
+Each agent should:
+1. Run `./scripts/triage_js_failures.sh` to see all categories
+2. Pick their assigned category and focus exclusively on it
+3. Use `./scripts/test_js_single.sh <file> --diff` on files from that category
+4. Find the shared root cause in the OCaml code, then port the fix
+5. Run the full suite before committing
+6. After their category is clear, pick the next unclaimed category from triage
+
 #### Available Scripts
 
 | Script | Purpose | When to use |
