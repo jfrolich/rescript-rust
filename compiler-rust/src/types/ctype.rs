@@ -2692,10 +2692,10 @@ fn should_keep_expanded_manifest_alias_repr(
             _ => return false,
         }
     };
-    let lhs_has_nested_parent = matches!(&lhs_path, Path::Pdot(parent, _, _) if matches!(parent.as_ref(), Path::Pdot(..)));
-    let relink_last = relink_path.last();
+    let lhs_has_nested_parent =
+        matches!(&lhs_path, Path::Pdot(parent, _, _) if matches!(parent.as_ref(), Path::Pdot(..)));
     let expected_alias_name = if swap { "t" } else { "cmp" };
-    if !lhs_has_nested_parent || relink_last != expected_alias_name {
+    if !lhs_has_nested_parent || relink_path.last() != expected_alias_name {
         return false;
     }
 
@@ -2714,10 +2714,7 @@ fn should_keep_expanded_manifest_alias_repr(
     };
 
     let same_family = |left: &Path, right: &Path| {
-        left.same(right)
-            || normalize_path_full(ctx, env, left).same(&normalize_path_full(ctx, env, right))
-            || resolved_type_items_share_identity(ctx, env, left, right, lhs_args_len)
-            || flattened_alias_paths_equivalent(ctx, env, left, right, lhs_args_len)
+        left.same(right) || flattened_alias_paths_equivalent(ctx, env, left, right, lhs_args_len)
     };
 
     same_family(&manifest_path, &lhs_path)
