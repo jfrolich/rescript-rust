@@ -180,6 +180,10 @@ pub struct PersistentEnv {
     open_modules: Vec<String>,
     /// Default JSX version from CLI flags, if any.
     jsx_version: Option<i32>,
+    /// Whether the current compilation uses `-nopervasives`.
+    nopervasives: bool,
+    /// The module currently being compiled, used to skip self-opens.
+    compiling_module: Option<String>,
     /// Cache of renamed signatures (matching OCaml's lazy Subst.signature).
     /// Each module's signature is renamed once and cached here.
     renamed_sig_cache: HashMap<String, Signature>,
@@ -214,6 +218,8 @@ impl PersistentEnv {
             alias_prefix_rewrites: HashMap::new(),
             open_modules: Vec::new(),
             jsx_version: None,
+            nopervasives: false,
+            compiling_module: None,
             renamed_sig_cache: HashMap::new(),
             in_memory_modules: Arc::new(HashMap::new()),
             in_process_mode: false,
@@ -240,6 +246,8 @@ impl PersistentEnv {
             alias_prefix_rewrites: registry.alias_rewrites.clone(),
             open_modules: Vec::new(),
             jsx_version: None,
+            nopervasives: false,
+            compiling_module: None,
             renamed_sig_cache: HashMap::new(),
             in_memory_modules: Arc::new(registry.module_info.clone()),
             in_process_mode: true,
@@ -287,6 +295,14 @@ impl PersistentEnv {
 
     pub fn set_jsx_version(&mut self, jsx_version: Option<i32>) {
         self.jsx_version = jsx_version;
+    }
+
+    pub fn set_nopervasives(&mut self, nopervasives: bool) {
+        self.nopervasives = nopervasives;
+    }
+
+    pub fn set_compiling_module(&mut self, module_name: Option<String>) {
+        self.compiling_module = module_name;
     }
 
     /// Add a directory to the load path.
@@ -535,6 +551,8 @@ impl PersistentEnv {
             alias_prefix_rewrites: self.alias_prefix_rewrites.clone(),
             open_modules: self.open_modules.clone(),
             jsx_version: self.jsx_version,
+            nopervasives: self.nopervasives,
+            compiling_module: self.compiling_module.clone(),
             renamed_sig_cache: HashMap::new(),
             in_memory_modules: self.in_memory_modules.clone(),
             in_process_mode: self.in_process_mode,
@@ -544,7 +562,16 @@ impl PersistentEnv {
         };
         let mut env = initial_env(ctx);
         let open_modules = fallback_pers.open_modules.clone();
-        load_pervasives(&mut fallback_pers, &mut env, ctx, &open_modules, false, None);
+        let nopervasives = fallback_pers.nopervasives;
+        let compiling_module = fallback_pers.compiling_module.clone();
+        load_pervasives(
+            &mut fallback_pers,
+            &mut env,
+            ctx,
+            &open_modules,
+            nopervasives,
+            compiling_module.as_deref(),
+        );
 
         if source_path
             .extension()

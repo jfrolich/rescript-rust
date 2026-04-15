@@ -1180,6 +1180,8 @@ pub fn compile_source_to_js_with_options(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_nopervasives(options.nopervasives);
+    pers_env.set_compiling_module(options.module_name.clone());
     load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
 
     // Store persistent env in the type check context for module resolution
@@ -1455,6 +1457,8 @@ pub fn typecheck_interface_source(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_nopervasives(options.nopervasives);
+    pers_env.set_compiling_module(options.module_name.clone());
     load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
 
     tctx.set_persistent_env(pers_env);
@@ -1606,6 +1610,8 @@ pub fn compile_source_in_process(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_nopervasives(options.nopervasives);
+    pers_env.set_compiling_module(options.module_name.clone());
     load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
 
     tctx.set_persistent_env(pers_env);
@@ -1768,6 +1774,8 @@ pub fn typecheck_interface_in_process(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_nopervasives(options.nopervasives);
+    pers_env.set_compiling_module(options.module_name.clone());
     load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
 
     tctx.set_persistent_env(pers_env);
@@ -1864,6 +1872,8 @@ pub fn typecheck_implementation_in_process(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_nopervasives(options.nopervasives);
+    pers_env.set_compiling_module(options.module_name.clone());
     load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
 
     tctx.set_persistent_env(pers_env);
@@ -2100,6 +2110,8 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path(load_path);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
+        pers_env.set_nopervasives(options.nopervasives);
+        pers_env.set_compiling_module(options.module_name.clone());
         load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
         tctx.set_persistent_env(pers_env);
 
@@ -2143,6 +2155,8 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path(load_path);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
+        pers_env.set_nopervasives(options.nopervasives);
+        pers_env.set_compiling_module(options.module_name.clone());
         load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
         tctx.set_persistent_env(pers_env);
 
@@ -2891,6 +2905,8 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_nopervasives(options.nopervasives);
+    pers_env.set_compiling_module(options.module_name.clone());
     load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
     tctx.set_persistent_env(pers_env);
 
@@ -2925,6 +2941,8 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_nopervasives(options.nopervasives);
+    pers_env.set_compiling_module(options.module_name.clone());
     load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
     tctx.set_persistent_env(pers_env);
 
