@@ -4631,7 +4631,9 @@ impl LambdaCompiler {
             Constant::String { s, delim } => {
                 let delim = match delim {
                     Some(StringDelim::StarJ) => Delim::StarJ,
-                    Some(StringDelim::NoQuotes) => Delim::NoQuotes,
+                    // OCaml's lam_compile_const.ml lowers lambda string constants with
+                    // DNoQuotes through E.str, so they stay ordinary quoted JS strings.
+                    Some(StringDelim::NoQuotes) => Delim::None,
                     Some(StringDelim::Backtick) => Delim::BackQuotes,
                     Some(StringDelim::Plain) | None => Delim::None,
                 };
@@ -12161,7 +12163,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_constant_preserves_marshaled_noquote_strings() {
+    fn compile_constant_quotes_noquote_delim_strings_like_ocaml() {
         let compiled = LambdaCompiler::compile_constant(&Constant::String {
             s: "{foo:true}".to_string(),
             delim: Some(StringDelim::NoQuotes),
@@ -12171,13 +12173,13 @@ mod tests {
             compiled,
             Expression {
                 desc: ExpressionDesc::Str {
-                    delim: Delim::NoQuotes,
+                    delim: Delim::None,
                     ref txt,
                 },
                 ..
             } if txt == "{foo:true}"
         ));
-        assert_eq!(print_expression(&compiled), "{foo:true}");
+        assert_eq!(print_expression(&compiled), "\"{foo:true}\"");
     }
 
     #[test]
@@ -18858,6 +18860,21 @@ mod tests {
     }
 
     #[test]
+    fn source_json_template_falls_back_to_regular_string_interpolation_like_ocaml() {
+        let source = r#"
+let x = json`some random ${"string"}`
+"#;
+
+        let output =
+            crate::driver::compile_source_to_js(source, "json_template_test.res").unwrap();
+
+        assert!(
+            output.contains("let x = \"some random \" + \"string\";"),
+            "expected ordinary string interpolation fallback, got:\n{output}"
+        );
+    }
+
+    #[test]
     fn lowers_marshaled_constant_args_in_js_call() {
         let mut compiler = LambdaCompiler::new();
         let lam = Lambda::prim(
@@ -18886,7 +18903,7 @@ mod tests {
                 dynamic_import: false,
                 transformed_jsx: false,
             },
-            vec![Lambda::const_(Constant::JsUndefined { is_unit: false })],
+            vec![],
             Location::none(),
         );
 

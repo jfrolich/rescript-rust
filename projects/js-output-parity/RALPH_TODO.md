@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 497 / 657 JS snapshots passing, 0 compile errors, 160 output diffs
+**Status:** 498 / 657 JS snapshots passing, 0 compile errors, 159 output diffs
 
 ## Goal
 
@@ -35,11 +35,72 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **497 / 657**
+- JS snapshot parity: **498 / 657**
 - Compile errors: **0**
-- Output diffs: **160**
+- Output diffs: **159**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: lower lambda string constants with `DNoQuotes` through the same
+  ordinary quoted-string path OCaml uses, so non-tagged `json\`...\``
+  interpolations fall back to normal string concatenation instead of leaking raw
+  unquoted template segments into the final JS
+- Active backend focus for this slice is **Phase 3: Port JS IR Lowering And
+  Metadata** from `PLAN.md`, because the remaining drift sat in the
+  `Lam_compile` constant-lowering boundary rather than the final printer:
+  optimized-lambda parity was already green, but Rust mapped
+  `Const_string(..., DNoQuotes)` to a raw `NoQuotes` JS IR string while OCaml's
+  backend lowers those lambda constants through `E.str`
+- OCaml reference:
+  `compiler/core/lam_compile_const.ml`, especially
+  `Const_string {s; delim = None | Some DNoQuotes} -> E.str s`; the failing
+  checked-in snapshot then shows the downstream effect in `tagged_template_test`
+  as ordinary quoted string concatenation rather than a tagged-template/raw-js
+  fragment
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so
+    `LambdaCompiler::compile_constant` now maps
+    `Constant::String {delim: Some(StringDelim::NoQuotes)}` to the ordinary JS
+    string delimiter path (`Delim::None`) instead of emitting a raw
+    `Delim::NoQuotes` literal
+  - kept explicit external marshaled constants on the existing raw-noquotes
+    path via `compile_external_arg_const`, matching OCaml's separate
+    external-argument handling
+  - replaced the old constant-level regression with the OCaml-aligned behavior
+    check `compile_constant_quotes_noquote_delim_strings_like_ocaml`
+  - added a focused driver-level regression
+    `source_json_template_falls_back_to_regular_string_interpolation_like_ocaml`
+    to cover the `json\`some random ${"string"}\`` shape directly
+- Verified focused guards for this slice:
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_constant_quotes_noquote_delim_strings_like_ocaml -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml source_json_template_falls_back_to_regular_string_interpolation_like_ocaml -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_marshaled_constant_args_in_js_call -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact AST-path release repro for `tests/tests/src/tagged_template_test.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/tagged_template_test.mjs` against
+    the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/tagged_template_test.res` now matches exactly: the
+    `json\`...\`` fallback emits `"some random " + "string"` like OCaml instead
+    of leaking the first segment as raw unquoted JS
+  - explicit marshaled external constants still stay raw in the JS backend, so
+    this change is isolated to lambda string constants rather than the FFI
+    constant path
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+- Topline impact:
+  - JS snapshot parity: **497 / 657** -> **498 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **160** -> **159** (**-1**)
+- Keep this change because it ports the exact OCaml `lam_compile_const.ml`
+  delimiter rule into Rust, fixes the checked-in `json\`...\`` fallback without
+  touching the separate raw external-constant path, and improves the
+  authoritative 657-file baseline by one file.
 
 Latest iteration on **2026-04-15**:
 
