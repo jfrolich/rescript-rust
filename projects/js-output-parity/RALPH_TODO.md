@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 494 / 657 JS snapshots passing, 0 compile errors, 163 output diffs
+**Status:** 497 / 657 JS snapshots passing, 0 compile errors, 160 output diffs
 
 ## Goal
 
@@ -35,11 +35,62 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **494 / 657**
+- JS snapshot parity: **497 / 657**
 - Compile errors: **0**
-- Output diffs: **163**
+- Output diffs: **160**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: make the JS tailcall-inline pass recurse over block suffixes the
+  same way OCaml does, so a directly-returned once-pure local helper still
+  inlines when it appears after earlier statements in the same block instead of
+  only when the whole block is a single `return helper(...)`
+- Active backend focus for this slice is **Phase 4: Port JS Passes** from
+  `PLAN.md`, because the remaining drift sat in
+  `Js_pass_tailcall_inline`: OCaml walks blocks left-to-right and can inline the
+  tail helper in a suffix like `if (...) ...; let nth_aux = ...; nth_aux(...)`,
+  while Rust only tried that rule on single-statement blocks and therefore kept
+  extra helper wrappers alive through final JS emission
+- OCaml reference:
+  `compiler/core/js_pass_tailcall_inline.ml`, especially the `block` walker that
+  handles `x :: xs` recursively and the `[ Return (Call (Var ...)) ]` suffix
+  case, allowing once-pure helpers to inline even when earlier statements remain
+  in the surrounding block
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so
+    `TailcallInlineState::transform_block` now matches OCaml's recursive
+    head/tail block traversal instead of only checking the whole block once
+  - added a focused regression
+    `js_tailcall_inline_inlines_suffix_named_calls_after_prefix_statements` to
+    cover the `test_list` shape where a guarded prefix statement precedes the
+    directly-returned local helper call
+- Verified focused guards for this slice:
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml js_tailcall_inline_ -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml recursive_self_tailcalls_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/test_list.res`, diffing
+    `/tmp/test_list.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_list.res` no longer emits the extra local loop-helper
+    wrappers that OCaml already inlines away for `nth_aux`, `rmap_f`,
+    `rmap2_f`, and `part`; the remaining drift in that file is now the separate
+    `stable_sort` helper-placement cluster plus a few `Not_found` throw-shape
+    differences
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+- Topline impact:
+  - JS snapshot parity: **494 / 657** -> **497 / 657** (**+3**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **163** -> **160** (**-3**)
+- Keep this change because it ports OCaml's block-suffix traversal rule in
+  `Js_pass_tailcall_inline` directly, removes an entire local-helper-wrapper
+  class from the final JS stream, and exposes the next deeper helper-placement
+  cluster without regressing the broader guard file.
 
 Latest iteration on **2026-04-15**:
 

@@ -9919,10 +9919,14 @@ impl TailcallInlineState {
             }
         }
 
-        let mut transformed = Vec::with_capacity(block.len());
-        for stmt in block {
-            transformed.extend(self.transform_statement(stmt));
-        }
+        let mut iter = block.into_iter();
+        let Some(first) = iter.next() else {
+            return Vec::new();
+        };
+        let rest: Block = iter.collect();
+
+        let mut transformed = self.transform_statement(first);
+        transformed.extend(self.transform_block(rest));
         transformed
     }
 
@@ -17148,6 +17152,112 @@ mod tests {
                 ..
             }) => assert!(id.same(&value)),
             other => panic!("expected the named call to inline to `return value`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn js_tailcall_inline_inlines_suffix_named_calls_after_prefix_statements() {
+        let helper = Ident::create_local("helper");
+        let arg = Ident::create_local("arg");
+        let run = Ident::create_local("run");
+        let value = Ident::create_local("value");
+        let guard = Ident::create_local("guard");
+        let deps = apply_js_tailcall_inline_pass(DepsProgram {
+            program: Program::new(
+                vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: helper.clone(),
+                        value: Some(Expression::new(ExpressionDesc::Fun {
+                            is_method: false,
+                            params: vec![arg.clone()],
+                            body: vec![Statement::return_(Expression::var(arg.clone()))],
+                            env: Default::default(),
+                            return_unit: false,
+                            async_: false,
+                            directive: None,
+                        })),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }),
+                    Statement::variable(VariableDeclaration {
+                        ident: run.clone(),
+                        value: Some(Expression::new(ExpressionDesc::Fun {
+                            is_method: false,
+                            params: vec![guard.clone(), value.clone()],
+                            body: vec![
+                                Statement::if_(
+                                    Expression::var(guard.clone()),
+                                    vec![Statement::return_(Expression::number(Number::int(0)))],
+                                    vec![],
+                                ),
+                                Statement::return_(Expression::call(
+                                    Expression::var(helper.clone()),
+                                    vec![Expression::var(value.clone())],
+                                    CallInfo::default(),
+                                )),
+                            ],
+                            env: Default::default(),
+                            return_unit: false,
+                            async_: false,
+                            directive: None,
+                        })),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }),
+                ],
+                vec![run.clone()],
+            ),
+            modules: vec![],
+            side_effect: None,
+        });
+
+        let [helper_stmt, run_stmt] = deps.program.block.as_slice() else {
+            panic!("expected helper and run bindings");
+        };
+
+        match &helper_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident_info, .. }) => {
+                assert_eq!(ident_info.used_stats, UsedStats::DeadPure);
+            }
+            other => {
+                panic!("expected helper to remain marked dead for the next pass, got {other:?}")
+            }
+        }
+
+        let StatementDesc::Variable(VariableDeclaration {
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::Fun { body, .. },
+                    ..
+                }),
+            ..
+        }) = &run_stmt.desc
+        else {
+            panic!("expected run to remain a function binding");
+        };
+
+        let [prefix, suffix] = body.as_slice() else {
+            panic!("expected the guard to remain ahead of the inlined suffix call");
+        };
+        assert!(match &prefix.desc {
+            StatementDesc::If(_, _, _) => true,
+            StatementDesc::Block(block) => matches!(
+                block.as_slice(),
+                [Statement {
+                    desc: StatementDesc::If(_, _, _),
+                    ..
+                }]
+            ),
+            _ => false,
+        });
+        match &suffix.desc {
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            }) => assert!(id.same(&value)),
+            other => {
+                panic!("expected the suffix named call to inline to `return value`, got {other:?}")
+            }
         }
     }
 
