@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 498 / 657 JS snapshots passing, 0 compile errors, 159 output diffs
+**Status:** 499 / 657 JS snapshots passing, 0 compile errors, 158 output diffs
 
 ## Goal
 
@@ -35,11 +35,59 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **498 / 657**
+- JS snapshot parity: **499 / 657**
 - Compile errors: **0**
-- Output diffs: **159**
+- Output diffs: **158**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep OCaml's `ForRange` synthetic `*_finish` temp-name
+  reservation in the enclosing printer scope so sibling loops in the same
+  function keep the same suffix progression as `js_dump`, instead of
+  reusing unsuffixed finish temps after the Rust printer pops its loop-local
+  scope
+- Active backend focus for this slice is **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`, because the optimized-lambda boundary was already green and the
+  remaining drift sat in the downstream `js_dump`-equivalent name allocator in
+  `compiler-rust/src/js_ir/printer.rs`
+- OCaml reference:
+  `compiler/core/js_dump.ml` and
+  `compiler/ext/ext_pp_scope.ml`
+- Rust change:
+  - updated `compiler-rust/src/js_ir/printer.rs` so `ForRange` finish bindings
+    are allocated in the enclosing scope before entering the loop-local scope,
+    then reserved inside the loop as well
+  - added focused regression
+    `test_for_range_finish_binding_suffix_persists_across_sibling_loops_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_for_range_finish_binding_suffix_persists_across_sibling_loops_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_unit_function_tail_if_drops_else_return_undefined -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact AST-path release repro for `tests/tests/src/bs_mutable_set_test.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/bs_mutable_set_test.mjs` against
+    the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bs_mutable_set_test.res` now matches exactly: the second
+    sibling loop in the same test function prints `i_finish$1` like OCaml
+    instead of reusing `i_finish`
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - the full authoritative sweep improved by two files, which indicates the
+    same loop-finish naming fix cleared an additional snapshot from the same
+    printer cluster
+- Topline impact:
+  - JS snapshot parity: **497 / 657** -> **499 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **160** -> **158** (**-2**)
+- Keep this change because it ports OCaml's `js_dump` / `Ext_pp_scope`
+  temporary-name allocation behavior into the Rust printer, fixes a real
+  byte-level JS drift in the downstream dumper, and improves the authoritative
+  baseline without perturbing the stable `ExternalShadow` guard.
 
 Latest iteration on **2026-04-15**:
 

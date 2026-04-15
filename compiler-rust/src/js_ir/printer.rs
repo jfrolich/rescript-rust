@@ -545,10 +545,14 @@ impl JsPrinter {
 
             StatementDesc::ForRange(init, end, id, direction, body) => {
                 let id_name = self.ident_name(id);
-                self.with_local_ident_scope(std::slice::from_ref(&id_name), |this| {
-                    let finish_binding = for_range_finish_needs_binding(end).then(|| {
-                        this.fresh_scoped_name(format!("{}_finish", convert_ident_name(id.name())))
-                    });
+                let finish_binding = for_range_finish_needs_binding(end)
+                    .then(|| self.fresh_scoped_name(format!("{}_finish", convert_ident_name(id.name()))));
+                let mut reserved_printed_names = vec![id_name.clone()];
+                if let Some(finish_name) = &finish_binding {
+                    reserved_printed_names.push(finish_name.clone());
+                }
+
+                self.with_local_ident_scope(&reserved_printed_names, |this| {
 
                     this.write("for ");
                     this.write_char('(');
@@ -3314,6 +3318,43 @@ mod tests {
 
         let expr = Expression::number(Number::char('文'));
         assert_eq!(print_expression(&expr), "/* '文' */25991");
+    }
+
+    #[test]
+    fn test_for_range_finish_binding_suffix_persists_across_sibling_loops_like_ocaml() {
+        let first = Statement::new(StatementDesc::ForRange(
+            Some(Expression::number(Number::int(0))),
+            Expression::call(
+                Expression::var(Ident::create_local("finishExpr")),
+                vec![Expression::number(Number::int(1))],
+                CallInfo::default(),
+            ),
+            Ident::create_local("i"),
+            ForDirection::Up,
+            vec![],
+        ));
+
+        let second = Statement::new(StatementDesc::ForRange(
+            Some(Expression::number(Number::int(0))),
+            Expression::call(
+                Expression::var(Ident::create_local("finishExpr")),
+                vec![Expression::number(Number::int(2))],
+                CallInfo::default(),
+            ),
+            Ident::create_local("i"),
+            ForDirection::Up,
+            vec![],
+        ));
+
+        let rendered = print_block(&vec![first, second]);
+
+        assert!(rendered.contains("for (let i = 0, i_finish = finishExpr(1); i < i_finish; ++i)"));
+        assert!(
+            rendered.contains(
+                "for (let i$1 = 0, i_finish$1 = finishExpr(2); i$1 < i_finish$1; ++i$1)"
+            ),
+            "expected sibling loop finish temp to keep the OCaml-style suffix, got:\n{rendered}"
+        );
     }
 
     #[test]
