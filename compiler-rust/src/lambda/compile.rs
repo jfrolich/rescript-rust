@@ -1318,6 +1318,14 @@ impl LambdaCompiler {
         result
     }
 
+    fn is_unit_undefined_handler(&self, bindings: &[Ident], handler: &Lambda) -> bool {
+        bindings.is_empty()
+            && matches!(
+                handler,
+                Lambda::Lconst(Constant::JsUndefined { is_unit: true })
+            )
+    }
+
     fn compile_fallthrough_static_raise_return_block(
         &mut self,
         label: i32,
@@ -1385,6 +1393,7 @@ impl LambdaCompiler {
                 }
                 _ if self.return_unit_stack.last().copied() == Some(true)
                     && !inside_enclosing_staticcatch_chain
+                    && !self.is_unit_undefined_handler(bindings, handler)
                     && !lambda_contains_static_raise(handler) =>
                 {
                     if !bindings.is_empty() {
@@ -1421,6 +1430,7 @@ impl LambdaCompiler {
                 }
                 _ if self.return_unit_stack.last().copied() == Some(true)
                     && !inside_enclosing_staticcatch_chain
+                    && !self.is_unit_undefined_handler(bindings, handler)
                     && !lambda_contains_static_raise(handler) =>
                 {
                     if !bindings.is_empty() {
@@ -16938,6 +16948,71 @@ mod tests {
             StatementDesc::Return(expr) => assert_int_expr(expr, 2),
             other => panic!("expected the fallthrough handler return, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn single_case_staticcatch_wrapped_untagged_object_unit_handler_keeps_negative_guard() {
+        let mut compiler = LambdaCompiler::new();
+        let json = Ident::create_local("json");
+        let seen = Ident::create_local("seen");
+        let block = compiler.with_return_unit_context(true, |compiler| {
+            compiler.compile_return_block(&Lambda::LstaticCatch(
+                Box::new(Lambda::Lswitch(
+                    Box::new(Lambda::var(json.clone())),
+                    LambdaSwitch {
+                        sw_consts_full: false,
+                        sw_consts: vec![],
+                        sw_blocks_full: false,
+                        sw_blocks: vec![(
+                            0,
+                            Lambda::Lassign(
+                                seen.clone(),
+                                Box::new(Lambda::const_(Constant::int(1))),
+                            ),
+                        )],
+                        sw_failaction: Some(Box::new(Lambda::static_raise(9, Vec::new()))),
+                        sw_names: Some(SwitchNames {
+                            consts: vec![crate::lambda::SwitchTag {
+                                name: "Null".to_string(),
+                                tag_type: Some(crate::lambda::SwitchCaseTag::Null),
+                            }],
+                            blocks: vec![
+                                crate::lambda::SwitchBlock {
+                                    tag: crate::lambda::SwitchTag::named("Object"),
+                                    tag_name: None,
+                                    block_type: Some(crate::lambda::SwitchBlockType::Object),
+                                },
+                                crate::lambda::SwitchBlock {
+                                    tag: crate::lambda::SwitchTag::named("Array"),
+                                    tag_name: None,
+                                    block_type: Some(crate::lambda::SwitchBlockType::Instance(
+                                        "Array".to_string(),
+                                    )),
+                                },
+                            ],
+                        }),
+                    },
+                )),
+                (9, vec![]),
+                Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
+            ))
+        });
+
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains(
+                "if (typeof json !== \"object\" || json === null || Array.isArray(json)) {"
+            ),
+            "expected the unit handler to stay as the negative guard default:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("return;"),
+            "expected the negative guard to keep an explicit early return:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("seen = 1;"),
+            "expected the object branch effect to remain after the guard:\n{rendered}"
+        );
     }
 
     #[test]
