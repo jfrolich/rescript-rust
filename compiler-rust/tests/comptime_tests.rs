@@ -1,0 +1,561 @@
+//! Integration tests for comptime (compile-time metaprogramming).
+//!
+//! These tests exercise the full compilation pipeline with @comptime:
+//! parse → PPX → type check (with comptime specialization) → lambda → JS.
+//!
+//! Tests are organized by the examples from EXAMPLES.md:
+//! 1. JSON Codec — @typeInfo + inline for on record fields
+//! 2. Simple constant evaluation — @comptime on expressions
+//! 3. TypeInfo introspection — @typeInfo on various types
+//! 4. Switch elimination — pattern matching on TypeInfo
+//! 5. Inline for — loop unrolling
+//! 6. @compileError — compile-time error reporting
+
+use rescript_compiler::driver::compile_source_to_js;
+use rescript_compiler::types::comptime::{build_type_info, TypeInfo, FieldInfo};
+use rescript_compiler::types::comptime::{ComptimeValue, match_typeinfo_pattern};
+
+// ============================================================================
+// TypeInfo construction tests
+// ============================================================================
+
+/// Helper: compile a type declaration and extract the TypeInfo for it.
+/// Uses the full pipeline up to type checking, then queries the type context.
+fn get_type_info_for(type_decl: &str, type_name: &str) -> Option<TypeInfo> {
+    // We can't easily extract TypeInfo from a compilation because the
+    // TypeContext is dropped after compilation. Instead, test build_type_info
+    // directly in the unit tests within comptime.rs.
+    // These integration tests focus on the end-to-end compilation behavior.
+    None
+}
+
+// ============================================================================
+// TypeInfo pattern matching tests
+// ============================================================================
+
+#[test]
+fn match_typeinfo_int() {
+    let result = match_typeinfo_pattern(&TypeInfo::Int, "Int");
+    assert!(result.is_some());
+    assert!(result.unwrap().is_empty()); // No bindings for simple match
+}
+
+#[test]
+fn match_typeinfo_string() {
+    let result = match_typeinfo_pattern(&TypeInfo::String, "String");
+    assert!(result.is_some());
+}
+
+#[test]
+fn match_typeinfo_float() {
+    let result = match_typeinfo_pattern(&TypeInfo::Float, "Float");
+    assert!(result.is_some());
+}
+
+#[test]
+fn match_typeinfo_bool() {
+    let result = match_typeinfo_pattern(&TypeInfo::Bool, "Bool");
+    assert!(result.is_some());
+}
+
+#[test]
+fn match_typeinfo_no_match() {
+    let result = match_typeinfo_pattern(&TypeInfo::Int, "String");
+    assert!(result.is_none());
+}
+
+#[test]
+fn match_typeinfo_record_extracts_fields() {
+    let info = TypeInfo::Record {
+        name: "user".to_string(),
+        fields: vec![
+            FieldInfo {
+                name: "name".to_string(),
+                typ: TypeInfo::String,
+                mutable: false,
+                optional: false,
+                attributes: vec![],
+            },
+            FieldInfo {
+                name: "age".to_string(),
+                typ: TypeInfo::Int,
+                mutable: false,
+                optional: false,
+                attributes: vec![],
+            },
+        ],
+        unboxed: false,
+    };
+
+    let result = match_typeinfo_pattern(&info, "Record");
+    assert!(result.is_some());
+
+    let bindings = result.unwrap();
+    assert!(bindings.contains_key("fields"));
+    assert!(bindings.contains_key("name"));
+
+    // Check fields is an array with 2 elements
+    match bindings.get("fields") {
+        Some(ComptimeValue::Array(fields)) => {
+            assert_eq!(fields.len(), 2);
+            // First field should have name "name"
+            if let ComptimeValue::Record(entries) = &fields[0] {
+                let name_entry = entries.iter().find(|(k, _)| k == "name");
+                assert!(name_entry.is_some());
+                if let Some((_, ComptimeValue::String(s))) = name_entry {
+                    assert_eq!(s, "name");
+                }
+            }
+        }
+        _ => panic!("Expected fields to be an Array"),
+    }
+
+    // Check name is "user"
+    match bindings.get("name") {
+        Some(ComptimeValue::String(s)) => assert_eq!(s, "user"),
+        _ => panic!("Expected name to be a String"),
+    }
+}
+
+#[test]
+fn match_typeinfo_variant_extracts_constructors() {
+    use rescript_compiler::types::comptime::ConstructorInfo;
+
+    let info = TypeInfo::Variant {
+        name: "shape".to_string(),
+        constructors: vec![
+            ConstructorInfo {
+                name: "Circle".to_string(),
+                args: vec![TypeInfo::Float],
+                attributes: vec![],
+            },
+            ConstructorInfo {
+                name: "Point".to_string(),
+                args: vec![],
+                attributes: vec![],
+            },
+        ],
+        unboxed: false,
+    };
+
+    let result = match_typeinfo_pattern(&info, "Variant");
+    assert!(result.is_some());
+
+    let bindings = result.unwrap();
+    assert!(bindings.contains_key("constructors"));
+
+    match bindings.get("constructors") {
+        Some(ComptimeValue::Array(ctors)) => {
+            assert_eq!(ctors.len(), 2);
+        }
+        _ => panic!("Expected constructors to be an Array"),
+    }
+}
+
+#[test]
+fn match_typeinfo_array_extracts_element() {
+    let info = TypeInfo::Array {
+        element: Box::new(TypeInfo::String),
+    };
+
+    let result = match_typeinfo_pattern(&info, "Array");
+    assert!(result.is_some());
+
+    let bindings = result.unwrap();
+    match bindings.get("element") {
+        Some(ComptimeValue::Type(TypeInfo::String)) => {}
+        _ => panic!("Expected element to be TypeInfo::String"),
+    }
+}
+
+#[test]
+fn match_typeinfo_option_extracts_inner() {
+    let info = TypeInfo::Option {
+        inner: Box::new(TypeInfo::Int),
+    };
+
+    let result = match_typeinfo_pattern(&info, "Option");
+    assert!(result.is_some());
+
+    let bindings = result.unwrap();
+    match bindings.get("inner") {
+        Some(ComptimeValue::Type(TypeInfo::Int)) => {}
+        _ => panic!("Expected inner to be TypeInfo::Int"),
+    }
+}
+
+#[test]
+fn match_typeinfo_function_extracts_args_and_return() {
+    let info = TypeInfo::Function {
+        args: vec![TypeInfo::String, TypeInfo::Int],
+        return_type: Box::new(TypeInfo::Bool),
+    };
+
+    let result = match_typeinfo_pattern(&info, "Function");
+    assert!(result.is_some());
+
+    let bindings = result.unwrap();
+    match bindings.get("args") {
+        Some(ComptimeValue::Array(args)) => assert_eq!(args.len(), 2),
+        _ => panic!("Expected args to be an Array"),
+    }
+    match bindings.get("return_type") {
+        Some(ComptimeValue::Type(TypeInfo::Bool)) => {}
+        _ => panic!("Expected return_type to be TypeInfo::Bool"),
+    }
+}
+
+// ============================================================================
+// Parser: inline for
+// ============================================================================
+
+#[test]
+fn parse_inline_for_syntax() {
+    // Test that `inline for` parses without errors
+    let source = r#"
+let x = {
+  inline for item in items {
+    Console.log(item)
+  }
+}
+"#;
+    // This should parse successfully (inline for is a valid expression)
+    // Type checking will reject it (not inside @comptime), but parsing should work
+    let mut parser = rescript_compiler::parser::Parser::new("test.res", source);
+    let structure = rescript_compiler::parser::module::parse_structure(&mut parser);
+    assert!(!parser.has_errors(), "inline for should parse without errors");
+}
+
+// ============================================================================
+// @comptime attribute detection
+// ============================================================================
+
+#[test]
+fn comptime_attribute_on_let_binding_parses() {
+    let source = r#"
+@comptime
+let double = x => x * 2
+"#;
+    let mut parser = rescript_compiler::parser::Parser::new("test.res", source);
+    let structure = rescript_compiler::parser::module::parse_structure(&mut parser);
+    assert!(!parser.has_errors(), "@comptime on let should parse");
+}
+
+// ============================================================================
+// ComptimeValue conversion tests
+// ============================================================================
+
+#[test]
+fn comptime_value_type_info_record_fields_are_accessible() {
+    let fields = vec![
+        FieldInfo {
+            name: "name".to_string(),
+            typ: TypeInfo::String,
+            mutable: false,
+            optional: false,
+            attributes: vec![],
+        },
+        FieldInfo {
+            name: "age".to_string(),
+            typ: TypeInfo::Int,
+            mutable: false,
+            optional: false,
+            attributes: vec![],
+        },
+        FieldInfo {
+            name: "email".to_string(),
+            typ: TypeInfo::Option {
+                inner: Box::new(TypeInfo::String),
+            },
+            mutable: false,
+            optional: true,
+            attributes: vec![],
+        },
+    ];
+
+    let record_info = TypeInfo::Record {
+        name: "user".to_string(),
+        fields: fields.clone(),
+        unboxed: false,
+    };
+
+    // Simulate what @typeInfo(user) produces
+    let value = ComptimeValue::Type(record_info.clone());
+
+    // Simulate switch @typeInfo(T) { | Record({fields}) => ... }
+    let bindings = match_typeinfo_pattern(&record_info, "Record").unwrap();
+    let field_values = match bindings.get("fields").unwrap() {
+        ComptimeValue::Array(arr) => arr,
+        _ => panic!("Expected Array"),
+    };
+
+    // Should have 3 fields
+    assert_eq!(field_values.len(), 3);
+
+    // Each field should have name, typ, mutable, optional
+    for (i, field_val) in field_values.iter().enumerate() {
+        match field_val {
+            ComptimeValue::Record(entries) => {
+                let names: Vec<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
+                assert!(names.contains(&"name"), "Field {} missing 'name'", i);
+                assert!(names.contains(&"typ"), "Field {} missing 'typ'", i);
+                assert!(names.contains(&"mutable"), "Field {} missing 'mutable'", i);
+                assert!(names.contains(&"optional"), "Field {} missing 'optional'", i);
+            }
+            _ => panic!("Expected Record for field {}", i),
+        }
+    }
+}
+
+// ============================================================================
+// End-to-end compilation tests
+// ============================================================================
+
+#[test]
+fn simple_let_binding_compiles() {
+    let source = r#"
+let x = 42
+"#;
+    let output = compile_source_to_js(source, "simple.res").unwrap();
+    assert!(output.contains("42"), "Expected 42 in output:\n{output}");
+}
+
+#[test]
+fn record_type_compiles() {
+    let source = r#"
+type user = {
+  name: string,
+  age: int,
+}
+
+let u: user = { name: "Alice", age: 30 }
+"#;
+    let output = compile_source_to_js(source, "record.res").unwrap();
+    assert!(output.contains("Alice"), "Expected Alice in output:\n{output}");
+}
+
+#[test]
+fn variant_type_compiles() {
+    let source = r#"
+type shape =
+  | Circle(float)
+  | Rectangle(float, float)
+  | Point
+
+let s = Circle(5.0)
+"#;
+    let output = compile_source_to_js(source, "variant.res").unwrap();
+    assert!(output.contains("5.0") || output.contains("5"), "Expected 5 in output:\n{output}");
+}
+
+// ============================================================================
+// Comptime compilation tests (current behavior)
+// ============================================================================
+
+#[test]
+fn comptime_function_definition_compiles() {
+    // Just defining a @comptime function should work — it gets registered
+    // but not called, so no specialization happens
+    let source = r#"
+@comptime
+let double = (x) => x * 2
+"#;
+    let result = compile_source_to_js(source, "comptime_def.res");
+    // This may or may not produce output — the @comptime attribute
+    // should be recognized without errors
+    assert!(result.is_ok(), "Expected @comptime let to compile: {:?}", result.err());
+}
+
+// ============================================================================
+// Expected output tests for JSON codec example (target behavior)
+//
+// These test the DESIRED output from the EXAMPLES.md.
+// They document what the comptime system should produce once
+// fully implemented. Currently they may fail — that's expected.
+// ============================================================================
+
+/// The encode example from EXAMPLES.md Section 1.
+/// When fully working, this should produce specialized JS with no generics.
+///
+/// Input:
+/// ```rescript
+/// type user = { name: string, age: int }
+/// let json = encode(user, myUser)
+/// ```
+///
+/// Expected output (no runtime dispatch):
+/// ```javascript
+/// var obj = {};
+/// obj["name"] = value.name;
+/// obj["age"] = value.age;
+/// ```
+#[test]
+#[ignore = "requires full comptime: @typeInfo + inline for + recursive specialization"]
+fn json_encode_record_specializes_to_field_by_field() {
+    let source = r#"
+@comptime
+let rec encodeField = (comptime T: type, value: T): Js.Json.t => {
+  switch @typeInfo(T) {
+  | String => Js.Json.string(value)
+  | Int => Js.Json.number(Int.toFloat(value))
+  | Float => Js.Json.number(value)
+  | Record({fields}) =>
+    let obj = Js.Dict.empty()
+    inline for field in fields {
+      Js.Dict.set(obj, field.name, encodeField(field.typ, @field(value, field.name)))
+    }
+    Js.Json.object_(obj)
+  | _ => @compileError(`Cannot encode`)
+  }
+}
+
+type user = { name: string, age: int }
+let myUser: user = { name: "Alice", age: 30 }
+let json = encodeField(user, myUser)
+"#;
+
+    let output = compile_source_to_js(source, "json_encode.res").unwrap();
+
+    // Should have field-by-field encoding, not a generic dispatch
+    assert!(
+        output.contains("name") && output.contains("age"),
+        "Expected field-specific encoding in:\n{output}"
+    );
+    // Should NOT have switch/match on type info at runtime
+    assert!(
+        !output.contains("typeInfo") && !output.contains("@typeInfo"),
+        "Should not have runtime typeInfo dispatch in:\n{output}"
+    );
+}
+
+/// Variant encoding from EXAMPLES.md Section 1.
+#[test]
+#[ignore = "requires full comptime: variant matching + inline for over constructors"]
+fn json_encode_variant_specializes_to_switch() {
+    let source = r#"
+type shape =
+  | Circle({radius: float})
+  | Rectangle({width: float, height: float})
+  | Point
+
+// Expected: specialized switch with TAG field per constructor
+"#;
+    // TODO: implement when variant encoding works
+}
+
+/// Optional field handling from EXAMPLES.md Section 1.
+#[test]
+#[ignore = "requires full comptime: optional field detection + conditional encoding"]
+fn json_encode_optional_fields() {
+    let source = r#"
+type user = {
+  name: string,
+  email: option<string>,
+}
+
+// Expected: conditional encoding for optional fields
+// if (value.email !== undefined) obj["email"] = value.email;
+"#;
+    // TODO: implement when optional field handling works
+}
+
+/// Recursive type encoding from EXAMPLES.md Section 1.
+#[test]
+#[ignore = "requires full comptime: recursive type detection + self-referencing calls"]
+fn json_encode_recursive_type() {
+    let source = r#"
+type rec treeNode = {
+  value: string,
+  children: array<treeNode>,
+}
+
+// Expected: let rec encode_treeNode = (value) => { ... encode_treeNode(v) ... }
+"#;
+    // TODO: implement when recursive comptime works
+}
+
+// ============================================================================
+// TypeUtils examples from EXAMPLES.md Section 6
+// ============================================================================
+
+#[test]
+#[ignore = "requires @comptime.derive + @buildVariant"]
+fn key_of_generates_variant_from_record_fields() {
+    let source = r#"
+@keyOf
+type user = {
+  name: string,
+  age: int,
+  email: string,
+}
+
+// Expected: type user_key = Name | Age | Email
+"#;
+}
+
+#[test]
+#[ignore = "requires @comptime.derive + @buildRecord with optional fields"]
+fn partial_makes_all_fields_optional() {
+    let source = r#"
+@partial
+type user = {
+  name: string,
+  age: int,
+}
+
+// Expected: type user_partial = { name?: string, age?: int }
+"#;
+}
+
+// ============================================================================
+// GraphQL example from EXAMPLES.md Section 2
+// ============================================================================
+
+#[test]
+#[ignore = "requires comptime string parsing + @embedFile + full derive system"]
+fn graphql_query_parses_and_validates_at_compile_time() {
+    // This requires the most advanced comptime features:
+    // - String parsing at compile time
+    // - @embedFile for schema loading
+    // - Module generation from parsed query
+    // - Schema validation with compile errors
+}
+
+// ============================================================================
+// CSS-in-JS example from EXAMPLES.md Section 3
+// ============================================================================
+
+#[test]
+#[ignore = "requires comptime string parsing + @sideEffect"]
+fn css_validates_property_names_at_compile_time() {
+    // Requires:
+    // - CSS parser at compile time
+    // - @compileError for unknown properties
+    // - @sideEffect for stylesheet injection
+}
+
+// ============================================================================
+// SQL example from EXAMPLES.md Section 4
+// ============================================================================
+
+#[test]
+#[ignore = "requires comptime string parsing + schema validation"]
+fn sql_query_validates_columns_at_compile_time() {
+    // Requires:
+    // - SQL parser at compile time
+    // - Schema validation
+    // - @buildRecord for result type generation
+}
+
+// ============================================================================
+// Form example from EXAMPLES.md Section 5
+// ============================================================================
+
+#[test]
+#[ignore = "requires @comptime.derive + inline for + @record"]
+fn form_generates_typed_hooks_from_record() {
+    // Requires:
+    // - @comptime.derive("form") registration
+    // - inline for over record fields
+    // - @record for building typed field accessors
+}
