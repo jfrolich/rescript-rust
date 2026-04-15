@@ -874,6 +874,7 @@ fn build_compiler_options(
         }
     }
 
+
     // Add dev dependency paths if the module is type:dev
     // (omitted for simplicity in first cut; can be added later)
 
@@ -1103,11 +1104,13 @@ fn register_source_fallback_paths(build_state: &BuildCommandState) {
 /// Runs on a dedicated thread with a large stack to handle any remaining
 /// source-fallback chains during the pre-compilation itself.
 fn pre_compile_runtime_modules(build_state: &BuildCommandState) {
-    let runtime_path = &build_state.build_state.compiler_info.runtime_path;
+    let runtime_root = &build_state.build_state.compiler_info.runtime_path;
+    // Runtime .res sources live in lib/ocaml/ alongside the .cmi/.cmj files
+    let runtime_path = runtime_root.join("lib").join("ocaml");
 
     // Collect all runtime .res files and check for .resi siblings
     let mut runtime_modules: Vec<(String, PathBuf, Option<PathBuf>)> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(runtime_path) {
+    if let Ok(entries) = std::fs::read_dir(&runtime_path) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("res") {
@@ -1145,7 +1148,7 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) {
     });
 
     let root_config = build_state.get_root_config();
-    let runtime_path_for_opts = runtime_path.clone();
+    let runtime_path_for_opts = runtime_root.clone();
     let jsx_version = root_config
         .jsx
         .as_ref()
@@ -1161,6 +1164,7 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) {
     let mut compiled = 0;
     for (module_name, res_path, resi_path) in &runtime_modules {
         let options = rescript_compiler::driver::CompilerOptions {
+            include_paths: vec![runtime_path.clone()],
             nopervasives: true,
             open_modules: vec!["Pervasives".to_string()],
             module_name: Some(module_name.clone()),
