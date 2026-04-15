@@ -43,6 +43,71 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: collapse the top-level sync component alias pair
+  `let make$N = function ...; let Module$Component = make$N;` before final
+  printing, so the printer sees the descriptive component binding as the
+  function owner instead of the generic `make` / `make$N` temporary
+- Active backend focus for this slice spans **Phase 4: Port JS Passes** and
+  **Phase 5: Byte-Exact Dumping** from `PLAN.md`, because the key drift sat in
+  the JS IR statement stream just before final emission: OCaml's final JS
+  snapshots already have the descriptive binding owning the top-level function
+  declaration, and `js_dump.ml` simply prints whichever identifier owns that
+  function binding
+- OCaml reference:
+  `compiler/core/js_pass_flatten_and_mark_dead.ml`, especially the preserve-mode
+  substitution boundary that keeps component `.make` reads materialized until
+  printing; and `compiler/core/js_dump.ml`, especially the top-level variable
+  declaration path that emits `function <ident>(...)` from the current binding
+  owner rather than inventing names in the printer
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so the JS flatten/dead pass
+    now collapses a live top-level sync alias pair of the form
+    `make` / `make$N` -> descriptive component name into a single function-owned
+    binding when the function is non-async, directive-free, non-recursive, and
+    the generic `make` binding does not survive any later uses
+  - kept async component aliases materialized, matching the existing
+    `async_jsx` snapshot shape where `async function make(...)` remains and the
+    descriptive component alias points at it
+  - added focused JS-pass regressions for both sides of the split:
+    `js_flatten_and_mark_dead_rebinds_sync_component_make_aliases_to_descriptive_names`
+    and
+    `js_flatten_and_mark_dead_keeps_async_component_make_aliases_materialized`
+- Verified focused guards for this slice:
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml js_flatten_and_mark_dead_ -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact AST-path release repro for `tests/tests/src/jsx_preserve_test.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/jsx_preserve_test.mjs` against the
+    checked-in snapshot
+  - exact AST-path release repro for `tests/tests/src/async_jsx.res` from
+    `tests/tests/lib/bs`, diffing `/tmp/async_jsx.mjs` against the checked-in
+    snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - the remaining preserve-mode wrapper/function ownership drift is gone:
+    `tests/tests/src/jsx_preserve_test.res` no longer emits
+    `function make(...)` + `let Jsx_preserve_test$B = make`, and
+    `tests/tests/src/async_jsx.res` no longer emits
+    `function make$1(...)` + `let Async_jsx$Bar = make$1`
+  - `tests/tests/src/jsx_preserve_test.res` and
+    `tests/tests/src/async_jsx.res` still differ, but only on the narrower
+    parameter-name residue (`props` vs `param`) rather than top-level binding
+    ownership
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+- Topline impact:
+  - JS snapshot parity: **491 / 657** -> **491 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **166** -> **166** (**no change**)
+- Keep this change because it moves the Rust JS backend onto the OCaml-aligned
+  ownership boundary for top-level sync component functions, eliminates the
+  larger wrapper/alias hunk in the preserve-mode repro files, and leaves only
+  the narrower parameter-naming residue for the next iteration even though the
+  current file-level pass count does not move yet.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: respect OCaml's global `jsx_preserve` guard end-to-end so
   transformed JSX only stays preserved in the final backend for files that
   actually enable `-bs-jsx-preserve`, instead of preserving JSX syntax or

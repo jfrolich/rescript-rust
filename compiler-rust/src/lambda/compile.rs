@@ -8085,8 +8085,230 @@ fn flatten_and_mark_dead_program(
     let mut substitution = HashMap::new();
     program.block =
         flatten_and_mark_dead_block(program.block, id_gen, &mut substitution, jsx_preserve);
+    program.block = collapse_sync_component_make_aliases(program.block, &program.export_set);
     mark_dead_code(&mut program);
     program
+}
+
+fn collapse_sync_component_make_aliases(
+    block: Block,
+    export_set: &HashSet<Ident>,
+) -> Block {
+    let mut rewritten = Vec::with_capacity(block.len());
+    let mut index = 0;
+
+    while index < block.len() {
+        let Some(current) = block.get(index) else {
+            break;
+        };
+        let Some(next) = block.get(index + 1) else {
+            rewritten.push(current.clone());
+            break;
+        };
+
+        let StatementDesc::Variable(function_decl) = &current.desc else {
+            rewritten.push(current.clone());
+            index += 1;
+            continue;
+        };
+        let StatementDesc::Variable(alias_decl) = &next.desc else {
+            rewritten.push(current.clone());
+            index += 1;
+            continue;
+        };
+
+        let Some(Expression {
+            desc:
+                ExpressionDesc::Fun {
+                    async_,
+                    directive,
+                    ..
+                },
+            ..
+        }) = &function_decl.value
+        else {
+            rewritten.push(current.clone());
+            index += 1;
+            continue;
+        };
+
+        if *async_
+            || directive.is_some()
+            || !is_make_like_binding_name(function_decl.ident.name())
+            || !is_descriptive_component_binding_name(alias_decl.ident.name())
+            || export_set.contains(&function_decl.ident)
+            || !matches!(
+                alias_decl.value.as_ref(),
+                Some(Expression {
+                    desc: ExpressionDesc::Var(VIdent::Id(id)),
+                    ..
+                }) if id.same(&function_decl.ident)
+            )
+            || expression_mentions_ident(
+                function_decl.value.as_ref().expect("function value checked above"),
+                &function_decl.ident,
+            )
+            || statements_mention_ident(&block[(index + 2)..], &function_decl.ident)
+            || !export_set.contains(&alias_decl.ident)
+                && !statements_mention_ident(&block[(index + 2)..], &alias_decl.ident)
+        {
+            rewritten.push(current.clone());
+            index += 1;
+            continue;
+        }
+
+        rewritten.push(Statement {
+            desc: StatementDesc::Variable(VariableDeclaration {
+                ident: alias_decl.ident.clone(),
+                value: function_decl.value.clone(),
+                property: function_decl.property,
+                ident_info: function_decl.ident_info.clone(),
+            }),
+            comment: current.comment.clone().or_else(|| next.comment.clone()),
+        });
+        index += 2;
+    }
+
+    rewritten
+}
+
+fn is_make_like_binding_name(name: &str) -> bool {
+    name == "make"
+        || name
+            .strip_prefix("make$")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_descriptive_component_binding_name(name: &str) -> bool {
+    !is_make_like_binding_name(name)
+        && name
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_uppercase())
+}
+
+fn statements_mention_ident(stmts: &[Statement], target: &Ident) -> bool {
+    stmts.iter().any(|stmt| statement_mentions_ident(stmt, target))
+}
+
+fn statement_mentions_ident(stmt: &Statement, target: &Ident) -> bool {
+    match &stmt.desc {
+        StatementDesc::Block(block) => statements_mention_ident(block, target),
+        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
+            ident.same(target)
+                || value
+                    .as_ref()
+                    .is_some_and(|value| expression_mentions_ident(value, target))
+        }
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
+            expression_mentions_ident(expr, target)
+        }
+        StatementDesc::If(cond, then_block, else_block) => {
+            expression_mentions_ident(cond, target)
+                || statements_mention_ident(then_block, target)
+                || statements_mention_ident(else_block, target)
+        }
+        StatementDesc::While(cond, body) => {
+            expression_mentions_ident(cond, target) || statements_mention_ident(body, target)
+        }
+        StatementDesc::ForRange(start, finish, loop_ident, _, body) => {
+            loop_ident.same(target)
+                || start
+                    .as_ref()
+                    .is_some_and(|start| expression_mentions_ident(start, target))
+                || expression_mentions_ident(finish, target)
+                || statements_mention_ident(body, target)
+        }
+        StatementDesc::IntSwitch(test, clauses, default) => {
+            expression_mentions_ident(test, target)
+                || clauses
+                    .iter()
+                    .any(|(_, clause)| statements_mention_ident(&clause.body, target))
+                || default
+                    .as_ref()
+                    .is_some_and(|block| statements_mention_ident(block, target))
+        }
+        StatementDesc::StringSwitch(test, clauses, default) => {
+            expression_mentions_ident(test, target)
+                || clauses
+                    .iter()
+                    .any(|clause| statements_mention_ident(&clause.clause.body, target))
+                || default
+                    .as_ref()
+                    .is_some_and(|block| statements_mention_ident(block, target))
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            statements_mention_ident(body, target)
+                || catch.as_ref().is_some_and(|(catch_ident, catch_block)| {
+                    catch_ident.same(target) || statements_mention_ident(catch_block, target)
+                })
+                || finally
+                    .as_ref()
+                    .is_some_and(|block| statements_mention_ident(block, target))
+        }
+        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => false,
+    }
+}
+
+fn expression_mentions_ident(expr: &Expression, target: &Ident) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Var(VIdent::Id(ident)) => ident.same(target),
+        ExpressionDesc::Var(VIdent::Qualified(_, _))
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::RawJsCode(_) => false,
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::StaticIndex(inner, _, _)
+        | ExpressionDesc::New(inner, None) => expression_mentions_ident(inner, target),
+        ExpressionDesc::In(left, right)
+        | ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::FlatCall(left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            expression_mentions_ident(left, target) || expression_mentions_ident(right, target)
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            expression_mentions_ident(test, target)
+                || expression_mentions_ident(consequent, target)
+                || expression_mentions_ident(alternate, target)
+        }
+        ExpressionDesc::Call(func, args, _)
+        | ExpressionDesc::New(func, Some(args))
+        | ExpressionDesc::TaggedTemplate(func, _, args) => {
+            expression_mentions_ident(func, target)
+                || args.iter().any(|arg| expression_mentions_ident(arg, target))
+        }
+        ExpressionDesc::Fun { params, body, .. } => {
+            params.iter().any(|param| param.same(target)) || statements_mention_ident(body, target)
+        }
+        ExpressionDesc::Array(items, _) => items
+            .iter()
+            .any(|item| expression_mentions_ident(item, target)),
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            expression_mentions_ident(tag, target)
+                || items.iter().any(|item| expression_mentions_ident(item, target))
+        }
+        ExpressionDesc::Object(dup, props) => {
+            dup.as_deref()
+                .is_some_and(|dup| expression_mentions_ident(dup, target))
+                || props
+                    .iter()
+                    .any(|(_, value)| expression_mentions_ident(value, target))
+        }
+        ExpressionDesc::CamlBlockTag(inner, _) => expression_mentions_ident(inner, target),
+    }
 }
 
 fn flatten_and_mark_dead_block(
@@ -17572,6 +17794,140 @@ mod tests {
         assert!(
             !rendered.contains("Foo.make"),
             "component .make read should not survive when jsx preserve is disabled:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn js_flatten_and_mark_dead_rebinds_sync_component_make_aliases_to_descriptive_names() {
+        let make = Ident::create_local("make");
+        let component = Ident::create_local("Jsx_preserve_test$B");
+        let module = Ident::create_local("B");
+        let props = Ident::create_local("props");
+        let rendered = print_deps_program(
+            &apply_js_flatten_and_mark_dead_pass(
+                DepsProgram {
+                    program: Program::new(
+                        vec![
+                            Statement::variable(VariableDeclaration {
+                                ident: make.clone(),
+                                value: Some(Expression::new(ExpressionDesc::Fun {
+                                    is_method: false,
+                                    params: vec![props],
+                                    body: vec![Statement::return_(Expression::null())],
+                                    env: Default::default(),
+                                    return_unit: false,
+                                    async_: false,
+                                    directive: None,
+                                })),
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            }),
+                            Statement::variable(VariableDeclaration {
+                                ident: component.clone(),
+                                value: Some(Expression::var(make.clone())),
+                                property: LetKind::Alias,
+                                ident_info: IdentInfo::default(),
+                            }),
+                            Statement::variable(VariableDeclaration {
+                                ident: module.clone(),
+                                value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                                    vec![Expression::var(component.clone())],
+                                    MutableFlag::Immutable,
+                                    Box::new(Expression::number(Number::int(0))),
+                                    TagInfo::Module(vec!["make".to_string()]),
+                                ))),
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            }),
+                        ],
+                        vec![],
+                    ),
+                    modules: vec![],
+                    side_effect: None,
+                },
+                true,
+            ),
+            None,
+        );
+
+        assert!(
+            rendered.contains("function Jsx_preserve_test$B(props)"),
+            "expected the descriptive component binding to own the function:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("let Jsx_preserve_test$B = make;"),
+            "component alias should collapse into the function declaration:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("function make(props)"),
+            "generic make binding should not survive for sync component aliases:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn js_flatten_and_mark_dead_keeps_async_component_make_aliases_materialized() {
+        let make = Ident::create_local("make");
+        let component = Ident::create_local("Async_jsx$Foo");
+        let module = Ident::create_local("Foo");
+        let param = Ident::create_local("param");
+        let rendered = print_deps_program(
+            &apply_js_flatten_and_mark_dead_pass(
+                DepsProgram {
+                    program: Program::new(
+                        vec![
+                            Statement::variable(VariableDeclaration {
+                                ident: make.clone(),
+                                value: Some(Expression::new(ExpressionDesc::Fun {
+                                    is_method: false,
+                                    params: vec![param],
+                                    body: vec![Statement::return_(Expression::null())],
+                                    env: Default::default(),
+                                    return_unit: false,
+                                    async_: true,
+                                    directive: None,
+                                })),
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            }),
+                            Statement::variable(VariableDeclaration {
+                                ident: component.clone(),
+                                value: Some(Expression::var(make.clone())),
+                                property: LetKind::Alias,
+                                ident_info: IdentInfo::default(),
+                            }),
+                            Statement::variable(VariableDeclaration {
+                                ident: module,
+                                value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                                    vec![Expression::var(component.clone())],
+                                    MutableFlag::Immutable,
+                                    Box::new(Expression::number(Number::int(0))),
+                                    TagInfo::Module(vec!["make".to_string()]),
+                                ))),
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            }),
+                        ],
+                        vec![],
+                    ),
+                    modules: vec![],
+                    side_effect: None,
+                },
+                true,
+            ),
+            None,
+        );
+
+        assert!(
+            rendered.contains("async function make(param)"),
+            "async component binding should keep the original make function:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("let Async_jsx$Foo = make;"),
+            "async component alias should remain materialized:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("async function Async_jsx$Foo(param)"),
+            "async component function should not be rebound to the descriptive alias:\n{rendered}"
         );
     }
 
