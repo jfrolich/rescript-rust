@@ -27,6 +27,7 @@ struct SimplifyEnv {
     plain_strings: HashMap<Ident, String>,
     preserved_export_bindings: HashSet<Ident>,
     allow_direct_function_beta_reduce: bool,
+    preserve_direct_wrapper_values: bool,
     substitutions: HashMap<Ident, Lambda>,
 }
 
@@ -1577,11 +1578,14 @@ fn simplify_primitive(
         .collect();
 
     match (&info.primitive, args.as_slice()) {
-        (Primitive::PjsFnMake(arity), [Lambda::Lfunction(func)]) => simplify_with_env(
-            &adjust_direct_js_fn_make_function(func, *arity, &info.loc),
-            env,
-            exports,
-        ),
+        (Primitive::PjsFnMake(arity), [Lambda::Lfunction(func)]) => {
+            let adjusted = adjust_direct_js_fn_make_function(func, *arity, &info.loc);
+            if env.preserve_direct_wrapper_values {
+                Lambda::prim(info.primitive.clone(), vec![adjusted], info.loc.clone())
+            } else {
+                simplify_with_env(&adjusted, env, exports)
+            }
+        }
         (Primitive::PjsFnMake(_), [arg]) if eta_reducible_module_field_read(arg) => {
             arg.clone()
         }
@@ -2141,6 +2145,36 @@ fn inlineable_direct_wrapper_function(value: &Lambda) -> Option<LFunction> {
     }
 }
 
+fn reduce_direct_wrapper_application_once(func: &Lambda, args: &[Lambda]) -> Option<Lambda> {
+    fn peel_direct_wrapper(
+        lam: &Lambda,
+    ) -> Option<(Vec<(LetKind, Ident, Lambda)>, LFunction)> {
+        if let Some(func) = inlineable_direct_wrapper_function(lam) {
+            return Some((Vec::new(), func));
+        }
+
+        match lam {
+            Lambda::Llet(kind, id, value, body) => {
+                let (mut bindings, func) = peel_direct_wrapper(body)?;
+                bindings.insert(0, (*kind, id.clone(), value.as_ref().clone()));
+                Some((bindings, func))
+            }
+            _ => None,
+        }
+    }
+
+    let (bindings, inline_func) = peel_direct_wrapper(func)?;
+    if !should_inline_direct_function(&inline_func, args) {
+        return None;
+    }
+
+    let reduced =
+        beta_reduce::propagate_beta_reduce(&inline_func.params, &inline_func.body, args);
+    Some(bindings.into_iter().rev().fold(reduced, |body, (kind, id, value)| {
+        Lambda::let_(kind, id, value, body)
+    }))
+}
+
 fn block_element_of_lambda(value: &Lambda) -> BlockElement {
     match value {
         Lambda::Lvar(_) | Lambda::Lconst(_) => BlockElement::Simple(value.clone()),
@@ -2234,6 +2268,17 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
                 return simplify_with_env(&reduced, env, exports);
             }
         }
+
+        if let Some(reduced) =
+            reduce_direct_wrapper_application_once(&apply.ap_func, &apply.ap_args)
+        {
+            let followup_env = SimplifyEnv {
+                allow_direct_function_beta_reduce: false,
+                preserve_direct_wrapper_values: true,
+                ..env.clone()
+            };
+            return simplify_with_env(&reduced, &followup_env, exports);
+        }
     }
 
     let args: Vec<_> = apply
@@ -2265,6 +2310,20 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
             .get(id)
             .cloned()
             .unwrap_or_else(|| simplify_with_env(&apply.ap_func, env, exports)),
+        Lambda::Lprim(info)
+            if !env.allow_direct_function_beta_reduce
+                && matches!(
+                    info.primitive,
+                    Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit
+                ) =>
+        {
+            let callee_args = info
+                .args
+                .iter()
+                .map(|arg| simplify_with_env(arg, env, exports))
+                .collect();
+            Lambda::prim(info.primitive.clone(), callee_args, info.loc.clone())
+        }
         _ => simplify_with_env(&apply.ap_func, env, exports),
     };
     Lambda::Lapply(Apply {
@@ -3916,7 +3975,77 @@ mod tests {
     }
 
     #[test]
-    fn beta_reduces_nested_direct_wrapper_applications_after_intermediate_let_cleanup() {
+    fn keeps_nested_direct_wrapper_applications_visible_for_backend_codegen() {
+        fn contains_apply_to_direct_wrapper(lam: &Lambda) -> bool {
+            match lam {
+                Lambda::Lapply(apply) => {
+                    matches!(
+                        apply.ap_func.as_ref(),
+                        Lambda::Lprim(crate::lambda::PrimInfo {
+                            primitive: Primitive::PjsFnMake(_),
+                            ..
+                        })
+                    ) || contains_apply_to_direct_wrapper(&apply.ap_func)
+                        || apply.ap_args.iter().any(contains_apply_to_direct_wrapper)
+                }
+                Lambda::Lfunction(func) => contains_apply_to_direct_wrapper(&func.body),
+                Lambda::Llet(_, _, value, body) => {
+                    contains_apply_to_direct_wrapper(value)
+                        || contains_apply_to_direct_wrapper(body)
+                }
+                Lambda::Lletrec(bindings, body) => {
+                    bindings
+                        .iter()
+                        .any(|(_, lam)| contains_apply_to_direct_wrapper(lam))
+                        || contains_apply_to_direct_wrapper(body)
+                }
+                Lambda::Lprim(info) => info.args.iter().any(contains_apply_to_direct_wrapper),
+                Lambda::Lswitch(scrutinee, switch) => {
+                    contains_apply_to_direct_wrapper(scrutinee)
+                        || switch
+                            .sw_consts
+                            .iter()
+                            .any(|(_, lam)| contains_apply_to_direct_wrapper(lam))
+                        || switch
+                            .sw_blocks
+                            .iter()
+                            .any(|(_, lam)| contains_apply_to_direct_wrapper(lam))
+                        || switch
+                            .sw_failaction
+                            .as_deref()
+                            .is_some_and(contains_apply_to_direct_wrapper)
+                }
+                Lambda::LstringSwitch(scrutinee, cases, default) => {
+                    contains_apply_to_direct_wrapper(scrutinee)
+                        || cases.iter().any(|(_, lam)| contains_apply_to_direct_wrapper(lam))
+                        || default
+                            .as_deref()
+                            .is_some_and(contains_apply_to_direct_wrapper)
+                }
+                Lambda::LstaticRaise(_, args) => args.iter().any(contains_apply_to_direct_wrapper),
+                Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                    contains_apply_to_direct_wrapper(body)
+                        || contains_apply_to_direct_wrapper(handler)
+                }
+                Lambda::LifThenElse(cond, then_, else_) => {
+                    contains_apply_to_direct_wrapper(cond)
+                        || contains_apply_to_direct_wrapper(then_)
+                        || contains_apply_to_direct_wrapper(else_)
+                }
+                Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                    contains_apply_to_direct_wrapper(first)
+                        || contains_apply_to_direct_wrapper(second)
+                }
+                Lambda::Lfor(_, start, end, _, body) => {
+                    contains_apply_to_direct_wrapper(start)
+                        || contains_apply_to_direct_wrapper(end)
+                        || contains_apply_to_direct_wrapper(body)
+                }
+                Lambda::Lassign(_, value) => contains_apply_to_direct_wrapper(value),
+                Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            }
+        }
+
         let outer = Ident::create_local("outer");
         let ignored = Ident::create_local("ignored");
         let inner = Ident::create_local("inner");
@@ -3982,10 +4111,10 @@ mod tests {
         });
 
         let simplified = simplify_for_js_backend(&lambda);
-        assert!(matches!(
-            simplified,
-            Lambda::Lconst(Constant::Int { i: 0, .. })
-        ));
+        assert!(
+            contains_apply_to_direct_wrapper(&simplified),
+            "expected the direct PjsFnMake application chain to survive for backend codegen, got {simplified:?}"
+        );
     }
 
     #[test]

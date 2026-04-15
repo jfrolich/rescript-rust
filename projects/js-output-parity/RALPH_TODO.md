@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 490 / 657 JS snapshots passing, 0 compile errors, 167 output diffs
+**Status:** 491 / 657 JS snapshots passing, 0 compile errors, 166 output diffs
 
 ## Goal
 
@@ -35,11 +35,77 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **490 / 657**
+- JS snapshot parity: **491 / 657**
 - Compile errors: **0**
-- Output diffs: **167**
+- Output diffs: **166**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep one-step direct `PjsFnMake` beta reduction on the JS-path
+  simplifier without globally preserving wrappers, so returned wrapper calls
+  from `gpr_1692_test.res` survive later cleanup passes exactly where OCaml
+  keeps them
+- Active backend focus for this slice is **Phase 2: Port Post-Lowering Lambda
+  Backend Stages** from `PLAN.md`, because the mismatch lived in the
+  post-lowering `lam_pass_remove_alias` / `lam_pass_alpha_conversion`
+  boundary before JS IR lowering: Rust needed to beta-reduce through the
+  direct wrapper once, then stop later no-beta cleanup passes from unwrapping
+  the returned direct-wrapper callee back into a bare `Lfunction`
+- OCaml reference:
+  `compiler/core/lam.ml`, especially `Lam.apply` / `is_eta_conversion_exn`
+  for direct `Pjs_fn_make` call reconstruction;
+  `compiler/core/lam_pass_remove_alias.ml`, especially the direct-application
+  `Lam_beta_reduce.propagate_beta_reduce` path;
+  `compiler/core/lam_pass_alpha_conversion.ml`, especially `Pjs_fn_make` /
+  `Pjs_fn_make_unit` simplification; and
+  `compiler/core/lam_compile_main.ml` for the first-pass-then-cleanup
+  sequence on the JS backend path
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so
+    `reduce_direct_wrapper_application_once(...)` still beta-reduces direct
+    wrapper callees once, but the follow-up subtree keeps the returned wrapper
+    value materialized instead of globally preserving every `PjsFnMake`
+  - added a callee-only preservation rule for the later
+    `allow_direct_function_beta_reduce = false` cleanup passes so
+    already-returned direct wrapper callees stay wrapped instead of being
+    re-unwrapped to bare `Lfunction`s and collapsed again
+  - kept ordinary `PjsFnMake` simplification elsewhere on the existing
+    OCaml-aligned unwrap path, avoiding the broad regression from global
+    wrapper preservation
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lambda::compile::tests::compile_effectful_underscore_binding_from_nested_js_function_calls_survives_shake -- --exact --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lambda::simplify::tests::keeps_nested_direct_wrapper_applications_visible_for_backend_codegen -- --exact --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lambda::simplify::tests::simplifies_named_nested_pjs_fn_make_application_chain_from_ari_regress_shape -- --exact --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lets_dce_pass_beta_reduces_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/gpr_1692_test.res`, diffing
+    `/tmp/gpr_1692_test.mjs` against the checked-in snapshot
+  - direct guard repros for
+    `tests/tests/src/PartialApplicationNoRuntimeCurry.res` and
+    `tests/tests/src/ExternalShadow.res`, diffing `/tmp/*.mjs` against the
+    checked-in snapshots
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1692_test.res` now matches the checked-in snapshot
+    again and no longer appears in `temp/rust-parity/diffs`; the top-level
+    wrapper call survives instead of collapsing away during later cleanup
+  - `tests/tests/src/PartialApplicationNoRuntimeCurry.res` and
+    `tests/tests/src/ExternalShadow.res` remain exact snapshot matches as
+    unchanged guard files
+  - the authoritative 657-file wrapper run improves by one file overall,
+    confirming the narrowed wrapper-preservation rule fixed a real backend
+    drift without reopening the surrounding guard cluster
+- Topline impact:
+  - JS snapshot parity: **490 / 657** -> **491 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **167** -> **166** (**-1**)
+- Keep this change because it matches OCaml's direct `Pjs_fn_make` call
+  boundary more closely than either Rust extreme (global wrapper erasure or
+  global wrapper preservation), removes the concrete `gpr_1692_test` drift,
+  and improves the authoritative baseline without reopening the nearby guard
+  files.
 
 Latest iteration on **2026-04-15**:
 
