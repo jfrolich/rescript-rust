@@ -1370,6 +1370,7 @@ impl LambdaCompiler {
                     true
                 }
                 _ if !self.uses_untagged_variant_switch(switch)
+                    && !inside_enclosing_staticcatch_chain
                     && !lambda_contains_static_raise(handler)
                     && !lambda_contains_staticcatch(handler)
                     && switch_cases_contain_static_raise_to_label(
@@ -18195,6 +18196,71 @@ mod tests {
         assert_eq!(clauses[2].tag_type, SwitchCaseTag::String("C".to_string()));
         assert_switch_case_returns_int_result(&clauses[2].clause.body, 2);
         assert!(!clauses[2].clause.should_break);
+    }
+
+    #[test]
+    fn nested_named_variant_return_switches_keep_complete_payload_handlers_inline() {
+        let mut compiler = LambdaCompiler::new();
+        let action = Ident::create_local("action");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::LstaticCatch(
+                Box::new(Lambda::Lswitch(
+                    Box::new(Lambda::var(action.clone())),
+                    LambdaSwitch {
+                        sw_consts_full: true,
+                        sw_consts: vec![
+                            (0, Lambda::const_(Constant::int(1))),
+                            (1, Lambda::const_(Constant::int(3))),
+                            (2, Lambda::const_(Constant::int(4))),
+                        ],
+                        sw_blocks_full: true,
+                        sw_blocks: vec![
+                            (0, Lambda::static_raise(18, Vec::new())),
+                            (1, Lambda::static_raise(18, Vec::new())),
+                            (2, Lambda::static_raise(19, Vec::new())),
+                        ],
+                        sw_failaction: None,
+                        sw_names: Some(SwitchNames {
+                            consts: vec![
+                                crate::lambda::SwitchTag::named("A"),
+                                crate::lambda::SwitchTag::named("B"),
+                                crate::lambda::SwitchTag::named("F"),
+                            ],
+                            blocks: vec![
+                                crate::lambda::SwitchBlock::named("C"),
+                                crate::lambda::SwitchBlock::named("D"),
+                                crate::lambda::SwitchBlock::named("E"),
+                            ],
+                        }),
+                    },
+                )),
+                (19, vec![]),
+                Box::new(Lambda::const_(Constant::int(2))),
+            )),
+            (18, vec![]),
+            Box::new(Lambda::const_(Constant::int(1))),
+        ));
+
+        let [if_stmt] = block.as_slice() else {
+            panic!("expected a single const/payload dispatch statement");
+        };
+        let StatementDesc::If(_, _, else_block) = &if_stmt.desc else {
+            panic!("expected the named variant lowering to stay as an if dispatch");
+        };
+        let [switch_stmt] = else_block.as_slice() else {
+            panic!("expected the payload branch to stay inside one switch");
+        };
+        let StatementDesc::StringSwitch(test, clauses, None) = &switch_stmt.desc else {
+            panic!("expected the complete payload branch to compile without a default arm");
+        };
+        assert_tag_field_access(test, &action);
+        assert_eq!(clauses.len(), 3);
+        assert_eq!(clauses[0].tag_type, SwitchCaseTag::String("C".to_string()));
+        assert!(clauses[0].clause.body.is_empty());
+        assert_eq!(clauses[1].tag_type, SwitchCaseTag::String("D".to_string()));
+        assert_switch_case_returns_int_result(&clauses[1].clause.body, 1);
+        assert_eq!(clauses[2].tag_type, SwitchCaseTag::String("E".to_string()));
+        assert_switch_case_returns_int_result(&clauses[2].clause.body, 2);
     }
 
     #[test]

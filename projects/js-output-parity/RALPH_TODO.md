@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 532 / 657 JS snapshots passing, 0 compile errors, 125 output diffs
+**Status:** 535 / 657 JS snapshots passing, 0 compile errors, 122 output diffs
 
 ## Goal
 
@@ -35,11 +35,58 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **532 / 657**
+- JS snapshot parity: **535 / 657**
 - Compile errors: **0**
-- Output diffs: **125**
+- Output diffs: **122**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep plain inner staticcatch handlers resolved inside
+  named-variant return switches when we are already inside an enclosing
+  staticcatch chain, instead of peeling the handler into a trailing
+  fallthrough return
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is `Lam_compile` staticcatch / switch
+  lowering in `compiler-rust/src/lambda/compile.rs`, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_staticcatch` and the
+  pseudo-jump fast path that only applies when the tail context is not already
+  marked `in_staticcatch`
+- Rust change:
+  - tightened `uses_fallthrough_staticcatch_return(...)` so the plain-handler
+    switch fallthrough optimization no longer runs when
+    `inside_enclosing_staticcatch_chain` is true
+  - added focused regression coverage in
+    `nested_named_variant_return_switches_keep_complete_payload_handlers_inline`
+    to lock down the `adt_optimize_test` shape where the last payload case must
+    keep the resolved handler inline inside the switch
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_named_variant_return_switches_keep_complete_payload_handlers_inline -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml named_variant_return_switches_inline_resolved_static_handler_values_inside_the_switch -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/adt_optimize_test.res`,
+    diffing `/tmp/adt_optimize_test.mjs` against the checked-in snapshot
+  - direct release guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/adt_optimize_test.res` is now an exact snapshot match;
+    the trailing `return 2;` / `return 3;` fallthroughs are gone and the final
+    payload cases stay inside their switches like OCaml
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the unchanged guard
+  - the full authoritative sweep in this current worktree now reports
+    **535 / 657** passing, **0** compile errors, and **122** output diffs
+- Topline impact in this current worktree:
+  - JS snapshot parity: **533 / 657** -> **535 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **124** -> **122** (**-2**)
+- Keep this change because it matches the OCaml backend's staticcatch boundary:
+  once we are already under an enclosing staticcatch chain, plain inner
+  handlers should stay resolved inside the named/string switch instead of being
+  lowered as an extra fallthrough return after the dispatch.
 
 Latest iteration on **2026-04-15**:
 
