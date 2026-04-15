@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 488 / 657 JS snapshots passing, 0 compile errors, 169 output diffs
+**Status:** 489 / 657 JS snapshots passing, 0 compile errors, 168 output diffs
 
 ## Goal
 
@@ -35,11 +35,75 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **488 / 657**
+- JS snapshot parity: **489 / 657**
 - Compile errors: **0**
-- Output diffs: **169**
+- Output diffs: **168**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: align Rust's lets-DCE-style direct-function beta reduction with
+  OCaml so returned callbacks still collapse after post-lowering cleanup even
+  when the apply status is `App_uncurry`, instead of only reducing the
+  `App_na` subset
+- Active backend focus for this slice remains **Phase 2: Port Post-Lowering
+  Lambda Backend Stages** from `PLAN.md`, because the remaining `ari_regress` /
+  `test_demo` IIFE drift lived in the post-lowering lambda cleanup boundary:
+  OCaml's `lam_pass_lets_dce.ml` beta-reduces direct `Lfunction` applies
+  regardless of `ap_status`, while Rust had added a `Na`-only restriction and
+  therefore left uncurried returned callbacks as emitted IIFEs
+- OCaml reference:
+  `compiler/core/lam_pass_lets_dce.ml`, especially the direct
+  `Lapply {ap_func = Lfunction ...}` beta-reduction branch and the fallback
+  `Lam.apply (simplif l1) ...` rebuild; `compiler/core/lam.ml`, especially
+  `Lam.apply`'s smart constructor over `Lfunction` and `Llet (..., Lfunction _)`;
+  and `compiler/core/lam_compile.ml`, especially the nested `App_na`
+  `compile_apply` reassociation branch for the smaller direct-call case
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so
+    `simplify_direct_function_applications_like_lets_dce(...)` no longer gates
+    direct `Lfunction` beta reduction on `ApplyStatus::Na`, and now rebuilds
+    fallback applies through `Lambda::apply(...)` so the OCaml-style smart
+    constructor keeps collapsing let-wrapped returned callbacks
+  - added an explicit uncurried regression in
+    `lets_dce_pass_beta_reduces_let_wrapped_returned_functions_with_uncurry_status`
+    alongside the existing `Na` regression
+  - kept the OCaml-aligned nested `App_na` reassociation support in
+    `compiler-rust/src/lambda/compile.rs` and the shared `Lambda::apply(...)`
+    smart constructor in `compiler-rust/src/lambda/mod.rs`, with focused tests
+    for the `ari_regress_test` / `test_demo` shapes
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lets_dce_pass_beta_reduces_let_wrapped_returned_functions_with_uncurry_status -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lets_dce_pass_beta_reduces_let_wrapped_returned_functions_with_na_status -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_shape -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/test_demo.res`, diffing
+    `/tmp/test_demo.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_demo.res` is now an exact snapshot match; the
+    returned-function call collapses to OCaml's direct arithmetic shape instead
+    of emitting `((xx, yy) => ...)(6, extra)`
+  - `tests/tests/src/ari_regress_test.res` also drops out of the authoritative
+    diff set after the same lets-DCE alignment, confirming the nearby
+    single-arg returned-function cluster now follows OCaml's backend cleanup
+    path as well
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - the remaining nearby returned-callback drift is now narrower:
+    `temp/rust-parity/diffs` still contains `js_src_mutable_uncurry_test.res.diff`,
+    while the old `ari_regress_test` / `test_demo` diffs are gone
+- Topline impact:
+  - JS snapshot parity: **488 / 657** -> **489 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **169** -> **168** (**-1**)
+- Keep this change because it matches the OCaml lets-DCE and `Lam.apply`
+  behavior directly, removes a Rust-only status restriction from backend
+  cleanup, and converts the returned-function IIFE cluster into real snapshot
+  wins without any printer-only rewrite.
 
 Latest iteration on **2026-04-15**:
 

@@ -357,6 +357,38 @@ impl Lambda {
         })
     }
 
+    /// Create a function application using OCaml's `Lam.apply` smart constructor.
+    pub fn apply(
+        func: Lambda,
+        args: Vec<Lambda>,
+        ap_info: ApInfo,
+        ap_transformed_jsx: bool,
+    ) -> Self {
+        match func {
+            Lambda::Lfunction(function) => {
+                if let Some(reduced) = eta_reduce_function_apply(&function, &args, &ap_info) {
+                    return reduced;
+                }
+                make_lapply(Lambda::Lfunction(function), args, ap_info, ap_transformed_jsx)
+            }
+            Lambda::Llet(kind, id, value, body) => match *body {
+                body @ Lambda::Lfunction(_) => Lambda::let_(
+                    kind,
+                    id,
+                    *value,
+                    Lambda::apply(body, args, ap_info, ap_transformed_jsx),
+                ),
+                body => make_lapply(
+                    Lambda::Llet(kind, id, value, Box::new(body)),
+                    args,
+                    ap_info,
+                    ap_transformed_jsx,
+                ),
+            },
+            func => make_lapply(func, args, ap_info, ap_transformed_jsx),
+        }
+    }
+
     /// Create a sequence
     pub fn seq(first: Lambda, second: Lambda) -> Self {
         match first {
@@ -684,6 +716,119 @@ impl Lambda {
             Lambda::Lconst(Constant::JsUndefined { is_unit: true })
         )
     }
+}
+
+fn eta_reduce_function_apply(function: &LFunction, args: &[Lambda], ap_info: &ApInfo) -> Option<Lambda> {
+    match function.body.as_ref() {
+        Lambda::Lprim(PrimInfo {
+            primitive:
+                Primitive::PnullToOpt
+                | Primitive::PnullUndefinedToOpt
+                | Primitive::PisNull
+                | Primitive::PisNullUndefined
+                | Primitive::Ptypeof,
+            args: wrap_args,
+            ..
+        }) => {
+            let [Lambda::Lprim(inner_call)] = wrap_args.as_slice() else {
+                return None;
+            };
+            let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
+            Some(Lambda::Lprim(PrimInfo {
+                primitive: function_primitive(function.body.as_ref())?,
+                args: vec![Lambda::Lprim(PrimInfo {
+                    primitive: inner_call.primitive.clone(),
+                    args: eta_args,
+                    loc: ap_info.loc.clone(),
+                })],
+                loc: ap_info.loc.clone(),
+            }))
+        }
+        Lambda::Lprim(inner_call) => {
+            let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
+            Some(Lambda::Lprim(PrimInfo {
+                primitive: inner_call.primitive.clone(),
+                args: eta_args,
+                loc: ap_info.loc.clone(),
+            }))
+        }
+        Lambda::Lsequence(first, second) => {
+            let Lambda::Lprim(inner_call) = first.as_ref() else {
+                return None;
+            };
+            let Lambda::Lconst(constant) = second.as_ref() else {
+                return None;
+            };
+            let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
+            Some(Lambda::Lsequence(
+                Box::new(Lambda::Lprim(PrimInfo {
+                    primitive: inner_call.primitive.clone(),
+                    args: eta_args,
+                    loc: ap_info.loc.clone(),
+                })),
+                Box::new(Lambda::Lconst(constant.clone())),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn function_primitive(body: &Lambda) -> Option<Primitive> {
+    match body {
+        Lambda::Lprim(PrimInfo { primitive, .. }) => Some(primitive.clone()),
+        _ => None,
+    }
+}
+
+fn eta_conversion_args(
+    params: &[Ident],
+    inner_args: &[Lambda],
+    outer_args: &[Lambda],
+) -> Option<Vec<Lambda>> {
+    if params.len() != inner_args.len() || params.len() != outer_args.len() {
+        return None;
+    }
+
+    params
+        .iter()
+        .zip(inner_args.iter())
+        .zip(outer_args.iter())
+        .map(|((param, inner_arg), outer_arg)| match inner_arg {
+            Lambda::Lvar(id) if param.same(id) => Some(outer_arg.clone()),
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::PjsFnMake(arity),
+                args,
+                loc,
+            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if param.same(id)) => {
+                Some(Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::PjsFnMake(*arity),
+                    args: vec![outer_arg.clone()],
+                    loc: loc.clone(),
+                }))
+            }
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::PjsFnMakeUnit,
+                args,
+                loc,
+            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if param.same(id)) => {
+                Some(Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::PjsFnMakeUnit,
+                    args: vec![outer_arg.clone()],
+                    loc: loc.clone(),
+                }))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn make_lapply(func: Lambda, args: Vec<Lambda>, ap_info: ApInfo, ap_transformed_jsx: bool) -> Lambda {
+    Lambda::Lapply(Apply {
+        ap_func: Box::new(func),
+        ap_args: args,
+        ap_info,
+        ap_transformed_jsx,
+    })
 }
 
 fn make_if(cond: Lambda, then_: Lambda, else_: Lambda) -> Lambda {

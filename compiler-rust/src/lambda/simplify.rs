@@ -439,18 +439,31 @@ fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
                 beta_reduce::no_names_beta_reduce(&func.params, &func.body, &apply.ap_args);
             simplify_direct_function_applications_like_lets_dce(&reduced)
         }
-        Lambda::Lapply(apply) => Lambda::Lapply(Apply {
-            ap_func: Box::new(simplify_direct_function_applications_like_lets_dce(
-                &apply.ap_func,
-            )),
-            ap_args: apply
-                .ap_args
-                .iter()
-                .map(simplify_direct_function_applications_like_lets_dce)
-                .collect(),
-            ap_info: apply.ap_info.clone(),
-            ap_transformed_jsx: apply.ap_transformed_jsx,
-        }),
+        Lambda::Lapply(apply) => {
+            let rebuilt = Apply {
+                ap_func: Box::new(simplify_direct_function_applications_like_lets_dce(
+                    &apply.ap_func,
+                )),
+                ap_args: apply
+                    .ap_args
+                    .iter()
+                    .map(simplify_direct_function_applications_like_lets_dce)
+                    .collect(),
+                ap_info: apply.ap_info.clone(),
+                ap_transformed_jsx: apply.ap_transformed_jsx,
+            };
+            let reapplied = Lambda::apply(
+                (*rebuilt.ap_func).clone(),
+                rebuilt.ap_args.clone(),
+                rebuilt.ap_info.clone(),
+                rebuilt.ap_transformed_jsx,
+            );
+            if matches!(reapplied, Lambda::Lapply(_)) {
+                reapplied
+            } else {
+                simplify_direct_function_applications_like_lets_dce(&reapplied)
+            }
+        }
         Lambda::Lfunction(func) => Lambda::function_(
             func.arity,
             func.params.clone(),
@@ -4032,6 +4045,164 @@ mod tests {
             ),
             "expected nested curried call to collapse to a direct integer add, got {simplified:?}"
         );
+    }
+
+    #[test]
+    fn lets_dce_pass_beta_reduces_let_wrapped_returned_functions_with_na_status() {
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let u = Ident::create_local("u");
+        let z = Ident::create_local("z");
+
+        let lambda = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::function_(
+                    2,
+                    vec![x.clone(), y.clone()],
+                    Lambda::let_(
+                        LetKind::Strict,
+                        u.clone(),
+                        Lambda::prim(
+                            Primitive::Paddint,
+                            vec![Lambda::var(x), Lambda::var(y)],
+                            Location::none(),
+                        ),
+                        Lambda::function_(
+                            1,
+                            vec![z.clone()],
+                            Lambda::prim(
+                                Primitive::Paddint,
+                                vec![Lambda::var(u.clone()), Lambda::var(z.clone())],
+                                Location::none(),
+                            ),
+                            FunctionAttribute::default(),
+                        ),
+                    ),
+                    FunctionAttribute::default(),
+                )),
+                ap_args: vec![Lambda::const_(Constant::int(3)), Lambda::const_(Constant::int(5))],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            })),
+            ap_args: vec![Lambda::const_(Constant::int(6))],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(kind, bound, value, body) = simplified else {
+            panic!("expected the Na-status let-wrapped returned function to stay let-bound after beta reduction");
+        };
+        assert_eq!(kind, LetKind::StrictOpt);
+        assert!(bound.same(&u));
+        assert!(matches!(
+            *value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Paddint,
+                ref args,
+                ..
+            }) if matches!(
+                args.as_slice(),
+                [
+                    Lambda::Lconst(Constant::Int { i: 3, .. }),
+                    Lambda::Lconst(Constant::Int { i: 5, .. }),
+                ]
+            )
+        ));
+        assert!(matches!(
+            *body,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Paddint,
+                ref args,
+                ..
+            }) if matches!(
+                args.as_slice(),
+                [
+                    Lambda::Lvar(lhs),
+                    Lambda::Lconst(Constant::Int { i: 6, .. }),
+                ] if lhs.same(&u)
+            )
+        ));
+    }
+
+    #[test]
+    fn lets_dce_pass_beta_reduces_let_wrapped_returned_functions_with_uncurry_status() {
+        let u = Ident::create_local("u");
+        let z = Ident::create_local("z");
+
+        let lambda = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::Llet(
+                LetKind::Strict,
+                u.clone(),
+                Box::new(Lambda::prim(
+                    Primitive::Paddint,
+                    vec![Lambda::const_(Constant::int(3)), Lambda::const_(Constant::int(5))],
+                    Location::none(),
+                )),
+                Box::new(Lambda::function_(
+                    1,
+                    vec![z.clone()],
+                    Lambda::prim(
+                        Primitive::Paddint,
+                        vec![Lambda::var(u.clone()), Lambda::var(z.clone())],
+                        Location::none(),
+                    ),
+                    FunctionAttribute::default(),
+                )),
+            )),
+            ap_args: vec![Lambda::const_(Constant::int(6))],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Uncurry,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(kind, bound, value, body) = simplified else {
+            panic!(
+                "expected lets_dce-style beta reduction for direct uncurried callbacks, got {simplified:?}"
+            );
+        };
+        assert_eq!(kind, LetKind::StrictOpt);
+        assert!(bound.same(&u));
+        assert!(matches!(
+            *value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Paddint,
+                ref args,
+                ..
+            }) if matches!(
+                args.as_slice(),
+                [
+                    Lambda::Lconst(Constant::Int { i: 3, .. }),
+                    Lambda::Lconst(Constant::Int { i: 5, .. }),
+                ]
+            )
+        ));
+        assert!(matches!(
+            *body,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Paddint,
+                ref args,
+                ..
+            }) if matches!(
+                args.as_slice(),
+                [
+                    Lambda::Lvar(lhs),
+                    Lambda::Lconst(Constant::Int { i: 6, .. }),
+                ] if lhs.same(&u)
+            )
+        ));
     }
 
     #[test]

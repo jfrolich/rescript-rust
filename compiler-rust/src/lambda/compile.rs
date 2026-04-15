@@ -30,7 +30,8 @@ use crate::lambda::primitive::{
 };
 use crate::lambda::subst;
 use crate::lambda::{
-    Apply, Lambda, LambdaSwitch, SwitchBlock, SwitchBlockType, SwitchCaseTag, TagInfo,
+    Apply, ApplyStatus, Lambda, LambdaSwitch, SwitchBlock, SwitchBlockType, SwitchCaseTag,
+    TagInfo,
 };
 
 /// Compilation result for an expression: prelude statements plus a value expression.
@@ -384,6 +385,27 @@ impl LambdaCompiler {
     }
 
     fn compile_apply_call(&mut self, apply: &Apply) -> Compiled {
+        if apply.ap_info.status == ApplyStatus::Na {
+            if let Lambda::Lapply(inner) = apply.ap_func.as_ref() {
+                if inner.ap_info.status == ApplyStatus::Na {
+                    let mut ap_info = apply.ap_info.clone();
+                    if ap_info.inlined != inner.ap_info.inlined {
+                        ap_info.inlined = inner.ap_info.inlined;
+                    }
+
+                    let mut args = inner.ap_args.clone();
+                    args.extend(apply.ap_args.iter().cloned());
+                    let merged = Lambda::apply(
+                        (*inner.ap_func).clone(),
+                        args,
+                        ap_info,
+                        apply.ap_transformed_jsx,
+                    );
+                    return self.compile_expr(&merged);
+                }
+            }
+        }
+
         let mut prelude = vec![];
         let func = self.compile_expr(&apply.ap_func);
         prelude.extend(func.prelude);
@@ -15998,6 +16020,194 @@ mod tests {
                 }]
             )
         ));
+    }
+
+    #[test]
+    fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
+        let mut compiler = LambdaCompiler::new();
+        let gg = Ident::create_local("gg");
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let u = Ident::create_local("u");
+        let z = Ident::create_local("z");
+        let result = Ident::create_local("result");
+        let loc = Location::none();
+
+        let lam = Lambda::let_(
+            LetKind::Alias,
+            gg.clone(),
+            Lambda::prim(
+                Primitive::PjsFnMake(2),
+                vec![Lambda::function_(
+                    2,
+                    vec![x.clone(), y.clone()],
+                    Lambda::let_(
+                        LetKind::Strict,
+                        u.clone(),
+                        Lambda::prim(
+                            Primitive::Paddint,
+                            vec![Lambda::var(x), Lambda::var(y)],
+                            loc.clone(),
+                        ),
+                        Lambda::prim(
+                            Primitive::PjsFnMake(1),
+                            vec![Lambda::function_(
+                                1,
+                                vec![z.clone()],
+                                Lambda::prim(
+                                    Primitive::Paddint,
+                                    vec![Lambda::var(u.clone()), Lambda::var(z)],
+                                    loc.clone(),
+                                ),
+                                crate::lambda::FunctionAttribute::default(),
+                            )],
+                            loc.clone(),
+                        ),
+                    ),
+                    crate::lambda::FunctionAttribute::default(),
+                )],
+                loc.clone(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                result.clone(),
+                Lambda::Lapply(Apply {
+                    ap_func: Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(gg)),
+                        ap_args: vec![Lambda::const_(Constant::int(3)), Lambda::const_(Constant::int(5))],
+                        ap_info: ApInfo {
+                            loc: loc.clone(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    ap_args: vec![Lambda::const_(Constant::int(6))],
+                    ap_info: ApInfo {
+                        loc: loc.clone(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Na,
+                    },
+                    ap_transformed_jsx: false,
+                }),
+                Lambda::var(result.clone()),
+            ),
+        );
+
+        let simplified = crate::lambda::simplify::simplify_for_js_backend(&lam);
+        let compiled = compiler.compile_expr(&simplified);
+        let rendered = format!(
+            "{}\n{}",
+            print_block(&compiled.prelude),
+            print_expression(&compiled.expr)
+        );
+        assert!(
+            rendered.contains("u + 6 | 0"),
+            "expected Ari_regress-style nested apply to collapse to a direct add, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("(z => u + z | 0)(6)"),
+            "expected Ari_regress-style nested apply to avoid an emitted IIFE, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_shape() {
+        let mut compiler = LambdaCompiler::new();
+        let g1 = Ident::create_local("g1");
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let u = Ident::create_local("u");
+        let xx = Ident::create_local("xx");
+        let yy = Ident::create_local("yy");
+        let extra = Ident::create_local("extra");
+        let result = Ident::create_local("result");
+        let loc = Location::none();
+
+        let lam = Lambda::let_(
+            LetKind::Alias,
+            g1.clone(),
+            Lambda::prim(
+                Primitive::PjsFnMake(2),
+                vec![Lambda::function_(
+                    2,
+                    vec![x.clone(), y.clone()],
+                    Lambda::let_(
+                        LetKind::Strict,
+                        u.clone(),
+                        Lambda::prim(
+                            Primitive::Paddint,
+                            vec![Lambda::var(x), Lambda::var(y)],
+                            loc.clone(),
+                        ),
+                        Lambda::prim(
+                            Primitive::PjsFnMake(2),
+                            vec![Lambda::function_(
+                                2,
+                                vec![xx.clone(), yy.clone()],
+                                Lambda::prim(
+                                    Primitive::Paddint,
+                                    vec![
+                                        Lambda::prim(
+                                            Primitive::Paddint,
+                                            vec![Lambda::var(xx), Lambda::var(yy)],
+                                            loc.clone(),
+                                        ),
+                                        Lambda::var(u.clone()),
+                                    ],
+                                    loc.clone(),
+                                ),
+                                crate::lambda::FunctionAttribute::default(),
+                            )],
+                            loc.clone(),
+                        ),
+                    ),
+                    crate::lambda::FunctionAttribute::default(),
+                )],
+                loc.clone(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                result.clone(),
+                Lambda::function_(
+                    1,
+                    vec![extra.clone()],
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::Lapply(Apply {
+                            ap_func: Box::new(Lambda::var(g1)),
+                            ap_args: vec![Lambda::const_(Constant::int(3)), Lambda::const_(Constant::int(4))],
+                            ap_info: ApInfo {
+                                loc: loc.clone(),
+                                inlined: InlineAttribute::Default,
+                                status: ApplyStatus::Na,
+                            },
+                            ap_transformed_jsx: false,
+                        })),
+                        ap_args: vec![Lambda::const_(Constant::int(6)), Lambda::var(extra.clone())],
+                        ap_info: ApInfo {
+                            loc: loc.clone(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    }),
+                    crate::lambda::FunctionAttribute::default(),
+                ),
+                Lambda::var(result),
+            ),
+        );
+
+        let simplified = crate::lambda::simplify::simplify_for_js_backend(&lam);
+        let compiled = compiler.compile_expr(&simplified);
+        let rendered = print_expression(&compiled.expr);
+        assert!(
+            rendered.contains("(6 + extra | 0) + u | 0"),
+            "expected test_demo-style nested apply to collapse to a direct returned add, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("((xx, yy) => (xx + yy | 0) + u | 0)(6, extra)"),
+            "expected test_demo-style nested apply to avoid an emitted multi-arg IIFE, got:\n{rendered}"
+        );
     }
 
     #[test]
