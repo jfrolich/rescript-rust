@@ -218,6 +218,14 @@ fn convert_located_stridx(loc: &Located<StrIdx>, arena: &ParseArena) -> Located<
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PackageCoercionCacheKey {
+    env_id: u64,
+    packed_module_path: Path,
+    package_path: Path,
+    package_lids: Vec<Longident>,
+}
+
 fn has_dict_pattern_attribute(arena: &ParseArena, attrs: &[crate::parser::ast::Attribute]) -> bool {
     attrs
         .iter()
@@ -725,8 +733,12 @@ pub struct TypeCheckContext<'a> {
     /// Cached semantic module types from Tmod_apply, keyed by parsed module
     /// expression location.  Ensures that a second lookup for the same functor
     /// application reuses the types with correct path substitutions.
-    pub module_expr_semantic_types:
+    pub(crate) module_expr_semantic_types:
         HashMap<crate::parse_arena::LocIdx, crate::types::decl::ModuleType>,
+    /// Cached coercions for repeated `module(M)` package expressions in the
+    /// same typing environment and package shape.
+    pub(crate) package_coercions:
+        HashMap<PackageCoercionCacheKey, crate::types::typedtree::ModuleCoercion>,
 }
 
 /// A diagnostic from type checking.
@@ -755,6 +767,7 @@ impl<'a> TypeCheckContext<'a> {
             force_fresh_local_float: false,
             generic_constraint_body_ty: None,
             module_expr_semantic_types: HashMap::new(),
+            package_coercions: HashMap::new(),
         }
     }
 
@@ -1145,8 +1158,6 @@ fn resolve_type_constructor_path(
     env: &Env,
     lid: &Longident,
 ) -> (Path, Option<crate::types::decl::TypeDeclaration>) {
-    use crate::types::decl::SignatureItem;
-
     match lid {
         Longident::Lident(name_idx) => {
             let name = tctx.arena.get_string(*name_idx);
@@ -1187,19 +1198,41 @@ fn resolve_type_constructor_path(
                 }
             }
 
-            if let Some((mod_path, sig)) =
-                env.resolve_module_lid(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
-            {
-                for item in &sig {
-                    if let SignatureItem::SigType(id, decl, _) = item {
-                        if id.name() == type_name {
-                            return (
-                                Path::pdot(mod_path.clone(), type_name.to_string()),
-                                Some(decl.clone()),
-                            );
-                        }
+            if let Some(Some((mod_path, decl))) = with_resolved_module_components_for_lid(
+                prefix,
+                tctx.arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+                |components| {
+                    let module_path = components.access_path().clone();
+                    if let Some((cached_path, _, decl)) = tctx
+                        .type_ctx
+                        .find_resolved_module_type(&module_path, type_name)
+                    {
+                        return Some((cached_path, decl));
                     }
-                }
+                    components.lookup_type(type_name).map(|(id, decl)| {
+                        let decl = decl.clone();
+                        tctx.type_ctx.register_resolved_module_type(
+                            &module_path,
+                            type_name,
+                            module_path.clone(),
+                            id.clone(),
+                            decl.clone(),
+                        );
+                        (module_path, decl)
+                    })
+                },
+            ) {
+                return (Path::pdot(mod_path, type_name.to_string()), Some(decl));
+            }
+            if let Some(mod_path) = env.resolve_module_access_path_for_lid(
+                prefix,
+                tctx.arena,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            ) {
                 return (Path::pdot(mod_path, type_name.to_string()), None);
             }
             (path_from_longident_persistent(lid, tctx.arena), None)
@@ -13754,6 +13787,7 @@ fn type_pack(
     let pack_arg_base_path = packed_module_path
         .clone()
         .or_else(|| Some(Path::pident(ctx.create_ident("%M"))));
+    let mut pack_args_rebuilt_from_path = false;
     let pack_args = if let Some(pack_module_path) = pack_arg_base_path.as_ref() {
         let mut rebuilt_args = Vec::with_capacity(pack_lids.len());
         let mut can_rebuild = true;
@@ -13767,6 +13801,7 @@ fn type_pack(
             }
         }
         if can_rebuild && rebuilt_args.len() == pack_lids.len() {
+            pack_args_rebuilt_from_path = true;
             rebuilt_args
         } else {
             expected_pack_args.clone()
@@ -13786,12 +13821,23 @@ fn type_pack(
     )
     .unwrap_or(crate::types::decl::ModuleType::MtyIdent(pack_path.clone()));
     let package_mty = typed_module_type_for_unpack(tctx.arena, loc, &decl_package_mty);
-    let arg_mty = {
-        crate::types::typemod::extract_module_type_from_mod_expr_with_ctx(
-            &typed_module,
-            Some(env),
-            ctx,
-        )
+    let direct_arg_mty = packed_module_path.as_ref().and_then(|path| {
+        env.lookup_module(path)
+            .ok()
+            .map(|md| md.md_type.clone())
+            .or_else(|| match path {
+                Path::Pident(id) => env.find_module(id.name()).ok().map(|md| md.md_type.clone()),
+                _ => None,
+            })
+    });
+    let arg_mty = direct_arg_mty
+        .or_else(|| {
+            crate::types::typemod::extract_module_type_from_mod_expr_with_ctx(
+                &typed_module,
+                Some(env),
+                ctx,
+            )
+        })
         .or_else(|| crate::types::typemod::decl_module_type_from_typed(&typed_module.mod_type))
         .or_else(|| {
             crate::types::typemod::lookup_module_type_from_parsed_module_expr(
@@ -13801,8 +13847,7 @@ fn type_pack(
                 module_expr,
             )
         })
-        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]))
-    };
+        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
     let arg_mty = if let Some(pack_module_path) = packed_module_path.as_ref() {
         crate::types::ctype::strengthen_module_type_for_inclusion_path(
             ctx,
@@ -13813,8 +13858,29 @@ fn type_pack(
     } else {
         arg_mty
     };
-    let coercion = crate::types::includemod::modtypes(ctx, env, &arg_mty, &decl_package_mty)
-        .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
+    let package_coercion_key = if pack_args_rebuilt_from_path {
+        packed_module_path.as_ref().map(|packed_module_path| PackageCoercionCacheKey {
+            env_id: env.id(),
+            packed_module_path: packed_module_path.clone(),
+            package_path: pack_path.clone(),
+            package_lids: pack_lids.clone(),
+        })
+    } else {
+        None
+    };
+    let cached_coercion = package_coercion_key
+        .as_ref()
+        .and_then(|key| tctx.package_coercions.get(key).cloned());
+    let coercion = if let Some(cached) = cached_coercion {
+        cached
+    } else {
+        let coercion = crate::types::includemod::modtypes(ctx, env, &arg_mty, &decl_package_mty)
+            .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
+        if let Some(key) = package_coercion_key {
+            tctx.package_coercions.insert(key, coercion.clone());
+        }
+        coercion
+    };
     let wrapped_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
             Box::new(typed_module),
@@ -15307,6 +15373,33 @@ impl Env {
                 let value_name = arena.get_string(*idx);
                 let lid_str = Self::longident_to_string(lid, arena);
 
+                if let Some(Some(result)) = with_resolved_module_components_for_lid(
+                    prefix, arena, self, pers_env, ctx, |components| {
+                        let module_path = components.access_path().clone();
+                        if let Some(cached) =
+                            ctx.find_resolved_module_value(&module_path, value_name)
+                        {
+                            return Some(cached);
+                        }
+                        components.lookup_value(value_name).map(|(pos, _, vd)| {
+                            let path = Path::Pdot(
+                                Box::new(module_path.clone()),
+                                value_name.to_string(),
+                                pos as i32,
+                            );
+                            let result = (path, vd.clone());
+                            ctx.register_resolved_module_value(
+                                &module_path,
+                                value_name,
+                                result.0.clone(),
+                                result.1.clone(),
+                            );
+                            result
+                        })
+                    },
+                ) {
+                    return Ok(result);
+                }
                 if let Some(module_path) =
                     self.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)
                 {
@@ -15465,11 +15558,22 @@ impl Env {
             Longident::Ldot(prefix, submod_idx) => {
                 let parent_path =
                     self.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)?;
-                let submod_name = arena.get_string(*submod_idx).to_string();
-                if let Some(cached) =
-                    ctx.find_resolved_child_module_path(&parent_path, submod_name.as_str())
+                let submod_name = arena.get_string(*submod_idx);
+                if let Some(cached) = ctx.find_resolved_child_module_path(&parent_path, submod_name)
                 {
                     return Some(cached);
+                }
+                if let Some(result) =
+                    with_resolved_module_components_for_lid(lid, arena, self, pers_env, ctx, |components| {
+                        components.access_path().clone()
+                    })
+                {
+                    ctx.register_resolved_child_module_path(
+                        &parent_path,
+                        submod_name,
+                        result.clone(),
+                    );
+                    return Some(result);
                 }
                 let result = with_resolved_module_components_for_path(
                     &parent_path,
@@ -15478,18 +15582,18 @@ impl Env {
                     ctx,
                     |components| {
                         components
-                            .lookup_module(submod_name.as_str())
+                            .lookup_module(submod_name)
                             .map(|(pos, _, md)| {
                                 if parent_path.head().is_persistent()
                                     || parent_path.head().stamp() == 0
                                 {
                                     md.md_path.clone().unwrap_or_else(|| {
-                                        Path::pdot(parent_path.clone(), submod_name.clone())
+                                        Path::pdot(parent_path.clone(), submod_name.to_string())
                                     })
                                 } else {
                                     Path::Pdot(
                                         Box::new(parent_path.clone()),
-                                        submod_name.clone(),
+                                        submod_name.to_string(),
                                         pos as i32,
                                     )
                                 }
@@ -15499,7 +15603,7 @@ impl Env {
                 .flatten()?;
                 ctx.register_resolved_child_module_path(
                     &parent_path,
-                    submod_name.as_str(),
+                    submod_name,
                     result.clone(),
                 );
                 Some(result)
@@ -15813,6 +15917,21 @@ impl Env {
             Longident::Ldot(prefix, submod_idx) => {
                 let submod_name = arena.get_string(*submod_idx);
                 if apply_subst {
+                    if let Some(result) = with_resolved_module_components_for_lid(
+                        lid,
+                        arena,
+                        self,
+                        pers_env,
+                        ctx,
+                        |components| {
+                            (
+                                components.access_path().clone(),
+                                components.cloned_signature(),
+                            )
+                        },
+                    ) {
+                        return Some(result);
+                    }
                     let parent_path =
                         self.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)?;
                     let (_, sub_path, _) = lookup_module_in_resolved_path(
@@ -18970,6 +19089,115 @@ fn module_components_cache_key(
         module_path.clone(),
         module_path_requires_env_scoped_cache(env, module_path).then_some(env.id()),
     ))
+}
+
+fn with_resolved_child_module_components<'a, R>(
+    parent_components: &crate::types::env_lazy::QualifiedModuleComponents,
+    child_name: &str,
+    env: &Env,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
+) -> Option<R> {
+    let (runtime_pos, _, md) = parent_components.lookup_qualified_module(child_name, ctx)?;
+    let access_path = qualified_submodule_access_path(
+        parent_components.access_path(),
+        child_name,
+        runtime_pos,
+        &md,
+    );
+    ctx.register_resolved_child_module_path(parent_components.access_path(), child_name, access_path.clone());
+
+    let module_key = module_components_cache_key(&access_path, env);
+    let mut f = Some(f);
+    if let Some(module_key) = module_key.as_ref() {
+        if let Some(result) = ctx.with_qualified_module_components(module_key, |components| {
+            (f.take()
+                .expect("qualified child module components callback reused"))(components)
+        }) {
+            return Some(result);
+        }
+    }
+
+    let components = match md.md_type {
+        crate::types::decl::ModuleType::MtySignature(sig) => {
+            crate::types::env_lazy::QualifiedModuleComponents::new(access_path.clone(), sig)
+        }
+        _ => return None,
+    };
+    let result = (f
+        .take()
+        .expect("qualified child module components callback reused"))(&components);
+    if let Some(module_key) = module_key {
+        ctx.register_qualified_module_components(module_key, components);
+    }
+    Some(result)
+}
+
+fn with_resolved_module_components_for_lid_inner<'a, R>(
+    lid: &Longident,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    f: &mut dyn FnMut(&crate::types::env_lazy::QualifiedModuleComponents) -> Option<R>,
+) -> Option<R> {
+    match lid {
+        Longident::Lident(mod_idx) => {
+            let mod_name = arena.get_string(*mod_idx);
+            let module_path = if let Ok((mod_id, md, is_local)) = env.find_module_with_origin(mod_name) {
+                if is_local {
+                    Path::pident(mod_id.clone())
+                } else {
+                    md.md_path
+                        .clone()
+                        .unwrap_or_else(|| Path::pident(mod_id.clone()))
+                }
+            } else {
+                Path::pident(Ident::create_persistent(mod_name))
+            };
+            with_resolved_module_components_for_path(&module_path, env, pers_env, ctx, f).flatten()
+        }
+        Longident::Ldot(prefix, child_idx) => {
+            let child_name = arena.get_string(*child_idx).to_string();
+            let mut continue_with_child = |components: &crate::types::env_lazy::QualifiedModuleComponents| {
+                with_resolved_child_module_components(
+                    components,
+                    child_name.as_str(),
+                    env,
+                    ctx,
+                    |child| f(child),
+                )
+                .flatten()
+            };
+            with_resolved_module_components_for_lid_inner(
+                prefix,
+                arena,
+                env,
+                pers_env,
+                ctx,
+                &mut continue_with_child,
+            )
+        }
+        Longident::Lapply(_, _) => None,
+    }
+}
+
+pub(crate) fn with_resolved_module_components_for_lid<'a, R>(
+    lid: &Longident,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
+) -> Option<R> {
+    let mut f = Some(f);
+    let mut wrapper = |components: &crate::types::env_lazy::QualifiedModuleComponents| {
+        Some(
+            (f.take()
+                .expect("qualified module components by lid callback reused"))(components),
+        )
+    };
+    with_resolved_module_components_for_lid_inner(lid, arena, env, pers_env, ctx, &mut wrapper)
 }
 
 fn build_module_components_from_parent_path<'a>(

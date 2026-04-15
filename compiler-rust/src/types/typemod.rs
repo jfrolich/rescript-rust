@@ -2826,6 +2826,16 @@ pub fn lookup_module_path_by_lid<'b>(
         }
         Longident::Ldot(prefix, submod_idx) => {
             let submod_name = arena.get_string(*submod_idx);
+            if let Some(path) = crate::types::typecore::with_resolved_module_components_for_lid(
+                lid,
+                arena,
+                env,
+                pers_env,
+                ctx,
+                |components| components.access_path().clone(),
+            ) {
+                return Some(path);
+            }
             let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
             crate::types::typecore::lookup_module_in_resolved_path(
                 &parent_path,
@@ -2864,6 +2874,22 @@ pub fn lookup_modtype_path_by_lid<'b>(
         }
         Longident::Ldot(prefix, submodtype_idx) => {
             let submodtype_name = arena.get_string(*submodtype_idx);
+            if let Some(path) = crate::types::typecore::with_resolved_module_components_for_lid(
+                prefix,
+                arena,
+                env,
+                pers_env,
+                ctx,
+                |components| {
+                    components.lookup_qualified_modtype(submodtype_name, ctx).map(|_| {
+                        Path::pdot(components.access_path().clone(), submodtype_name.to_string())
+                    })
+                },
+            )
+            .flatten()
+            {
+                return Some(path);
+            }
             let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
             crate::types::typecore::lookup_modtype_in_resolved_path(
                 &parent_path,
@@ -2911,7 +2937,6 @@ pub fn lookup_module_type_by_lid<'b>(
             let submod_name = arena.get_string(*submod_idx);
             // Recursively resolve prefix to get parent module type
             let parent_type = lookup_module_type_by_lid(prefix, arena, env, pers_env, ctx)?;
-            let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
             // Keep alias identity for dotted module lookups through aliased parents.
             // OCaml `Env.find_module` preserves this (Belt.Id.MakeComparable is an alias
             // through Belt_Id.MakeComparable), which is required for implicit
@@ -2922,6 +2947,42 @@ pub fn lookup_module_type_by_lid<'b>(
                 }
                 _ => None,
             };
+            if let Some(found) = crate::types::typecore::with_resolved_module_components_for_lid(
+                prefix,
+                arena,
+                env,
+                pers_env,
+                ctx,
+                |components| {
+                    if let Some((_, _, sub_md)) =
+                        components.lookup_qualified_module(submod_name, ctx)
+                    {
+                        if let Some((alias_presence, alias_path)) = parent_alias.clone() {
+                            if let DeclMty::MtyAlias(child_presence, child_path) = &sub_md.md_type {
+                                return Some(DeclMty::MtyAlias(
+                                    *child_presence,
+                                    child_path.clone(),
+                                ));
+                            }
+                            return Some(DeclMty::MtyAlias(
+                                alias_presence,
+                                Path::pdot(alias_path, submod_name.to_string()),
+                            ));
+                        }
+                        return Some(sub_md.md_type.clone());
+                    }
+                    if let Some((_, mtd)) = components.lookup_qualified_modtype(submod_name, ctx) {
+                        let child_mty = mtd.mtd_type.clone()?;
+                        return Some(child_mty);
+                    }
+                    None
+                },
+            )
+            .flatten()
+            {
+                return Some(found);
+            }
+            let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
             crate::types::typecore::with_resolved_module_components_for_path(
                 &parent_path,
                 env,
@@ -5004,17 +5065,12 @@ fn find_packed_typed_module_expr(expr: &Expression) -> Option<&ModuleExpr> {
 }
 
 /// Extract semantic module type information from an unpack payload expression.
-fn lookup_module_type_from_unpack_expr<'a>(
+fn module_type_from_typed_unpack_expr<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arena: &'a ParseArena,
-    expr: &crate::parser::ast::Expression,
+    typed_expr: &Expression,
 ) -> Option<crate::types::decl::ModuleType> {
-    // Match OCaml Pmod_unpack typing: inspect the unpack payload type and
-    // derive the semantic module type from its package path + constraints.
-    // OCaml does this from the typed package expression, not by peeking at
-    // the packed parsed module expression.
-    let typed_expr = type_expression(tctx, env, expr).ok()?;
     let expanded = crate::types::ctype::expand_head(tctx.type_ctx, env, typed_expr.exp_type);
     let package_info = {
         let desc = tctx.type_ctx.get_desc(tctx.type_ctx.repr(expanded));
@@ -5036,6 +5092,17 @@ fn lookup_module_type_from_unpack_expr<'a>(
         &mut tctx.persistent_env,
         tctx.type_ctx,
     )
+}
+
+/// Extract semantic module type information from an unpack payload expression.
+fn lookup_module_type_from_unpack_expr<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    expr: &crate::parser::ast::Expression,
+) -> Option<crate::types::decl::ModuleType> {
+    let typed_expr = type_expression(tctx, env, expr).ok()?;
+    module_type_from_typed_unpack_expr(tctx, env, arena, &typed_expr)
 }
 
 fn remove_module_type_aliases_for_typeof<'b>(
@@ -5114,7 +5181,7 @@ pub fn lookup_module_type_from_parsed_module_expr<'a>(
         return Some(cached);
     }
 
-    match &*mod_expr.pmod_desc {
+    let result = match &*mod_expr.pmod_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             let longident = arena.get_longident(lid.txt);
             lookup_module_type_by_lid(
@@ -5142,7 +5209,13 @@ pub fn lookup_module_type_from_parsed_module_expr<'a>(
             lookup_module_type_from_unpack_expr(tctx, env, arena, expr)
         }
         _ => None,
+    };
+
+    if let Some(ref semantic_mty) = result {
+        tctx.module_expr_semantic_types
+            .insert(mod_expr.pmod_loc, semantic_mty.clone());
     }
+    result
 }
 
 /// Translate a parsed module type (signature) into a decl::ModuleType.
@@ -7720,6 +7793,12 @@ fn type_module_expr_with_alias<'a>(
             // Unpack: unpack(E)
             let expr = arena.get_expr(*expr_idx);
             let typed_expr = type_expression(tctx, env, expr)?;
+            if let Some(semantic_mty) =
+                module_type_from_typed_unpack_expr(tctx, env, arena, &typed_expr)
+            {
+                tctx.module_expr_semantic_types
+                    .insert(mod_expr.pmod_loc, semantic_mty);
+            }
             let expanded =
                 crate::types::ctype::expand_head(tctx.type_ctx, env, typed_expr.exp_type);
             let unpack_mty = match &*tctx.type_ctx.get_desc(tctx.type_ctx.repr(expanded)) {
@@ -10521,6 +10600,7 @@ fn type_structure_item<'a>(
                         path,
                     ))
                 }
+                ParsedModuleExprDesc::Pmod_unpack(_) => None,
                 _ => lookup_module_type_from_parsed_module_expr(
                     tctx,
                     env,
@@ -10539,7 +10619,9 @@ fn type_structure_item<'a>(
 
             // Extend environment with the new module
             // Use semantic_mod_type from Pmod_ident, or extract from typed structure
-            let final_mod_type = semantic_mod_type.or_else(|| {
+            let final_mod_type = semantic_mod_type
+                .or_else(|| tctx.module_expr_semantic_types.get(&typed_mod.mod_loc).cloned())
+                .or_else(|| {
                 let mut resolve_ident_sig =
                     |lid: &Located<LidentIdx>,
                      include_env: Option<&Env>|
