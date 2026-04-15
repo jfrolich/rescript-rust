@@ -1386,6 +1386,14 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
     }
 
     if let Some(else_ret) = single_return_expr(&else_) {
+        // Keep explicit positive success guards when the consequent already
+        // carries a real multi-statement return tail and the alternate is only
+        // `return undefined`. OCaml's backend preserves that final shape for
+        // cases like async option switches, while the early-return rewrite here
+        // flips them into `if (!cond) return; ...` too soon.
+        if preserves_positive_return_undefined_tail(&then_, else_ret) {
+            return Statement::new(StatementDesc::If(cond, then_, else_));
+        }
         let mut block = Vec::with_capacity(1 + then_.len());
         block.push(Statement::new(StatementDesc::If(
             negate_condition(cond),
@@ -1546,6 +1554,28 @@ fn single_statement(block: &Block) -> Option<&Statement> {
         return None;
     };
     Some(stmt)
+}
+
+fn statement_has_nontrivial_prefix_output(stmt: &Statement) -> bool {
+    match &stmt.desc {
+        StatementDesc::Block(inner) => inner.iter().any(statement_has_nontrivial_prefix_output),
+        StatementDesc::Exp(expr) => !expression_stmt_is_trivial(expr),
+        _ => true,
+    }
+}
+
+fn preserves_positive_return_undefined_tail(then_: &Block, else_ret: &Expression) -> bool {
+    if !matches!(else_ret.desc, ExpressionDesc::Undefined { .. }) {
+        return false;
+    }
+    let Some((last, prefix)) = then_.split_last() else {
+        return false;
+    };
+    if !matches!(last.desc, StatementDesc::Return(_)) {
+        return false;
+    }
+
+    prefix.iter().any(statement_has_nontrivial_prefix_output)
 }
 
 fn expression_stmt_is_trivial(expr: &Expression) -> bool {
@@ -2958,6 +2988,30 @@ mod tests {
         };
         assert!(ocaml_eq_expression(nested_test, &inner_cond));
         assert!(ocaml_eq_block(nested_else, else_block));
+    }
+
+    #[test]
+    fn test_if_statement_keeps_positive_multi_statement_return_tail() {
+        let cond = Expression::var(Ident::create_local("value"));
+        let effect = Statement::exp(Expression::call(
+            Expression::var(Ident::create_local("load")),
+            vec![],
+            CallInfo::default(),
+        ));
+        let then_block = vec![
+            effect,
+            Statement::return_(Expression::undefined(true)),
+        ];
+        let else_block = vec![Statement::return_(Expression::undefined(true))];
+
+        let stmt = Statement::if_(cond.clone(), then_block.clone(), else_block.clone());
+
+        let StatementDesc::If(test, kept_then, kept_else) = &stmt.desc else {
+            panic!("expected the positive return tail to stay as an if statement: {stmt:#?}");
+        };
+        assert!(ocaml_eq_expression(test, &cond));
+        assert!(ocaml_eq_block(kept_then, &then_block));
+        assert!(ocaml_eq_block(kept_else, &else_block));
     }
 
     #[test]

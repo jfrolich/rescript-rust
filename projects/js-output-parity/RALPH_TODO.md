@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 520 / 657 with 8 unrelated compile errors and 129 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 522 / 657 with 8 unrelated compile errors and 127 output diffs
 
 ## Goal
 
@@ -47,9 +47,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **520 / 657**
+- JS snapshot parity: **522 / 657**
 - Compile errors: **8**
-- Output diffs: **129**
+- Output diffs: **127**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -59,10 +59,55 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `520 / 657` unless the
+Do **not** replace the recorded project baseline with `522 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: keep OCaml's explicit positive success guards when a
+  multi-statement return tail only alternates with `return undefined`,
+  instead of rewriting them into a negative early-return guard too soon
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this change is in `compiler-rust/src/js_ir/mod.rs`, not a
+  printer rewrite
+- OCaml reference:
+  `compiler/core/js_stmt_make.ml` and `compiler/core/js_exp_make.ml`;
+  the checked-in OCaml snapshots keep async/unit option-tail shapes as
+  positive success guards (`if (cond) { ... return; }`) instead of
+  `if (!cond) return; ...`
+- Rust change:
+  - added `preserves_positive_return_undefined_tail(...)` and
+    `statement_has_nontrivial_prefix_output(...)`
+  - used them to block the `else return undefined` rewrite in
+    `simplify_if_statement(...)` when the consequent already carries a real
+    multi-statement return tail
+  - added focused regression coverage in
+    `test_if_statement_keeps_positive_multi_statement_return_tail`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_keeps_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh Import`
+  - `timeout 30 ./scripts/test_js_single.sh reasonReactRouter --diff`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_3875_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/Import.res` now matches its checked-in snapshot again;
+    `f9` keeps the OCaml-aligned positive `value !== undefined` guard
+  - `undef_regression_test` dropped out of the current diff set as part of
+    the same guard-shape motif
+  - `reasonReactRouter` and `gpr_3875_test` still show broader control-flow
+    drift in the same family
+- Topline impact in this current worktree:
+  - JS snapshot parity: **520 / 657** -> **522 / 657** (**+2**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **129** -> **127** (**-2**)
+- Keep this change because the previous rewrite was Rust-only. Preserving the
+  positive success guard matches the checked-in OCaml backend output for
+  multi-statement return tails instead of normalizing them into a different
+  but semantically equivalent negative-guard shape.
 
 Latest iteration on **2026-04-16**:
 
