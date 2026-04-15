@@ -1043,6 +1043,88 @@ The following files have known location parity differences that require more com
    - Issue: Doc comments on variant constructors not being converted to `res.doc` attributes
    - Root cause: Doc comment to attribute conversion for variant constructor contexts
 
+### JS Output Parity (In Progress)
+
+**Status:** ~525/657 passing (80%). The Rust compiler produces identical JavaScript to OCaml for most files.
+
+**Goal:** Byte-for-byte identical `.js` output between the Rust and OCaml compilers for all 657 test files.
+
+#### Quick Start — Agent Workflow
+
+```bash
+# 1. Build the Rust compiler
+cargo build --release --manifest-path compiler-rust/Cargo.toml
+
+# 2. Run the triage script to see what's broken and WHY
+./scripts/triage_js_failures.sh
+
+# 3. Pick the top category (most files, one root cause)
+#    Fix the root cause in Rust code
+
+# 4. Rebuild
+cargo build --release --manifest-path compiler-rust/Cargo.toml
+
+# 5. Use single-file test for rapid iteration while developing a fix
+./scripts/test_js_single.sh adt_optimize_test --diff
+
+# 6. Run the full suite — it's fast (~50s) and catches regressions
+./scripts/test_js_output_parity.sh
+
+# 7. Commit with parity count in description
+```
+
+**IMPORTANT**: Always run the full suite (`test_js_output_parity.sh`) before committing.
+It runs all 657 files in ~50 seconds and is the only way to catch regressions.
+
+#### Available Scripts
+
+| Script | Purpose | When to use |
+|--------|---------|-------------|
+| `./scripts/test_js_output_parity.sh` | Full 657-file suite (~50s) | **Before every commit** |
+| `./scripts/test_js_single.sh <file>` | Test one file (~3s) | Rapid iteration while developing a fix |
+| `./scripts/test_js_single.sh <file> --diff` | Show diff for one file | Understanding what's wrong |
+| `./scripts/test_js_single.sh <file> --rust` | Show Rust JS output | Inspecting compiler output |
+| `./scripts/test_js_single.sh <file> --expected` | Show expected OCaml output | Reading the OCaml reference |
+| `./scripts/triage_js_failures.sh` | Group failures by root cause | Planning which category to fix next |
+| `./scripts/triage_js_failures.sh --refresh` | Re-run full suite then triage | After a fix, full re-triage |
+
+#### Strategy: Fix Categories, Not Individual Files
+
+The triage script groups failures by root cause. **Always fix the top category first** — one fix in the compiler typically resolves all files in that group. Example categories:
+
+- **temp-var-naming** (14 files): OCaml uses `tmp`, Rust uses `ifres`/`$$switch` → fix in `lam_compile` temp name generation
+- **switch-fallthrough** (10 files): return placement in switch blocks → fix in switch lowering continuation
+- **recursive-module** (8 files): `Primitive_module.init` not lowered → implement recursive module backend
+- **cond-simplify** (38 files): ternary expressions not folded → port `js_exp_make` simplification rules
+
+**Do NOT fix files one at a time.** Always identify the shared root cause across files first.
+
+#### Finding the OCaml Reference Code
+
+When you see a diff, trace it to the OCaml implementation:
+
+| Diff pattern | Look in (OCaml) | Look in (Rust) |
+|-------------|-----------------|----------------|
+| Wrong temp var names | `compiler/core/lam_compile.ml` (compile_lambda) | `compiler-rust/src/lambda/compile.rs` |
+| Missing expression fold | `compiler/core/js_exp_make.ml` | `compiler-rust/src/lambda/compile.rs` or `js_ir/` |
+| Wrong switch shape | `compiler/core/lam_compile.ml` (compile_switch) | `compiler-rust/src/lambda/compile.rs` |
+| Missing optimization | `compiler/core/lam_pass_*.ml` | `compiler-rust/src/lambda/` |
+| Wrong JS formatting | `compiler/core/js_dump.ml` | `compiler-rust/src/js_ir/printer.rs` |
+| Import differences | `compiler/core/js_dump_import_export.ml` | `compiler-rust/src/js_ir/printer.rs` |
+| Missing primitive | `compiler/core/lam_compile_primitive.ml` | `compiler-rust/src/lambda/compile.rs` |
+
+#### Commit Convention
+
+Include the parity count in commit descriptions:
+
+```
+js-output: fix switch default return placement
+
+JS snapshot parity: 525 -> 535 / 657
+```
+
+This allows tracking progress over time via `git log`.
+
 ### Key Design Decisions
 
 - **Thread-safe ID generation** - `IdGenerator` with `AtomicI32` instead of global `currentstamp`
