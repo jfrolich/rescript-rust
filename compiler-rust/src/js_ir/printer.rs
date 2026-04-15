@@ -1253,7 +1253,21 @@ impl JsPrinter {
                     self.write_char('(');
                 }
                 self.write("new ");
-                self.print_expression(ctor, 16);
+                let ctor_level = match &ctor.desc {
+                    ExpressionDesc::StaticIndex(target, _, _)
+                        if matches!(
+                            target.as_ref(),
+                            Expression {
+                                desc: ExpressionDesc::Var(VIdent::Qualified(module, None)),
+                                ..
+                            } if matches!(module.kind, Kind::External { .. })
+                        ) =>
+                    {
+                        15
+                    }
+                    _ => 16,
+                };
+                self.print_expression(ctor, ctor_level);
                 self.write_char('(');
                 if let Some(args) = args {
                     for (i, arg) in args.iter().enumerate() {
@@ -3168,6 +3182,45 @@ mod tests {
             CallInfo::default(),
         );
         assert_eq!(print_expression(&expr), "foo(undefined)");
+    }
+
+    #[test]
+    fn test_print_new_member_constructor_omits_extra_parens_like_ocaml() {
+        let expr = Expression::new(ExpressionDesc::New(
+            Box::new(Expression::new(ExpressionDesc::StaticIndex(
+                Box::new(Expression::qualified(
+                    ModuleId {
+                        id: Ident::create_local("React"),
+                        kind: Kind::External {
+                            name: "react".to_string(),
+                            default: false,
+                            import_attributes: None,
+                        },
+                        dynamic_import: false,
+                    },
+                    None,
+                )),
+                "Component".to_string(),
+                None,
+            ))),
+            Some(vec![]),
+        ));
+
+        assert_eq!(print_expression(&expr), "new React.Component()");
+    }
+
+    #[test]
+    fn test_print_new_global_member_constructor_keeps_parens_like_snapshot() {
+        let expr = Expression::new(ExpressionDesc::New(
+            Box::new(Expression::new(ExpressionDesc::StaticIndex(
+                Box::new(Expression::var(Ident::create_local("global"))),
+                "Buffer".to_string(),
+                None,
+            ))),
+            Some(vec![Expression::number(Number::int(20))]),
+        ));
+
+        assert_eq!(print_expression(&expr), "new (global.Buffer)(20)");
     }
 
     #[test]

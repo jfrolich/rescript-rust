@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 489 / 657 JS snapshots passing, 0 compile errors, 168 output diffs
+**Status:** 490 / 657 JS snapshots passing, 0 compile errors, 167 output diffs
 
 ## Goal
 
@@ -35,11 +35,71 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **489 / 657**
+- JS snapshot parity: **490 / 657**
 - Compile errors: **0**
-- Output diffs: **168**
+- Output diffs: **167**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: match the checked-in snapshot's constructor-target parenthesis
+  rule for imported JS module namespaces without relaxing the separate
+  parenthesization that the snapshot still expects for globals and deeper
+  scoped constructor chains
+- Active backend focus for this slice is **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`, because the remaining mismatch lived in final JS emission rather
+  than typedtree/lambda lowering: the Rust printer emitted
+  `new (React.Component)()` for imported namespace constructors, while the
+  snapshot expects `new React.Component()`, but still expects
+  `new (global.Buffer)(20)` for global and nested scoped constructor targets
+- OCaml reference:
+  `compiler/core/js_dump.ml`, especially the `New` and `Static_index`
+  emission path; plus the checked-in snapshot and package-built
+  `tests/tests/lib/bs/src/reasonReactOptimizedCreateClass.mjs` /
+  `tests/tests/src/bs_qualified.mjs` outputs to pin the constructor-target
+  shapes that must remain parenthesized versus the imported-namespace case that
+  must not
+- Rust change:
+  - updated `compiler-rust/src/js_ir/printer.rs` so `ExpressionDesc::New`
+    omits the extra constructor parens only for a single static member access
+    off an imported external-module namespace
+    (`ExpressionDesc::StaticIndex(Var(Qualified(External, None)), ...)`)
+  - kept the old parenthesization for global constructors and deeper scoped
+    member chains such as `global.Buffer` and `ZZ.global.a0.a1.a2.Buffer`
+  - added printer regressions
+    `test_print_new_member_constructor_omits_extra_parens_like_ocaml` and
+    `test_print_new_global_member_constructor_keeps_parens_like_snapshot`,
+    alongside the existing precedence guard
+    `test_print_typeof_function_parenthesizes_arrow_expression`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_new_ -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_typeof_function_parenthesizes_arrow_expression -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/reasonReactOptimizedCreateClass.res`,
+    diffing `/tmp/reasonReactOptimizedCreateClass.mjs` against the checked-in
+    snapshot
+  - direct release repro for `tests/tests/src/bs_qualified.res`, diffing
+    `/tmp/bs_qualified.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/reasonReactOptimizedCreateClass.res` now matches the
+    snapshot again; Rust emits `new React.Component().updater` instead of
+    `new (React.Component)().updater`
+  - `tests/tests/src/bs_qualified.res` stays aligned with the snapshot's
+    explicit constructor parens for globals and nested scoped values
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+- Topline impact:
+  - JS snapshot parity: **489 / 657** -> **490 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **168** -> **167** (**-1**)
+- Keep this change because it isolates a real printer-only drift in final JS
+  dumping, matches the checked-in snapshot's imported-namespace constructor
+  shape without broadening the rule past what the snapshot permits, and
+  improves the authoritative baseline without touching earlier backend stages.
 
 Latest iteration on **2026-04-15**:
 
