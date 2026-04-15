@@ -738,6 +738,7 @@ impl<'a> Mapper<'a> {
         let is_jsx = matches!(
             &*expr.pexp_desc,
             current::ExpressionDesc::Pexp_jsx_element(_)
+                | current::ExpressionDesc::Pexp_inline_for(_)
         );
         let mut attrs = self.map_attributes(&expr.pexp_attributes);
         if is_jsx {
@@ -1114,6 +1115,9 @@ impl<'a> Mapper<'a> {
                         }
                     }
                 }
+            }
+            current::ExpressionDesc::Pexp_inline_for(_) => {
+                unreachable!("Pexp_inline_for should be eliminated before mapping to pt0")
             }
         }
     }

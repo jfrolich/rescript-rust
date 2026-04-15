@@ -654,6 +654,11 @@ impl<'a> DependencyCollector<'a> {
             ExpressionDesc::Pexp_jsx_element(jsx) => {
                 self.add_jsx_element(jsx);
             }
+            ExpressionDesc::Pexp_inline_for(inner) => {
+                let (ref _pat, ref collection, ref body) = **inner;
+                self.add_expr_idx(*collection);
+                self.add_expr_idx(*body);
+            }
         }
     }
 

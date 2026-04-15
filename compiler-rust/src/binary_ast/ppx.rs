@@ -6647,6 +6647,14 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         ExpressionDesc::Pexp_jsx_element(jsx) => {
             ExpressionDesc::Pexp_jsx_element(Box::new(rewrite_jsx_element(jsx, arena)))
         }
+        ExpressionDesc::Pexp_inline_for(inner) => {
+            let (ref pat, ref collection, ref body) = **inner;
+            let coll_expr = arena.get_expr(*collection).clone();
+            let body_expr = arena.get_expr(*body).clone();
+            let rw_collection = rewrite_expression_generic(&coll_expr, arena);
+            let rw_body = rewrite_expression_generic(&body_expr, arena);
+            ExpressionDesc::Pexp_inline_for(Box::new((*pat, arena.push_expr(rw_collection), arena.push_expr(rw_body))))
+        }
     };
 
     Expression {

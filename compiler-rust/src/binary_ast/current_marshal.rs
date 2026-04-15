@@ -1610,6 +1610,9 @@ impl Marshal for ExpressionDesc {
                 w.write_block_header(29, 1);
                 jsx.marshal(w);
             }
+            ExpressionDesc::Pexp_inline_for(_) => {
+                unreachable!("Pexp_inline_for should be eliminated before serialization")
+            }
         }
     }
 }

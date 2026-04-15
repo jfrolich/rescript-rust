@@ -1766,6 +1766,22 @@ pub fn print_expression(
         ExpressionDesc::Pexp_jsx_element(jsx) => {
             print_jsx_element(state, jsx, e.pexp_loc, cmt_tbl, arena)
         }
+        ExpressionDesc::Pexp_inline_for(inner) => {
+            let (ref pat, ref collection, ref body) = **inner;
+            Doc::concat(vec![
+                Doc::text("for "),
+                print_pattern(state, arena.get_pat(*pat), cmt_tbl, arena),
+                Doc::text(" in "),
+                print_expression_with_comments(state, arena.get_expr(*collection), cmt_tbl, arena),
+                Doc::text(" {"),
+                Doc::indent(Doc::concat(vec![
+                    Doc::line(),
+                    print_expression_with_comments(state, arena.get_expr(*body), cmt_tbl, arena),
+                ])),
+                Doc::line(),
+                Doc::text("}"),
+            ])
+        }
         // Send (method call): expr#method -> expr["method"]
         ExpressionDesc::Pexp_send(inner) => {
             let (ref parent_expr_idx, ref label) = **inner;

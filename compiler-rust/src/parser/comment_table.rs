@@ -2465,6 +2465,17 @@ fn walk_expression(
         ExpressionDesc::Pexp_jsx_element(jsx) => {
             walk_jsx_element(jsx, expr.pexp_loc, t, comments, arena);
         }
+        ExpressionDesc::Pexp_inline_for(inner) => {
+            let (ref _pat, ref collection, ref body) = **inner;
+            let (leading, trailing) = partition_leading_trailing(comments, expr.pexp_loc, arena);
+            t.attach_leading(expr.pexp_loc, leading, arena);
+            // Safety: arena is append-only, expression won't be invalidated
+            let coll_expr = arena.get_expr(*collection).clone();
+            let body_expr = arena.get_expr(*body).clone();
+            let (before_body, rest) = partition_leading_trailing(trailing, coll_expr.pexp_loc, arena);
+            walk_expression(&coll_expr, t, before_body, arena);
+            walk_expression(&body_expr, t, rest, arena);
+        }
     }
 }
 

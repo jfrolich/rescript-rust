@@ -466,6 +466,12 @@ fn rewrite_expression(
         ExpressionDesc::Pexp_jsx_element(element) => ExpressionDesc::Pexp_jsx_element(Box::new(
             rewrite_jsx_element(element, arena, let_unwrap_enabled)?,
         )),
+        ExpressionDesc::Pexp_inline_for(inner) => {
+            let (ref pat, ref collection, ref body) = **inner;
+            let new_collection = rewrite_expr_idx(*collection, arena, let_unwrap_enabled)?;
+            let new_body = rewrite_expr_idx(*body, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_inline_for(Box::new((*pat, new_collection, new_body)))
+        }
     };
 
     Ok(Expression {

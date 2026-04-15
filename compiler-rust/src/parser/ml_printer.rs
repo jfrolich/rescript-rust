@@ -2196,6 +2196,17 @@ fn print_expression_inner<W: Write>(
         ExpressionDesc::Pexp_jsx_element(jsx) => {
             print_jsx_element(f, arena, jsx);
         }
+        ExpressionDesc::Pexp_inline_for(inner) => {
+            let (ref pat, ref collection, ref body) = **inner;
+            f.string("(* inline for *)");
+            f.string(" for ");
+            print_pattern(f, arena, arena.get_pat(*pat));
+            f.string(" in ");
+            print_expression_inner(f, arena, arena.get_expr(*collection), false, PrintCtx::reset());
+            f.string(" { ");
+            print_expression_inner(f, arena, arena.get_expr(*body), false, PrintCtx::reset());
+            f.string(" }");
+        }
     }
 }
 

@@ -655,6 +655,8 @@ pub enum ExpressionDesc {
     Pexp_await(ExprIdx),
     /// JSX element.
     Pexp_jsx_element(Box<JsxElement>),
+    /// Inline for: `inline for pat in collection { body }` (comptime loop unrolling).
+    Pexp_inline_for(Box<(PatIdx, ExprIdx, ExprIdx)>),
 }
 
 /// A record field in an expression.

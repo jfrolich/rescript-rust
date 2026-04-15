@@ -1136,6 +1136,7 @@ fn parse_parameters(p: &mut Parser<'_>) -> Vec<super::core::FundefParameter> {
                         expr: None,
                         pat: unit_pat,
                         start_pos_idx: lparen_pos_idx,
+                        comptime: false,
                     },
                 ));
             } else if had_dot {
@@ -1406,6 +1407,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                 expr: default,
                 pat,
                 start_pos_idx,
+                comptime: false,
             },
         ));
     }
@@ -1478,6 +1480,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                     expr: default,
                     pat,
                     start_pos_idx,
+                    comptime: false,
                 },
             ));
         }
@@ -1489,6 +1492,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                 expr: None,
                 pat,
                 start_pos_idx,
+                comptime: false,
             },
         ));
     }
@@ -2005,6 +2009,18 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                     pexp_loc: LocIdx::none(),
                     pexp_attributes: Attributes::new(),
                 }
+            }
+        }
+        // `inline for` — comptime loop unrolling
+        Token::Lident(s) if s == "inline" => {
+            let is_inline_for = p.lookahead(|p| {
+                p.next();
+                p.token == Token::For
+            });
+            if is_inline_for {
+                parse_inline_for_expr(p)
+            } else {
+                parse_value_or_constructor(p)
             }
         }
         Token::Uident(_) | Token::Lident(_) => parse_value_or_constructor(p),
@@ -4072,6 +4088,7 @@ fn parse_braced_arrow_ident(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expres
         expr: None,
         pat,
         start_pos_idx,
+        comptime: false,
     };
 
     // Parse as an arrow expression with the pre-built parameter
@@ -5971,6 +5988,51 @@ fn parse_for_expr(p: &mut Parser<'_>) -> Expression {
             let b_idx = p.arena_mut().push_expr(body);
             Box::new(ExpressionDesc::Pexp_for(Box::new((
                 pat_idx, s_idx, e_idx, direction, b_idx,
+            ))))
+        },
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    }
+}
+
+/// Parse an inline for expression: `inline for pat in collection { body }`.
+/// Used for comptime loop unrolling.
+fn parse_inline_for_expr(p: &mut Parser<'_>) -> Expression {
+    let start_pos_idx = p.start_pos_idx();
+    // Consume `inline`
+    p.next();
+    // Consume `for`
+    p.expect(Token::For);
+
+    p.leave_breadcrumb(Grammar::ExprFor);
+    p.begin_region();
+
+    let pat = {
+        p.leave_breadcrumb(Grammar::Pattern);
+        let pat = super::pattern::parse_pattern(p);
+        p.eat_breadcrumb();
+        pat
+    };
+
+    p.expect(Token::In);
+    let collection = parse_expr_with_context(p, ExprContext::When);
+
+    p.expect(Token::Lbrace);
+    let body = parse_expr_block(p);
+    p.expect(Token::Rbrace);
+
+    p.eat_breadcrumb();
+    p.end_region();
+
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+
+    Expression {
+        pexp_desc: {
+            let pat_idx = p.arena_mut().push_pat(pat);
+            let coll_idx = p.arena_mut().push_expr(collection);
+            let body_idx = p.arena_mut().push_expr(body);
+            Box::new(ExpressionDesc::Pexp_inline_for(Box::new((
+                pat_idx, coll_idx, body_idx,
             ))))
         },
         pexp_loc: loc,

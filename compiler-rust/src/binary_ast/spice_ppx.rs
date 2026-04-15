@@ -4389,6 +4389,11 @@ impl<'a> LocCloner<'a> {
             ExpressionDesc::Pexp_extension(ext) => self.extension(ext),
             ExpressionDesc::Pexp_await(expr) => self.expression_idx(expr),
             ExpressionDesc::Pexp_jsx_element(element) => self.jsx_element(element),
+            ExpressionDesc::Pexp_inline_for(inner) => {
+                let (ref mut _pat, ref mut collection, ref mut body) = **inner;
+                self.expression_idx(collection);
+                self.expression_idx(body);
+            }
         }
     }
 

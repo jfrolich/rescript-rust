@@ -974,6 +974,15 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             expression(arena.get_expr(*e), arena),
         ]),
         ExpressionDesc::Pexp_jsx_element(jsx) => jsx_element(jsx, arena),
+        ExpressionDesc::Pexp_inline_for(inner) => {
+            let (ref pat, ref collection, ref body) = **inner;
+            Sexp::list(vec![
+                Sexp::atom("Pexp_inline_for"),
+                pattern(arena.get_pat(*pat), arena),
+                expression(arena.get_expr(*collection), arena),
+                expression(arena.get_expr(*body), arena),
+            ])
+        }
     };
     Sexp::list(vec![
         Sexp::atom("expression"),

@@ -5028,6 +5028,12 @@ pub fn type_expect<'a>(
                 &expr.pexp_attributes,
             )
         }
+
+        ED::Pexp_inline_for(_) => {
+            Err(super::TypeCoreError::Other(
+                "inline for can only be used inside @comptime functions".to_string(),
+            ))
+        }
     }
 }
 
@@ -9513,6 +9519,11 @@ fn collect_lident_idents_in_expression(
                 }
             }
         },
+        ED::Pexp_inline_for(inner) => {
+            let (ref _pat, ref collection, ref body) = **inner;
+            collect_lident_idents_in_expression(arena, arena.get_expr(*collection), out);
+            collect_lident_idents_in_expression(arena, arena.get_expr(*body), out);
+        }
     }
 }
 
