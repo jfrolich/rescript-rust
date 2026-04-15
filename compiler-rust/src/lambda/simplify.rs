@@ -956,25 +956,41 @@ fn substitute_alias_use(lam: &Lambda, target: &Ident, replacement: &Lambda) -> L
             ap_info: apply.ap_info.clone(),
             ap_transformed_jsx: apply.ap_transformed_jsx,
         }),
-        Lambda::Lfunction(func) => Lambda::function_(
-            func.arity,
-            func.params.clone(),
-            substitute_alias_use(&func.body, target, replacement),
-            func.attr.clone(),
-        ),
+        Lambda::Lfunction(func) => {
+            if func.params.iter().any(|param| param.same(target)) {
+                lam.clone()
+            } else {
+                Lambda::function_(
+                    func.arity,
+                    func.params.clone(),
+                    substitute_alias_use(&func.body, target, replacement),
+                    func.attr.clone(),
+                )
+            }
+        }
         Lambda::Llet(kind, id, value, body) => Lambda::let_(
             *kind,
             id.clone(),
             substitute_alias_use(value, target, replacement),
-            substitute_alias_use(body, target, replacement),
+            if id.same(target) {
+                body.as_ref().clone()
+            } else {
+                substitute_alias_use(body, target, replacement)
+            },
         ),
-        Lambda::Lletrec(bindings, body) => Lambda::letrec(
-            bindings
-                .iter()
-                .map(|(id, lam)| (id.clone(), substitute_alias_use(lam, target, replacement)))
-                .collect(),
-            substitute_alias_use(body, target, replacement),
-        ),
+        Lambda::Lletrec(bindings, body) => {
+            if bindings.iter().any(|(id, _)| id.same(target)) {
+                lam.clone()
+            } else {
+                Lambda::letrec(
+                    bindings
+                        .iter()
+                        .map(|(id, lam)| (id.clone(), substitute_alias_use(lam, target, replacement)))
+                        .collect(),
+                    substitute_alias_use(body, target, replacement),
+                )
+            }
+        }
         Lambda::Lprim(info) => Lambda::prim(
             info.primitive.clone(),
             info.args
@@ -1024,12 +1040,20 @@ fn substitute_alias_use(lam: &Lambda, target: &Ident, replacement: &Lambda) -> L
         Lambda::LstaticCatch(body, ids, handler) => Lambda::LstaticCatch(
             Box::new(substitute_alias_use(body, target, replacement)),
             ids.clone(),
-            Box::new(substitute_alias_use(handler, target, replacement)),
+            Box::new(if ids.1.iter().any(|id| id.same(target)) {
+                handler.as_ref().clone()
+            } else {
+                substitute_alias_use(handler, target, replacement)
+            }),
         ),
         Lambda::LtryWith(body, exn, handler) => Lambda::LtryWith(
             Box::new(substitute_alias_use(body, target, replacement)),
             exn.clone(),
-            Box::new(substitute_alias_use(handler, target, replacement)),
+            Box::new(if exn.same(target) {
+                handler.as_ref().clone()
+            } else {
+                substitute_alias_use(handler, target, replacement)
+            }),
         ),
         Lambda::LifThenElse(cond, then_, else_) => Lambda::if_(
             substitute_alias_use(cond, target, replacement),
@@ -1049,7 +1073,11 @@ fn substitute_alias_use(lam: &Lambda, target: &Ident, replacement: &Lambda) -> L
             Box::new(substitute_alias_use(from, target, replacement)),
             Box::new(substitute_alias_use(to, target, replacement)),
             *direction,
-            Box::new(substitute_alias_use(body, target, replacement)),
+            Box::new(if id.same(target) {
+                body.as_ref().clone()
+            } else {
+                substitute_alias_use(body, target, replacement)
+            }),
         ),
         Lambda::Lassign(id, value) => Lambda::Lassign(
             id.clone(),
@@ -3139,7 +3167,7 @@ mod tests {
     };
     use crate::location::Location;
 
-    use super::simplify_for_js_backend;
+    use super::{simplify_for_js_backend, substitute_alias_use};
 
     fn find_binding_value<'a>(lam: &'a Lambda, target: &Ident) -> Option<&'a Lambda> {
         match lam {
@@ -5220,6 +5248,59 @@ mod tests {
             *func.body,
             Lambda::Lvar(id) if id == projected
         ));
+    }
+
+    #[test]
+    fn substitute_alias_use_does_not_rewrite_shadowed_function_bodies() {
+        let none = Ident::create_local("none");
+        let replacement = Lambda::const_(Constant::JsUndefined { is_unit: false });
+        let original = Lambda::function_(
+            1,
+            vec![none.clone()],
+            Lambda::var(none.clone()),
+            FunctionAttribute::default(),
+        );
+
+        let substituted = substitute_alias_use(&original, &none, &replacement);
+        let Lambda::Lfunction(func) = substituted else {
+            panic!("expected substitution to keep the shadowing function intact");
+        };
+        let [param] = func.params.as_slice() else {
+            panic!("expected a single function parameter");
+        };
+        assert!(param.same(&none));
+        assert!(
+            matches!(func.body.as_ref(), Lambda::Lvar(body_id) if body_id.same(param)),
+            "expected the shadowed function body to keep using its own parameter, got {func:?}"
+        );
+    }
+
+    #[test]
+    fn backend_alias_inlining_preserves_shadowed_reused_function_params() {
+        let none = Ident::create_local("none");
+        let lambda = Lambda::let_(
+            LetKind::Alias,
+            none.clone(),
+            Lambda::const_(Constant::JsUndefined { is_unit: false }),
+            Lambda::function_(
+                1,
+                vec![none.clone()],
+                Lambda::var(none.clone()),
+                FunctionAttribute::default(),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lfunction(func) = simplified else {
+            panic!("expected the alias wrapper to simplify to a function");
+        };
+        let [param] = func.params.as_slice() else {
+            panic!("expected a single simplified parameter");
+        };
+        assert!(
+            matches!(func.body.as_ref(), Lambda::Lvar(body_id) if body_id.same(param)),
+            "expected the simplified wrapper body to keep using its own parameter, got {func:?}"
+        );
     }
 
     #[test]

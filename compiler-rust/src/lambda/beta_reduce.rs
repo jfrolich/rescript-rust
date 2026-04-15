@@ -23,7 +23,7 @@ use crate::lambda::analysis::no_side_effects;
 use crate::lambda::closure::StatsMap;
 use crate::lambda::compat::LetKind;
 use crate::lambda::primitive::Primitive;
-use crate::lambda::subst::{Subst, subst};
+use crate::lambda::subst::Subst;
 use crate::lambda::{Apply, Lambda, PrimInfo};
 
 /// Tracking state for simple beta reduction.
@@ -215,7 +215,7 @@ pub fn propagate_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -
         }
     }
 
-    let new_body = subst(&substitution, body);
+    let new_body = rewrite_bounded_vars(&mut substitution, body, &id_gen);
     let mut result = new_body;
     for (param, arg) in rest_bindings.into_iter().rev() {
         result = refine_let(LetKind::Strict, param, arg, result);
@@ -272,15 +272,15 @@ pub fn propagate_beta_reduce_with_map(
                     }
                 }
                 // Bind to a new variable
-                    let new_param = param.rename(&id_gen);
-                    rest_bindings.push((new_param.clone(), arg.clone()));
-                    substitution.insert(param.clone(), Lambda::var(new_param));
-                }
+                let new_param = param.rename(&id_gen);
+                rest_bindings.push((new_param.clone(), arg.clone()));
+                substitution.insert(param.clone(), Lambda::var(new_param));
             }
         }
+    }
 
     // Apply substitution to body
-    let new_body = subst(&substitution, body);
+    let new_body = rewrite_bounded_vars(&mut substitution, body, &id_gen);
 
     // Wrap with let bindings (in reverse order for proper scoping)
     let mut result = new_body;
@@ -309,24 +309,181 @@ fn refine_let(kind: LetKind, id: Ident, value: Lambda, body: Lambda) -> Lambda {
 }
 
 fn max_ident_stamp(params: &[Ident], body: &Lambda, args: &[Lambda]) -> i32 {
-    let params_max = params.iter().fold(0, |max_stamp, param| max_stamp.max(param.stamp()));
-    let body_max = max_ident_stamp_in_lambda(body);
-    let args_max = args
+    let params_max = params
         .iter()
-        .fold(0, |max_stamp, arg| max_stamp.max(max_ident_stamp_in_lambda(arg)));
+        .fold(0, |max_stamp, param| max_stamp.max(param.stamp()));
+    let body_max = max_ident_stamp_in_lambda(body);
+    let args_max = args.iter().fold(0, |max_stamp, arg| {
+        max_stamp.max(max_ident_stamp_in_lambda(arg))
+    });
     params_max.max(body_max).max(args_max)
+}
+
+fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGenerator) -> Lambda {
+    fn rebind(id: &Ident, substitution: &mut Subst, id_gen: &IdGenerator) -> Ident {
+        let renamed = id.rename(id_gen);
+        substitution.insert(id.clone(), Lambda::var(renamed.clone()));
+        renamed
+    }
+
+    match lam {
+        Lambda::Lvar(id) => substitution.get(id).cloned().unwrap_or_else(|| lam.clone()),
+        Lambda::Lconst(_) => lam.clone(),
+        Lambda::Lapply(apply) => Lambda::Lapply(Apply {
+            ap_func: Box::new(rewrite_bounded_vars(substitution, &apply.ap_func, id_gen)),
+            ap_args: apply
+                .ap_args
+                .iter()
+                .map(|arg| rewrite_bounded_vars(substitution, arg, id_gen))
+                .collect(),
+            ap_info: apply.ap_info.clone(),
+            ap_transformed_jsx: apply.ap_transformed_jsx,
+        }),
+        Lambda::Lfunction(func) => {
+            let params = func
+                .params
+                .iter()
+                .map(|param| rebind(param, substitution, id_gen))
+                .collect();
+            Lambda::function_(
+                func.arity,
+                params,
+                rewrite_bounded_vars(substitution, &func.body, id_gen),
+                func.attr.clone(),
+            )
+        }
+        Lambda::Llet(kind, id, arg, body) => {
+            let id = rebind(id, substitution, id_gen);
+            Lambda::let_(
+                *kind,
+                id,
+                rewrite_bounded_vars(substitution, arg, id_gen),
+                rewrite_bounded_vars(substitution, body, id_gen),
+            )
+        }
+        Lambda::Lletrec(bindings, body) => {
+            let renamed_ids: Vec<_> = bindings
+                .iter()
+                .map(|(id, _)| rebind(id, substitution, id_gen))
+                .collect();
+            let bindings = renamed_ids
+                .into_iter()
+                .zip(bindings.iter())
+                .map(|(id, (_, expr))| (id, rewrite_bounded_vars(substitution, expr, id_gen)))
+                .collect();
+            Lambda::letrec(bindings, rewrite_bounded_vars(substitution, body, id_gen))
+        }
+        Lambda::Lprim(prim_info) => Lambda::Lprim(PrimInfo {
+            primitive: prim_info.primitive.clone(),
+            args: prim_info
+                .args
+                .iter()
+                .map(|arg| rewrite_bounded_vars(substitution, arg, id_gen))
+                .collect(),
+            loc: prim_info.loc.clone(),
+        }),
+        Lambda::LglobalModule(_, _) => lam.clone(),
+        Lambda::Lswitch(arg, switch) => Lambda::Lswitch(
+            Box::new(rewrite_bounded_vars(substitution, arg, id_gen)),
+            crate::lambda::LambdaSwitch {
+                sw_consts_full: switch.sw_consts_full,
+                sw_consts: switch
+                    .sw_consts
+                    .iter()
+                    .map(|(key, value)| {
+                        (*key, rewrite_bounded_vars(substitution, value, id_gen))
+                    })
+                    .collect(),
+                sw_blocks_full: switch.sw_blocks_full,
+                sw_blocks: switch
+                    .sw_blocks
+                    .iter()
+                    .map(|(key, value)| {
+                        (*key, rewrite_bounded_vars(substitution, value, id_gen))
+                    })
+                    .collect(),
+                sw_failaction: switch
+                    .sw_failaction
+                    .as_ref()
+                    .map(|value| Box::new(rewrite_bounded_vars(substitution, value, id_gen))),
+                sw_names: switch.sw_names.clone(),
+            },
+        ),
+        Lambda::LstringSwitch(arg, cases, default) => Lambda::LstringSwitch(
+            Box::new(rewrite_bounded_vars(substitution, arg, id_gen)),
+            cases
+                .iter()
+                .map(|(key, value)| (key.clone(), rewrite_bounded_vars(substitution, value, id_gen)))
+                .collect(),
+            default
+                .as_ref()
+                .map(|value| Box::new(rewrite_bounded_vars(substitution, value, id_gen))),
+        ),
+        Lambda::LstaticRaise(id, args) => Lambda::LstaticRaise(
+            *id,
+            args.iter()
+                .map(|arg| rewrite_bounded_vars(substitution, arg, id_gen))
+                .collect(),
+        ),
+        Lambda::LstaticCatch(body, (exit, vars), handler) => {
+            let body = rewrite_bounded_vars(substitution, body, id_gen);
+            let vars = vars
+                .iter()
+                .map(|var| rebind(var, substitution, id_gen))
+                .collect();
+            Lambda::LstaticCatch(
+                Box::new(body),
+                (*exit, vars),
+                Box::new(rewrite_bounded_vars(substitution, handler, id_gen)),
+            )
+        }
+        Lambda::LtryWith(body, exn, handler) => {
+            let body = rewrite_bounded_vars(substitution, body, id_gen);
+            let exn = rebind(exn, substitution, id_gen);
+            Lambda::LtryWith(
+                Box::new(body),
+                exn,
+                Box::new(rewrite_bounded_vars(substitution, handler, id_gen)),
+            )
+        }
+        Lambda::LifThenElse(cond, then_, else_) => Lambda::LifThenElse(
+            Box::new(rewrite_bounded_vars(substitution, cond, id_gen)),
+            Box::new(rewrite_bounded_vars(substitution, then_, id_gen)),
+            Box::new(rewrite_bounded_vars(substitution, else_, id_gen)),
+        ),
+        Lambda::Lsequence(first, second) => Lambda::Lsequence(
+            Box::new(rewrite_bounded_vars(substitution, first, id_gen)),
+            Box::new(rewrite_bounded_vars(substitution, second, id_gen)),
+        ),
+        Lambda::Lwhile(cond, body) => Lambda::Lwhile(
+            Box::new(rewrite_bounded_vars(substitution, cond, id_gen)),
+            Box::new(rewrite_bounded_vars(substitution, body, id_gen)),
+        ),
+        Lambda::Lfor(id, from, to, direction, body) => {
+            let id = rebind(id, substitution, id_gen);
+            Lambda::Lfor(
+                id,
+                Box::new(rewrite_bounded_vars(substitution, from, id_gen)),
+                Box::new(rewrite_bounded_vars(substitution, to, id_gen)),
+                *direction,
+                Box::new(rewrite_bounded_vars(substitution, body, id_gen)),
+            )
+        }
+        Lambda::Lassign(id, value) => Lambda::Lassign(
+            id.clone(),
+            Box::new(rewrite_bounded_vars(substitution, value, id_gen)),
+        ),
+    }
 }
 
 fn max_ident_stamp_in_lambda(lam: &Lambda) -> i32 {
     match lam {
         Lambda::Lvar(id) | Lambda::LglobalModule(id, _) => id.stamp(),
         Lambda::Lconst(_) => 0,
-        Lambda::Lapply(apply) => apply
-            .ap_args
-            .iter()
-            .fold(max_ident_stamp_in_lambda(&apply.ap_func), |max_stamp, arg| {
-                max_stamp.max(max_ident_stamp_in_lambda(arg))
-            }),
+        Lambda::Lapply(apply) => apply.ap_args.iter().fold(
+            max_ident_stamp_in_lambda(&apply.ap_func),
+            |max_stamp, arg| max_stamp.max(max_ident_stamp_in_lambda(arg)),
+        ),
         Lambda::Lfunction(func) => func
             .params
             .iter()
@@ -337,10 +494,15 @@ fn max_ident_stamp_in_lambda(lam: &Lambda) -> i32 {
             .stamp()
             .max(max_ident_stamp_in_lambda(value))
             .max(max_ident_stamp_in_lambda(body)),
-        Lambda::Lletrec(bindings, body) => bindings.iter().fold(
-            max_ident_stamp_in_lambda(body),
-            |max_stamp, (id, lam)| max_stamp.max(id.stamp()).max(max_ident_stamp_in_lambda(lam)),
-        ),
+        Lambda::Lletrec(bindings, body) => {
+            bindings
+                .iter()
+                .fold(max_ident_stamp_in_lambda(body), |max_stamp, (id, lam)| {
+                    max_stamp
+                        .max(id.stamp())
+                        .max(max_ident_stamp_in_lambda(lam))
+                })
+        }
         Lambda::Lprim(info) => info.args.iter().fold(0, |max_stamp, arg| {
             max_stamp.max(max_ident_stamp_in_lambda(arg))
         }),
@@ -546,6 +708,35 @@ mod tests {
     }
 
     #[test]
+    fn test_propagate_beta_reduce_renames_reused_returned_function_params() {
+        let none = Ident::create_local("none");
+        let params = vec![none.clone()];
+        let body = Lambda::function_(
+            1,
+            vec![none.clone()],
+            Lambda::var(none.clone()),
+            FunctionAttribute::default(),
+        );
+        let args = vec![Lambda::const_(Constant::JsUndefined { is_unit: false })];
+
+        let reduced = propagate_beta_reduce(&params, &body, &args);
+        let Lambda::Lfunction(func) = reduced else {
+            panic!("expected beta reduction to keep the returned wrapper");
+        };
+        let [param] = func.params.as_slice() else {
+            panic!("expected a single returned parameter");
+        };
+        assert!(
+            !param.same(&none),
+            "expected the reused returned parameter to be alpha-renamed"
+        );
+        assert!(
+            matches!(func.body.as_ref(), Lambda::Lvar(body_id) if body_id.same(param)),
+            "expected the returned wrapper body to keep using its own parameter, got {func:?}"
+        );
+    }
+
+    #[test]
     fn test_propagate_beta_reduce_with_map_const() {
         let x = Ident::create_local("x");
 
@@ -619,6 +810,44 @@ mod tests {
             },
             _ => panic!("Expected Lprim, got {result:?}"),
         }
+    }
+
+    #[test]
+    fn test_propagate_beta_reduce_with_map_renames_reused_returned_function_params() {
+        let none = Ident::create_local("none");
+        let params = vec![none.clone()];
+        let body = Lambda::function_(
+            1,
+            vec![none.clone()],
+            Lambda::var(none.clone()),
+            FunctionAttribute::default(),
+        );
+        let args = vec![Lambda::const_(Constant::JsUndefined { is_unit: false })];
+
+        let mut stats = StatsMap::new();
+        stats.insert(
+            none.clone(),
+            VarStats {
+                top: true,
+                times: 1,
+            },
+        );
+
+        let reduced = propagate_beta_reduce_with_map(&stats, &params, &body, &args);
+        let Lambda::Lfunction(func) = reduced else {
+            panic!("expected beta reduction with stats to keep the returned wrapper");
+        };
+        let [param] = func.params.as_slice() else {
+            panic!("expected a single returned parameter");
+        };
+        assert!(
+            !param.same(&none),
+            "expected the reused returned parameter to be alpha-renamed"
+        );
+        assert!(
+            matches!(func.body.as_ref(), Lambda::Lvar(body_id) if body_id.same(param)),
+            "expected the returned wrapper body to keep using its own parameter, got {func:?}"
+        );
     }
 
     #[test]

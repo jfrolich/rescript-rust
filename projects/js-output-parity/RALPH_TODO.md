@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 504 / 657 JS snapshots passing, 0 compile errors, 153 output diffs
+**Status:** 503 / 657 JS snapshots passing, 0 compile errors, 154 output diffs
 
 ## Goal
 
@@ -35,11 +35,76 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **504 / 657**
+- JS snapshot parity: **503 / 657**
 - Compile errors: **0**
-- Output diffs: **153**
+- Output diffs: **154**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep backend beta-reduction and alias substitution lexical so
+  returned wrappers preserve their own parameters instead of inheriting outer
+  placeholder values like `undefined`, while leaving unrelated alias-shape drift
+  for a later slice
+- Active backend focus for this slice is **Phase 2: Port Post-Lowering Lambda
+  Backend Stages** from `PLAN.md`, because the optimized-lambda boundary was
+  already green and the remaining drift sat in Rust's
+  `simplify_for_js_backend` pass: direct backend cleanup could beta-reduce or
+  alias-substitute through rebinding scopes, which showed up downstream as
+  `Primitive_int.compare(undefined, prim1)` in `bs_array_test` and
+  `fromArray(undefined, Icmp)` / `eq(a, b, undefined)` in
+  `bs_map_set_dict_test`
+- OCaml reference:
+  `compiler/core/lam_beta_reduce.ml`,
+  `compiler/core/lam_bounded_vars.ml`, and
+  `compiler/core/lam_pass_lets_dce.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/beta_reduce.rs` so backend beta
+    reduction rewrites bounded variables like OCaml's
+    `Lam_bounded_vars.rewrite` instead of calling the raw capture-unsafe
+    substitution directly
+  - updated `compiler-rust/src/lambda/simplify.rs` so `substitute_alias_use`
+    stops at rebinding scopes (`Lfunction`, `Llet`, `Lletrec`,
+    `LstaticCatch`, `LtryWith`, `Lfor`) instead of substituting through
+    shadowed bodies
+  - added focused regressions:
+    `test_propagate_beta_reduce_renames_reused_returned_function_params`,
+    `test_propagate_beta_reduce_with_map_renames_reused_returned_function_params`,
+    `substitute_alias_use_does_not_rewrite_shadowed_function_bodies`, and
+    `backend_alias_inlining_preserves_shadowed_reused_function_params`
+- Verified focused guards for this slice:
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_propagate_beta_reduce_renames_reused_returned_function_params -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_propagate_beta_reduce_with_map_renames_reused_returned_function_params -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml substitute_alias_use_does_not_rewrite_shadowed_function_bodies -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml backend_alias_inlining_preserves_shadowed_reused_function_params -- --nocapture`
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml does_not_inline_captured_single_use_aliases -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact AST-path release repro for `tests/tests/src/bs_array_test.res` from
+    `tests/tests/lib/bs`, diffing `/tmp/bs_array_test.mjs` against the
+    checked-in snapshot
+  - exact AST-path release repro for `tests/tests/src/bs_map_set_dict_test.res`
+    from `tests/tests/lib/bs`, diffing `/tmp/bs_map_set_dict_test.mjs` against
+    the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bs_array_test.res` now matches exactly: the comparator
+    wrapper keeps `prim0` instead of collapsing to `undefined`
+  - `tests/tests/src/bs_map_set_dict_test.res` no longer drops forwarded
+    `none` / `extra`; the remaining drift in that file is now the separate
+    `let cmp = m_dict$1.cmp` alias-materialization difference
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+- Topline impact:
+  - JS snapshot parity: **502 / 657** -> **503 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **155** -> **154** (**-1**)
+- Keep this change because it ports OCaml's bounded-variable rewrite into
+  Rust's backend beta-reduction path and makes backend alias substitution
+  lexical, which removes a real emitted-JS `undefined` capture cluster without
+  perturbing the stable `ExternalShadow` guard.
 
 Latest iteration on **2026-04-15**:
 
