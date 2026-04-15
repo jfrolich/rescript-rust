@@ -26,6 +26,7 @@ struct SimplifyEnv {
     optional_blocks: HashMap<Ident, OptionalBlockInfo>,
     plain_strings: HashMap<Ident, String>,
     preserved_export_bindings: HashSet<Ident>,
+    preserved_local_module_eta_alias_bindings: HashSet<Ident>,
     allow_direct_function_beta_reduce: bool,
     preserve_direct_wrapper_values: bool,
     substitutions: HashMap<Ident, Lambda>,
@@ -110,15 +111,33 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     let flattened = deep_flatten_for_js_backend(lam);
     let exports = collect_exported_idents(&flattened);
     let preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
-    let first = simplify_for_js_backend_once(&flattened, &preserved_export_bindings, true);
-    let second = simplify_for_js_backend_once(&first, &preserved_export_bindings, false);
+    let preserved_local_module_eta_alias_bindings =
+        collect_local_module_eta_alias_bindings(&flattened);
+    let first = simplify_for_js_backend_once(
+        &flattened,
+        &preserved_export_bindings,
+        &preserved_local_module_eta_alias_bindings,
+        true,
+    );
+    let second = simplify_for_js_backend_once(
+        &first,
+        &preserved_export_bindings,
+        &preserved_local_module_eta_alias_bindings,
+        false,
+    );
     let lets_dce_style = simplify_direct_function_applications_like_lets_dce(&second);
-    simplify_for_js_backend_once(&lets_dce_style, &preserved_export_bindings, false)
+    simplify_for_js_backend_once(
+        &lets_dce_style,
+        &preserved_export_bindings,
+        &preserved_local_module_eta_alias_bindings,
+        false,
+    )
 }
 
 fn simplify_for_js_backend_once(
     lam: &Lambda,
     preserved_export_bindings: &HashSet<Ident>,
+    preserved_local_module_eta_alias_bindings: &HashSet<Ident>,
     allow_direct_function_beta_reduce: bool,
 ) -> Lambda {
     let flattened = deep_flatten_for_js_backend(lam);
@@ -127,6 +146,8 @@ fn simplify_for_js_backend_once(
         functions: collect_inlineable_functions(&flattened),
         known_functions: collect_known_functions(&flattened),
         preserved_export_bindings: preserved_export_bindings.clone(),
+        preserved_local_module_eta_alias_bindings: preserved_local_module_eta_alias_bindings
+            .clone(),
         allow_direct_function_beta_reduce,
         ..SimplifyEnv::default()
     };
@@ -642,6 +663,9 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             let mut body_exports = None;
             let preserve_exported_eta_alias =
                 binding_is_exported && preserve_exported_eta_alias_binding(original_value, &value);
+            let preserve_local_module_field_eta_alias = env
+                .preserved_local_module_eta_alias_bindings
+                .contains(id);
             if let Some(block_info) = immutable_block_elements(&value) {
                 body_env.blocks.insert(id.clone(), block_info);
             }
@@ -661,7 +685,9 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 body_env.plain_strings.insert(id.clone(), string_value);
             }
             if let Some(substitution) = substitution_candidate(kind, original_value, &value) {
-                if !substitution_hits_assigned_free_variable(&substitution, body) {
+                if !preserve_local_module_field_eta_alias
+                    && !substitution_hits_assigned_free_variable(&substitution, body)
+                {
                     if binding_is_exported {
                         if let Some(export_target) = exported_alias_target(&substitution) {
                             let propagated = body_exports.get_or_insert_with(|| exports.clone());
@@ -705,6 +731,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             }
             if kind == LetKind::Alias
                 && !preserve_exported_eta_alias
+                && !preserve_local_module_field_eta_alias
                 && !env.preserved_export_bindings.contains(id)
             {
                 let use_info = alias_use_info(id, &body);
@@ -715,7 +742,10 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                     return substitute_alias_use(&body, id, &value);
                 }
             }
-            if !preserve_exported_eta_alias && !free_variables(&body).contains(id) {
+            if !preserve_exported_eta_alias
+                && !preserve_local_module_field_eta_alias
+                && !free_variables(&body).contains(id)
+            {
                 if analysis::no_side_effects(&value) {
                     body
                 } else {
@@ -2670,6 +2700,36 @@ fn preserve_exported_eta_alias_binding(original_value: &Lambda, simplified_value
     }
 }
 
+fn eta_wrapped_global_module_field_binding(value: &Lambda) -> bool {
+    let Some(func) = inlineable_local_function(value) else {
+        return false;
+    };
+
+    if func.attr.async_ || func.attr.directive.is_some() || func.attr.one_unit_arg {
+        return false;
+    }
+
+    let apply = match func.body.as_ref() {
+        Lambda::Lapply(apply) => apply,
+        Lambda::Lsequence(first, second)
+            if matches!(
+                second.as_ref(),
+                Lambda::Lconst(Constant::JsUndefined { .. })
+            ) =>
+        {
+            let Lambda::Lapply(apply) = first.as_ref() else {
+                return false;
+            };
+            apply
+        }
+        _ => return false,
+    };
+
+    eta_wrapped_args_match_params(&func.params, &apply.ap_args)
+        && apply.ap_info.status != ApplyStatus::Na
+        && eta_reducible_module_field_read(apply.ap_func.as_ref())
+}
+
 fn lambda_exports_ident(lam: &Lambda, id: &Ident) -> bool {
     match lam {
         Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
@@ -2737,6 +2797,173 @@ fn lambda_exports_ident(lam: &Lambda, id: &Ident) -> bool {
                 || lambda_exports_ident(body, id)
         }
         Lambda::Lassign(_, value) => lambda_exports_ident(value, id),
+    }
+}
+
+fn collect_local_module_eta_alias_bindings(lam: &Lambda) -> HashSet<Ident> {
+    fn collect_into(lam: &Lambda, preserved: &mut HashSet<Ident>) {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
+            Lambda::Lapply(apply) => {
+                collect_into(&apply.ap_func, preserved);
+                for arg in &apply.ap_args {
+                    collect_into(arg, preserved);
+                }
+            }
+            Lambda::Lfunction(func) => collect_into(&func.body, preserved),
+            Lambda::Llet(_, id, value, body) => {
+                if lambda_uses_ident_in_local_module_block(body, id)
+                    && eta_wrapped_global_module_field_binding(value)
+                {
+                    preserved.insert(id.clone());
+                }
+                collect_into(value, preserved);
+                collect_into(body, preserved);
+            }
+            Lambda::Lletrec(bindings, body) => {
+                for (_, expr) in bindings {
+                    collect_into(expr, preserved);
+                }
+                collect_into(body, preserved);
+            }
+            Lambda::Lprim(info) => {
+                for arg in &info.args {
+                    collect_into(arg, preserved);
+                }
+            }
+            Lambda::Lswitch(scrutinee, switch) => {
+                collect_into(scrutinee, preserved);
+                for (_, lam) in &switch.sw_consts {
+                    collect_into(lam, preserved);
+                }
+                for (_, lam) in &switch.sw_blocks {
+                    collect_into(lam, preserved);
+                }
+                if let Some(failaction) = &switch.sw_failaction {
+                    collect_into(failaction, preserved);
+                }
+            }
+            Lambda::LstringSwitch(scrutinee, cases, default) => {
+                collect_into(scrutinee, preserved);
+                for (_, lam) in cases {
+                    collect_into(lam, preserved);
+                }
+                if let Some(default) = default {
+                    collect_into(default, preserved);
+                }
+            }
+            Lambda::LstaticRaise(_, args) => {
+                for arg in args {
+                    collect_into(arg, preserved);
+                }
+            }
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                collect_into(body, preserved);
+                collect_into(handler, preserved);
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                collect_into(cond, preserved);
+                collect_into(then_, preserved);
+                collect_into(else_, preserved);
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                collect_into(first, preserved);
+                collect_into(second, preserved);
+            }
+            Lambda::Lfor(_, start, end, _, body) => {
+                collect_into(start, preserved);
+                collect_into(end, preserved);
+                collect_into(body, preserved);
+            }
+            Lambda::Lassign(_, value) => collect_into(value, preserved),
+        }
+    }
+
+    let mut preserved = HashSet::new();
+    collect_into(lam, &mut preserved);
+    preserved
+}
+
+fn lambda_uses_ident_in_local_module_block(lam: &Lambda, id: &Ident) -> bool {
+    match lam {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lapply(apply) => {
+            lambda_uses_ident_in_local_module_block(&apply.ap_func, id)
+                || apply
+                    .ap_args
+                    .iter()
+                    .any(|arg| lambda_uses_ident_in_local_module_block(arg, id))
+        }
+        Lambda::Lfunction(func) => lambda_uses_ident_in_local_module_block(&func.body, id),
+        Lambda::Llet(_, _, value, body) => {
+            lambda_uses_ident_in_local_module_block(value, id)
+                || lambda_uses_ident_in_local_module_block(body, id)
+        }
+        Lambda::Lletrec(bindings, body) => {
+            lambda_uses_ident_in_local_module_block(body, id)
+                || bindings
+                    .iter()
+                    .any(|(_, lam)| lambda_uses_ident_in_local_module_block(lam, id))
+        }
+        Lambda::Lprim(info) => {
+            (matches!(
+                &info.primitive,
+                Primitive::Pmakeblock(_, TagInfo::Module(_), Mutable::Immutable)
+            ) && info
+                .args
+                .iter()
+                .any(|arg| matches!(arg, Lambda::Lvar(field_id) if field_id.same(id))))
+                || info
+                    .args
+                    .iter()
+                    .any(|arg| lambda_uses_ident_in_local_module_block(arg, id))
+        }
+        Lambda::Lswitch(scrutinee, switch) => {
+            lambda_uses_ident_in_local_module_block(scrutinee, id)
+                || switch
+                    .sw_consts
+                    .iter()
+                    .any(|(_, lam)| lambda_uses_ident_in_local_module_block(lam, id))
+                || switch
+                    .sw_blocks
+                    .iter()
+                    .any(|(_, lam)| lambda_uses_ident_in_local_module_block(lam, id))
+                || switch
+                    .sw_failaction
+                    .as_deref()
+                    .is_some_and(|lam| lambda_uses_ident_in_local_module_block(lam, id))
+        }
+        Lambda::LstringSwitch(scrutinee, cases, default) => {
+            lambda_uses_ident_in_local_module_block(scrutinee, id)
+                || cases
+                    .iter()
+                    .any(|(_, lam)| lambda_uses_ident_in_local_module_block(lam, id))
+                || default
+                    .as_deref()
+                    .is_some_and(|lam| lambda_uses_ident_in_local_module_block(lam, id))
+        }
+        Lambda::LstaticRaise(_, args) => args
+            .iter()
+            .any(|arg| lambda_uses_ident_in_local_module_block(arg, id)),
+        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+            lambda_uses_ident_in_local_module_block(body, id)
+                || lambda_uses_ident_in_local_module_block(handler, id)
+        }
+        Lambda::LifThenElse(cond, then_, else_) => {
+            lambda_uses_ident_in_local_module_block(cond, id)
+                || lambda_uses_ident_in_local_module_block(then_, id)
+                || lambda_uses_ident_in_local_module_block(else_, id)
+        }
+        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+            lambda_uses_ident_in_local_module_block(first, id)
+                || lambda_uses_ident_in_local_module_block(second, id)
+        }
+        Lambda::Lfor(_, start, end, _, body) => {
+            lambda_uses_ident_in_local_module_block(start, id)
+                || lambda_uses_ident_in_local_module_block(end, id)
+                || lambda_uses_ident_in_local_module_block(body, id)
+        }
+        Lambda::Lassign(_, value) => lambda_uses_ident_in_local_module_block(value, id),
     }
 }
 
@@ -6990,6 +7217,112 @@ mod tests {
                 ..
             }) if matches!(ids.as_slice(), [first, second] if first.same(&exported) && second.same(&result))
                 && matches!(args.as_slice(), [Lambda::Lvar(first), Lambda::Lvar(second)] if first.same(&exported) && second.same(&result))
+        ));
+    }
+
+    #[test]
+    fn local_module_blocks_keep_eta_reduced_field_aliases_materialized_like_test_zero_nullable() {
+        let js_undefined = Ident::create_persistent("Js_undefined");
+        let field_binding = Ident::create_local("f9");
+        let module_binding = Ident::create_local("Test_def");
+        let param = Ident::create_local("x");
+        let direct_callee = Lambda::prim(
+            Primitive::Pfield(
+                0,
+                FieldDbgInfo::Module {
+                    name: "toOption".to_string(),
+                },
+            ),
+            vec![Lambda::LglobalModule(js_undefined.clone(), false)],
+            Location::none(),
+        );
+
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Strict,
+            field_binding.clone(),
+            Lambda::function_(
+                1,
+                vec![param.clone()],
+                Lambda::Lapply(Apply {
+                    ap_func: Box::new(direct_callee.clone()),
+                    ap_args: vec![Lambda::var(param.clone())],
+                    ap_info: ApInfo {
+                        loc: Location::none(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Uncurry,
+                    },
+                    ap_transformed_jsx: false,
+                }),
+                FunctionAttribute::default(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                module_binding.clone(),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::Module(vec!["f9".to_string()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(field_binding.clone())],
+                    Location::none(),
+                ),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::ModuleExport(vec![module_binding.clone()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(module_binding.clone())],
+                    Location::none(),
+                ),
+            ),
+        ));
+
+        let Lambda::Llet(_, kept_field, field_value, body) = simplified else {
+            panic!("expected the eta-reduced module field alias to remain materialized");
+        };
+        assert!(
+            kept_field.same(&field_binding),
+            "unexpected simplified shape: {:?}",
+            Lambda::Llet(
+                LetKind::Alias,
+                kept_field.clone(),
+                field_value.clone(),
+                body.clone(),
+            )
+        );
+        assert!(matches!(
+            *field_value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(_, FieldDbgInfo::Module { ref name }),
+                args,
+                ..
+            }) if name == "toOption"
+                && matches!(args.as_slice(), [Lambda::LglobalModule(id, false)] if id.same(&js_undefined))
+        ));
+
+        let Lambda::Llet(_, kept_module, module_value, export_block) = *body else {
+            panic!("expected the local module binding to remain after the field alias");
+        };
+        assert!(kept_module.same(&module_binding));
+        assert!(matches!(
+            *module_value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pmakeblock(_, TagInfo::Module(fields), _),
+                args,
+                ..
+            }) if matches!(fields.as_slice(), [field] if field == "f9")
+                && matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&field_binding))
+        ));
+        assert!(matches!(
+            *export_block,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _),
+                args,
+                ..
+            }) if matches!(ids.as_slice(), [id] if id.same(&module_binding))
+                && matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&module_binding))
         ));
     }
 

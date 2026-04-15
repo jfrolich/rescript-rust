@@ -43,6 +43,67 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: keep eta-reduced global-module field aliases materialized when
+  they feed local `TagInfo::Module(...)` blocks, matching OCaml's
+  `lam_pass_remove_alias.ml` behavior instead of substituting those aliases
+  away across later Rust JS-backend cleanup passes
+- Active backend focus for this slice is **Phase 4: Port JS Passes** from
+  `PLAN.md`, because the remaining emitted-JS drift in
+  `tests/tests/src/test_zero_nullable.res` came from
+  `compiler-rust/src/lambda/simplify.rs`, where Rust was eta-reducing
+  `Js_undefined.toOption` correctly but then inlining the resulting field read
+  into the local module block on a later simplifier pass, unlike OCaml
+- OCaml reference:
+  `compiler/core/lam_pass_remove_alias.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so
+    `simplify_for_js_backend` computes a stable set of local bindings whose
+    original values are eta-wrapped global-module field calls used directly by
+    local module blocks
+  - threaded that preserved-binding set through every JS-backend simplify pass
+    so later passes no longer substitute or DCE those already-eta-reduced
+    aliases after the first pass has materialized them as direct `Pfield`
+    reads
+  - added a focused regression covering the `test_zero_nullable` shape where a
+    local module export should keep the eta-reduced `f9$1 = Js_undefined.toOption`
+    binding materialized
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml local_module_blocks_keep_eta_reduced_field_aliases_materialized_like_test_zero_nullable -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml exported_eta_alias_calls_use_direct_callee_but_keep_export_binding_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml inlines_single_use_alias_field_reads_into_module_blocks -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml keeps_sync_component_props_wrappers_materialized_for_js_backend -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact direct release repro for `tests/tests/src/test_zero_nullable.res`
+    via the checked-in `.ast` + `compiler-args` path, diffing
+    `tests/tests/lib/bs/src/test_zero_nullable.mjs` against
+    `/tmp/test_zero_nullable.mjs`
+  - unchanged broader guard repro for `tests/tests/src/ExternalShadow.res`
+    via the same release compiler path, diffing
+    `tests/tests/src/ExternalShadow.mjs` against `/tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `test_zero_nullable` now keeps the `f9$1 = Js_undefined.toOption`
+    materialized alias like OCaml instead of inlining that field read straight
+    into the local module block
+  - the remaining `test_zero_nullable` drift is now narrowed to the final
+    `Null_undefined_neq` tail binding shape (`let res = true; let
+    Null_undefined_neq_a = null; ...`) rather than the earlier `f9`
+    export/binding materialization
+  - `ExternalShadow` remained an exact snapshot match as a broader guard
+  - the full authoritative sweep stayed flat, so this OCaml-aligned
+    simplifier fix is still worth keeping even though the affected file
+    continues to fail for a later nullish-lowering reason
+- Topline impact:
+  - JS snapshot parity: **517 / 657** -> **517 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **140** -> **140** (**no change**)
+- Keep this change because it matches OCaml's alias-retention behavior for
+  eta-reduced global-module field wrappers inside local module exports,
+  removes one real emitted-JS mismatch from `test_zero_nullable`, and leaves
+  the remaining failure isolated to a separate `Null_undefined_neq` cluster.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: port OCaml's `Normal_optional` alias handling in the JS-backend
   lambda simplifier so `Psome` / `Psome_not_nest` bindings fold through
   `PisNotNone` and `PvalFromOption` the same way `lam_pass_collect.ml` and
