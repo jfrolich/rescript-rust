@@ -1502,7 +1502,9 @@ fn resolved_type_items_share_identity(
 /// 2. Looks up the module at the path (checking env + CMI)
 /// 3. If the module is an alias (`MtyAlias`), follows it
 fn normalize_path_full<'a>(ctx: &'a TypeContext<'a>, env: &Env, path: &Path) -> Path {
-    let env_id = env.id();
+    let env_id = env
+        .module_path_requires_env_scoped_cache(path)
+        .then_some(env.id());
     if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
         return cached;
     }
