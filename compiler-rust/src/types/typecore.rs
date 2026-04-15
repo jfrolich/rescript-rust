@@ -13769,43 +13769,21 @@ fn type_pack(
     )
     .unwrap_or(crate::types::decl::ModuleType::MtyIdent(pack_path.clone()));
     let package_mty = typed_module_type_for_unpack(tctx.arena, loc, &decl_package_mty);
-    let direct_arg_mty = packed_module_path.as_ref().and_then(|path| {
-        env.lookup_module(path)
-            .ok()
-            .map(|md| md.md_type.clone())
-            .or_else(|| match path {
-                Path::Pident(id) => env.find_module(id.name()).ok().map(|md| md.md_type.clone()),
-                _ => None,
-            })
-    });
-    let arg_mty = direct_arg_mty
-        .or_else(|| {
-            crate::types::typemod::extract_module_type_from_mod_expr_with_ctx(
-                &typed_module,
-                Some(env),
-                ctx,
-            )
-        })
-        .or_else(|| crate::types::typemod::decl_module_type_from_typed(&typed_module.mod_type))
-        .or_else(|| {
-            crate::types::typemod::lookup_module_type_from_parsed_module_expr(
-                tctx,
-                env,
-                tctx.arena,
-                module_expr,
-            )
-        })
-        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
-    let arg_mty = if let Some(pack_module_path) = packed_module_path.as_ref() {
-        crate::types::ctype::strengthen_module_type_for_inclusion_path(
+    let arg_mty = crate::types::typemod::lookup_module_type_from_parsed_module_expr(
+        tctx,
+        env,
+        tctx.arena,
+        module_expr,
+    )
+    .or_else(|| {
+        crate::types::typemod::extract_module_type_from_mod_expr_with_ctx(
+            &typed_module,
+            Some(env),
             ctx,
-            env,
-            pack_module_path,
-            &arg_mty,
         )
-    } else {
-        arg_mty
-    };
+    })
+    .or_else(|| crate::types::typemod::decl_module_type_from_typed(&typed_module.mod_type))
+    .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
     let package_coercion_key = if pack_args_rebuilt_from_path {
         packed_module_path.as_ref().map(|packed_module_path| PackageCoercionCacheKey {
             env_id: env.id(),

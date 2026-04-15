@@ -5181,17 +5181,66 @@ pub fn lookup_module_type_from_parsed_module_expr<'a>(
         return Some(cached);
     }
 
+    fn semantic_module_type_for_ident_expr<'a>(
+        tctx: &mut TypeCheckContext<'a>,
+        env: &Env,
+        arena: &'a ParseArena,
+        lid: &Located<LidentIdx>,
+    ) -> Option<crate::types::decl::ModuleType> {
+        use crate::types::decl::ModuleType as DeclMty;
+
+        let longident = arena.get_longident(lid.txt);
+        let path = lookup_module_path_by_lid(
+            longident,
+            arena,
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        )?;
+        let mut semantic_mty = lookup_module_type_by_lid(
+            longident,
+            arena,
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        )?;
+        let strengthen_path = match semantic_mty.clone() {
+            DeclMty::MtyAlias(_, alias_path) => {
+                let mut normalized = alias_path;
+                while let Some(next) = crate::types::typecore::alias_target_for_module_path(
+                    &normalized,
+                    env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                ) {
+                    if next.same(&normalized) {
+                        break;
+                    }
+                    normalized = next;
+                }
+                semantic_mty = scrape_alias_module_type(
+                    &semantic_mty,
+                    env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                )
+                .unwrap_or(semantic_mty);
+                env.normalize_path(&normalized)
+            }
+            _ => path,
+        };
+        Some(crate::types::ctype::strengthen_module_type_for_inclusion_path(
+            tctx.type_ctx,
+            env,
+            &strengthen_path,
+            &semantic_mty,
+        ))
+    }
+
     let result = match &*mod_expr.pmod_desc {
-        ParsedModuleExprDesc::Pmod_ident(lid) => {
-            let longident = arena.get_longident(lid.txt);
-            lookup_module_type_by_lid(
-                longident,
-                arena,
-                env,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
-            )
-        }
+        ParsedModuleExprDesc::Pmod_ident(lid) => semantic_module_type_for_ident_expr(
+            tctx, env, arena, lid,
+        ),
         ParsedModuleExprDesc::Pmod_apply(functor_idx, arg_idx) => {
             let functor_expr = arena.get_mod_expr(*functor_idx);
             let arg_expr = arena.get_mod_expr(*arg_idx);
