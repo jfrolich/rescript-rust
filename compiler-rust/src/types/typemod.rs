@@ -8408,6 +8408,21 @@ pub fn type_structure<'a>(
         sig_items.extend(item_sig);
         typed_items.push(typed_item);
         current_env = new_env;
+
+        // Check for comptime derive attributes on type declarations
+        if let ParsedStructureItemDesc::Pstr_type(inner) = &*item.pstr_desc {
+            let (_, ref decls) = **inner;
+            for decl in decls {
+                let derive_items = process_comptime_derives(tctx, &current_env, arena, decl);
+                if let Ok(extra_items) = derive_items {
+                    for (extra_item, extra_sig, extra_env) in extra_items {
+                        sig_items.extend(extra_sig);
+                        typed_items.push(extra_item);
+                        current_env = extra_env;
+                    }
+                }
+            }
+        }
     }
 
     let structure = Structure {
@@ -12028,6 +12043,191 @@ module M3: {
 }
 
 // ── Comptime Registration ──────────────────────────────────────────────────
+
+/// Process comptime derive attributes (@keyOf, @partial, @encoder, @decoder)
+/// on a type declaration. Returns additional structure items to splice in.
+fn process_comptime_derives<'a>(
+    tctx: &mut crate::types::typecore::TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a crate::parse_arena::ParseArena,
+    decl: &crate::parser::ast::TypeDeclaration,
+) -> Result<Vec<(StructureItem, Vec<crate::types::decl::SignatureItem>, Env)>, TypeModError> {
+    let mut results = Vec::new();
+    let type_name = arena.get_string(decl.ptype_name.txt).to_string();
+
+    // Check attributes for known derives
+    for (attr_name_loc, _payload) in decl.ptype_attributes.iter() {
+        let attr_name = arena.get_string(attr_name_loc.txt);
+
+        // Find the type declaration in env to build TypeInfo
+        let type_info = {
+            let id_and_decl = env.find_type(&type_name);
+            match id_and_decl {
+                Ok(type_decl) => {
+                    let mut visited = Vec::new();
+                    // Build TypeInfo from the type declaration's kind
+                    match &type_decl.type_kind {
+                        crate::types::decl::TypeKind::TypeRecord(labels, _) => {
+                            let fields = labels
+                                .iter()
+                                .map(|ld| crate::types::comptime::FieldInfo {
+                                    name: ld.ld_id.name().to_string(),
+                                    typ: crate::types::comptime::build_type_info(
+                                        tctx.type_ctx,
+                                        env,
+                                        ld.ld_type,
+                                        &mut visited,
+                                    ),
+                                    mutable: ld.ld_mutable
+                                        == crate::types::asttypes::MutableFlag::Mutable,
+                                    optional: ld.ld_optional,
+                                    attributes: vec![],
+                                })
+                                .collect();
+                            crate::types::comptime::TypeInfo::Record {
+                                name: type_name.clone(),
+                                fields,
+                                unboxed: type_decl.type_unboxed.unboxed,
+                            }
+                        }
+                        crate::types::decl::TypeKind::TypeVariant(ctors) => {
+                            let constructors = ctors
+                                .iter()
+                                .map(|cd| {
+                                    let args = match &cd.cd_args {
+                                        crate::types::decl::ConstructorArguments::CstrTuple(
+                                            tys,
+                                        ) => tys
+                                            .iter()
+                                            .map(|t| {
+                                                crate::types::comptime::build_type_info(
+                                                    tctx.type_ctx,
+                                                    env,
+                                                    *t,
+                                                    &mut visited,
+                                                )
+                                            })
+                                            .collect(),
+                                        crate::types::decl::ConstructorArguments::CstrRecord(
+                                            labels,
+                                        ) => labels
+                                            .iter()
+                                            .map(|ld| {
+                                                crate::types::comptime::build_type_info(
+                                                    tctx.type_ctx,
+                                                    env,
+                                                    ld.ld_type,
+                                                    &mut visited,
+                                                )
+                                            })
+                                            .collect(),
+                                    };
+                                    crate::types::comptime::ConstructorInfo {
+                                        name: cd.cd_id.name().to_string(),
+                                        args,
+                                        attributes: vec![],
+                                    }
+                                })
+                                .collect();
+                            crate::types::comptime::TypeInfo::Variant {
+                                name: type_name.clone(),
+                                constructors,
+                                unboxed: type_decl.type_unboxed.unboxed,
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+                Err(_) => continue,
+            }
+        };
+
+        match attr_name {
+            "keyOf" => {
+                let source = crate::types::comptime::generate_key_of_source(
+                    &type_info,
+                    &type_name,
+                )
+                .map_err(|e| TypeModError::CoreError(TypeCoreError::Other(e)))?;
+
+                // Parse and type-check the generated type declaration
+                let generated_items = compile_generated_source(tctx, env, &source)?;
+                results.extend(generated_items);
+            }
+            "partial" => {
+                let source = crate::types::comptime::generate_partial_source(
+                    &type_info,
+                    &type_name,
+                )
+                .map_err(|e| TypeModError::CoreError(TypeCoreError::Other(e)))?;
+
+                let generated_items = compile_generated_source(tctx, env, &source)?;
+                results.extend(generated_items);
+            }
+            "encoder" => {
+                let source = crate::types::comptime::generate_encode_binding(
+                    "encode",
+                    &type_info,
+                    &type_name,
+                )
+                .map_err(|e| TypeModError::CoreError(TypeCoreError::Other(e)))?;
+
+                let generated_items = compile_generated_source(tctx, env, &source)?;
+                results.extend(generated_items);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(results)
+}
+
+/// Compile a generated ReScript source string into typed structure items.
+fn compile_generated_source<'a>(
+    tctx: &mut crate::types::typecore::TypeCheckContext<'a>,
+    env: &Env,
+    source: &str,
+) -> Result<Vec<(StructureItem, Vec<crate::types::decl::SignatureItem>, Env)>, TypeModError> {
+    let mut parser = crate::parser::Parser::new("__comptime_derive__.res", source);
+    let structure = crate::parser::module::parse_structure(&mut parser);
+
+    if parser.has_errors() {
+        return Err(TypeModError::CoreError(TypeCoreError::Other(format!(
+            "Comptime derive generated invalid ReScript:\n{}\nErrors: {:?}",
+            source,
+            parser.diagnostics()
+        ))));
+    }
+
+    let generated_arena = parser.into_arena();
+
+    // Type-check each generated item in a sub-context
+    let mut results = Vec::new();
+    let mut current_env = env.clone();
+
+    for item in &structure {
+        let mut gen_tctx =
+            crate::types::typecore::TypeCheckContext::new(tctx.type_ctx, &generated_arena);
+        gen_tctx.persistent_env = tctx.persistent_env.clone();
+        gen_tctx.comptime_functions = tctx.comptime_functions.clone();
+
+        let ctx = gen_tctx.type_ctx;
+        ctx.init_def(ctx.current_stamp());
+        gen_tctx.set_unify_env(&current_env);
+
+        match type_structure_item(&mut gen_tctx, &current_env, &generated_arena, item) {
+            Ok((typed_item, item_sig, new_env)) => {
+                current_env = new_env;
+                results.push((typed_item, item_sig, current_env.clone()));
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    }
+
+    Ok(results)
+}
 
 /// Check if a value binding has `@comptime` attribute and register
 /// its typed body in the comptime function registry.

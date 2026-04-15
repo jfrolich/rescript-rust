@@ -664,6 +664,16 @@ fn fixture_optional_field() {
     run_fixture("optional_field");
 }
 
+#[test]
+fn fixture_derive_keyof() {
+    run_fixture("derive_keyof");
+}
+
+#[test]
+fn fixture_derive_partial() {
+    run_fixture("derive_partial");
+}
+
 // ============================================================================
 // End-to-end compilation tests (without stdlib)
 // ============================================================================
