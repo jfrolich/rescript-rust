@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 499 / 657 JS snapshots passing, 0 compile errors, 158 output diffs
+**Status:** 501 / 657 JS snapshots passing, 0 compile errors, 156 output diffs
 
 ## Goal
 
@@ -35,11 +35,69 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **499 / 657**
+- JS snapshot parity: **501 / 657**
 - Compile errors: **0**
-- Output diffs: **158**
+- Output diffs: **156**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: lower nested `staticcatch` handlers that only jump outward into
+  already-active handlers without synthesizing a fresh local `exit` temp, so
+  return-position control flow matches OCaml on files like
+  `gpr_3609_test.res`
+- Active backend focus for this slice is **Phase 2: Port Post-Lowering Lambda
+  Backend Stages** from `PLAN.md`, because the optimized-lambda boundary was
+  already green and the emitted-JS drift sat in Rust's `LstaticCatch`
+  lowering in `compiler-rust/src/lambda/compile.rs`, where handler forwarding
+  was still more conservative than OCaml's `lam_compile` static-jump handling
+- OCaml reference:
+  `compiler/core/lam_compile.ml` and
+  `compiler/core/lam_compile_context.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so
+    `staticcatch_requires_explicit_jump` only keeps an explicit jump temp when
+    the handler contains unresolved nested static control flow, not when its
+    `LstaticRaise`s already target an active outer static / fallthrough / jump
+    handler
+  - added focused regression
+    `nested_staticcatch_binding_handlers_that_raise_outward_avoid_exit_temps`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_staticcatch_binding_handlers_that_raise_outward_avoid_exit_temps -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml staticcatch_wrapped_int_return_switches_omit_empty_default_arms -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_handler -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact direct release repro for `tests/tests/src/gpr_3609_test.res`,
+    diffing `/tmp/gpr_3609_test.mjs` against the checked-in snapshot
+  - broader cluster repro for
+    `tests/tests/src/DictPatternMatchingOptimization.res`,
+    diffing `/tmp/DictPatternMatchingOptimization.mjs` against the checked-in
+    snapshot
+  - unchanged broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_3609_test.res` now matches exactly: the nested
+    variant/staticcatch return path no longer emits `let exit = 0; ... if (exit
+    === 1)` and instead matches OCaml's direct branch return shape
+  - the fresh authoritative diff set also dropped
+    `tests/tests/src/extensible_variant_test.res`, indicating the same nested
+    staticcatch-return fix cleared a second file from the cluster
+  - `tests/tests/src/DictPatternMatchingOptimization.res` still differs, but
+    it now stands as the remaining broader control-flow / guard-ordering file
+    in this area rather than sharing the exact `gpr_3609` nested-staticcatch
+    temp pattern
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+- Topline impact:
+  - JS snapshot parity: **499 / 657** -> **501 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **158** -> **156** (**-2**)
+- Keep this change because it matches OCaml's static-jump lowering more
+  closely in nested return-position handlers, removes a real emitted-JS
+  `exit`-temp cluster, and improves the authoritative baseline without
+  perturbing the stable `ExternalShadow` guard.
 
 Latest iteration on **2026-04-15**:
 

@@ -6252,6 +6252,109 @@ impl LambdaCompiler {
         Some(subst::subst(&subst, &handler.handler))
     }
 
+    fn staticcatch_requires_explicit_jump(&self, bindings: &[Ident], handler: &Lambda) -> bool {
+        let _ = bindings;
+        self.lambda_requires_explicit_staticcatch_jump(handler)
+    }
+
+    fn active_static_raise_target_exists(&self, label: i32, arity: usize) -> bool {
+        self.static_jump_handlers
+            .iter()
+            .rev()
+            .any(|handler| handler.label == label && handler.bindings.len() == arity)
+            || self
+                .fallthrough_return_handlers
+                .iter()
+                .rev()
+                .any(|handler| handler.label == label && handler.bindings.len() == arity)
+            || self
+                .static_handlers
+                .iter()
+                .rev()
+                .any(|handler| handler.label == label && handler.bindings.len() == arity)
+    }
+
+    fn lambda_requires_explicit_staticcatch_jump(&self, lam: &Lambda) -> bool {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            Lambda::Lapply(apply) => {
+                self.lambda_requires_explicit_staticcatch_jump(&apply.ap_func)
+                    || apply
+                        .ap_args
+                        .iter()
+                        .any(|arg| self.lambda_requires_explicit_staticcatch_jump(arg))
+            }
+            Lambda::Lfunction(func) => self.lambda_requires_explicit_staticcatch_jump(&func.body),
+            Lambda::Llet(_, _, value, body) => {
+                self.lambda_requires_explicit_staticcatch_jump(value)
+                    || self.lambda_requires_explicit_staticcatch_jump(body)
+            }
+            Lambda::Lletrec(bindings, body) => {
+                bindings
+                    .iter()
+                    .any(|(_, value)| self.lambda_requires_explicit_staticcatch_jump(value))
+                    || self.lambda_requires_explicit_staticcatch_jump(body)
+            }
+            Lambda::Lprim(info) => info
+                .args
+                .iter()
+                .any(|arg| self.lambda_requires_explicit_staticcatch_jump(arg)),
+            Lambda::Lswitch(scrut, switch) => {
+                self.lambda_requires_explicit_staticcatch_jump(scrut)
+                    || switch
+                        .sw_consts
+                        .iter()
+                        .any(|(_, body)| self.lambda_requires_explicit_staticcatch_jump(body))
+                    || switch
+                        .sw_blocks
+                        .iter()
+                        .any(|(_, body)| self.lambda_requires_explicit_staticcatch_jump(body))
+                    || switch.sw_failaction.as_deref().is_some_and(|body| {
+                        self.lambda_requires_explicit_staticcatch_jump(body)
+                    })
+            }
+            Lambda::LstringSwitch(scrut, cases, default) => {
+                self.lambda_requires_explicit_staticcatch_jump(scrut)
+                    || cases
+                        .iter()
+                        .any(|(_, body)| self.lambda_requires_explicit_staticcatch_jump(body))
+                    || default.as_deref().is_some_and(|body| {
+                        self.lambda_requires_explicit_staticcatch_jump(body)
+                    })
+            }
+            Lambda::LstaticRaise(label, args) => {
+                !self.active_static_raise_target_exists(*label, args.len())
+                    || args
+                        .iter()
+                        .any(|arg| self.lambda_requires_explicit_staticcatch_jump(arg))
+            }
+            Lambda::LstaticCatch(_, (_, _), _) => true,
+            Lambda::LtryWith(body, _, handler) => {
+                self.lambda_requires_explicit_staticcatch_jump(body)
+                    || self.lambda_requires_explicit_staticcatch_jump(handler)
+            }
+            Lambda::Lsequence(first, second) => {
+                self.lambda_requires_explicit_staticcatch_jump(first)
+                    || self.lambda_requires_explicit_staticcatch_jump(second)
+            }
+            Lambda::Lwhile(cond, body) => {
+                self.lambda_requires_explicit_staticcatch_jump(cond)
+                    || self.lambda_requires_explicit_staticcatch_jump(body)
+            }
+            Lambda::Lfor(_, start, finish, _, body) => {
+                self.lambda_requires_explicit_staticcatch_jump(start)
+                    || self.lambda_requires_explicit_staticcatch_jump(finish)
+                    || self.lambda_requires_explicit_staticcatch_jump(body)
+            }
+            Lambda::Lassign(_, value) => self.lambda_requires_explicit_staticcatch_jump(value),
+            Lambda::LifThenElse(cond, then_, else_) => {
+                self.lambda_requires_explicit_staticcatch_jump(cond)
+                    || self.lambda_requires_explicit_staticcatch_jump(then_)
+                    || self.lambda_requires_explicit_staticcatch_jump(else_)
+            }
+        }
+    }
+
     fn collect_required_module_set(&self, block: &Block) -> OcamlModuleSet {
         let mut modules = OcamlModuleSet::new();
         collect_modules_from_block(block, &mut modules);
@@ -14694,6 +14797,46 @@ mod tests {
             assert_switch_case_assigns_int_result(&clause.clause.body, &version, expected_value);
         }
         assert_switch_default_assigns_int_result(default_block, &version, 3);
+    }
+
+    #[test]
+    fn nested_staticcatch_binding_handlers_that_raise_outward_avoid_exit_temps() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let carried = Ident::create_local("carried");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::LstaticCatch(
+                Box::new(Lambda::if_(
+                    Lambda::var(cond.clone()),
+                    Lambda::const_(Constant::int(0)),
+                    Lambda::static_raise(2, Vec::new()),
+                )),
+                (2, vec![]),
+                Box::new(Lambda::static_raise(
+                    1,
+                    vec![Lambda::const_(Constant::int(1))],
+                )),
+            )),
+            (1, vec![carried.clone()]),
+            Box::new(Lambda::var(carried.clone())),
+        ));
+
+        let rendered = print_block(&block);
+        assert!(
+            !rendered.contains("let exit ="),
+            "nested binding handlers reintroduced an explicit staticcatch jump temp:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("if (exit ==="),
+            "nested binding handlers still guard the handler behind an exit sentinel:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("return cond ? 0 : 1;")
+                || (rendered.contains("if (cond)")
+                    && rendered.contains("return 0;")
+                    && rendered.contains("return 1;")),
+            "expected the outward handler raise to lower directly instead of through an exit temp:\n{rendered}"
+        );
     }
 
     #[test]
