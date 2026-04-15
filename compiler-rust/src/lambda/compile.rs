@@ -1508,6 +1508,16 @@ impl LambdaCompiler {
             .collect()
     }
 
+    fn should_hoist_grouped_named_string_return_tail(&self, body: &Lambda) -> bool {
+        match body {
+            Lambda::LstaticRaise(label, args) => self
+                .resolve_static_raise(*label, args)
+                .as_ref()
+                .is_some_and(lambda_has_exit),
+            _ => false,
+        }
+    }
+
     fn compile_recursive_function_expr(
         &mut self,
         _function: &Ident,
@@ -3340,19 +3350,68 @@ impl LambdaCompiler {
             return block;
         }
 
-        let clauses = self.grouped_return_string_clauses(
-            self.grouped_switch_case_refs(cases, default, |_, _| true),
-            |tag| tag,
-        );
+        let grouped_cases = self.grouped_switch_case_refs(cases, default, |_, _| true);
+        let mut shared_tail = None;
+        let clauses = if default.is_none() && self.active_fallthrough_return_handler().is_none() {
+            let mut clauses = Vec::with_capacity(grouped_cases.len());
+            let mut group_start = 0;
+            while group_start < grouped_cases.len() {
+                let mut group_end = group_start;
+                while !grouped_cases[group_end].2 {
+                    group_end += 1;
+                }
+
+                let (_, body, _) = &grouped_cases[group_end];
+                let compiled_body = self.compile_return_block(body);
+                let hoist_shared_tail = group_start != group_end
+                    && group_end + 1 == grouped_cases.len()
+                    && self.should_hoist_grouped_named_string_return_tail(body)
+                    && !compiled_body.is_empty()
+                    && block_terminates(&compiled_body);
+
+                for (tag, _, _) in &grouped_cases[group_start..group_end] {
+                    clauses.push(StringClause {
+                        tag_type: tag.clone(),
+                        clause: empty_switch_case_clause(),
+                    });
+                }
+                clauses.push(StringClause {
+                    tag_type: grouped_cases[group_end].0.clone(),
+                    clause: if hoist_shared_tail {
+                        shared_tail = Some(compiled_body);
+                        CaseClause {
+                            body: vec![],
+                            should_break: true,
+                            comment: None,
+                        }
+                    } else {
+                        CaseClause {
+                            body: compiled_body,
+                            should_break: false,
+                            comment: None,
+                        }
+                    },
+                });
+
+                group_start = group_end + 1;
+            }
+            clauses
+        } else {
+            self.grouped_return_string_clauses(grouped_cases, |tag| tag)
+        };
 
         let default_block = default
             .map(|fallback| self.compile_return_block(fallback))
             .filter(|body| !body.is_empty());
-        vec![Statement::new(StatementDesc::StringSwitch(
+        let mut block = vec![Statement::new(StatementDesc::StringSwitch(
             test,
             clauses,
             default_block,
-        ))]
+        ))];
+        if let Some(tail) = shared_tail {
+            block.extend(tail);
+        }
+        block
     }
 
     fn compile_named_string_switch_effect(
@@ -8302,6 +8361,45 @@ fn lambda_contains_static_raise(lam: &Lambda) -> bool {
             lambda_contains_static_raise(cond)
                 || lambda_contains_static_raise(then_)
                 || lambda_contains_static_raise(else_)
+        }
+    }
+}
+
+fn lambda_has_exit(lam: &Lambda) -> bool {
+    match lam {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lapply(apply) => {
+            lambda_has_exit(&apply.ap_func) || apply.ap_args.iter().any(lambda_has_exit)
+        }
+        Lambda::Lfunction(_) => false,
+        Lambda::Llet(_, _, value, body) => lambda_has_exit(value) || lambda_has_exit(body),
+        Lambda::Lletrec(bindings, body) => {
+            bindings.iter().any(|(_, value)| lambda_has_exit(value)) || lambda_has_exit(body)
+        }
+        Lambda::Lprim(info) => info.args.iter().any(lambda_has_exit),
+        Lambda::Lswitch(scrut, switch) => {
+            lambda_has_exit(scrut)
+                || switch.sw_consts.iter().any(|(_, body)| lambda_has_exit(body))
+                || switch.sw_blocks.iter().any(|(_, body)| lambda_has_exit(body))
+                || switch.sw_failaction.as_deref().is_some_and(lambda_has_exit)
+        }
+        Lambda::LstringSwitch(scrut, cases, default) => {
+            lambda_has_exit(scrut)
+                || cases.iter().any(|(_, body)| lambda_has_exit(body))
+                || default.as_deref().is_some_and(lambda_has_exit)
+        }
+        Lambda::LstaticRaise(_, _) => true,
+        Lambda::LstaticCatch(body, (_, _), handler) | Lambda::LtryWith(body, _, handler) => {
+            lambda_has_exit(body) || lambda_has_exit(handler)
+        }
+        Lambda::Lsequence(first, second) => lambda_has_exit(first) || lambda_has_exit(second),
+        Lambda::Lwhile(cond, body) => lambda_has_exit(cond) || lambda_has_exit(body),
+        Lambda::Lfor(_, start, finish, _, body) => {
+            lambda_has_exit(start) || lambda_has_exit(finish) || lambda_has_exit(body)
+        }
+        Lambda::Lassign(_, value) => lambda_has_exit(value),
+        Lambda::LifThenElse(cond, then_, else_) => {
+            lambda_has_exit(cond) || lambda_has_exit(then_) || lambda_has_exit(else_)
         }
     }
 }
@@ -17564,6 +17662,112 @@ mod tests {
         assert_string_equality_check(cond, None, Some(&action), "Ok");
         assert_switch_case_returns_int_result(then_block, 1);
         assert_switch_case_returns_int_result(else_block, 2);
+    }
+
+    #[test]
+    fn named_variant_return_switches_keep_shared_final_groups_inside_the_switch_without_exits() {
+        let mut compiler = LambdaCompiler::new();
+        let action = Ident::create_local("action");
+        let block = compiler.compile_return_block(&Lambda::Lswitch(
+            Box::new(Lambda::var(action.clone())),
+            LambdaSwitch {
+                sw_consts_full: true,
+                sw_consts: vec![],
+                sw_blocks_full: true,
+                sw_blocks: vec![
+                    (0, Lambda::const_(Constant::int(1))),
+                    (1, Lambda::const_(Constant::int(2))),
+                    (2, Lambda::const_(Constant::int(2))),
+                ],
+                sw_failaction: None,
+                sw_names: Some(SwitchNames {
+                    consts: vec![],
+                    blocks: vec![
+                        crate::lambda::SwitchBlock::named("A"),
+                        crate::lambda::SwitchBlock::named("B"),
+                        crate::lambda::SwitchBlock::named("C"),
+                    ],
+                }),
+            },
+        ));
+
+        let [switch_stmt] = block.as_slice() else {
+            panic!("expected a single payload tag switch");
+        };
+        let StatementDesc::StringSwitch(test, clauses, None) = &switch_stmt.desc else {
+            panic!("expected a direct payload tag switch without a default arm");
+        };
+        assert_tag_field_access(test, &action);
+        assert_eq!(clauses.len(), 3);
+        assert_eq!(clauses[0].tag_type, SwitchCaseTag::String("A".to_string()));
+        assert_switch_case_returns_int_result(&clauses[0].clause.body, 1);
+        assert_eq!(clauses[1].tag_type, SwitchCaseTag::String("B".to_string()));
+        assert!(
+            clauses[1].clause.body.is_empty(),
+            "expected the first shared case to keep falling through"
+        );
+        assert!(!clauses[1].clause.should_break);
+        assert_eq!(clauses[2].tag_type, SwitchCaseTag::String("C".to_string()));
+        assert_switch_case_returns_int_result(&clauses[2].clause.body, 2);
+        assert!(
+            !clauses[2].clause.should_break,
+            "plain shared return groups should stay in the switch without an exit-driven break"
+        );
+    }
+
+    #[test]
+    fn named_variant_return_switches_inline_resolved_static_handler_values_inside_the_switch() {
+        let mut compiler = LambdaCompiler::new();
+        let action = Ident::create_local("action");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::Lswitch(
+                Box::new(Lambda::var(action.clone())),
+                LambdaSwitch {
+                    sw_consts_full: true,
+                    sw_consts: vec![
+                        (0, Lambda::const_(Constant::int(1))),
+                        (1, Lambda::static_raise(7, Vec::new())),
+                        (2, Lambda::static_raise(7, Vec::new())),
+                    ],
+                    sw_blocks_full: true,
+                    sw_blocks: vec![],
+                    sw_failaction: None,
+                    sw_names: Some(SwitchNames {
+                        consts: vec![
+                            crate::lambda::SwitchTag::named("A"),
+                            crate::lambda::SwitchTag::named("B"),
+                            crate::lambda::SwitchTag::named("C"),
+                        ],
+                        blocks: vec![],
+                    }),
+                },
+            )),
+            (7, vec![]),
+            Box::new(Lambda::const_(Constant::int(2))),
+        ));
+
+        let [switch_stmt] = block.as_slice() else {
+            panic!("expected a single switch with the resolved handler inlined");
+        };
+        let StatementDesc::StringSwitch(test, clauses, None) = &switch_stmt.desc else {
+            panic!("expected a named-constructor string switch without a trailing handler block");
+        };
+        assert!(matches!(
+            test,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&action)
+        ));
+        assert_eq!(clauses.len(), 3);
+        assert_eq!(clauses[0].tag_type, SwitchCaseTag::String("A".to_string()));
+        assert_switch_case_returns_int_result(&clauses[0].clause.body, 1);
+        assert_eq!(clauses[1].tag_type, SwitchCaseTag::String("B".to_string()));
+        assert!(clauses[1].clause.body.is_empty());
+        assert!(!clauses[1].clause.should_break);
+        assert_eq!(clauses[2].tag_type, SwitchCaseTag::String("C".to_string()));
+        assert_switch_case_returns_int_result(&clauses[2].clause.body, 2);
+        assert!(!clauses[2].clause.should_break);
     }
 
     #[test]

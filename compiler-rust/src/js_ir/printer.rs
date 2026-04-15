@@ -945,12 +945,16 @@ impl JsPrinter {
         self.last_new_line = false;
         self.write(" :");
 
-        if !clause.body.is_empty() {
+        if !clause.body.is_empty() || clause.should_break {
             self.indent();
             self.newline();
-            self.print_statements(&clause.body, false);
+            if !clause.body.is_empty() {
+                self.print_statements(&clause.body, false);
+            }
             if clause.should_break {
-                self.newline();
+                if !clause.body.is_empty() {
+                    self.newline();
+                }
                 self.write("break");
                 self.semi();
             }
@@ -983,12 +987,16 @@ impl JsPrinter {
         self.print_switch_case_tag(&clause.tag_type);
         self.write(" :");
 
-        if !clause.clause.body.is_empty() {
+        if !clause.clause.body.is_empty() || clause.clause.should_break {
             self.indent();
             self.newline();
-            self.print_statements(&clause.clause.body, false);
+            if !clause.clause.body.is_empty() {
+                self.print_statements(&clause.clause.body, false);
+            }
             if clause.clause.should_break {
-                self.newline();
+                if !clause.clause.body.is_empty() {
+                    self.newline();
+                }
                 self.write("break");
                 self.semi();
             }
@@ -5220,6 +5228,37 @@ mod tests {
     }
 
     #[test]
+    fn test_print_int_switch_cases_emit_break_for_empty_body_clauses() {
+        let rendered = print_block(&vec![Statement::new(StatementDesc::IntSwitch(
+            Expression::var(Ident::create_local("tag")),
+            vec![
+                (
+                    0,
+                    CaseClause {
+                        body: vec![],
+                        should_break: false,
+                        comment: None,
+                    },
+                ),
+                (
+                    1,
+                    CaseClause {
+                        body: vec![],
+                        should_break: true,
+                        comment: None,
+                    },
+                ),
+            ],
+            None,
+        ))]);
+
+        assert_eq!(
+            rendered,
+            "switch (tag) {\n  case 0 :\n  case 1 :\n    break;\n}"
+        );
+    }
+
+    #[test]
     fn test_print_string_switch_cases_keep_space_before_colon() {
         let rendered = print_block(&vec![Statement::new(StatementDesc::StringSwitch(
             Expression::var(Ident::create_local("tag")),
@@ -5247,6 +5286,69 @@ mod tests {
         assert_eq!(
             rendered,
             "switch (tag) {\n  case \"One\" :\n    return 1;\n  case \"Two\" :\n  default:\n    return 2;\n}"
+        );
+    }
+
+    #[test]
+    fn test_print_string_switch_cases_emit_break_for_empty_body_clauses() {
+        let rendered = print_block(&vec![Statement::new(StatementDesc::StringSwitch(
+            Expression::var(Ident::create_local("tag")),
+            vec![
+                StringClause {
+                    tag_type: SwitchCaseTag::String("One".to_string()),
+                    clause: CaseClause {
+                        body: vec![],
+                        should_break: false,
+                        comment: None,
+                    },
+                },
+                StringClause {
+                    tag_type: SwitchCaseTag::String("Two".to_string()),
+                    clause: CaseClause {
+                        body: vec![],
+                        should_break: true,
+                        comment: None,
+                    },
+                },
+            ],
+            None,
+        ))]);
+
+        assert_eq!(
+            rendered,
+            "switch (tag) {\n  case \"One\" :\n  case \"Two\" :\n    break;\n}"
+        );
+    }
+
+    #[test]
+    fn test_print_string_switch_cases_keep_break_on_its_own_line_after_body() {
+        let rendered = print_block(&vec![Statement::new(StatementDesc::StringSwitch(
+            Expression::var(Ident::create_local("tag")),
+            vec![StringClause {
+                tag_type: SwitchCaseTag::String("One".to_string()),
+                clause: CaseClause {
+                    body: vec![Statement::exp(Expression::call(
+                        Expression::qualified(
+                            ModuleId {
+                                id: Ident::create_local("console"),
+                                kind: Kind::Ml,
+                                dynamic_import: false,
+                            },
+                            Some("log".to_string()),
+                        ),
+                        vec![Expression::string("hello")],
+                        CallInfo::default(),
+                    ))],
+                    should_break: true,
+                    comment: None,
+                },
+            }],
+            None,
+        ))]);
+
+        assert_eq!(
+            rendered,
+            "switch (tag) {\n  case \"One\" :\n    console.log(\"hello\");\n    break;\n}"
         );
     }
 

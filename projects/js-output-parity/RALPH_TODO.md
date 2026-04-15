@@ -43,6 +43,65 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: match OCaml's grouped named-constructor return-switch shape
+  more closely by printing empty-body `break;` clauses when the lowering asks
+  for them, while avoiding the broader Rust-only hoist that moved every
+  resolved static-handler branch out of the switch
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is still `Lam_compile`
+  control-flow lowering after optimized lambda parity, plus the matching
+  `Js_dump` empty-body `break` emission needed for the same switch shape
+- OCaml reference:
+  `compiler/core/lam_compile.ml`,
+  `compiler/core/lam_exit_code.ml`,
+  `compiler/core/js_output.ml`,
+  `compiler/core/js_dump.ml`
+- Rust change:
+  - updated `compiler-rust/src/js_ir/printer.rs` so `switch` cases now emit
+    `break;` even when the case body is empty and `should_break` is set, and
+    kept non-empty case bodies printing `break` on a separate line
+  - updated `compiler-rust/src/lambda/compile.rs` so the grouped
+    named-string return-switch fast path only hoists the final shared tail
+    when the grouped case resolves to another static-exit chain; direct
+    plain-value handlers now stay in the switch again instead of regressing
+    files like `variant.res`
+  - added focused unit coverage for empty-body `break` printing, for plain
+    shared final groups that must stay inside the switch, and for grouped
+    cases that resolve through an inlined static handler value
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml named_variant_return_switches_keep_shared_final_groups_inside_the_switch_without_exits -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml named_variant_return_switches_inline_resolved_static_handler_values_inside_the_switch -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_string_switch_cases_keep_break_on_its_own_line_after_body -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/gpr_2413_test.res`, diffing
+    `/tmp/gpr_2413_test.mjs` against the checked-in snapshot
+  - direct guard repro for `tests/tests/src/variant.res`, diffing
+    `/tmp/variant.mjs` against the checked-in snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_2413_test.res` now matches OCaml's grouped-case
+    switch shape again for the `B | C` branch; the remaining drift is the
+    narrower temp-binding hoist after the switch (`let a$3 = ...; return a$3
+    * a$3`) instead of the broader missing `break`/tail layout
+  - `tests/tests/src/variant.res` no longer regresses in `rollback_path`; the
+    grouped `Pident | Papply` handler stays in the switch, so only the
+    pre-existing `fooC` control-shape diff remains there
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as a
+    broader guard
+  - the full authoritative sweep in this worktree remains **518 / 657**
+    passing, **0** compile errors, and **139** output diffs
+- Topline impact:
+  - JS snapshot parity: **518 / 657** -> **518 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **139** -> **139** (**no change**)
+- Keep this change because it matches OCaml's empty-body `break` printing and
+  narrows the `gpr_2413_test` backend drift without reintroducing the
+  `variant.res` grouped-handler regression.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: narrow the plain-handler fallthrough rule for nested
   `staticcatch` return switches so Rust only peels the plain handler out of
   the switch when an explicit case body re-raises the current label, matching
