@@ -8942,3 +8942,59 @@ Remaining internal compile errors under the measured wrapper baseline:
   lowering after optimized lambda. The wrapper totals stay flat because the
   affected checked-in files still carry later import-order or printer drift,
   not because the function-call fix was spurious.
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep plain nested `staticcatch` handlers inside the surrounding
+  return-switch default when the current switch is already nested under an
+  enclosing staticcatch chain, matching the OCaml `flatten_nested_caches` /
+  `compile_staticcatch` boundary instead of peeling the inner plain handler out
+  into Rust-only post-switch fallthrough
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is still `Lam_compile` control-flow
+  lowering after optimized lambda parity, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml` and
+  `compiler/core/lam_compile_context.ml`, especially
+  `flatten_nested_caches`, `flat_catches`, and the `compile_staticcatch`
+  pseudo-jump gate that only applies at the outer boundary of a flattened
+  staticcatch chain
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so
+    `uses_fallthrough_staticcatch_return(...)` no longer applies the plain
+    handler fallthrough path while the compiler is already nested under an
+    enclosing static handler / jump chain
+  - kept the earlier nested re-raise fallthrough path intact, so the
+    multi-case outward-re-raise cluster still lowers with the OCaml-style
+    fallthrough ordering where appropriate
+  - added the focused regression
+    `nested_named_variant_return_switches_keep_plain_inner_handlers_as_default_arms`
+    to lock the `VariantPatternMatchingSpreads.lookup2` shape in place
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_named_variant_return_switches_keep_plain_inner_handlers_as_default_arms -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml multi_case_staticcatch_wrapped_named_variant_return_switch_moves_fallthrough_cases_last -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/VariantPatternMatchingSpreads.res`,
+    diffing `/tmp/VariantPatternMatchingSpreads.mjs` against the checked-in
+    snapshot
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - direct sibling repro for
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res`, diffing
+    `/tmp/VariantPatternMatchingSpreadsWithPayloads.mjs` against the checked-in
+    snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/VariantPatternMatchingSpreads.res` now matches its
+    checked-in `.mjs` snapshot exactly; the Rust backend no longer drops the
+    OCaml `default: return doWithA(d);` arm from `lookup2`
+  - `tests/tests/src/ExternalShadow.res` still matches its checked-in `.mjs`
+    snapshot exactly after the nested-staticcatch change
+  - `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` remains a
+    separate sibling drift in the same family; its remaining diff is now the
+    payload-bearing `doWithB` / nested-switch shape rather than the fixed
+    plain-handler default-arm loss
+- Topline impact:
+  - JS snapshot parity: **516 / 657** -> **518 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **141** -> **139** (**-2**)
