@@ -23,6 +23,7 @@ use crate::js_ir::{
 use crate::lambda::analysis;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::constant::{Constant, ConstructorRuntimeTag, PointerInfo, StringDelim};
+use crate::lambda::free_variables::free_variables;
 use crate::lambda::primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
     ExternalModuleBindName, ExternalModuleName, ExternalObjLabel, ExternalObjSpec, ExternalSpec,
@@ -661,33 +662,54 @@ impl LambdaCompiler {
     }
 
     fn compile_recursive_bindings(&mut self, bindings: &[(Ident, Lambda)]) -> Block {
-        let recursive_functions = recursive_function_bindings(bindings);
-        let recursive_function_tail_targets =
-            direct_recursive_function_tail_targets_with_bindings(bindings, &recursive_functions);
-        let recursive_function_ids: HashSet<_> =
-            recursive_function_tail_targets.keys().cloned().collect();
-        let mut declarations = vec![];
-        let mut effects = vec![];
+        let dependencies = recursive_binding_dependencies(bindings);
+        let mut block = vec![];
 
-        for (id, expr) in bindings {
-            let (binding_decls, binding_effects) =
-                self.compile_recursive_binding(
-                    id,
-                    expr,
+        for group in recursive_binding_groups(bindings, &dependencies) {
+            if let [index] = group.as_slice() {
+                if !dependencies[*index].contains(index) {
+                    let (id, expr) = &bindings[*index];
+                    block.extend(self.compile_let_binding(LetKind::Strict, id, expr));
+                    continue;
+                }
+            }
+
+            let recursive_functions = recursive_function_bindings_in_group(bindings, &group);
+            let recursive_function_tail_targets =
+                direct_recursive_function_tail_targets_with_group(
                     bindings,
-                    recursive_function_tail_targets
-                        .get(id)
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[]),
+                    &group,
                     &recursive_functions,
-                    &recursive_function_ids,
                 );
-            declarations.extend(binding_decls);
-            effects.extend(binding_effects);
+            let recursive_function_ids: HashSet<_> =
+                recursive_function_tail_targets.keys().cloned().collect();
+            let mut declarations = vec![];
+            let mut effects = vec![];
+
+            for &index in &group {
+                let (id, expr) = &bindings[index];
+                let (binding_decls, binding_effects) =
+                    self.compile_recursive_binding(
+                        id,
+                        expr,
+                        bindings,
+                        &group,
+                        recursive_function_tail_targets
+                            .get(id)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]),
+                        &recursive_functions,
+                        &recursive_function_ids,
+                    );
+                declarations.extend(binding_decls);
+                effects.extend(binding_effects);
+            }
+
+            declarations.extend(effects);
+            block.extend(declarations);
         }
 
-        declarations.extend(effects);
-        declarations
+        block
     }
 
     fn compile_recursive_binding(
@@ -695,6 +717,7 @@ impl LambdaCompiler {
         id: &Ident,
         expr: &Lambda,
         all_bindings: &[(Ident, Lambda)],
+        group: &[usize],
         tail_targets: &[Ident],
         recursive_functions: &HashMap<Ident, LFunction>,
         recursive_function_ids: &HashSet<Ident>,
@@ -751,25 +774,29 @@ impl LambdaCompiler {
             }
             Lambda::Lprim(info) if matches!(info.primitive, Primitive::Pmakeblock(_, _, _)) => {
                 if let Some(effects) =
-                    self.compile_recursive_self_binding_makeblock(id, info, all_bindings)
+                    self.compile_recursive_self_binding_makeblock(id, info, all_bindings, group)
                 {
                     return (vec![], effects);
                 }
 
+                let tag_info = match &info.primitive {
+                    Primitive::Pmakeblock(_, tag_info, _) => tag_info,
+                    _ => unreachable!("guard must preserve Pmakeblock"),
+                };
                 let compiled = self.compile_expr(expr);
                 let mut effects = compiled.prelude;
                 if !block_terminates(&effects) {
-                    effects.push(Statement::exp(Expression::bin(
-                        BinOp::Eq,
-                        Expression::var(id.clone()),
-                        compiled.expr,
+                    effects.push(Statement::exp(self.runtime_call_expr(
+                        "Primitive_object",
+                        "updateDummy",
+                        vec![Expression::var(id.clone()), compiled.expr],
                     )));
                 }
                 (
                     vec![Statement::variable(VariableDeclaration {
                         ident: id.clone(),
-                        value: None,
-                        property: LetKind::Strict,
+                        value: Some(Self::recursive_dummy_object_expr(tag_info)),
+                        property: LetKind::Variable,
                         ident_info: IdentInfo::default(),
                     })],
                     effects,
@@ -803,6 +830,7 @@ impl LambdaCompiler {
         id: &Ident,
         info: &crate::lambda::PrimInfo,
         all_bindings: &[(Ident, Lambda)],
+        group: &[usize],
     ) -> Option<Block> {
         let tag_info = match &info.primitive {
             Primitive::Pmakeblock(_, tag_info, _) => tag_info,
@@ -827,9 +855,10 @@ impl LambdaCompiler {
         let only_self_or_captured = info.args.iter().all(|arg| match arg {
             Lambda::Lvar(binding) => {
                 binding.same(id)
-                    || !all_bindings
-                        .iter()
-                        .any(|(other, _)| other.same(binding) && !other.same(id))
+                    || !group.iter().any(|&index| {
+                        let (other, _) = &all_bindings[index];
+                        other.same(binding) && !other.same(id)
+                    })
             }
             Lambda::Lconst(_) => true,
             _ => false,
@@ -6405,10 +6434,140 @@ fn recursive_function_binding_value(expr: &Lambda) -> Option<LFunction> {
     }
 }
 
+fn recursive_binding_dependencies(bindings: &[(Ident, Lambda)]) -> Vec<Vec<usize>> {
+    let index_by_id = bindings
+        .iter()
+        .enumerate()
+        .map(|(index, (id, _))| (id.clone(), index))
+        .collect::<HashMap<_, _>>();
+
+    bindings
+        .iter()
+        .map(|(_, expr)| {
+            let mut dependencies = free_variables(expr)
+                .into_iter()
+                .filter_map(|id| index_by_id.get(&id).copied())
+                .collect::<Vec<_>>();
+            dependencies.sort_unstable();
+            dependencies.dedup();
+            dependencies
+        })
+        .collect()
+}
+
+fn strongly_connected_binding_components(deps: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    struct TarjanState {
+        index: usize,
+        stack: Vec<usize>,
+        on_stack: Vec<bool>,
+        indices: Vec<Option<usize>>,
+        lowlink: Vec<usize>,
+        components: Vec<Vec<usize>>,
+    }
+
+    fn strong_connect(node: usize, deps: &[Vec<usize>], state: &mut TarjanState) {
+        state.indices[node] = Some(state.index);
+        state.lowlink[node] = state.index;
+        state.index += 1;
+        state.stack.push(node);
+        state.on_stack[node] = true;
+
+        for &dep in &deps[node] {
+            if state.indices[dep].is_none() {
+                strong_connect(dep, deps, state);
+                state.lowlink[node] = state.lowlink[node].min(state.lowlink[dep]);
+            } else if state.on_stack[dep] {
+                state.lowlink[node] =
+                    state.lowlink[node].min(state.indices[dep].expect("visited node"));
+            }
+        }
+
+        if state.lowlink[node] == state.indices[node].expect("visited node") {
+            let mut component = Vec::new();
+            loop {
+                let current = state.stack.pop().expect("tarjan stack");
+                state.on_stack[current] = false;
+                component.push(current);
+                if current == node {
+                    break;
+                }
+            }
+            state.components.push(component);
+        }
+    }
+
+    let len = deps.len();
+    let mut state = TarjanState {
+        index: 1,
+        stack: Vec::new(),
+        on_stack: vec![false; len],
+        indices: vec![None; len],
+        lowlink: vec![0; len],
+        components: Vec::new(),
+    };
+
+    for node in 0..len {
+        if state.indices[node].is_none() {
+            strong_connect(node, deps, &mut state);
+        }
+    }
+
+    state.components
+}
+
+fn recursive_binding_group_is_function_only(
+    bindings: &[(Ident, Lambda)],
+    group: &[usize],
+) -> bool {
+    group
+        .iter()
+        .all(|&index| matches!(bindings[index].1, Lambda::Lfunction(_)))
+}
+
+fn sort_recursive_binding_group(bindings: &[(Ident, Lambda)], group: &mut [usize]) {
+    if recursive_binding_group_is_function_only(bindings, group) {
+        return;
+    }
+    group.sort_by_key(|index| !matches!(bindings[*index].1, Lambda::Lfunction(_)));
+}
+
+fn recursive_binding_groups(
+    bindings: &[(Ident, Lambda)],
+    dependencies: &[Vec<usize>],
+) -> Vec<Vec<usize>> {
+    match bindings.len() {
+        0 => vec![],
+        1 => vec![vec![0]],
+        _ => {
+            let mut groups = strongly_connected_binding_components(dependencies);
+            if groups.len() <= 1 {
+                groups = vec![(0..bindings.len()).collect()];
+            }
+            for group in &mut groups {
+                sort_recursive_binding_group(bindings, group);
+            }
+            groups
+        }
+    }
+}
+
 fn recursive_function_bindings(bindings: &[(Ident, Lambda)]) -> HashMap<Ident, LFunction> {
     bindings
         .iter()
         .filter_map(|(id, expr)| recursive_function_binding_value(expr).map(|func| (id.clone(), func)))
+        .collect()
+}
+
+fn recursive_function_bindings_in_group(
+    bindings: &[(Ident, Lambda)],
+    group: &[usize],
+) -> HashMap<Ident, LFunction> {
+    group
+        .iter()
+        .filter_map(|&index| {
+            let (id, expr) = &bindings[index];
+            recursive_function_binding_value(expr).map(|func| (id.clone(), func))
+        })
         .collect()
 }
 
@@ -6611,6 +6770,32 @@ fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
 fn direct_recursive_function_tail_targets(bindings: &[(Ident, Lambda)]) -> HashMap<Ident, Vec<Ident>> {
     let recursive_functions = recursive_function_bindings(bindings);
     direct_recursive_function_tail_targets_with_bindings(bindings, &recursive_functions)
+}
+
+fn direct_recursive_function_tail_targets_with_group(
+    bindings: &[(Ident, Lambda)],
+    group: &[usize],
+    recursive_functions: &HashMap<Ident, LFunction>,
+) -> HashMap<Ident, Vec<Ident>> {
+    let mut tail_targets: HashMap<Ident, Vec<Ident>> = recursive_functions
+        .keys()
+        .cloned()
+        .map(|id| {
+            let targets = vec![id.clone()];
+            (id, targets)
+        })
+        .collect();
+
+    for &index in group {
+        let (id, expr) = &bindings[index];
+        let Some(function_id) = recursive_function_binding_alias_target(expr, recursive_functions)
+        else {
+            continue;
+        };
+        tail_targets.entry(function_id).or_default().push(id.clone());
+    }
+
+    tail_targets
 }
 
 fn direct_recursive_function_tail_targets_with_bindings(
@@ -21604,6 +21789,136 @@ let fib3 = n => {
                 ..
             } if id.same(&xx)
         ));
+    }
+
+    #[test]
+    fn acyclic_letrec_singletons_lower_like_lam_scc_plain_lets() {
+        let mut compiler = LambdaCompiler::new();
+        let a = Ident::create_local("a");
+        let b = Ident::create_local("b");
+        let lam = Lambda::letrec(
+            vec![
+                (
+                    a.clone(),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::record(
+                                vec![("inner".to_string(), false)],
+                                crate::parser::ast::MutableFlag::Immutable,
+                            ),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::prim(
+                            Primitive::Pmakeblock(
+                                0,
+                                TagInfo::record(
+                                    vec![("value".to_string(), false)],
+                                    crate::parser::ast::MutableFlag::Immutable,
+                                ),
+                                Mutable::Immutable,
+                            ),
+                            vec![Lambda::const_(Constant::int(1))],
+                            Location::none(),
+                        )],
+                        Location::none(),
+                    ),
+                ),
+                (
+                    b.clone(),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::record(
+                                vec![("next".to_string(), false)],
+                                crate::parser::ast::MutableFlag::Immutable,
+                            ),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(a.clone())],
+                        Location::none(),
+                    ),
+                ),
+            ],
+            Lambda::unit(),
+        );
+
+        let rendered = print_block(&compiler.compile_expr(&lam).prelude);
+
+        assert!(
+            rendered.contains("let a = {"),
+            "expected the non-recursive singleton to lower as a plain let:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("let b = {"),
+            "expected the dependent singleton to lower as a plain let:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("let a;") && !rendered.contains("let b;"),
+            "unexpected recursive placeholder declaration remained:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Primitive_object.updateDummy"),
+            "acyclic singletons should not go through dummy-object updates:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn mutually_recursive_record_bindings_lower_to_runtime_update_dummy_calls() {
+        let mut compiler = LambdaCompiler::new();
+        let a = Ident::create_local("a");
+        let b = Ident::create_local("b");
+        let lam = Lambda::letrec(
+            vec![
+                (
+                    a.clone(),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::record(
+                                vec![("b".to_string(), false)],
+                                crate::parser::ast::MutableFlag::Immutable,
+                            ),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(b.clone())],
+                        Location::none(),
+                    ),
+                ),
+                (
+                    b.clone(),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::record(
+                                vec![("a".to_string(), false)],
+                                crate::parser::ast::MutableFlag::Immutable,
+                            ),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(a.clone())],
+                        Location::none(),
+                    ),
+                ),
+            ],
+            Lambda::unit(),
+        );
+
+        let rendered = print_block(&compiler.compile_expr(&lam).prelude);
+
+        assert!(
+            rendered.contains("let a = {};") && rendered.contains("let b = {};"),
+            "expected dummy-object declarations for mutually recursive records:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Primitive_object.updateDummy(a, {")
+                && rendered.contains("Primitive_object.updateDummy(b, {"),
+            "expected runtime dummy-object updates for mutually recursive records:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("let a;") && !rendered.contains("let b;"),
+            "unexpected placeholder assignments remained:\n{rendered}"
+        );
     }
 
     #[test]

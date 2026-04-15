@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 504 / 657 JS snapshots passing, 0 compile errors, 153 output diffs
+**Status:** 510 / 657 JS snapshots passing, 0 compile errors, 147 output diffs
 
 ## Goal
 
@@ -35,11 +35,79 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **504 / 657**
+- JS snapshot parity: **510 / 657**
 - Compile errors: **0**
-- Output diffs: **153**
+- Output diffs: **147**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: port OCaml's recursive-binding decomposition and dummy-object
+  update path so legacy `Lletrec` groups stop compiling acyclic singletons as
+  recursive placeholders and stop lowering mutually recursive blocks as
+  `let x; x = {...}` assignments
+- Active backend focus for this slice is **Phase 3: Port JS IR Lowering And
+  Metadata** from `PLAN.md`, because the optimized-lambda boundary was already
+  green and the emitted-JS drift sat in Rust's `Lambda::Lletrec` lowering in
+  `compiler-rust/src/lambda/compile.rs`, which was still skipping OCaml's
+  `Lam_scc.scc` split and `compile_recursive_let` dummy-object
+  `Primitive_object.updateDummy` path
+- OCaml reference:
+  `compiler/core/lam_scc.ml` and
+  `compiler/core/lam_compile.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/compile.rs` so recursive bindings are
+    first decomposed into SCCs using free-variable dependencies, mirroring
+    `Lam_scc.scc` instead of treating every incoming `Lletrec` binding as part
+    of one recursive group
+  - lowered acyclic singleton SCCs through `compile_let_binding` as plain
+    strict lets, which removes bogus recursive placeholders from files like
+    `minimal_test`
+  - lowered the remaining general recursive `Pmakeblock` path through dummy
+    object declarations plus `Primitive_object.updateDummy(...)`, matching
+    OCaml's `compile_recursive_let` instead of assigning a finished object into
+    an uninitialized `let x;`
+  - added focused regressions
+    `acyclic_letrec_singletons_lower_like_lam_scc_plain_lets`
+    and
+    `mutually_recursive_record_bindings_lower_to_runtime_update_dummy_calls`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml acyclic_letrec_singletons_lower_like_lam_scc_plain_lets -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml mutually_recursive_record_bindings_lower_to_runtime_update_dummy_calls -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml recursive_self_referential_record_bindings_lower_to_dummy_object_updates_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact direct release repro for `tests/tests/src/rec_array_test.res`,
+    diffing `/tmp/rec_array_test.mjs` against the checked-in snapshot
+  - unchanged broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - improved but not-yet-exact direct repro for `tests/tests/src/minimal_test.res`,
+    where the bogus recursive placeholder is gone but a pure nested cons tail is
+    still hoisted into `fake_y_1`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - exact snapshot matches were restored for
+    `tests/tests/src/gpr_1716_test.res`,
+    `tests/tests/src/queue_402.res`,
+    `tests/tests/src/rec_array_test.res`,
+    `tests/tests/src/rec_fun_test.res`,
+    `tests/tests/src/recursive_records_test.res`, and
+    `tests/tests/src/unboxed_use_case.res`
+  - `tests/tests/src/minimal_test.res` now follows the OCaml recursive-binding
+    split instead of emitting `let fake_y; fake_y = ...`, but still differs by
+    hoisting the pure nested tail block into `fake_y_1`; treat that as a
+    separate remaining pure-block lowering issue rather than a reason to revert
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+- Topline impact:
+  - JS snapshot parity: **504 / 657** -> **510 / 657** (**+6**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **153** -> **147** (**-6**)
+- Keep this change because it matches OCaml's `Lam_scc.scc` /
+  `compile_recursive_let` behavior, clears a real recursive-binding cluster
+  across six checked-in snapshots, and leaves the remaining `minimal_test`
+  nested-block hoist as a smaller follow-up lowering issue rather than a
+  contradiction of the port.
 
 Latest iteration on **2026-04-15**:
 
