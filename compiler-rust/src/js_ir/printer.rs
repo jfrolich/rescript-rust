@@ -1575,7 +1575,7 @@ impl JsPrinter {
                     if i > 0 {
                         self.write(", ");
                     }
-                    self.print_expression(arg, 1);
+                    self.print_call_argument(arg, level);
                 }
                 self.write_char(')');
 
@@ -1632,7 +1632,11 @@ impl JsPrinter {
                 if needs_paren {
                     self.write_char('(');
                 }
-                self.print_expression(arr, 15);
+                let extra_group_indent = matches!(
+                    &arr.as_ref().desc,
+                    ExpressionDesc::Object(_, props) if props.len() > 1
+                ) && matches!(self.previous_non_space_char_on_line(), Some('(' | ','));
+                self.print_member_target_expression(arr, extra_group_indent);
                 self.write_char('[');
                 self.print_expression(idx, 0);
                 self.write_char(']');
@@ -2202,6 +2206,38 @@ impl JsPrinter {
         if needs_paren {
             self.write_char(')');
         }
+    }
+
+    fn print_member_target_expression(&mut self, expr: &Expression, extra_group_indent: bool) {
+        if extra_group_indent {
+            self.indent();
+        }
+        self.print_expression(expr, 15);
+        if extra_group_indent {
+            self.dedent();
+        }
+    }
+
+    fn print_call_argument(&mut self, expr: &Expression, call_level: u8) {
+        let extra_group_indent = call_level == 15
+            && matches!(expr.desc, ExpressionDesc::Object(_, _))
+            && !self.output.is_empty()
+            && !self.last_new_line;
+        if extra_group_indent {
+            self.indent();
+        }
+        self.print_expression(expr, 1);
+        if extra_group_indent {
+            self.dedent();
+        }
+    }
+
+    fn previous_non_space_char_on_line(&self) -> Option<char> {
+        self.output
+            .chars()
+            .rev()
+            .take_while(|c| *c != '\n')
+            .find(|c| !c.is_whitespace())
     }
 
     fn print_array_literal(&mut self, elements: &[Expression]) {
@@ -4978,6 +5014,104 @@ mod tests {
         )));
 
         assert_eq!(rendered, "({\n  foo: 43,\n  bar: 86\n})[\"foo\"]");
+    }
+
+    #[test]
+    fn test_print_parenthesized_object_literal_before_dot_access_preserves_group_indentation_like_ocaml()
+    {
+        let expr = Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(Expression::new(ExpressionDesc::Object(
+                None,
+                vec![(
+                    PropertyName::lit("_5"),
+                    Expression::number(Number::int(3)),
+                )],
+            ))),
+            "TAG".to_string(),
+            None,
+        ));
+
+        assert_eq!(print_expression(&expr), "({\n  _5: 3\n}).TAG");
+    }
+
+    #[test]
+    fn test_print_object_literal_call_argument_before_index_keeps_group_indent_like_ocaml() {
+        let expr = Expression::new(ExpressionDesc::ArrayIndex(
+            Box::new(Expression::call(
+                Expression::new(ExpressionDesc::StaticIndex(
+                    Box::new(Expression::var(Ident::create_local("Object"))),
+                    "create".to_string(),
+                    None,
+                )),
+                vec![Expression::new(ExpressionDesc::Object(
+                    None,
+                    vec![(
+                        PropertyName::lit("a"),
+                        Expression::number(Number::int(1)),
+                    )],
+                ))],
+                CallInfo::default(),
+            )),
+            Box::new(Expression::string("a")),
+        ));
+
+        assert_eq!(
+            print_expression(&expr),
+            "$$Object.create({\n    a: 1\n  })[\"a\"]"
+        );
+    }
+
+    #[test]
+    fn test_print_parenthesized_object_literal_index_as_call_argument_keeps_group_indent() {
+        let arg = Expression::new(ExpressionDesc::ArrayIndex(
+            Box::new(Expression::new(ExpressionDesc::Object(
+                None,
+                vec![
+                    (
+                        PropertyName::lit("foo"),
+                        Expression::number(Number::int(43)),
+                    ),
+                    (
+                        PropertyName::lit("bar"),
+                        Expression::number(Number::int(86)),
+                    ),
+                ],
+            ))),
+            Box::new(Expression::string("foo")),
+        ));
+        let call = Expression::call(
+            Expression::var(Ident::create_local("f")),
+            vec![arg],
+            CallInfo::default(),
+        );
+
+        assert_eq!(
+            print_expression(&call),
+            "f(({\n    foo: 43,\n    bar: 86\n  })[\"foo\"])"
+        );
+    }
+
+    #[test]
+    fn test_print_parenthesized_object_literal_dot_access_as_call_argument_preserves_base_indent()
+    {
+        let arg = Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(Expression::new(ExpressionDesc::Object(
+                None,
+                vec![(
+                    PropertyName::lit("_5"),
+                    Expression::number(Number::int(3)),
+                )],
+            ))),
+            "TAG".to_string(),
+            None,
+        ));
+        let call = Expression::call(
+            Expression::var(Ident::create_local("f")),
+            vec![arg],
+            CallInfo::default(),
+        );
+
+        assert_eq!(print_expression(&call), "f(({\n  _5: 3\n}).TAG)");
     }
 
     #[test]

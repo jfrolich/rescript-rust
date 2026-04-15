@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 522 / 657 JS snapshots passing, 0 compile errors, 135 output diffs
+**Status:** 524 / 657 JS snapshots passing, 0 compile errors, 133 output diffs
 
 ## Goal
 
@@ -35,11 +35,74 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **522 / 657**
+- JS snapshot parity: **524 / 657**
 - Compile errors: **0**
-- Output diffs: **135**
+- Output diffs: **133**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: match OCaml's `js_dump` grouping for parenthesized
+  object-literal member/index expressions by narrowing the extra indent to
+  the array-index case that actually picks up an extra nested group, while
+  leaving static member access and single-field object-index chains at the
+  base indentation level
+- Active backend focus for this slice is **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; this is downstream `js_dump` formatting in
+  `compiler-rust/src/js_ir/printer.rs`, not typedtree, lambda, or JS-pass work
+- OCaml reference:
+  `compiler/core/js_dump.ml`, specifically the interaction between `Call`
+  argument grouping, `Object` dumping via `P.cond_paren_group` and
+  `P.brace_vgroup`, and the surrounding array-index / property-access dump
+  paths
+- Rust change:
+  - kept the OCaml-aligned extra indent for raw object call arguments only
+    when the call itself is being dumped as a member/index target, which
+    preserves the `Object.create({ ... })["a"]` shape
+  - narrowed the parenthesized-object target indentation so it only applies to
+    array-index chains whose immediate object literal target is multiline with
+    multiple fields, which matches the snapshot shape in `js_dict_test`
+    without overindenting `method_string_name` or the static-member cases in
+    `gpr_1946_test`
+  - added focused regression coverage in
+    `test_print_parenthesized_object_literal_index_as_call_argument_keeps_group_indent`,
+    `test_print_parenthesized_object_literal_dot_access_as_call_argument_preserves_base_indent`,
+    and
+    `test_print_parenthesized_object_literal_before_dot_access_preserves_group_indentation_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 60 cargo test --manifest-path compiler-rust/Cargo.toml test_print_parenthesized_object_literal_preserves_group_indentation_like_ocaml -- --nocapture`
+  - `timeout 60 cargo test --manifest-path compiler-rust/Cargo.toml test_print_parenthesized_object_literal_before_dot_access_preserves_group_indentation_like_ocaml -- --nocapture`
+  - `timeout 60 cargo test --manifest-path compiler-rust/Cargo.toml test_print_parenthesized_object_literal_index_as_call_argument_keeps_group_indent -- --nocapture`
+  - `timeout 60 cargo test --manifest-path compiler-rust/Cargo.toml test_print_parenthesized_object_literal_dot_access_as_call_argument_preserves_base_indent -- --nocapture`
+  - `timeout 60 cargo test --manifest-path compiler-rust/Cargo.toml test_print_object_literal_call_argument_before_index_keeps_group_indent_like_ocaml -- --nocapture`
+  - `timeout 60 cargo test --manifest-path compiler-rust/Cargo.toml test_print_singleton_array_preserves_nested_object_indentation_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repros for `tests/tests/src/js_dict_test.res`,
+    `tests/tests/src/stdlib/Stdlib_ObjectTests.res`,
+    `tests/tests/src/method_string_name.res`, and
+    `tests/tests/src/ExternalShadow.res`, diffing the generated files in
+    `/tmp` against the checked-in snapshots
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/js_dict_test.res`,
+    `tests/tests/src/stdlib/Stdlib_ObjectTests.res`, and
+    `tests/tests/src/method_string_name.res` are now exact snapshot matches
+    together, which closes the parenthesized-object indentation cluster this
+    slice was targeting
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the broader unchanged guard
+  - the full authoritative sweep in this worktree now reports **524 / 657**
+    passing, **0** compile errors, and **133** output diffs
+- Topline impact:
+  - JS snapshot parity: **522 / 657** -> **524 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **135** -> **133** (**-2**)
+- Keep this change because it restores the OCaml-backed grouping distinction
+  between raw object call arguments used as member/index targets and
+  parenthesized object-index chains, and the authoritative harness confirms
+  that the narrower rule improves parity instead of merely reshaping local
+  hunks.
 
 Latest iteration on **2026-04-15**:
 
