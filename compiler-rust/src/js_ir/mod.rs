@@ -57,8 +57,6 @@ pub struct ModulePathResolver {
     runtime_path: Option<PathBuf>,
     persistent_env: Option<PersistentEnv>,
     path_overrides: HashMap<String, String>,
-    /// When true, all resolution uses the in-memory registry only — no disk probes.
-    in_process: bool,
 }
 
 impl ModulePathResolver {
@@ -69,9 +67,6 @@ impl ModulePathResolver {
         runtime_path: Option<&FsPath>,
         persistent_env: Option<PersistentEnv>,
     ) -> Self {
-        let in_process = persistent_env
-            .as_ref()
-            .is_some_and(|env| env.is_in_process_mode());
         Self {
             format: module_format_from_output_path(output_path),
             output_suffix: output_suffix_from_path(output_path),
@@ -80,13 +75,7 @@ impl ModulePathResolver {
             runtime_path: runtime_path.map(normalize_absolute_path),
             persistent_env,
             path_overrides: HashMap::new(),
-            in_process,
         }
-    }
-
-    /// Whether this resolver is in in-process mode (no disk probes).
-    pub fn is_in_process(&self) -> bool {
-        self.in_process
     }
 
     /// Override a module's emitted JS import path.
@@ -157,18 +146,6 @@ impl ModulePathResolver {
     }
 
     fn is_runtime_module(&self, module_name: &str) -> bool {
-        // Check in-memory registry first (--in-process mode)
-        if let Some(env) = &self.persistent_env {
-            if let Some(info) = env.get_in_memory_module(module_name) {
-                return info.is_runtime;
-            }
-        }
-
-        // In in-process mode, the registry is authoritative — no disk probes.
-        if self.in_process {
-            return false;
-        }
-
         let Some(runtime_path) = &self.runtime_path else {
             return false;
         };
@@ -210,11 +187,6 @@ impl ModulePathResolver {
     }
 
     fn fallback_local_module_source(&self, module_name: &str) -> Option<PathBuf> {
-        // In in-process mode, module source paths come from the registry only.
-        if self.in_process {
-            return None;
-        }
-
         let current_source = self.current_source_path.as_ref()?;
         let current_dir = current_source.parent()?;
         let entries = fs::read_dir(current_dir)

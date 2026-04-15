@@ -3,7 +3,6 @@
 //! This module wires together parsing, type-checking, Lambda conversion, and
 //! JS IR codegen to produce JavaScript output.
 
-use ahash::AHashMap as HashMap;
 use std::ffi::OsString;
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1111,13 +1110,6 @@ pub struct CompilerOptions {
     pub jsx_preserve: bool,
     /// Enable debug-mode JS emission (like OCaml's -bs-g / Js_config.debug).
     pub debug: bool,
-    /// When true, do not implicitly open Pervasives and Stdlib (like OCaml's -nopervasives).
-    /// Used by `@rescript/runtime` modules which bootstrap Pervasives themselves.
-    pub nopervasives: bool,
-    /// The module name being compiled (e.g. "Pervasives"). Used for self-open filtering:
-    /// if `-open Pervasives` is in open_modules and we're compiling Pervasives itself,
-    /// the self-open is skipped to avoid circular loading.
-    pub module_name: Option<String>,
 }
 
 pub(crate) fn jsx_version_for_structure(
@@ -1203,9 +1195,7 @@ pub fn compile_source_to_js_with_options(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(options.module_name.clone());
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
 
     // Store persistent env in the type check context for module resolution
     tctx.set_persistent_env(pers_env);
@@ -1575,9 +1565,7 @@ pub fn typecheck_interface_source(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(options.module_name.clone());
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
 
     tctx.set_persistent_env(pers_env);
 
@@ -1630,418 +1618,6 @@ pub fn compile_file_to_js_with_options(
     let source: String = bytes.iter().map(|&b| b as char).collect();
     let filename = path.to_string_lossy();
     compile_source_to_js_with_options(&source, &filename, options)
-}
-
-// ============================================================================
-// In-Process Compilation API
-// ============================================================================
-//
-// These entry points are designed for `rewatch --in-process` where the build
-// orchestrator owns the `PersistentEnv` and dependency interfaces live in
-// memory rather than on disk as `.cmi` files.
-
-use crate::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
-use crate::cmi::portable_types::PortablePersStruct;
-use crate::types::decl::Signature as DeclSignature;
-
-/// Result of an in-process `.res` compilation.
-///
-/// Contains the generated JavaScript and everything needed to update the
-/// shared `ModuleRegistry` for downstream dependents.
-pub struct InProcessCompileResult {
-    /// Generated JavaScript source text.
-    pub js_output: String,
-    /// The module's published signature (inferred from `.res`).
-    pub signature: DeclSignature,
-    /// The finalized PersStruct in portable form, ready for the registry.
-    pub pers_struct: Option<PortablePersStruct>,
-    /// Any new alias rewrites discovered during this compilation.
-    pub new_alias_rewrites: HashMap<String, crate::types::path::Path>,
-}
-
-/// Result of an in-process `.resi` interface type-check.
-///
-/// Contains the interface signature and everything needed to update the
-/// shared `ModuleRegistry`.
-pub struct InProcessInterfaceResult {
-    /// The module's published signature (from the `.resi` file).
-    pub signature: DeclSignature,
-    /// The finalized PersStruct in portable form, ready for the registry.
-    pub pers_struct: Option<PortablePersStruct>,
-    /// Any new alias rewrites discovered during this compilation.
-    pub new_alias_rewrites: HashMap<String, crate::types::path::Path>,
-}
-
-/// Compile a `.res` source file fully in-process, returning JS output and
-/// the module's published interface.
-///
-/// Unlike `compile_source_to_js_with_options`, this function:
-/// - Creates a fresh `PersistentEnv` internally from the shared `ModuleRegistry`.
-/// - Does NOT probe the filesystem for a sibling `.resi` file. Instead, the
-///   caller passes `has_interface: true` when a `.resi` exists and has
-///   already been typechecked and registered in the registry.
-/// - Returns the inferred `Signature` and finalized `PersStruct` so the
-///   caller can update the registry for downstream dependents.
-pub fn compile_source_in_process(
-    source: &str,
-    filename: &str,
-    module_name: &str,
-    options: &CompilerOptions,
-    registry: &ModuleRegistry,
-    has_interface: bool,
-) -> Result<InProcessCompileResult> {
-    let original_alias_count = registry.alias_rewrites.len();
-
-    // Parse
-    let mut parser = Parser::new(filename, source);
-    let structure = module::parse_structure(&mut parser);
-    if parser.has_errors() {
-        return Err(anyhow!(
-            "Parse failed with {} error(s)",
-            parser.diagnostics().len()
-        ));
-    }
-    let file_directives = extract_file_directives_from_structure(&structure, parser.arena())?;
-    let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
-    let structure = if let Some(jsx_version) = jsx_version {
-        jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
-    } else {
-        structure
-    };
-    let structure = ppx::expand_extensions(&structure, parser.arena_mut());
-    let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
-        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
-
-    // Type check
-    log::debug!("[compile_source_in_process] {} type-check start", module_name);
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
-    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    let mut env = initial_env(&type_ctx);
-
-    // Create a fresh PersistentEnv from the shared registry.
-    let mut pers_env = PersistentEnv::from_registry(registry);
-    let load_path = build_load_path(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(options.module_name.clone());
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
-
-    tctx.set_persistent_env(pers_env);
-
-    log::debug!("[compile_source_in_process] {} type_structure start", module_name);
-    let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
-        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
-    log::debug!("[compile_source_in_process] {} type_structure done", module_name);
-
-    // Apply interface constraints if a .resi was pre-registered.
-    if has_interface {
-        apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
-    }
-
-    // Normalize only when there's no .resi (matching OCaml's behavior).
-    if !has_interface {
-        normalize_signature_types(&type_ctx, &typed_structure, &final_env);
-    }
-
-    // Prepare the inferred signature for saving (renames idents).
-    prepare_inferred_signature_for_saving(
-        &type_ctx,
-        &typed_structure,
-        options.source_filename.as_deref(),
-        has_interface,
-    );
-
-    // Extract the published signature.
-    let published_signature =
-        crate::types::includemod::simplify_signature(&typed_structure.str_type);
-
-    // Lambda conversion
-    log::debug!("[compile_source_in_process] {} lambda start", module_name);
-    let lambda_start_stamp = type_ctx
-        .current_stamp()
-        .max(max_lambda_input_stamp(&typed_structure));
-
-    let unit_name = options
-        .source_filename
-        .as_deref()
-        .map(module_name_from_source_filename)
-        .unwrap_or_default();
-    let implementation_coercion =
-        compute_raw_implementation_coercion(&mut tctx, &type_ctx, &env, &typed_structure, options);
-    let mut raw_converter =
-        crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
-            parser.arena(),
-            &type_ctx,
-            &env,
-            lambda_start_stamp,
-            unit_name,
-        );
-    if let Some(persistent_env) = tctx.persistent_env.clone() {
-        raw_converter.set_persistent_env(persistent_env);
-    }
-    let raw_lambda =
-        raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
-    let possible_required_modules = raw_converter.take_possible_required_modules();
-    let raw_lambda_current_stamp = raw_converter.current_stamp();
-
-    let lowered_lambda = crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
-        raw_lambda,
-        raw_lambda_current_stamp,
-    );
-
-    // Lambda -> JS IR
-    let mut module_path_resolver = ModulePathResolver::from_compile_options(
-        options.source_filename.as_deref(),
-        options.output_path.as_deref(),
-        options.runtime_path.as_deref(),
-        tctx.persistent_env.clone(),
-    );
-    for module in &possible_required_modules {
-        if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
-            if let Some(path) =
-                module_path_resolver.resolve_local_module_fallback_path(module.id.name())
-            {
-                module_path_resolver.set_module_path_override(module.id.name(), path);
-            }
-        }
-    }
-    let mut compiler =
-        LambdaCompiler::with_module_path_resolver(Some(module_path_resolver.clone()));
-    let program = compiler.compile_deps_program_with_possible_required_modules(
-        &lowered_lambda,
-        &possible_required_modules,
-    );
-
-    // JS IR -> JS source
-    log::debug!("[compile_source_in_process] {} js-print start", module_name);
-    let js =
-        print_deps_program_with_directives(&program, Some(&module_path_resolver), &file_directives, options.debug, options.jsx_preserve);
-    log::debug!("[compile_source_in_process] {} complete", module_name);
-
-    // Register the module's published interface in the internal PersistentEnv
-    // and extract the finalized PersStruct for the caller's registry.
-    let mut internal_env = tctx
-        .persistent_env
-        .take()
-        .unwrap_or_else(PersistentEnv::new);
-
-    if !has_interface {
-        internal_env.register_in_memory_signature(
-            module_name,
-            published_signature.clone(),
-            filename,
-            &type_ctx,
-        );
-    }
-
-    let (pers_struct, new_alias_rewrites) =
-        internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);
-
-    Ok(InProcessCompileResult {
-        js_output: js,
-        signature: published_signature,
-        pers_struct,
-        new_alias_rewrites,
-    })
-}
-
-/// Type-check a `.resi` interface file fully in-process, returning the
-/// module's published signature.
-///
-/// Unlike `typecheck_interface_source`, this function:
-/// - Creates a fresh `PersistentEnv` internally from the shared `ModuleRegistry`.
-/// - Returns the `Signature` and finalized `PersStruct` so the caller can
-///   update the registry for downstream dependents.
-pub fn typecheck_interface_in_process(
-    source: &str,
-    filename: &str,
-    module_name: &str,
-    options: &CompilerOptions,
-    registry: &ModuleRegistry,
-) -> Result<InProcessInterfaceResult> {
-    let original_alias_count = registry.alias_rewrites.len();
-
-    // Parse as signature
-    let mut parser = Parser::new(filename, source);
-    let signature = module::parse_signature(&mut parser);
-    if parser.has_errors() {
-        return Err(anyhow!(
-            "Parse failed with {} error(s)",
-            parser.diagnostics().len()
-        ));
-    }
-
-    // Type check
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
-    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    let mut env = initial_env(&type_ctx);
-
-    // Create a fresh PersistentEnv from the shared registry.
-    let mut pers_env = PersistentEnv::from_registry(registry);
-    let load_path = build_load_path(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(options.module_name.clone());
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
-
-    tctx.set_persistent_env(pers_env);
-
-    let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
-        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
-
-    // Extract the Signature (Vec<SignatureItem>) from the TypedSignature.
-    let typed_module_type = crate::types::typedtree::ModuleType {
-        mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature),
-        mty_type: crate::types::decl::ModuleType::MtySignature(vec![]),
-        mty_env: crate::types::typedtree::EnvRef(0),
-        mty_loc: crate::parse_arena::LocIdx(0),
-        mty_attributes: crate::parser::ast::Attributes::new(),
-    };
-    let published_signature =
-        match crate::types::typemod::decl_module_type_from_typed(&typed_module_type) {
-            Some(crate::types::decl::ModuleType::MtySignature(sig)) => sig,
-            _ => {
-                return Err(anyhow!(
-                    "Failed to extract interface signature from typed tree"
-                ))
-            }
-        };
-
-    // Register the interface signature in the internal PersistentEnv
-    // and extract the finalized PersStruct for the caller's registry.
-    let mut internal_env = tctx
-        .persistent_env
-        .take()
-        .unwrap_or_else(PersistentEnv::new);
-
-    internal_env.register_in_memory_signature(
-        module_name,
-        published_signature.clone(),
-        filename,
-        &type_ctx,
-    );
-
-    let (pers_struct, new_alias_rewrites) =
-        internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);
-
-    Ok(InProcessInterfaceResult {
-        signature: published_signature,
-        pers_struct,
-        new_alias_rewrites,
-    })
-}
-
-/// Type-check a `.res` implementation file in-process WITHOUT lambda/JS codegen.
-///
-/// Returns the module's published signature and PersStruct, suitable for
-/// populating the module registry with the interface only. Used for
-/// pre-compiling runtime modules where we need the type information but
-/// don't need JS output (the JS is already pre-built).
-pub fn typecheck_implementation_in_process(
-    source: &str,
-    filename: &str,
-    module_name: &str,
-    options: &CompilerOptions,
-    registry: &ModuleRegistry,
-    has_interface: bool,
-) -> Result<InProcessInterfaceResult> {
-    let original_alias_count = registry.alias_rewrites.len();
-
-    // Parse
-    let mut parser = Parser::new(filename, source);
-    let structure = module::parse_structure(&mut parser);
-    if parser.has_errors() {
-        return Err(anyhow!(
-            "Parse failed with {} error(s)",
-            parser.diagnostics().len()
-        ));
-    }
-    let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
-    let structure = if let Some(jsx_version) = jsx_version {
-        jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
-    } else {
-        structure
-    };
-    let structure = ppx::expand_extensions(&structure, parser.arena_mut());
-    let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
-        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
-
-    // Type check
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
-    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    let mut env = initial_env(&type_ctx);
-
-    let mut pers_env = PersistentEnv::from_registry(registry);
-    let load_path = build_load_path(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(options.module_name.clone());
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
-
-    tctx.set_persistent_env(pers_env);
-
-    let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
-        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
-
-    if has_interface {
-        apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
-    }
-
-    if !has_interface {
-        normalize_signature_types(&type_ctx, &typed_structure, &final_env);
-    }
-
-    prepare_inferred_signature_for_saving(
-        &type_ctx,
-        &typed_structure,
-        options.source_filename.as_deref(),
-        has_interface,
-    );
-
-    let published_signature =
-        crate::types::includemod::simplify_signature(&typed_structure.str_type);
-
-    // Register and extract PersStruct (no lambda/JS conversion)
-    let mut internal_env = tctx
-        .persistent_env
-        .take()
-        .unwrap_or_else(PersistentEnv::new);
-
-    if !has_interface {
-        internal_env.register_in_memory_signature(
-            module_name,
-            published_signature.clone(),
-            filename,
-            &type_ctx,
-        );
-    }
-
-    let (pers_struct, new_alias_rewrites) =
-        internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);
-
-    Ok(InProcessInterfaceResult {
-        signature: published_signature,
-        pers_struct,
-        new_alias_rewrites,
-    })
 }
 
 /// Build the load path from compiler options.
@@ -2135,55 +1711,36 @@ fn normalize_lexical_path(path: PathBuf) -> PathBuf {
 ///
 /// This is equivalent to OCaml's `res_compmisc.ml:initial_env()` which loads
 /// Pervasives.cmi and Stdlib.cmi and opens them into the environment.
-///
-/// When `nopervasives` is true (matching OCaml's `-nopervasives` flag), the
-/// implicit Pervasives and Stdlib opens are skipped. This is used by
-/// `@rescript/runtime` modules which bootstrap Pervasives themselves.
-///
-/// When `compiling_module` is `Some(name)`, any explicit `-open` that matches
-/// that module name is skipped to prevent circular self-loading (matching
-/// OCaml's `res_compmisc.ml:initial_env` which filters `modulename` from
-/// `open_modules`).
 pub(crate) fn load_pervasives<'a>(
     pers_env: &mut PersistentEnv,
     env: &mut Env,
     ctx: &'a TypeContext<'a>,
     open_modules: &[String],
-    nopervasives: bool,
-    compiling_module: Option<&str>,
 ) {
     use crate::ident::Ident;
 
-    if !nopervasives {
-        // Try to load and open Pervasives (matches OCaml: open_implicit_module "Pervasives")
-        if pers_env.open_module("Pervasives", env, ctx) {
-            if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
-                if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                    ctx.register_raw_module_sig("Pervasives", sig.clone());
-                }
-                env.add_module(Ident::create_persistent("Pervasives"), md);
+    // Try to load and open Pervasives (matches OCaml: open_implicit_module "Pervasives")
+    if pers_env.open_module("Pervasives", env, ctx) {
+        if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
+            if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+                ctx.register_raw_module_sig("Pervasives", sig.clone());
             }
+            env.add_module(Ident::create_persistent("Pervasives"), md);
         }
+    }
 
-        // Try to load and open Stdlib (matches OCaml: open_implicit_module "Stdlib")
-        if pers_env.open_module("Stdlib", env, ctx) {
-            if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
-                if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                    ctx.register_raw_module_sig("Stdlib", sig.clone());
-                }
-                env.add_module(Ident::create_persistent("Stdlib"), md);
+    // Try to load and open Stdlib (matches OCaml: open_implicit_module "Stdlib")
+    if pers_env.open_module("Stdlib", env, ctx) {
+        if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
+            if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+                ctx.register_raw_module_sig("Stdlib", sig.clone());
             }
+            env.add_module(Ident::create_persistent("Stdlib"), md);
         }
     }
 
     // Apply explicit `-open` modules in argument order.
-    // Filter out self-opens: if compiling module M, skip `-open M`.
     for module_name in open_modules {
-        if let Some(compiling) = compiling_module {
-            if module_name == compiling {
-                continue;
-            }
-        }
         if pers_env.open_module(module_name, env, ctx) {
             if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
                 env.add_module(Ident::create_persistent(module_name), md);
@@ -2230,9 +1787,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path(load_path);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
-        pers_env.set_nopervasives(options.nopervasives);
-        pers_env.set_compiling_module(options.module_name.clone());
-        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
         tctx.set_persistent_env(pers_env);
 
         let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
@@ -2275,9 +1830,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path(load_path);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
-        pers_env.set_nopervasives(options.nopervasives);
-        pers_env.set_compiling_module(options.module_name.clone());
-        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
         tctx.set_persistent_env(pers_env);
 
         let (typed_structure, _final_env) =
@@ -3025,9 +2578,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(options.module_name.clone());
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
     tctx.set_persistent_env(pers_env);
 
     let (typed_structure, _final_env) = type_structure(&mut tctx, &env, &arena, &structure)
@@ -3061,9 +2612,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(options.module_name.clone());
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
     tctx.set_persistent_env(pers_env);
 
     let typed_signature = transl_signature(&mut tctx, &env, &arena, &signature)

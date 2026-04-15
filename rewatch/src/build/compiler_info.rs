@@ -51,8 +51,8 @@ pub fn verify_compiler_info(
                 Err(_) => return true, // unknown or invalid format -> treat as mismatch
             };
 
-            let current_bsc_path_str = compiler.bsc_path.as_ref().expect("bsc_path required for file-based mode").to_string_lossy();
-            let current_bsc_hash_hex = compiler.bsc_hash.as_ref().expect("bsc_hash required for file-based mode").to_hex().to_string();
+            let current_bsc_path_str = compiler.bsc_path.to_string_lossy();
+            let current_bsc_hash_hex = compiler.bsc_hash.to_hex().to_string();
             let current_runtime_path_str = compiler.runtime_path.to_string_lossy();
             let current_rescript_config_hash = match get_rescript_config_hash(package) {
                 Some(hash) => hash,
@@ -114,8 +114,8 @@ pub fn verify_compiler_info(
 }
 
 pub fn write_compiler_info(build_state: &BuildCommandState) {
-    let bsc_path = build_state.compiler_info.bsc_path.as_ref().expect("bsc_path required for file-based mode").to_string_lossy().to_string();
-    let bsc_hash = build_state.compiler_info.bsc_hash.as_ref().expect("bsc_hash required for file-based mode").to_hex().to_string();
+    let bsc_path = build_state.compiler_info.bsc_path.to_string_lossy().to_string();
+    let bsc_hash = build_state.compiler_info.bsc_hash.to_hex().to_string();
     let runtime_path = build_state
         .compiler_info
         .runtime_path

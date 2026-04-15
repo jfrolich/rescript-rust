@@ -4568,129 +4568,9 @@ impl LambdaCompiler {
         Compiled { prelude, expr }
     }
 
-    fn primitive_expected_arity(prim: &Primitive) -> Option<usize> {
-        use Primitive::*;
-
-        Some(match prim {
-            Pstringlength
-            | Parraylength
-            | Pnot
-            | Pnegint
-            | Pnegfloat
-            | Pnotint
-            | Poffsetint(_)
-            | Poffsetref(_)
-            | PnullToOpt
-            | PnullUndefinedToOpt
-            | PisNotNone
-            | PisNull
-            | PisUndefined
-            | PisNullUndefined
-            | PvalFromOption
-            | PvalFromOptionNotNest
-            | Psome
-            | PsomeNotNest
-            | Pfield(_, _)
-            | Ptypeof
-            | Pintoffloat
-            | Pfloatofint
-            | Pawait
-            | Pidentity
-            | Pignore
-            | PwrapExn
-            | PjsFnMake(_)
-            | PjsFnMakeUnit
-            | PjsFnMethod => 1,
-            PjsUnsafeDowngrade { setter: false, .. } => 1,
-            Paddint
-            | Paddfloat
-            | Psubint
-            | Psubfloat
-            | Pmulint
-            | Pmulfloat
-            | Pdivint
-            | Pdivfloat
-            | Pmodint
-            | Pmodfloat
-            | Ppowint
-            | Ppowfloat
-            | Pobjcomp(_)
-            | Pboolcomp(_)
-            | Pintcomp(_)
-            | Pfloatcomp(_)
-            | Pbigintcomp(_)
-            | Pstringcomp(_)
-            | Pjscomp(_)
-            | Pobjorder
-            | Pobjmin
-            | Pobjmax
-            | Pboolorder
-            | Pboolmin
-            | Pboolmax
-            | Pintorder
-            | Pintmin
-            | Pintmax
-            | Pfloatorder
-            | Pfloatmin
-            | Pfloatmax
-            | Pbigintorder
-            | Pbigintmin
-            | Pbigintmax
-            | Pstringorder
-            | Pstringmin
-            | Pstringmax
-            | Psequand
-            | Psequor
-            | Pandint
-            | Porint
-            | Pxorint
-            | Plslint
-            | Plsrint
-            | Pasrint
-            | Pstringadd
-            | Psetfield(_, _) => 2,
-            PjsUnsafeDowngrade { setter: true, .. } => 2,
-            PjsCall { arg_types, .. } => arg_types.len(),
-            PjsObjectCreate(obj_params) => obj_params.len(),
-            _ => return None,
-        })
-    }
-
-    fn compile_unsaturated_primitive(
-        &mut self,
-        prim: &Primitive,
-        args: &[Lambda],
-        expected_arity: usize,
-    ) -> Compiled {
-        let missing = expected_arity.saturating_sub(args.len());
-        debug_assert!(missing > 0);
-
-        let params = if missing == 1 {
-            vec![self.id_gen.create("prim")]
-        } else {
-            (0..missing)
-                .map(|i| self.id_gen.create(&format!("prim{i}")))
-                .collect::<Vec<_>>()
-        };
-        let mut full_args = args.to_vec();
-        full_args.extend(params.iter().cloned().map(Lambda::var));
-
-        self.compile_expr(&Lambda::function_(
-            missing as i32,
-            params,
-            Lambda::prim(prim.clone(), full_args, crate::location::Location::none()),
-            Default::default(),
-        ))
-    }
-
     fn compile_primitive(&mut self, prim: &Primitive, args: &[Lambda]) -> Compiled {
         if matches!(prim, Primitive::Pimport) {
             return self.compile_import_primitive(args);
-        }
-        if let Some(expected_arity) = Self::primitive_expected_arity(prim)
-            && args.len() < expected_arity
-        {
-            return self.compile_unsaturated_primitive(prim, args, expected_arity);
         }
 
         use Primitive::*;
@@ -14640,30 +14520,6 @@ mod tests {
 
         assert!(compiled.prelude.is_empty());
         assert!(matches!(compiled.expr.desc, ExpressionDesc::Fun { .. }));
-    }
-
-    #[test]
-    fn compile_unsaturated_array_length_primitive_eta_wraps() {
-        let mut compiler = LambdaCompiler::new();
-        let compiled = compiler.compile_expr(&Lambda::prim(
-            Primitive::Parraylength,
-            vec![],
-            Location::none(),
-        ));
-
-        assert!(compiled.prelude.is_empty());
-        match &compiled.expr.desc {
-            ExpressionDesc::Fun { params, body, .. } => {
-                assert_eq!(params.len(), 1);
-
-                let rendered = print_block(body);
-                assert!(
-                    rendered.contains(".length"),
-                    "expected eta-wrapped array length body, got {rendered}"
-                );
-            }
-            other => panic!("expected eta-wrapped function, got {other:?}"),
-        }
     }
 
     #[test]

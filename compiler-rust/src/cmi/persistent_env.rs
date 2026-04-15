@@ -14,7 +14,6 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::fs;
 use std::path::Path as FsPath;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::driver::{
@@ -24,8 +23,8 @@ use crate::ident::Ident;
 use crate::parser::{Parser, jsx_ppx, module};
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    AliasPresence, ConstructorDescription, ConstructorTag, LabelDescription, ModuleDeclaration,
-    ModuleType, RecStatus, Signature, SignatureItem, TypeKind,
+    ConstructorDescription, ConstructorTag, LabelDescription, ModuleDeclaration, ModuleType,
+    Signature, SignatureItem, TypeKind,
 };
 use crate::types::env::{Env, initial_env};
 use crate::types::path::Path;
@@ -37,7 +36,6 @@ use crate::types::typedtree::{
 use crate::types::typemod::{decl_module_type_from_typed, transl_signature, type_structure};
 
 use super::cmi_format;
-use super::portable_types::{self, PortablePersStruct};
 use super::sig_reader::SigReadContext;
 
 /// A cached persistent module structure.
@@ -58,119 +56,6 @@ pub enum CmjExportConstant {
     Undefined { is_unit: bool },
 }
 
-/// In-memory module metadata for the `--in-process` build mode.
-///
-/// When a module is registered in the in-memory registry, these fields
-/// replace the disk-based lookups that normally read `.ast` (source path),
-/// `.cmj` (purity), and `.cmi` (interface).
-#[derive(Debug, Clone)]
-pub struct InMemoryModuleInfo {
-    /// Source file path (replaces `.ast` source-path lookup)
-    pub source_path: PathBuf,
-    /// Whether the module is side-effect free (replaces `.cmj` purity lookup)
-    pub is_pure: bool,
-    /// Whether this module belongs to `@rescript/runtime`
-    pub is_runtime: bool,
-}
-
-/// Read-only module registry for `--in-process` builds.
-///
-/// Contains all previously-published module interfaces and metadata.
-/// Shared (by reference) across parallel compilations within a wave.
-/// Each worker creates a fresh `PersistentEnv` from this registry.
-#[derive(Clone, Default)]
-pub struct ModuleRegistry {
-    /// Cached module structures in portable form (TypeExprRefs are self-contained
-    /// indices into each entry's PortableTypeGraph, not arena refs).
-    /// Keyed by module name.
-    pub cached_modules: HashMap<String, PortablePersStruct>,
-    /// Module metadata (source paths, purity, runtime status).
-    pub module_info: HashMap<String, InMemoryModuleInfo>,
-    /// Alias prefix rewrites (flattened_name -> qualified_path).
-    pub alias_rewrites: HashMap<String, Path>,
-    /// Source file paths for ALL modules, including those not yet compiled.
-    /// Used for on-demand source-based type checking when a module is needed
-    /// as an implicit dependency (e.g., via `-open Pervasives`) but hasn't
-    /// been compiled yet in the current wave.
-    pub source_fallback_paths: HashMap<String, PathBuf>,
-}
-
-impl ModuleRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Register a namespace module's alias signature directly.
-    /// This is the registry-level equivalent of `PersistentEnv::register_namespace_in_memory`.
-    pub fn register_namespace(
-        &mut self,
-        namespace_name: &str,
-        module_aliases: &[(String, String)],
-    ) {
-        let mut sig_items: Signature = Vec::with_capacity(module_aliases.len());
-        for (short_name, internal_name) in module_aliases {
-            sig_items.push(SignatureItem::SigModule(
-                Ident::create_persistent(short_name.as_str()),
-                ModuleDeclaration {
-                    md_type: ModuleType::MtyAlias(
-                        AliasPresence::MtaPresent,
-                        Path::Pident(Ident::create_persistent(internal_name.as_str())),
-                    ),
-                    md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
-                    md_path: None,
-                },
-                RecStatus::TrecNot,
-            ));
-        }
-
-        // Record alias rewrites
-        let module_path = Path::Pident(Ident::create_persistent(namespace_name));
-        collect_alias_rewrites(&sig_items, &module_path, &mut self.alias_rewrites);
-
-        // Namespace signatures contain only MtyAlias entries (no TypeExprRefs),
-        // so the portable type graph is empty.
-        let fingerprint =
-            portable_types::compute_type_graph_fingerprint_pub(&[], &sig_items);
-        let portable = PortablePersStruct {
-            ps_name: namespace_name.to_string(),
-            ps_filename: format!("{}.mlmap", namespace_name),
-            ps_sig: sig_items,
-            type_graph: portable_types::PortableTypeGraph {
-                entries: Vec::new(),
-            },
-            fingerprint,
-        };
-        self.cached_modules
-            .insert(namespace_name.to_string(), portable);
-    }
-
-    /// Remove a module from the registry (for deleted/renamed modules).
-    /// Purges cached signature, module info, source fallback, and any alias
-    /// rewrites that reference this module.
-    pub fn purge_module(&mut self, name: &str) {
-        self.cached_modules.remove(name);
-        self.module_info.remove(name);
-        self.source_fallback_paths.remove(name);
-        // Remove alias rewrites that point to this module
-        self.alias_rewrites
-            .retain(|key, _| key != name);
-    }
-
-    /// Store a compiled module's finalized PersStruct and metadata.
-    pub fn register_module(
-        &mut self,
-        name: &str,
-        portable: PortablePersStruct,
-        info: InMemoryModuleInfo,
-        new_alias_rewrites: HashMap<String, Path>,
-    ) {
-        self.cached_modules.insert(name.to_string(), portable);
-        self.module_info.insert(name.to_string(), info);
-        self.alias_rewrites.extend(new_alias_rewrites);
-    }
-}
-
 /// Persistent environment for module loading.
 #[derive(Clone)]
 pub struct PersistentEnv {
@@ -187,33 +72,9 @@ pub struct PersistentEnv {
     open_modules: Vec<String>,
     /// Default JSX version from CLI flags, if any.
     jsx_version: Option<i32>,
-    /// Whether the current compilation uses `-nopervasives`.
-    nopervasives: bool,
-    /// The module currently being compiled, used to skip self-opens.
-    compiling_module: Option<String>,
     /// Cache of renamed signatures (matching OCaml's lazy Subst.signature).
     /// Each module's signature is renamed once and cached here.
     renamed_sig_cache: HashMap<String, Signature>,
-    /// In-memory module registry for `--in-process` builds.
-    /// When a module is registered here, its metadata (source path, purity)
-    /// is resolved from memory instead of from `.ast`/`.cmj` files on disk.
-    /// Wrapped in Arc for cheap cloning during source-fallback recursion.
-    in_memory_modules: Arc<HashMap<String, InMemoryModuleInfo>>,
-    /// When true, all module resolution uses the in-memory registry only.
-    /// Disk fallbacks (`.ast`, `.cmj`, `.cmi` probes) are skipped entirely.
-    in_process_mode: bool,
-    /// Source file paths for on-demand lazy type checking in `--in-process` mode.
-    /// When `find_pers_struct` can't find a module in the cache and this map
-    /// has its source path, the module is type-checked from source on the fly.
-    /// Wrapped in Arc for cheap cloning during source-fallback recursion.
-    source_fallback_paths: Arc<HashMap<String, PathBuf>>,
-    /// Current depth of source-fallback recursion. Each `typecheck_source_signature`
-    /// call increments this. Used to prevent stack overflow from deep dependency chains.
-    source_fallback_depth: usize,
-    /// Portable module cache for `--in-process` builds. These contain self-contained
-    /// type graphs that are internalized into the current TypeContext on first access
-    /// via `find_pers_struct`. Populated by `from_registry()`.
-    portable_cache: HashMap<String, PortablePersStruct>,
 }
 
 impl PersistentEnv {
@@ -225,70 +86,8 @@ impl PersistentEnv {
             alias_prefix_rewrites: HashMap::new(),
             open_modules: Vec::new(),
             jsx_version: None,
-            nopervasives: false,
-            compiling_module: None,
             renamed_sig_cache: HashMap::new(),
-            in_memory_modules: Arc::new(HashMap::new()),
-            in_process_mode: false,
-            source_fallback_paths: Arc::new(HashMap::new()),
-            source_fallback_depth: 0,
-            portable_cache: HashMap::new(),
         }
-    }
-
-    /// Create a PersistentEnv seeded from a ModuleRegistry.
-    ///
-    /// Each worker in a parallel wave gets its own PersistentEnv via this
-    /// constructor. The registry's cached modules and metadata are cloned
-    /// into the env so that `find_pers_struct` can resolve dependencies
-    /// without disk I/O. The env is automatically in in-process mode.
-    pub fn from_registry(registry: &ModuleRegistry) -> Self {
-        // Store portable modules for lazy internalization. They will be
-        // deserialized into the current TypeContext on first access via
-        // find_pers_struct, which has a TypeContext parameter.
-        let portable_cache = registry.cached_modules.clone();
-        PersistentEnv {
-            cache: HashMap::new(),
-            load_path: Vec::new(),
-            alias_prefix_rewrites: registry.alias_rewrites.clone(),
-            open_modules: Vec::new(),
-            jsx_version: None,
-            nopervasives: false,
-            compiling_module: None,
-            renamed_sig_cache: HashMap::new(),
-            in_memory_modules: Arc::new(registry.module_info.clone()),
-            in_process_mode: true,
-            source_fallback_paths: Arc::new(registry.source_fallback_paths.clone()),
-            source_fallback_depth: 0,
-            portable_cache,
-        }
-    }
-
-    /// Extract the diff produced by this compilation: the newly-registered
-    /// PersStruct and any new alias rewrites that weren't in the original
-    /// registry. Used to update the shared ModuleRegistry after compilation.
-    /// Extract the diff produced by this compilation: the newly-registered
-    /// PersStruct (serialized to portable form) and any new alias rewrites.
-    /// Must be called while the TypeContext is still alive so the type graph
-    /// can be serialized.
-    pub fn extract_module_update(
-        &self,
-        module_name: &str,
-        original_alias_count: usize,
-        ctx: &TypeContext<'_>,
-    ) -> (Option<PortablePersStruct>, HashMap<String, Path>) {
-        let portable = self
-            .cache
-            .get(module_name)
-            .and_then(|opt| opt.as_ref())
-            .map(|ps| portable_types::serialize_pers_struct(ps, ctx));
-        // New alias rewrites are any beyond what was in the original registry
-        let new_rewrites = if self.alias_prefix_rewrites.len() > original_alias_count {
-            self.alias_prefix_rewrites.clone()
-        } else {
-            HashMap::new()
-        };
-        (portable, new_rewrites)
     }
 
     /// Set the load path (list of directories to search for .cmi files).
@@ -302,14 +101,6 @@ impl PersistentEnv {
 
     pub fn set_jsx_version(&mut self, jsx_version: Option<i32>) {
         self.jsx_version = jsx_version;
-    }
-
-    pub fn set_nopervasives(&mut self, nopervasives: bool) {
-        self.nopervasives = nopervasives;
-    }
-
-    pub fn set_compiling_module(&mut self, module_name: Option<String>) {
-        self.compiling_module = module_name;
     }
 
     /// Add a directory to the load path.
@@ -351,35 +142,8 @@ impl PersistentEnv {
         name: &str,
         ctx: &'a TypeContext<'a>,
     ) -> Option<&PersStruct> {
-        // Check cache first (already internalized)
+        // Check cache first
         if self.cache.contains_key(name) {
-            return self.cache.get(name).and_then(|opt| opt.as_ref());
-        }
-
-        // Check portable cache (from ModuleRegistry, needs internalization).
-        // The portable PersStruct was already finalized (path substitution done)
-        // before serialization. We only need to:
-        // 1. Internalize types into the current TypeContext
-        // 2. Collect alias rewrites
-        // 3. Register types by stamp (without cascading alias resolution)
-        if let Some(portable) = self.portable_cache.remove(name) {
-            let ps = portable_types::internalize_pers_struct(&portable, ctx);
-            let module_path = Path::Pident(Ident::create_persistent(name));
-            let effective_module_path = self
-                .alias_prefix_rewrites
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| module_path.clone());
-            collect_alias_rewrites(
-                &ps.ps_sig,
-                &effective_module_path,
-                &mut self.alias_prefix_rewrites,
-            );
-            register_types_by_stamp_recursive(
-                &ModuleType::MtySignature(ps.ps_sig.clone()),
-                ctx,
-            );
-            self.cache.insert(name.to_string(), Some(ps));
             return self.cache.get(name).and_then(|opt| opt.as_ref());
         }
 
@@ -468,16 +232,6 @@ impl PersistentEnv {
     /// backend uses indirectly through cmj/package metadata when computing JS
     /// import paths.
     pub fn resolve_module_source_path(&self, name: &str) -> Option<PathBuf> {
-        // Check in-memory registry first (--in-process mode)
-        if let Some(info) = self.in_memory_modules.get(name) {
-            return Some(info.source_path.clone());
-        }
-
-        // In in-process mode, the registry is authoritative — no disk fallback.
-        if self.in_process_mode {
-            return None;
-        }
-
         for ext in ["ast", "iast"] {
             let ast_filename = format!("{name}.{ext}");
             if let Some(ast_path) = self.find_in_path_uncap(&ast_filename) {
@@ -506,18 +260,7 @@ impl PersistentEnv {
     }
 
     /// Read the `pure` flag recorded in a module's `.cmj` metadata.
-    /// In `--in-process` mode, returns the in-memory purity flag instead.
     pub fn module_cmj_is_pure(&self, name: &str) -> Option<bool> {
-        // Check in-memory registry first (--in-process mode)
-        if let Some(info) = self.in_memory_modules.get(name) {
-            return Some(info.is_pure);
-        }
-
-        // In in-process mode, the registry is authoritative — no disk fallback.
-        if self.in_process_mode {
-            return None;
-        }
-
         let path = self.resolve_module_cmj_path(name)?;
         read_cmj_pure(&path)
     }
@@ -538,58 +281,17 @@ impl PersistentEnv {
         Some(bytes.iter().map(|&b| b as char).collect())
     }
 
-    /// Maximum recursion depth for source-fallback type checking.
-    /// Each level compiles a dependency from source. Deep chains indicate
-    /// many transitive deps being loaded on demand.
-    const MAX_SOURCE_FALLBACK_DEPTH: usize = 15;
-
     fn typecheck_source_signature<'a>(
         &self,
         source_path: &FsPath,
         ctx: &'a TypeContext<'a>,
     ) -> Option<(Signature, PersistentEnv)> {
-        if self.source_fallback_depth >= Self::MAX_SOURCE_FALLBACK_DEPTH {
-            return None;
-        }
-
         let filename = source_path.to_string_lossy().into_owned();
         let source = Self::read_source_latin1(source_path)?;
-        // Create a lightweight fallback env instead of cloning the entire PersistentEnv.
-        // Share the read-only maps but start with an empty cache (deps loaded on demand).
-        // Copy only the current cache placeholders (None entries that prevent infinite recursion).
-        let placeholders: HashMap<String, Option<PersStruct>> = self
-            .cache
-            .iter()
-            .filter(|(_, v)| v.is_none())
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let mut fallback_pers = PersistentEnv {
-            cache: placeholders,
-            load_path: self.load_path.clone(),
-            alias_prefix_rewrites: self.alias_prefix_rewrites.clone(),
-            open_modules: self.open_modules.clone(),
-            jsx_version: self.jsx_version,
-            nopervasives: self.nopervasives,
-            compiling_module: self.compiling_module.clone(),
-            renamed_sig_cache: HashMap::new(),
-            in_memory_modules: self.in_memory_modules.clone(),
-            in_process_mode: self.in_process_mode,
-            source_fallback_paths: self.source_fallback_paths.clone(),
-            source_fallback_depth: self.source_fallback_depth + 1,
-            portable_cache: self.portable_cache.clone(),
-        };
+        let mut fallback_pers = self.clone();
         let mut env = initial_env(ctx);
         let open_modules = fallback_pers.open_modules.clone();
-        let nopervasives = fallback_pers.nopervasives;
-        let compiling_module = fallback_pers.compiling_module.clone();
-        load_pervasives(
-            &mut fallback_pers,
-            &mut env,
-            ctx,
-            &open_modules,
-            nopervasives,
-            compiling_module.as_deref(),
-        );
+        load_pervasives(&mut fallback_pers, &mut env, ctx, &open_modules);
 
         if source_path
             .extension()
@@ -717,13 +419,6 @@ impl PersistentEnv {
     /// Load a module from a .cmi file, or fall back to the source path embedded
     /// in a sibling `.ast` when the module is implementation-only.
     fn load_module<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<PersStruct> {
-        // In in-process mode, the registry/source fallback is authoritative.
-        // Never touch `.cmi` files on disk, even if stale artifacts happen to
-        // exist on the load path.
-        if self.in_process_mode {
-            return self.load_module_from_source_path_fallback(name, ctx);
-        }
-
         let cmi_filename = format!("{}.cmi", name);
         if let Some(full_path) = self.find_in_path_uncap(&cmi_filename) {
             let cmi = match cmi_format::read_cmi(&full_path) {
@@ -748,56 +443,12 @@ impl PersistentEnv {
         self.load_module_from_source_fallback(name, ctx)
     }
 
-    /// Load a module by type-checking its source file directly in `--in-process` mode.
-    ///
-    /// Unlike `load_module_from_source_fallback` (which reads `.ast` files),
-    /// this reads the source `.res`/`.resi` file path from `source_fallback_paths`.
-    fn load_module_from_source_path_fallback<'a>(
-        &mut self,
-        name: &str,
-        ctx: &'a TypeContext<'a>,
-    ) -> Option<PersStruct> {
-        let source_path = self.source_fallback_paths.get(name)?.clone();
-
-        // The source_fallback_paths already points to the preferred file
-        // (.resi if it exists, .res otherwise), set by rewatch when
-        // registering the paths.
-        let (signature, fallback_pers) =
-            self.typecheck_source_signature(&source_path, ctx)?;
-
-        // Merge any modules the fallback discovered
-        self.alias_prefix_rewrites
-            .extend(fallback_pers.alias_prefix_rewrites.clone());
-        for (module_name, loaded) in fallback_pers.cache {
-            if module_name != name && loaded.is_some() && !self.cache.contains_key(&module_name) {
-                self.cache.insert(module_name, loaded);
-            }
-        }
-
-        Some(self.finalize_loaded_signature(
-            name,
-            name.to_string(),
-            signature,
-            source_path.to_string_lossy().into_owned(),
-            ctx,
-        ))
-    }
-
     /// Read a module's signature from CMI without applying path substitution.
     /// Used for interface constraint propagation (moregen) where we need raw
     /// Pident paths that match the implementation's local paths.
     /// In OCaml, ps_sig retains raw Pident paths; path substitution happens
     /// lazily in components_of_module_maker, not on ps_sig.
-    pub fn read_raw_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<Signature> {
-        if self.in_process_mode {
-            if let Some(loaded) = self.cache.get(name).and_then(|loaded| loaded.as_ref()) {
-                return Some(loaded.ps_sig.clone());
-            }
-
-            let loaded = self.find_pers_struct(name, ctx)?;
-            return Some(loaded.ps_sig.clone());
-        }
-
+    pub fn read_raw_sig<'a>(&self, name: &str, ctx: &'a TypeContext<'a>) -> Option<Signature> {
         let cmi_filename = format!("{}.cmi", name);
         let full_path = self.find_in_path_uncap(&cmi_filename)?;
         let cmi = cmi_format::read_cmi(&full_path).ok()?;
@@ -887,111 +538,6 @@ impl PersistentEnv {
             md_loc: crate::location::Location::none(),
             md_path: None,
         })
-    }
-
-    /// Register a module's in-memory metadata for `--in-process` builds.
-    ///
-    /// This records the source path, purity, and runtime status so that
-    /// `resolve_module_source_path`, `module_cmj_is_pure`, and runtime
-    /// detection can resolve from memory instead of probing disk.
-    pub fn register_in_memory_module(&mut self, name: &str, info: InMemoryModuleInfo) {
-        Arc::make_mut(&mut self.in_memory_modules).insert(name.to_string(), info);
-    }
-
-    /// Register a module's signature directly into the cache for
-    /// `--in-process` builds, bypassing `.cmi` loading from disk.
-    ///
-    /// `source_filename` is the source file path (e.g. `/path/to/Foo.res`),
-    /// used as `ps_filename` for downstream lookups.
-    pub fn register_in_memory_signature<'a>(
-        &mut self,
-        name: &str,
-        signature: Signature,
-        source_filename: &str,
-        ctx: &'a TypeContext<'a>,
-    ) {
-        let ps = self.finalize_loaded_signature(
-            name,
-            name.to_string(),
-            signature,
-            source_filename.to_string(),
-            ctx,
-        );
-        self.cache.insert(name.to_string(), Some(ps));
-        // Invalidate any cached renamed sig so it gets re-derived
-        self.renamed_sig_cache.remove(name);
-    }
-
-    /// Register a namespace module's alias signature directly into the cache
-    /// for `--in-process` builds, without requiring a `TypeContext`.
-    ///
-    /// A namespace module is a synthetic module that re-exports submodules via
-    /// aliases. For example, namespace `MyApp` with modules `Foo`, `Bar` produces:
-    /// ```text
-    /// module Foo = Foo-MyApp
-    /// module Bar = Bar-MyApp
-    /// ```
-    ///
-    /// `module_aliases` is a list of `(short_name, internal_name)` pairs, e.g.
-    /// `[("Foo", "Foo-MyApp"), ("Bar", "Bar-MyApp")]`.
-    ///
-    /// This method bypasses `finalize_loaded_signature` since namespace alias
-    /// signatures contain no type declarations—only `SigModule` items with
-    /// `MtyAlias`—so type path substitution is a no-op.
-    pub fn register_namespace_in_memory(
-        &mut self,
-        namespace_name: &str,
-        module_aliases: &[(String, String)],
-    ) {
-        let mut sig_items: Signature = Vec::with_capacity(module_aliases.len());
-        for (short_name, internal_name) in module_aliases {
-            sig_items.push(SignatureItem::SigModule(
-                Ident::create_persistent(short_name.as_str()),
-                ModuleDeclaration {
-                    md_type: ModuleType::MtyAlias(
-                        AliasPresence::MtaPresent,
-                        Path::Pident(Ident::create_persistent(internal_name.as_str())),
-                    ),
-                    md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
-                    md_path: None,
-                },
-                RecStatus::TrecNot,
-            ));
-        }
-
-        // Record alias rewrites (e.g., "Foo-MyApp" → Pdot(Pident("MyApp"), "Foo"))
-        let module_path = Path::Pident(Ident::create_persistent(namespace_name));
-        collect_alias_rewrites(&sig_items, &module_path, &mut self.alias_prefix_rewrites);
-
-        let ps = PersStruct {
-            ps_name: namespace_name.to_string(),
-            ps_sig: sig_items,
-            ps_filename: format!("{}.mlmap", namespace_name),
-        };
-        self.cache.insert(namespace_name.to_string(), Some(ps));
-        self.renamed_sig_cache.remove(namespace_name);
-    }
-
-    /// Look up in-memory module info by name.
-    pub fn get_in_memory_module(&self, name: &str) -> Option<&InMemoryModuleInfo> {
-        self.in_memory_modules.get(name)
-    }
-
-    /// Check whether a module is registered in the in-memory registry.
-    pub fn has_in_memory_module(&self, name: &str) -> bool {
-        self.in_memory_modules.contains_key(name)
-    }
-
-    /// Enable in-process mode: all module resolution uses the in-memory
-    /// registry only, with no disk fallbacks for `.ast`, `.cmj`, or `.cmi`.
-    pub fn set_in_process_mode(&mut self, enabled: bool) {
-        self.in_process_mode = enabled;
-    }
-
-    /// Whether in-process mode is active.
-    pub fn is_in_process_mode(&self) -> bool {
-        self.in_process_mode
     }
 }
 
@@ -1106,43 +652,6 @@ fn find_in_path(load_path: &[PathBuf], filename: &str) -> Option<String> {
         }
     }
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::context::IdGenerator;
-    use tempfile::tempdir;
-
-    #[test]
-    fn in_process_ignores_bogus_cmi_on_load_path() {
-        let tmp = tempdir().expect("failed to create tempdir");
-        let load_path = tmp.path().join("lib").join("ocaml");
-        std::fs::create_dir_all(&load_path).expect("failed to create load path");
-        std::fs::write(load_path.join("Foo.cmi"), b"bogus cmi").expect("failed to write bogus cmi");
-
-        let source_path = tmp.path().join("Foo.res");
-        std::fs::write(&source_path, "let answer = 1\n").expect("failed to write source");
-
-        let id_gen = IdGenerator::new();
-        let type_ctx = TypeContext::new(&id_gen);
-
-        let mut env = PersistentEnv::new();
-        env.set_in_process_mode(true);
-        env.set_nopervasives(true);
-        env.add_load_path(load_path);
-        Arc::make_mut(&mut env.source_fallback_paths).insert("Foo".to_string(), source_path);
-
-        let loaded = env
-            .find_pers_struct("Foo", &type_ctx)
-            .expect("expected source fallback to load Foo");
-        assert_eq!(loaded.ps_name, "Foo");
-
-        let raw_sig = env
-            .read_raw_sig("Foo", &type_ctx)
-            .expect("expected raw signature from in-memory source load");
-        assert!(!raw_sig.is_empty());
-    }
 }
 
 fn read_marshaled_cmj(path: &FsPath) -> Option<OcamlValue> {
@@ -2061,7 +1570,7 @@ pub fn substitute_type_expr_path_pub(
 }
 
 fn substitute_type_expr_path(
-    initial_ty_ref: TypeExprRef,
+    ty_ref: TypeExprRef,
     type_stamp_map: &HashMap<i32, Path>,
     type_name_map: &HashMap<String, Path>,
     module_stamp_map: &HashMap<i32, Path>,
@@ -2069,104 +1578,220 @@ fn substitute_type_expr_path(
     ctx: &TypeContext<'_>,
     visited: &mut HashSet<usize>,
 ) {
-    // Use an explicit work stack instead of recursion to avoid stack overflow
-    // on large type graphs (e.g., objects with hundreds of fields create deep
-    // Tfield chains, and Tlink chains from unification can be thousands deep).
-    let mut work_stack = vec![initial_ty_ref];
+    if !visited.insert(ty_ref.0) {
+        return; // Already visited (cycle detection)
+    }
 
-    while let Some(ty_ref) = work_stack.pop() {
-        if !visited.insert(ty_ref.0) {
-            continue; // Already visited (cycle detection)
-        }
+    let desc = ctx.get_desc(ty_ref);
 
-        let desc = ctx.get_desc(ty_ref);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            let new_path = substitute_type_path(
+                path,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+            );
+            if new_path != *path {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
+                    *path = new_path;
+                }
+                ctx.set_desc(ty_ref, new_desc);
+            }
 
-        match &*desc {
-            TypeDesc::Tconstr { path, args, .. } => {
-                let new_path = substitute_type_path(
-                    path,
+            // Recurse into type arguments
+            for &arg in args {
+                substitute_type_expr_path(
+                    arg,
                     type_stamp_map,
                     type_name_map,
                     module_stamp_map,
                     module_name_map,
+                    ctx,
+                    visited,
                 );
-                if new_path != *path {
-                    let mut new_desc = (*desc).clone();
-                    if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
-                        *path = new_path;
-                    }
-                    ctx.set_desc(ty_ref, new_desc);
-                }
-
-                // Push type arguments onto work stack
-                for &arg in args {
-                    work_stack.push(arg);
-                }
             }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                work_stack.push(arg.typ);
-                work_stack.push(*ret);
-            }
-            TypeDesc::Ttuple(types) => {
-                for &t in types {
-                    work_stack.push(t);
-                }
-            }
-            TypeDesc::Tlink(t) | TypeDesc::Tsubst(t) => {
-                work_stack.push(*t);
-            }
-            TypeDesc::Tpoly { body, vars } => {
-                work_stack.push(*body);
-                for &v in vars {
-                    work_stack.push(v);
-                }
-            }
-            TypeDesc::Tobject { fields, .. } => {
-                work_stack.push(*fields);
-            }
-            TypeDesc::Tfield { typ, rest, .. } => {
-                work_stack.push(*typ);
-                work_stack.push(*rest);
-            }
-            TypeDesc::Tvariant(row) => {
-                work_stack.push(row.row_more);
-                for field in &row.row_fields {
-                    match &field.1 {
-                        crate::types::type_expr::RowField::Rpresent(Some(t)) => {
-                            work_stack.push(*t);
-                        }
-                        crate::types::type_expr::RowField::Reither { types, .. } => {
-                            for &t in types {
-                                work_stack.push(t);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            TypeDesc::Tpackage { path, args, .. } => {
-                // Package paths are module-type paths; OCaml substitutes these through
-                // `Subst.modtype`, not just module substitution.
-                let new_path = substitute_type_path(
-                    path,
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            substitute_type_expr_path(
+                arg.typ,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
+            substitute_type_expr_path(
+                *ret,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
+        }
+        TypeDesc::Ttuple(types) => {
+            for &t in types {
+                substitute_type_expr_path(
+                    t,
                     type_stamp_map,
                     type_name_map,
                     module_stamp_map,
                     module_name_map,
+                    ctx,
+                    visited,
                 );
-                if new_path != *path {
-                    let mut new_desc = (*desc).clone();
-                    if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
-                        *path = new_path;
+            }
+        }
+        TypeDesc::Tlink(t) => {
+            substitute_type_expr_path(
+                *t,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
+        }
+        TypeDesc::Tsubst(t) => {
+            substitute_type_expr_path(
+                *t,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            substitute_type_expr_path(
+                *body,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
+            for &v in vars {
+                substitute_type_expr_path(
+                    v,
+                    type_stamp_map,
+                    type_name_map,
+                    module_stamp_map,
+                    module_name_map,
+                    ctx,
+                    visited,
+                );
+            }
+        }
+        TypeDesc::Tobject { fields, .. } => {
+            substitute_type_expr_path(
+                *fields,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            substitute_type_expr_path(
+                *typ,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
+            substitute_type_expr_path(
+                *rest,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
+        }
+        TypeDesc::Tvariant(row) => {
+            substitute_type_expr_path(
+                row.row_more,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
+            for field in &row.row_fields {
+                match &field.1 {
+                    crate::types::type_expr::RowField::Rpresent(Some(t)) => {
+                        substitute_type_expr_path(
+                            *t,
+                            type_stamp_map,
+                            type_name_map,
+                            module_stamp_map,
+                            module_name_map,
+                            ctx,
+                            visited,
+                        );
                     }
-                    ctx.set_desc(ty_ref, new_desc);
-                }
-                for &arg in args {
-                    work_stack.push(arg);
+                    crate::types::type_expr::RowField::Reither { types, .. } => {
+                        for &t in types {
+                            substitute_type_expr_path(
+                                t,
+                                type_stamp_map,
+                                type_name_map,
+                                module_stamp_map,
+                                module_name_map,
+                                ctx,
+                                visited,
+                            );
+                        }
+                    }
+                    _ => {}
                 }
             }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
         }
+        TypeDesc::Tpackage { path, args, .. } => {
+            // Package paths are module-type paths; OCaml substitutes these through
+            // `Subst.modtype`, not just module substitution.
+            let new_path = substitute_type_path(
+                path,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+            );
+            if new_path != *path {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
+                    *path = new_path;
+                }
+                ctx.set_desc(ty_ref, new_desc);
+            }
+            for &arg in args {
+                substitute_type_expr_path(
+                    arg,
+                    type_stamp_map,
+                    type_name_map,
+                    module_stamp_map,
+                    module_name_map,
+                    ctx,
+                    visited,
+                );
+            }
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
     }
 }
 
@@ -3208,87 +2833,81 @@ fn add_signature_to_env_with_options(
 
     fn collect_target_constr_nodes(
         ctx: &TypeContext<'_>,
-        initial_ty: TypeExprRef,
+        ty: TypeExprRef,
         out: &mut Vec<(TypeExprRef, String)>,
         seen: &mut HashSet<TypeExprRef>,
     ) {
-        // Use an explicit work stack to avoid stack overflow on large type
-        // graphs (e.g., objects with hundreds of fields create deep Tfield chains).
-        let mut work_stack = vec![initial_ty];
-
-        while let Some(raw_ty) = work_stack.pop() {
-            let ty = ctx.repr(raw_ty);
-            if !seen.insert(ty) {
-                continue;
+        let ty = ctx.repr(ty);
+        if !seen.insert(ty) {
+            return;
+        }
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => {
+                let path_name = path.name();
+                if path_name == "React.element"
+                    || path_name == "Jsx.element"
+                    || path.last() == "element"
+                    || path.last() == "someElement"
+                {
+                    out.push((ty, path_name));
+                }
+                for arg in args {
+                    collect_target_constr_nodes(ctx, *arg, out, seen);
+                }
             }
-            let desc = ctx.get_desc(ty);
-            match &*desc {
-                TypeDesc::Tconstr { path, args, .. } => {
-                    let path_name = path.name();
-                    if path_name == "React.element"
-                        || path_name == "Jsx.element"
-                        || path.last() == "element"
-                        || path.last() == "someElement"
-                    {
-                        out.push((ty, path_name));
-                    }
-                    for arg in args {
-                        work_stack.push(*arg);
-                    }
-                }
-                TypeDesc::Tarrow { arg, ret, .. } => {
-                    work_stack.push(arg.typ);
-                    work_stack.push(*ret);
-                }
-                TypeDesc::Ttuple(items) => {
-                    for item in items {
-                        work_stack.push(*item);
-                    }
-                }
-                TypeDesc::Tobject { fields, name } => {
-                    work_stack.push(*fields);
-                    if let Some((_path, args)) = name {
-                        for arg in args {
-                            work_stack.push(*arg);
-                        }
-                    }
-                }
-                TypeDesc::Tfield { typ, rest, .. } => {
-                    work_stack.push(*typ);
-                    work_stack.push(*rest);
-                }
-                TypeDesc::Tpoly { body, vars } => {
-                    work_stack.push(*body);
-                    for var in vars {
-                        work_stack.push(*var);
-                    }
-                }
-                TypeDesc::Tvariant(row) => {
-                    work_stack.push(row.row_more);
-                    for (_label, field) in &row.row_fields {
-                        match field {
-                            crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
-                                work_stack.push(*ty);
-                            }
-                            crate::types::type_expr::RowField::Reither { types, .. } => {
-                                for ty in types {
-                                    work_stack.push(*ty);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                TypeDesc::Tpackage { args, .. } => {
-                    for arg in args {
-                        work_stack.push(*arg);
-                    }
-                }
-                TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-                    work_stack.push(*target);
-                }
-                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                collect_target_constr_nodes(ctx, arg.typ, out, seen);
+                collect_target_constr_nodes(ctx, *ret, out, seen);
             }
+            TypeDesc::Ttuple(items) => {
+                for item in items {
+                    collect_target_constr_nodes(ctx, *item, out, seen);
+                }
+            }
+            TypeDesc::Tobject { fields, name } => {
+                collect_target_constr_nodes(ctx, *fields, out, seen);
+                if let Some((_path, args)) = name {
+                    for arg in args {
+                        collect_target_constr_nodes(ctx, *arg, out, seen);
+                    }
+                }
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                collect_target_constr_nodes(ctx, *typ, out, seen);
+                collect_target_constr_nodes(ctx, *rest, out, seen);
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                collect_target_constr_nodes(ctx, *body, out, seen);
+                for var in vars {
+                    collect_target_constr_nodes(ctx, *var, out, seen);
+                }
+            }
+            TypeDesc::Tvariant(row) => {
+                collect_target_constr_nodes(ctx, row.row_more, out, seen);
+                for (_label, field) in &row.row_fields {
+                    match field {
+                        crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
+                            collect_target_constr_nodes(ctx, *ty, out, seen);
+                        }
+                        crate::types::type_expr::RowField::Reither { types, .. } => {
+                            for ty in types {
+                                collect_target_constr_nodes(ctx, *ty, out, seen);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TypeDesc::Tpackage { args, .. } => {
+                for arg in args {
+                    collect_target_constr_nodes(ctx, *arg, out, seen);
+                }
+            }
+            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+                collect_target_constr_nodes(ctx, *target, out, seen);
+            }
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
         }
     }
 

@@ -6102,39 +6102,30 @@ pub fn copy_type_deep(
             new_ty
         }
         TypeDesc::Ttuple(types) => {
-            let placeholder = ctx.new_var(None);
-            cache.insert(ty, placeholder);
             let new_types: Vec<_> = types
                 .iter()
                 .map(|t| copy_type_deep(ctx, *t, cache))
                 .collect();
             let result = ctx.new_tuple(new_types);
-            ctx.set_desc(placeholder, TypeDesc::Tlink(result));
             cache.insert(ty, result);
             result
         }
         TypeDesc::Tconstr { path, args, .. } => {
-            let placeholder = ctx.new_var(None);
-            cache.insert(ty, placeholder);
             let new_args: Vec<_> = args
                 .iter()
                 .map(|t| copy_type_deep(ctx, *t, cache))
                 .collect();
             let result = ctx.new_constr(path.clone(), new_args);
-            ctx.set_desc(placeholder, TypeDesc::Tlink(result));
             cache.insert(ty, result);
             result
         }
         TypeDesc::Tpoly { body, vars } => {
-            let placeholder = ctx.new_var(None);
-            cache.insert(ty, placeholder);
             let new_vars: Vec<_> = vars
                 .iter()
                 .map(|t| copy_type_deep(ctx, *t, cache))
                 .collect();
             let new_body = copy_type_deep(ctx, *body, cache);
             let result = ctx.new_poly(new_body, new_vars);
-            ctx.set_desc(placeholder, TypeDesc::Tlink(result));
             cache.insert(ty, result);
             result
         }
@@ -6238,22 +6229,10 @@ pub fn copy_type_deep(
             cache.insert(ty, result);
             result
         }
-        TypeDesc::Tsubst(target) | TypeDesc::Tlink(target) => {
-            let placeholder = ctx.new_var(None);
-            cache.insert(ty, placeholder);
-            let result = copy_type_deep(ctx, *target, cache);
-            if result != placeholder {
-                ctx.set_desc(placeholder, TypeDesc::Tlink(result));
-                cache.insert(ty, result);
-                result
-            } else {
-                placeholder
-            }
-        }
+        TypeDesc::Tsubst(target) => copy_type_deep(ctx, *target, cache),
+        TypeDesc::Tlink(target) => copy_type_deep(ctx, *target, cache),
         TypeDesc::Tnil | TypeDesc::Tunivar(_) => ty, // Return as-is
         TypeDesc::Tpackage { path, lids, args } => {
-            let placeholder = ctx.new_var(None);
-            cache.insert(ty, placeholder);
             let new_args: Vec<_> = args
                 .iter()
                 .map(|t| copy_type_deep(ctx, *t, cache))
@@ -6263,7 +6242,6 @@ pub fn copy_type_deep(
                 lids: lids.clone(),
                 args: new_args,
             });
-            ctx.set_desc(placeholder, TypeDesc::Tlink(result));
             cache.insert(ty, result);
             result
         }
@@ -7806,21 +7784,5 @@ mod tests {
             &*ctx.get_desc(original_manifest),
             TypeDesc::Tconstr { path, .. } if matches!(path, crate::types::Path::Pident(id) if id.name() == "u")
         ));
-    }
-
-    #[test]
-    fn test_copy_type_deep_handles_link_subst_cycles() {
-        let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
-
-        let link = ctx.new_var(None);
-        let subst = ctx.new_type(TypeDesc::Tsubst(link));
-        ctx.set_desc(link, TypeDesc::Tlink(subst));
-
-        let mut cache = HashMap::new();
-        let copied = copy_type_deep(&ctx, link, &mut cache);
-
-        assert_ne!(copied, link);
-        assert_eq!(ctx.repr(copied), copied);
     }
 }

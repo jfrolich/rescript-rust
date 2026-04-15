@@ -4273,9 +4273,6 @@ pub fn type_expect<'a>(
 ) -> TypeCoreResult<Expression> {
     use crate::parser::ast::ExpressionDesc as ED;
 
-    let _depth_guard = super::context::TypecheckerDepthGuard::enter()
-        .map_err(|msg| super::TypeCoreError::Other(msg))?;
-
     let loc = expr.pexp_loc.clone();
     let ctx = tctx.type_ctx;
     let exp_env_ref = ctx.store_typed_env(env);
@@ -11714,24 +11711,17 @@ fn inline_record_decl_from_variant_type<'a>(
                 return None;
             };
             let inline_params = inline_record_type_params(ctx, &type_decl.type_params, labels);
-            // For @unboxed types, the inline record uses RecordUnboxed representation
-            // (matching OCaml's datarepr.ml which sets Record_unboxed when type_unboxed.unboxed)
-            let inline_repr = if type_decl.type_unboxed.unboxed {
-                crate::types::RecordRepresentation::RecordUnboxed(false)
-            } else {
-                crate::types::RecordRepresentation::RecordInlined {
-                    tag: block_tag,
-                    name: cstr_name.to_string(),
-                    num_nonconsts,
-                    attrs: cd.cd_attributes.clone(),
-                }
-            };
             return Some(crate::types::TypeDeclaration {
                 type_params: inline_params.clone(),
                 type_arity: inline_params.len() as i32,
                 type_kind: crate::types::TypeKind::TypeRecord(
                     labels.clone(),
-                    inline_repr,
+                    crate::types::RecordRepresentation::RecordInlined {
+                        tag: block_tag,
+                        name: cstr_name.to_string(),
+                        num_nonconsts,
+                        attrs: cd.cd_attributes.clone(),
+                    },
                 ),
                 type_private: type_decl.type_private,
                 type_manifest: None,
@@ -16392,23 +16382,17 @@ fn lookup_constructor_in_module<'b>(
                                             Path::pdot(type_path.clone(), cstr_name.to_string());
                                         let inline_constr = ctx
                                             .new_generic_constr(inline_path, inline_params.clone());
-                                        // For @unboxed types, inline record uses RecordUnboxed
-                                        let inline_repr_cmi = if type_decl.type_unboxed.unboxed {
-                                            crate::types::RecordRepresentation::RecordUnboxed(false)
-                                        } else {
-                                            crate::types::RecordRepresentation::RecordInlined {
-                                                tag: block_idx,
-                                                name: cstr_name.to_string(),
-                                                num_nonconsts,
-                                                attrs: cd.cd_attributes.clone(),
-                                            }
-                                        };
                                         let inline_decl = crate::types::TypeDeclaration {
                                             type_params: inline_params.clone(),
                                             type_arity: inline_params.len() as i32,
                                             type_kind: crate::types::TypeKind::TypeRecord(
                                                 labels.clone(),
-                                                inline_repr_cmi,
+                                                crate::types::RecordRepresentation::RecordInlined {
+                                                    tag: block_idx,
+                                                    name: cstr_name.to_string(),
+                                                    num_nonconsts,
+                                                    attrs: cd.cd_attributes.clone(),
+                                                },
                                             ),
                                             type_private: type_decl.type_private,
                                             type_manifest: None,
@@ -18482,23 +18466,17 @@ fn lookup_constructor_by_expected_type<'b>(
                             Path::pdot(result_type_path.clone(), cstr_name.to_string());
                         let inline_constr =
                             ctx.new_generic_constr(inline_path, inline_params.clone());
-                        // For @unboxed types, inline record uses RecordUnboxed
-                        let inline_repr_mod = if concrete_type_decl.type_unboxed.unboxed {
-                            crate::types::RecordRepresentation::RecordUnboxed(false)
-                        } else {
-                            crate::types::RecordRepresentation::RecordInlined {
-                                tag: block_idx,
-                                name: cstr_name.to_string(),
-                                num_nonconsts,
-                                attrs: cd.cd_attributes.clone(),
-                            }
-                        };
                         let inline_decl = crate::types::TypeDeclaration {
                             type_params: inline_params.clone(),
                             type_arity: inline_params.len() as i32,
                             type_kind: crate::types::TypeKind::TypeRecord(
                                 copied_labels,
-                                inline_repr_mod,
+                                crate::types::RecordRepresentation::RecordInlined {
+                                    tag: block_idx,
+                                    name: cstr_name.to_string(),
+                                    num_nonconsts,
+                                    attrs: cd.cd_attributes.clone(),
+                                },
                             ),
                             type_private: concrete_type_decl.type_private,
                             type_manifest: None,
@@ -19917,23 +19895,17 @@ fn lookup_type_decl_for_path<'a>(
                         {
                             let inline_params =
                                 inline_record_type_params(ctx, &parent_decl.type_params, labels);
-                            // For @unboxed types, inline record uses RecordUnboxed
-                            let inline_repr_path = if parent_decl.type_unboxed.unboxed {
-                                crate::types::RecordRepresentation::RecordUnboxed(false)
-                            } else {
-                                crate::types::RecordRepresentation::RecordInlined {
-                                    tag: block_idx,
-                                    name: type_name.to_string(),
-                                    num_nonconsts,
-                                    attrs: cd.cd_attributes.clone(),
-                                }
-                            };
                             return Some(crate::types::TypeDeclaration {
                                 type_params: inline_params.clone(),
                                 type_arity: inline_params.len() as i32,
                                 type_kind: crate::types::TypeKind::TypeRecord(
                                     labels.clone(),
-                                    inline_repr_path,
+                                    crate::types::RecordRepresentation::RecordInlined {
+                                        tag: block_idx,
+                                        name: type_name.to_string(),
+                                        num_nonconsts,
+                                        attrs: cd.cd_attributes.clone(),
+                                    },
                                 ),
                                 type_private: parent_decl.type_private,
                                 type_manifest: None,

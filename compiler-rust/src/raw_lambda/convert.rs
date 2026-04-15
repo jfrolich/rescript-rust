@@ -3298,7 +3298,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     /// Resolve the runtime field position of a name within a module's signature.
     fn resolve_field_position_in_module(
-        &mut self,
+        &self,
         env: &crate::types::env::Env,
         module_path: &crate::types::Path,
         field_name: &str,
@@ -3313,7 +3313,7 @@ impl<'a> RawLambdaConverter<'a> {
                 // For persistent modules (Belt_Id, etc.), try the persistent env
                 if let crate::types::Path::Pident(id) = module_path {
                     if id.is_persistent() || id.is_global() {
-                        if let Some(ref mut pers) = self.persistent_env {
+                        if let Some(ref pers) = self.persistent_env {
                             let sig = pers.read_raw_sig(id.name(), self.type_ctx)?;
                             return Some(ModuleType::MtySignature(sig));
                         }

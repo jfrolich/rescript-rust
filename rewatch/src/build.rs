@@ -112,18 +112,12 @@ pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
     Ok(result)
 }
 
-pub fn get_compiler_info(project_context: &ProjectContext, build_mode: BuildMode) -> Result<CompilerInfo> {
-    let (bsc_path, bsc_hash) = if build_mode.is_in_process() {
-        // In --in-process mode, bsc is not needed
-        (None, None)
-    } else {
-        let path = helpers::get_bsc();
-        let hash = helpers::compute_file_hash(&path).ok_or(anyhow!(
-            "Failed to compute bsc hash for {}",
-            path.to_string_lossy()
-        ))?;
-        (Some(path), Some(hash))
-    };
+pub fn get_compiler_info(project_context: &ProjectContext) -> Result<CompilerInfo> {
+    let bsc_path = helpers::get_bsc();
+    let bsc_hash = helpers::compute_file_hash(&bsc_path).ok_or(anyhow!(
+        "Failed to compute bsc hash for {}",
+        bsc_path.to_string_lossy()
+    ))?;
     let runtime_path = compile::get_runtime_path(&project_context.current_config, project_context)?;
     Ok(CompilerInfo {
         bsc_path,
@@ -139,30 +133,25 @@ pub fn initialize_build(
     path: &Path,
     plain_output: bool,
     warn_error: Option<String>,
-    build_mode: build_types::BuildMode,
+    use_rust_parser: bool,
     subprocess: bool,
     dump_typed_sexp: bool,
 ) -> Result<BuildCommandState> {
     let project_context = ProjectContext::new(path)?;
-    let compiler = get_compiler_info(&project_context, build_mode)?;
+    let compiler = get_compiler_info(&project_context)?;
 
     let timing_clean_start = Instant::now();
     let packages = packages::make(filter, &project_context, show_progress)?;
 
-    // In --in-process mode, skip compiler-info verification (no disk assets to invalidate).
-    let compiler_check = if build_mode.is_in_process() {
-        CompilerCheckResult::SameCompilerAsLastRun
-    } else {
-        verify_compiler_info(&packages, &compiler)
-    };
+    let compiler_check = verify_compiler_info(&packages, &compiler);
 
     if !packages::validate_packages_dependencies(&packages) {
         return Err(anyhow!("Failed to validate package dependencies"));
     }
 
     let mut build_state =
-        BuildCommandState::new(project_context, packages, compiler, warn_error, build_mode, subprocess, dump_typed_sexp);
-    packages::parse_packages(&mut build_state, build_mode.is_in_process())?;
+        BuildCommandState::new(project_context, packages, compiler, warn_error, use_rust_parser, subprocess, dump_typed_sexp);
+    packages::parse_packages(&mut build_state)?;
 
     let compile_assets_state = read_compile_state::read(&mut build_state)?;
 
@@ -253,10 +242,7 @@ pub fn incremental_build(
     create_sourcedirs: bool,
     plain_output: bool,
 ) -> Result<(), IncrementalBuildError> {
-    // In --in-process mode, skip .compiler.log creation (no disk metadata).
-    if !build_state.build_mode().is_in_process() {
-        logs::initialize(&build_state.packages);
-    }
+    logs::initialize(&build_state.packages);
 
     // When dump_typed_sexp is set, force all modules parse_dirty and compile_dirty
     // so every file gets re-parsed (to store AST) and sexp-dumped
@@ -303,9 +289,7 @@ pub fn incremental_build(
             warnings
         }
         Err(err) => {
-            if !build_state.build_mode().is_in_process() {
-                logs::finalize(&build_state.packages);
-            }
+            logs::finalize(&build_state.packages);
 
             if !plain_output && show_progress {
                 eprintln!(
@@ -388,10 +372,8 @@ pub fn incremental_build(
 
     let compile_duration = start_compiling.elapsed();
 
-    if !build_state.build_mode().is_in_process() {
-        logs::finalize(&build_state.packages);
-    }
-    if create_sourcedirs && !build_state.build_mode().is_in_process() {
+    logs::finalize(&build_state.packages);
+    if create_sourcedirs {
         sourcedirs::print(build_state);
     }
     pb.finish();
@@ -447,9 +429,7 @@ pub fn incremental_build(
         }
 
         // Write per-package compiler metadata to `lib/bs/compiler-info.json` (idempotent)
-        if !build_state.build_mode().is_in_process() {
-            write_compiler_info(build_state);
-        }
+        write_compiler_info(build_state);
 
         Ok(())
     }
@@ -543,7 +523,7 @@ pub fn build(
     create_sourcedirs: bool,
     plain_output: bool,
     warn_error: Option<String>,
-    build_mode: build_types::BuildMode,
+    use_rust_parser: bool,
     subprocess: bool,
     dump_typed_sexp: bool,
 ) -> Result<BuildCommandState> {
@@ -560,7 +540,7 @@ pub fn build(
         path,
         plain_output,
         warn_error,
-        build_mode,
+        use_rust_parser,
         subprocess,
         dump_typed_sexp,
     )
@@ -585,17 +565,13 @@ pub fn build(
                     default_timing.unwrap_or(timing_total_elapsed).as_secs_f64()
                 );
             }
-            if !build_state.build_mode().is_in_process() {
-                clean::cleanup_after_build(&build_state);
-                write_build_ninja(&build_state);
-            }
+            clean::cleanup_after_build(&build_state);
+            write_build_ninja(&build_state);
             Ok(build_state)
         }
         Err(e) => {
-            if !build_state.build_mode().is_in_process() {
-                clean::cleanup_after_build(&build_state);
-                write_build_ninja(&build_state);
-            }
+            clean::cleanup_after_build(&build_state);
+            write_build_ninja(&build_state);
             Err(anyhow!("Incremental build failed. Error: {e}"))
         }
     }

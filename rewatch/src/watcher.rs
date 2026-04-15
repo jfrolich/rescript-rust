@@ -66,7 +66,7 @@ struct AsyncWatchArgs<'a> {
     create_sourcedirs: bool,
     plain_output: bool,
     warn_error: Option<String>,
-    build_mode: build::build_types::BuildMode,
+    use_rust_parser: bool,
     subprocess: bool,
     dump_typed_sexp: bool,
 }
@@ -81,7 +81,7 @@ async fn async_watch(
         create_sourcedirs,
         plain_output,
         warn_error,
-        build_mode,
+        use_rust_parser,
         subprocess,
         dump_typed_sexp,
     }: AsyncWatchArgs<'_>,
@@ -93,7 +93,7 @@ async fn async_watch(
         path,
         plain_output,
         warn_error,
-        build_mode,
+        use_rust_parser,
         subprocess,
         dump_typed_sexp,
     )
@@ -293,7 +293,7 @@ async fn async_watch(
                     path,
                     plain_output,
                     build_state.get_warn_error_override(),
-                    build_state.build_mode(),
+                    build_state.use_rust_parser(),
                     build_state.subprocess(),
                     build_state.dump_typed_sexp,
                 )
@@ -343,7 +343,7 @@ pub fn start(
     create_sourcedirs: bool,
     plain_output: bool,
     warn_error: Option<String>,
-    build_mode: build::build_types::BuildMode,
+    use_rust_parser: bool,
     subprocess: bool,
     dump_typed_sexp: bool,
 ) -> Result<()> {
@@ -372,7 +372,7 @@ pub fn start(
             create_sourcedirs,
             plain_output,
             warn_error: warn_error.clone(),
-            build_mode,
+            use_rust_parser,
             subprocess,
             dump_typed_sexp,
         })

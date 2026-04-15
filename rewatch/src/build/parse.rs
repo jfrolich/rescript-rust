@@ -11,7 +11,6 @@ use anyhow::{Context, anyhow};
 use log::debug;
 use rayon::prelude::*;
 use rescript_compiler::binary_ast::{
-    Dependencies, extract_signature_deps, extract_structure_deps,
     write_signature_ast_current_with_extra_deps, write_structure_ast_current_with_extra_deps,
 };
 use rescript_compiler::parser::{Parser, code_frame, jsx_ppx, let_unwrap_ppx, module};
@@ -26,7 +25,6 @@ pub fn generate_asts(
     let mut has_failure = false;
     let mut stderr = "".to_string();
     let use_rust_parser = build_state.use_rust_parser();
-    let in_process = build_state.build_mode().is_in_process();
     let store_ast = build_state.dump_typed_sexp() && use_rust_parser;
 
     build_state
@@ -42,7 +40,7 @@ pub fn generate_asts(
                     let path = package.get_mlmap_path();
                     (
                         module_name.to_owned(),
-                        Ok((Path::new(&path).to_path_buf(), None, None, None)),
+                        Ok((Path::new(&path).to_path_buf(), None, None)),
                         Ok(None),
                         false,
                     )
@@ -64,7 +62,6 @@ pub fn generate_asts(
                             build_state.get_warn_error_override(),
                             use_rust_parser,
                             store_ast,
-                            in_process,
                         )
                         .map_err(|e| e.to_string());
 
@@ -77,7 +74,6 @@ pub fn generate_asts(
                                     build_state.get_warn_error_override(),
                                     use_rust_parser,
                                     store_ast,
-                                    in_process,
                                 ) {
                                     Ok(v) => Ok(Some(v)),
                                     Err(e) => Err(e.to_string()),
@@ -94,12 +90,10 @@ pub fn generate_asts(
                                     .with_extension("ast"),
                                 None,
                                 None,
-                                None,
                             )),
                             Ok(source_file.interface.as_ref().map(|i| {
                                 (
                                     PathBuf::from(helpers::get_basename(&i.path)).with_extension("iast"),
-                                    None,
                                     None,
                                     None,
                                 )
@@ -114,8 +108,8 @@ pub fn generate_asts(
         })
         .collect::<Vec<(
             String,
-            Result<(PathBuf, Option<helpers::StdErr>, Option<super::build_types::StoredAst>, Option<Dependencies>), String>,
-            Result<Option<(PathBuf, Option<helpers::StdErr>, Option<super::build_types::StoredAst>, Option<Dependencies>)>, String>,
+            Result<(PathBuf, Option<helpers::StdErr>, Option<super::build_types::StoredAst>), String>,
+            Result<Option<(PathBuf, Option<helpers::StdErr>, Option<super::build_types::StoredAst>)>, String>,
             bool,
         )>>()
         .into_iter()
@@ -152,7 +146,7 @@ pub fn generate_asts(
                         // In case of an internal dependency, we want to keep on
                         // propagating the warning with every compile. So we mark it as dirty for
                         // the next round
-                        Ok((_path, Some(stderr_warnings), stored_ast, deps)) if package.is_local_dep => {
+                        Ok((_path, Some(stderr_warnings), stored_ast)) if package.is_local_dep => {
                             source_file.implementation.parse_state = ParseState::Warning;
                             source_file.implementation.parse_dirty = true;
                             logs::append(package, &stderr_warnings);
@@ -160,18 +154,12 @@ pub fn generate_asts(
                             if let Some(ast) = stored_ast {
                                 build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:impl"), ast);
                             }
-                            if let Some(deps) = deps {
-                                build_state.in_memory_deps.lock().unwrap().insert(format!("{module_name}:impl"), deps);
-                            }
                         }
-                        Ok((_path, Some(_), stored_ast, deps)) | Ok((_path, None, stored_ast, deps)) => {
+                        Ok((_path, Some(_), stored_ast)) | Ok((_path, None, stored_ast)) => {
                             source_file.implementation.parse_state = ParseState::Success;
                             source_file.implementation.parse_dirty = false;
                             if let Some(ast) = stored_ast {
                                 build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:impl"), ast);
-                            }
-                            if let Some(deps) = deps {
-                                build_state.in_memory_deps.lock().unwrap().insert(format!("{module_name}:impl"), deps);
                             }
                         }
                         Err(err) => {
@@ -190,7 +178,7 @@ pub fn generate_asts(
                         // In case of an internal dependency, we want to keep on
                         // propagating the warning with every compile. So we mark it as dirty for
                         // the next round
-                        Ok(Some((_path, Some(stderr_warnings), stored_ast, deps))) if package.is_local_dep => {
+                        Ok(Some((_path, Some(stderr_warnings), stored_ast))) if package.is_local_dep => {
                             if let Some(interface) = source_file.interface.as_mut() {
                                 interface.parse_state = ParseState::Warning;
                                 interface.parse_dirty = true;
@@ -200,20 +188,14 @@ pub fn generate_asts(
                             if let Some(ast) = stored_ast {
                                 build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:intf"), ast);
                             }
-                            if let Some(deps) = deps {
-                                build_state.in_memory_deps.lock().unwrap().insert(format!("{module_name}:intf"), deps);
-                            }
                         }
-                        Ok(Some((_, None, stored_ast, deps))) | Ok(Some((_, Some(_), stored_ast, deps))) => {
+                        Ok(Some((_, None, stored_ast))) | Ok(Some((_, Some(_), stored_ast))) => {
                             if let Some(interface) = source_file.interface.as_mut() {
                                 interface.parse_state = ParseState::Success;
                                 interface.parse_dirty = false;
                             }
                             if let Some(ast) = stored_ast {
                                 build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:intf"), ast);
-                            }
-                            if let Some(deps) = deps {
-                                build_state.in_memory_deps.lock().unwrap().insert(format!("{module_name}:intf"), deps);
                             }
                         }
                         Err(err) => {
@@ -235,80 +217,76 @@ pub fn generate_asts(
         });
 
     // compile the mlmaps of dirty modules
-    // In --in-process mode, skip bsc subprocess compilation and asset copying entirely.
-    // Namespace signatures are synthesized in-memory at the start of the compile phase.
-    if !build_state.build_mode().is_in_process() {
-        // first collect dirty packages
-        let dirty_packages = build_state
-            .modules
-            .iter()
-            .filter(|(_, module)| module.compile_dirty)
-            .map(|(_, module)| module.package_name.clone())
-            .collect::<AHashSet<String>>();
+    // first collect dirty packages
+    let dirty_packages = build_state
+        .modules
+        .iter()
+        .filter(|(_, module)| module.compile_dirty)
+        .map(|(_, module)| module.package_name.clone())
+        .collect::<AHashSet<String>>();
 
-        // Collect package names first to avoid borrow checker issues
-        let module_package_pairs = build_state.module_name_package_pairs();
+    // Collect package names first to avoid borrow checker issues
+    let module_package_pairs = build_state.module_name_package_pairs();
 
-        for (module_name, package_name) in module_package_pairs {
-            if let Some(module) = build_state.build_state.modules.get_mut(&module_name) {
-                let is_dirty = match &module.source_type {
-                    SourceType::MlMap(_) => {
-                        if dirty_packages.contains(&package_name) {
-                            let package = build_state
-                                .build_state
-                                .packages
-                                .get(&package_name)
-                                .expect("Package not found");
-                            // probably better to do this in a different function
-                            // specific to compiling mlmaps
-                            let compile_path = package.get_mlmap_compile_path();
-                            let mlmap_hash = helpers::compute_file_hash(Path::new(&compile_path));
-                            if let Err(err) = namespaces::compile_mlmap(
-                                &build_state.build_state.project_context,
-                                package,
-                                &module_name,
-                                build_state.build_state.compiler_info.bsc_path.as_ref().expect("bsc_path required for file-based mode"),
-                            ) {
-                                has_failure = true;
-                                stderr.push_str(&format!("{err}\n"));
-                            }
-                            let mlmap_hash_after = helpers::compute_file_hash(Path::new(&compile_path));
-
-                            let suffix = package
-                                .namespace
-                                .to_suffix()
-                                .expect("namespace should be set for mlmap module");
-                            let base_build_path = package.get_build_path().join(&suffix);
-                            let base_ocaml_build_path = package.get_ocaml_build_path().join(&suffix);
-                            let _ = std::fs::copy(
-                                base_build_path.with_extension("cmi"),
-                                base_ocaml_build_path.with_extension("cmi"),
-                            );
-                            let _ = std::fs::copy(
-                                base_build_path.with_extension("cmt"),
-                                base_ocaml_build_path.with_extension("cmt"),
-                            );
-                            let _ = std::fs::copy(
-                                base_build_path.with_extension("cmj"),
-                                base_ocaml_build_path.with_extension("cmj"),
-                            );
-                            let _ = std::fs::copy(
-                                base_build_path.with_extension("mlmap"),
-                                base_ocaml_build_path.with_extension("mlmap"),
-                            );
-                            match (mlmap_hash, mlmap_hash_after) {
-                                (Some(digest), Some(digest_after)) => !digest.eq(&digest_after),
-                                _ => true,
-                            }
-                        } else {
-                            false
+    for (module_name, package_name) in module_package_pairs {
+        if let Some(module) = build_state.build_state.modules.get_mut(&module_name) {
+            let is_dirty = match &module.source_type {
+                SourceType::MlMap(_) => {
+                    if dirty_packages.contains(&package_name) {
+                        let package = build_state
+                            .build_state
+                            .packages
+                            .get(&package_name)
+                            .expect("Package not found");
+                        // probably better to do this in a different function
+                        // specific to compiling mlmaps
+                        let compile_path = package.get_mlmap_compile_path();
+                        let mlmap_hash = helpers::compute_file_hash(Path::new(&compile_path));
+                        if let Err(err) = namespaces::compile_mlmap(
+                            &build_state.build_state.project_context,
+                            package,
+                            &module_name,
+                            &build_state.build_state.compiler_info.bsc_path,
+                        ) {
+                            has_failure = true;
+                            stderr.push_str(&format!("{err}\n"));
                         }
+                        let mlmap_hash_after = helpers::compute_file_hash(Path::new(&compile_path));
+
+                        let suffix = package
+                            .namespace
+                            .to_suffix()
+                            .expect("namespace should be set for mlmap module");
+                        let base_build_path = package.get_build_path().join(&suffix);
+                        let base_ocaml_build_path = package.get_ocaml_build_path().join(&suffix);
+                        let _ = std::fs::copy(
+                            base_build_path.with_extension("cmi"),
+                            base_ocaml_build_path.with_extension("cmi"),
+                        );
+                        let _ = std::fs::copy(
+                            base_build_path.with_extension("cmt"),
+                            base_ocaml_build_path.with_extension("cmt"),
+                        );
+                        let _ = std::fs::copy(
+                            base_build_path.with_extension("cmj"),
+                            base_ocaml_build_path.with_extension("cmj"),
+                        );
+                        let _ = std::fs::copy(
+                            base_build_path.with_extension("mlmap"),
+                            base_ocaml_build_path.with_extension("mlmap"),
+                        );
+                        match (mlmap_hash, mlmap_hash_after) {
+                            (Some(digest), Some(digest_after)) => !digest.eq(&digest_after),
+                            _ => true,
+                        }
+                    } else {
+                        false
                     }
-                    _ => false,
-                };
-                if is_dirty {
-                    module.compile_dirty = is_dirty;
                 }
+                _ => false,
+            };
+            if is_dirty {
+                module.compile_dirty = is_dirty;
             }
         }
     }
@@ -376,8 +354,7 @@ fn generate_ast(
     warn_error_override: Option<String>,
     use_rust_parser: bool,
     store_ast: bool,
-    in_process: bool,
-) -> anyhow::Result<(PathBuf, Option<helpers::StdErr>, Option<super::build_types::StoredAst>, Option<Dependencies>)> {
+) -> anyhow::Result<(PathBuf, Option<helpers::StdErr>, Option<super::build_types::StoredAst>)> {
     let file_path = PathBuf::from(&package.path).join(filename);
     let contents = helpers::read_file(&file_path).expect("Error reading file");
 
@@ -394,12 +371,8 @@ fn generate_ast(
     );
 
     // generate the dir of the ast_path (it mirrors the source file dir)
-    // In --in-process mode, we still create the build dir for consistency
-    // (other code may expect it), but we don't write .ast files.
     let ast_parent_path = package.get_build_path().join(ast_path.parent().unwrap());
-    if !in_process {
-        helpers::create_path(&ast_parent_path);
-    }
+    helpers::create_path(&ast_parent_path);
 
     /* Create .ast */
     let result = if use_rust_parser {
@@ -411,9 +384,8 @@ fn generate_ast(
             jsx_version,
             let_unwrap_enabled,
             store_ast,
-            in_process,
         )
-        .map(|(stderr, stored, deps)| (ast_path.clone(), stderr, stored, deps))
+        .map(|(stderr, stored)| (ast_path.clone(), stderr, stored))
     } else {
         let (_expected_ast_path, parser_args) = parser_args(
             &build_state.project_context,
@@ -425,7 +397,7 @@ fn generate_ast(
         )?;
 
         match Some(
-            Command::new(build_state.compiler_info.bsc_path.as_ref().expect("bsc_path required for file-based mode"))
+            Command::new(&build_state.compiler_info.bsc_path)
                 .current_dir(&build_path_abs)
                 .args(parser_args)
                 .output()
@@ -442,12 +414,12 @@ fn generate_ast(
 
                 if helpers::contains_ascii_characters(&stderr) {
                     if res_to_ast.status.success() {
-                        Ok((ast_path.clone(), Some(stderr.to_string()), None, None))
+                        Ok((ast_path.clone(), Some(stderr.to_string()), None))
                     } else {
                         Err(anyhow!("Error in {}:\n{}", package.name, stderr))
                     }
                 } else {
-                    Ok((ast_path.clone(), None, None, None))
+                    Ok((ast_path.clone(), None, None))
                 }
             }
             _ => {
@@ -461,13 +433,11 @@ fn generate_ast(
             }
         }
     };
-    if !in_process {
-        if let Ok((ast_path, _, _, _)) = &result {
-            let _ = std::fs::copy(
-                Path::new(&build_path_abs).join(ast_path),
-                package.get_ocaml_build_path().join(ast_path.file_name().unwrap()),
-            );
-        }
+    if let Ok((ast_path, _, _)) = &result {
+        let _ = std::fs::copy(
+            Path::new(&build_path_abs).join(ast_path),
+            package.get_ocaml_build_path().join(ast_path.file_name().unwrap()),
+        );
     }
     result
 }
@@ -600,8 +570,7 @@ fn generate_ast_with_rust_parser(
     jsx_version: i32,
     let_unwrap_enabled: bool,
     store_ast: bool,
-    in_process: bool,
-) -> anyhow::Result<(Option<helpers::StdErr>, Option<super::build_types::StoredAst>, Option<Dependencies>)> {
+) -> anyhow::Result<(Option<helpers::StdErr>, Option<super::build_types::StoredAst>)> {
     let bytes =
         std::fs::read(source_file).with_context(|| format!("Failed to read {}", source_file.display()))?;
     let source = source_bytes_to_latin1(&bytes);
@@ -649,41 +618,21 @@ fn generate_ast_with_rust_parser(
         )
         .map_err(|e| anyhow!(e))?;
 
-        if in_process {
-            // In --in-process mode: extract deps without writing to disk.
-            // Apply binary_ast PPX rewrite for accurate dep extraction.
-            let rewritten = rescript_compiler::binary_ast::ppx::rewrite_signature(
-                &signature,
-                parser.arena_mut(),
-            )
-            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
-            let mut deps = extract_signature_deps(parser.arena(), &rewritten);
-            deps.extend(extra_deps.iter().cloned());
+        write_signature_ast_current_with_extra_deps(
+            ast_output_path,
+            source_path_for_ast,
+            parser.arena_mut(),
+            &signature,
+            extra_deps,
+        )
+        .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
 
-            // In --in-process, always store the AST (needed for compilation).
-            let stored = if store_ast {
-                Some(super::build_types::StoredAst::Signature(parser.into_arena(), signature))
-            } else {
-                None
-            };
-            Ok(((!warnings.is_empty()).then_some(warnings), stored, Some(deps)))
+        let stored = if store_ast {
+            Some(super::build_types::StoredAst::Signature(parser.into_arena(), signature))
         } else {
-            write_signature_ast_current_with_extra_deps(
-                ast_output_path,
-                source_path_for_ast,
-                parser.arena_mut(),
-                &signature,
-                extra_deps,
-            )
-            .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
-
-            let stored = if store_ast {
-                Some(super::build_types::StoredAst::Signature(parser.into_arena(), signature))
-            } else {
-                None
-            };
-            Ok(((!warnings.is_empty()).then_some(warnings), stored, None))
-        }
+            None
+        };
+        Ok(((!warnings.is_empty()).then_some(warnings), stored))
     } else {
         let structure = module::parse_structure(&mut parser);
         if parser.has_errors() {
@@ -720,41 +669,21 @@ fn generate_ast_with_rust_parser(
         )
         .map_err(|e| anyhow!(e))?;
 
-        if in_process {
-            // In --in-process mode: extract deps without writing to disk.
-            // Apply binary_ast PPX rewrite for accurate dep extraction.
-            let rewritten = rescript_compiler::binary_ast::ppx::rewrite_structure(
-                &structure,
-                parser.arena_mut(),
-            )
-            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
-            let mut deps = extract_structure_deps(parser.arena(), &rewritten);
-            deps.extend(extra_deps.iter().cloned());
+        write_structure_ast_current_with_extra_deps(
+            ast_output_path,
+            source_path_for_ast,
+            parser.arena_mut(),
+            &structure,
+            extra_deps,
+        )
+        .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
 
-            // In --in-process, always store the AST (needed for compilation).
-            let stored = if store_ast {
-                Some(super::build_types::StoredAst::Structure(parser.into_arena(), structure))
-            } else {
-                None
-            };
-            Ok(((!warnings.is_empty()).then_some(warnings), stored, Some(deps)))
+        let stored = if store_ast {
+            Some(super::build_types::StoredAst::Structure(parser.into_arena(), structure))
         } else {
-            write_structure_ast_current_with_extra_deps(
-                ast_output_path,
-                source_path_for_ast,
-                parser.arena_mut(),
-                &structure,
-                extra_deps,
-            )
-            .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
-
-            let stored = if store_ast {
-                Some(super::build_types::StoredAst::Structure(parser.into_arena(), structure))
-            } else {
-                None
-            };
-            Ok(((!warnings.is_empty()).then_some(warnings), stored, None))
-        }
+            None
+        };
+        Ok(((!warnings.is_empty()).then_some(warnings), stored))
     }
 }
 
