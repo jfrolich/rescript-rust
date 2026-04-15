@@ -494,7 +494,7 @@ impl Env {
         f: impl FnOnce(&[(Ident, Path)]) -> R,
     ) -> R {
         if self.local_module_aliases_cache.borrow().is_none() {
-            let aliases = self
+            let mut aliases: Vec<_> = self
                 .modules
                 .by_name
                 .values()
@@ -511,6 +511,14 @@ impl Env {
                     }
                 })
                 .collect();
+            aliases.sort_by(|(left_id, left_target), (right_id, right_target)| {
+                right_target
+                    .name()
+                    .len()
+                    .cmp(&left_target.name().len())
+                    .then_with(|| right_target.name().cmp(&left_target.name()))
+                    .then_with(|| right_id.stamp().cmp(&left_id.stamp()))
+            });
             *self.local_module_aliases_cache.borrow_mut() = Some(aliases);
         }
 

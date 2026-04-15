@@ -1598,31 +1598,23 @@ fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Opt
 }
 
 fn normalize_path_through_local_aliases(env: &Env, path: &Path) -> Option<Path> {
-    let mut aliases = env.with_current_local_module_aliases(|aliases| aliases.to_vec());
-    aliases.sort_by(|(left_id, left_target), (right_id, right_target)| {
-        right_target
-            .name()
-            .len()
-            .cmp(&left_target.name().len())
-            .then_with(|| right_target.name().cmp(&left_target.name()))
-            .then_with(|| right_id.stamp().cmp(&left_id.stamp()))
-    });
-
-    aliases.into_iter().find_map(|(alias_id, target_path)| {
-        let target_head = target_path.head();
-        let target_is_local = env
-            .find_module_with_origin(target_head.name())
-            .ok()
-            .is_some_and(|(origin_id, _, is_local)| is_local && origin_id.same(target_head));
-        if !target_is_local {
-            return None;
-        }
-        let alias_path = Path::pident(alias_id);
-        if alias_path.same(path) {
-            return None;
-        }
-        rewrite_path_prefix(path, &target_path, &alias_path)
-            .filter(|rewritten| !rewritten.same(path))
+    env.with_current_local_module_aliases(|aliases| {
+        aliases.iter().find_map(|(alias_id, target_path)| {
+            let target_head = target_path.head();
+            let target_is_local = env
+                .find_module_with_origin(target_head.name())
+                .ok()
+                .is_some_and(|(origin_id, _, is_local)| is_local && origin_id.same(target_head));
+            if !target_is_local {
+                return None;
+            }
+            let alias_path = Path::pident(alias_id.clone());
+            if alias_path.same(path) {
+                return None;
+            }
+            rewrite_path_prefix(path, &target_path, &alias_path)
+                .filter(|rewritten| !rewritten.same(path))
+        })
     })
 }
 
