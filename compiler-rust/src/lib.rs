@@ -55,6 +55,8 @@ pub mod parse_arena;
 pub mod parser;
 pub mod raw_lambda;
 pub mod types;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_vfs;
 
 // Re-exports for convenience
 #[cfg(feature = "native")]

@@ -1,8 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Tabs } from "@base-ui/react/tabs";
-import Editor from "@monaco-editor/react";
+import Editor, { loader } from "@monaco-editor/react";
 import { parseSexp, buildLocationIndex, findNodeAtCursor } from "./sexp-parser.js";
 import TreeView from "./TreeView.jsx";
+import { registerRescriptLanguage, languageId } from "./rescript-language.js";
+import { loadStdlib } from "./stdlib-loader.js";
+
+// Register ReScript language with Monaco before any editor mounts
+loader.init().then((monaco) => {
+  registerRescriptLanguage(monaco);
+});
 
 const INITIAL_CODE = `let add = (a, b) => a + b
 
@@ -36,12 +43,18 @@ export default function App() {
   const resizing = useRef(false);
   const compileTimer = useRef(null);
 
-  // Load WASM compiler
+  // Load WASM compiler + stdlib
   useEffect(() => {
     async function loadCompiler() {
       try {
+        setStatus("Loading WASM...");
         const wasm = await import("../crate/pkg/rescript_playground_wasm.js");
         await wasm.default();
+
+        setStatus("Loading stdlib...");
+        const fileCount = await loadStdlib(wasm);
+        console.log(`Loaded ${fileCount} stdlib files into VFS`);
+
         setCompiler(wasm);
         setStatus("Ready");
         setStatusType("ready");
@@ -52,8 +65,8 @@ export default function App() {
         setCompileTime(Math.round(performance.now() - t0));
         setResult(JSON.parse(output));
       } catch (err) {
-        console.error("Failed to load WASM:", err);
-        setStatus("Failed to load");
+        console.error("Failed to load:", err);
+        setStatus(`Failed: ${err.message}`);
         setStatusType("error");
       }
     }
@@ -147,7 +160,7 @@ export default function App() {
       <div className="main">
         <div className="editor-pane" style={{ width: `${editorWidth}%` }}>
           <Editor
-            defaultLanguage="plaintext"
+            defaultLanguage={languageId}
             defaultValue={INITIAL_CODE}
             theme="vs-dark"
             onChange={handleEditorChange}

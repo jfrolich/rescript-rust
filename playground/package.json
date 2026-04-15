@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node scripts/bundle-stdlib.js && vite build",
+    "bundle:stdlib": "node scripts/bundle-stdlib.js",
     "build:wasm": "cd crate && wasm-pack build --target web --release",
     "preview": "vite preview"
   },

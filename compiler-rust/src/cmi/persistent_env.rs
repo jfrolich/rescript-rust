@@ -534,8 +534,15 @@ impl PersistentEnv {
     }
 
     fn read_source_latin1(path: &FsPath) -> Option<String> {
-        let bytes = fs::read(path).ok()?;
-        Some(bytes.iter().map(|&b| b as char).collect())
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::wasm_vfs::read_file(&path.to_string_lossy())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let bytes = fs::read(path).ok()?;
+            Some(bytes.iter().map(|&b| b as char).collect())
+        }
     }
 
     /// Maximum recursion depth for source-fallback type checking.

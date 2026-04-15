@@ -1,7 +1,6 @@
 use wasm_bindgen::prelude::*;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 use rescript_compiler::cmi::persistent_env::{ModuleRegistry, PersistentEnv};
 use rescript_compiler::driver::{self, CompilerOptions};
@@ -12,11 +11,11 @@ use rescript_compiler::types::{
     initial_env, type_structure, TypeCheckContext, TypeContext,
     sexp_typedtree,
 };
+use rescript_compiler::wasm_vfs;
 
 // ── Virtual filesystem ──────────────────────────────────────────────────────
 
 thread_local! {
-    static VFS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     static REGISTRY: RefCell<ModuleRegistry> = RefCell::new(ModuleRegistry::new());
 }
 
@@ -24,23 +23,19 @@ thread_local! {
 /// Call this with stdlib .res/.resi files at startup, and with user files on edit.
 #[wasm_bindgen]
 pub fn vfs_write_file(path: &str, content: &str) {
-    VFS.with(|vfs| {
-        vfs.borrow_mut().insert(path.to_string(), content.to_string());
-    });
+    wasm_vfs::write_file(path, content.to_string());
 }
 
 /// Delete a file from the virtual filesystem.
 #[wasm_bindgen]
 pub fn vfs_delete_file(path: &str) {
-    VFS.with(|vfs| {
-        vfs.borrow_mut().remove(path);
-    });
+    wasm_vfs::delete_file(path);
 }
 
 /// Clear all files and reset the module registry.
 #[wasm_bindgen]
 pub fn vfs_clear() {
-    VFS.with(|vfs| vfs.borrow_mut().clear());
+    wasm_vfs::clear();
     REGISTRY.with(|r| *r.borrow_mut() = ModuleRegistry::new());
 }
 
