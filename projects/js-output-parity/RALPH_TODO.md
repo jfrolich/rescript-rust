@@ -43,6 +43,71 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: port OCaml's `Normal_optional` alias handling in the JS-backend
+  lambda simplifier so `Psome` / `Psome_not_nest` bindings fold through
+  `PisNotNone` and `PvalFromOption` the same way `lam_pass_collect.ml` and
+  `lam_pass_remove_alias.ml` do
+- Active backend focus for this slice is **Phase 4: Port JS Passes** from
+  `PLAN.md`, because the remaining emitted-JS drift in
+  `tests/tests/src/test_zero_nullable.res` came from Rust's
+  `compiler-rust/src/lambda/simplify.rs`, where the post-lowering backend
+  simplifier only tracked nullable wrappers (`PnullToOpt`,
+  `PnullUndefinedToOpt`) and therefore left `Some(x)` aliases opaque during
+  `PisNotNone` / `PvalFromOption` folding
+- OCaml reference:
+  `compiler/core/lam_pass_collect.ml`,
+  `compiler/core/lam_pass_remove_alias.ml`,
+  `compiler/core/lam_beta_reduce.ml`
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so `optional_block_info`
+    records `Psome` / `PsomeNotNest` aliases as a separate OCaml-style
+    `Normal_optional` class instead of only tracking nullable wrappers
+  - updated the `LifThenElse` simplifier in
+    `compiler-rust/src/lambda/simplify.rs` so `PisNotNone` on those normal
+    option aliases collapses directly to the then-branch, while nullable
+    aliases keep the existing OCaml-style `not (is_null[_undefined])`
+    predicate rewrite
+  - added focused regressions covering both `PisNotNone(Some(x))` collapse and
+    `PvalFromOption` unboxing through a `Psome` alias with a non-variable
+    payload
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml folds_some_alias_checks_to_the_then_branch_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml unboxes_some_aliases_with_non_var_payloads_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml rewrites_nullable_alias_checks_to_raw_nullable_predicates -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - exact direct release repro for `tests/tests/src/test_zero_nullable.res`
+    via the checked-in `.ast` + `compiler-args` path, diffing
+    `tests/tests/lib/bs/src/test_zero_nullable.mjs` against
+    `/tmp/test_zero_nullable.mjs`
+  - unchanged broader guard repro for `tests/tests/src/ExternalShadow.res`
+    via the same `.ast` path, diffing
+    `tests/tests/lib/bs/src/ExternalShadow.mjs` against
+    `/tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `test_zero_nullable` no longer emits the redundant
+    `Primitive_option.some(x)` / `Primitive_option.valFromOption(...)`
+    identity round-trip in the three `f7` helpers, confirming the missing
+    `Normal_optional` alias fold was real emitted-JS drift
+  - `ExternalShadow` remained an exact snapshot match as a broader guard
+  - the remaining `test_zero_nullable` drift is now narrowed to later
+    export/binding-shape differences (`f9` alias materialization and the final
+    `Null_undefined_neq` binding order), not the option-unwrapping rule this
+    slice targeted
+  - the full authoritative sweep stayed flat, so this OCaml-aligned change is
+    still worth keeping even though the affected file continues to fail for
+    independent later-pass reasons
+- Topline impact:
+  - JS snapshot parity: **517 / 657** -> **517 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **140** -> **140** (**no change**)
+- Keep this change because it directly ports OCaml's `Normal_optional`
+  bookkeeping and alias-removal behavior into Rust's JS-backend simplifier,
+  removes a real option-wrapper mismatch from `test_zero_nullable`, and leaves
+  the remaining failure in that file isolated to later export/binding shaping.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: port OCaml's `js_exp_make.and_`, `or_`, and `econd`
   side-effect gate so Rust stops applying JS-expression `&&` / `||`
   simplifications in effectful contexts where the OCaml backend keeps the

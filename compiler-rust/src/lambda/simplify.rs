@@ -46,7 +46,19 @@ struct ImmutableBlockInfo {
 #[derive(Clone)]
 struct OptionalBlockInfo {
     value: Lambda,
-    kind: BoxedNullable,
+    kind: OptionalAliasKind,
+}
+
+#[derive(Clone, Copy)]
+enum OptionalAliasKind {
+    Normal,
+    Boxed(BoxedNullable),
+}
+
+#[derive(Clone)]
+enum OptionalPredicate {
+    AlwaysSome,
+    Boxed { value: Lambda, kind: BoxedNullable },
 }
 
 #[derive(Clone)]
@@ -788,13 +800,18 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             )
         }
         Lambda::LifThenElse(cond, then_, else_) => {
-            if let Some((optional_value, kind)) = optional_block_predicate(cond, env) {
-                let predicate = optional_is_some_predicate(optional_value, kind);
-                return Lambda::if_(
-                    predicate,
-                    simplify_with_env(then_, env, exports),
-                    simplify_with_env(else_, env, exports),
-                );
+            if let Some(optional_predicate) = optional_block_predicate(cond, env) {
+                return match optional_predicate {
+                    OptionalPredicate::AlwaysSome => simplify_with_env(then_, env, exports),
+                    OptionalPredicate::Boxed { value, kind } => {
+                        let predicate = optional_is_some_predicate(value, kind);
+                        Lambda::if_(
+                            predicate,
+                            simplify_with_env(then_, env, exports),
+                            simplify_with_env(else_, env, exports),
+                        )
+                    }
+                };
             }
 
             Lambda::if_(
@@ -1954,12 +1971,20 @@ fn immutable_block_elements(value: &Lambda) -> Option<ImmutableBlockInfo> {
 fn optional_block_info(value: &Lambda) -> Option<OptionalBlockInfo> {
     match value {
         Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Psome | Primitive::PsomeNotNest,
+            args,
+            ..
+        }) if matches!(args.as_slice(), [_]) => Some(OptionalBlockInfo {
+            value: args[0].clone(),
+            kind: OptionalAliasKind::Normal,
+        }),
+        Lambda::Lprim(crate::lambda::PrimInfo {
             primitive: Primitive::PnullToOpt,
             args,
             ..
         }) if matches!(args.as_slice(), [Lambda::Lvar(_)]) => Some(OptionalBlockInfo {
             value: args[0].clone(),
-            kind: BoxedNullable::Null,
+            kind: OptionalAliasKind::Boxed(BoxedNullable::Null),
         }),
         Lambda::Lprim(crate::lambda::PrimInfo {
             primitive: Primitive::PnullUndefinedToOpt,
@@ -1967,13 +1992,13 @@ fn optional_block_info(value: &Lambda) -> Option<OptionalBlockInfo> {
             ..
         }) if matches!(args.as_slice(), [Lambda::Lvar(_)]) => Some(OptionalBlockInfo {
             value: args[0].clone(),
-            kind: BoxedNullable::NullUndefined,
+            kind: OptionalAliasKind::Boxed(BoxedNullable::NullUndefined),
         }),
         _ => None,
     }
 }
 
-fn optional_block_predicate(cond: &Lambda, env: &SimplifyEnv) -> Option<(Lambda, BoxedNullable)> {
+fn optional_block_predicate(cond: &Lambda, env: &SimplifyEnv) -> Option<OptionalPredicate> {
     match cond {
         Lambda::Lprim(crate::lambda::PrimInfo {
             primitive: Primitive::PisNotNone,
@@ -1983,7 +2008,13 @@ fn optional_block_predicate(cond: &Lambda, env: &SimplifyEnv) -> Option<(Lambda,
             [Lambda::Lvar(id)] => env
                 .optional_blocks
                 .get(id)
-                .map(|optional| (optional.value.clone(), optional.kind)),
+                .map(|optional| match optional.kind {
+                    OptionalAliasKind::Normal => OptionalPredicate::AlwaysSome,
+                    OptionalAliasKind::Boxed(kind) => OptionalPredicate::Boxed {
+                        value: optional.value.clone(),
+                        kind,
+                    },
+                }),
             _ => None,
         },
         _ => None,
@@ -5919,6 +5950,62 @@ mod tests {
         assert!(matches!(
             else_.as_ref(),
             Lambda::Lconst(Constant::Int { i: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn folds_some_alias_checks_to_the_then_branch_like_ocaml() {
+        let value = Ident::create_local("value");
+        let optional = Ident::create_local("optional");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            optional.clone(),
+            Lambda::prim(
+                Primitive::Psome,
+                vec![Lambda::var(value.clone())],
+                Location::none(),
+            ),
+            Lambda::if_(
+                Lambda::prim(
+                    Primitive::PisNotNone,
+                    vec![Lambda::var(optional.clone())],
+                    Location::none(),
+                ),
+                Lambda::prim(
+                    Primitive::PvalFromOption,
+                    vec![Lambda::var(optional)],
+                    Location::none(),
+                ),
+                Lambda::const_(Constant::int(0)),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        assert!(matches!(simplified, Lambda::Lvar(id) if id == value));
+    }
+
+    #[test]
+    fn unboxes_some_aliases_with_non_var_payloads_like_ocaml() {
+        let optional = Ident::create_local("optional");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            optional.clone(),
+            Lambda::prim(
+                Primitive::Psome,
+                vec![Lambda::const_(Constant::int(3))],
+                Location::none(),
+            ),
+            Lambda::prim(
+                Primitive::PvalFromOption,
+                vec![Lambda::var(optional)],
+                Location::none(),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        assert!(matches!(
+            simplified,
+            Lambda::Lconst(Constant::Int { i: 3, .. })
         ));
     }
 
