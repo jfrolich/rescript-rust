@@ -1,0 +1,1 @@
+{"rustc":13850170861107434965,"features":"[]","declared_features":"[\"rayon\", \"serde\"]","target":6036116006429052394,"profile":5796776443608547601,"path":2633005931681178977,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"debug/.fingerprint/oxc_index-95a9ec5fe86a89da/dep-lib-oxc_index","checksum":false}}],"rustflags":[],"config":2069994364910194474,"compile_kind":0}

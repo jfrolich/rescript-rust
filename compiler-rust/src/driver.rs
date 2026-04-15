@@ -36,7 +36,7 @@ pub fn enable_cli_cleanup_skip() {
     SKIP_CLI_CLEANUP.store(true, Ordering::Relaxed);
 }
 
-fn module_name_from_source_filename(path: &str) -> String {
+pub fn module_name_from_source_filename(path: &str) -> String {
     let basename = std::path::Path::new(path)
         .file_name()
         .and_then(|s| s.to_str())
@@ -70,7 +70,7 @@ fn has_react_component_with_props_attr(
     })
 }
 
-fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structure) -> i32 {
+pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structure) -> i32 {
     use crate::ident::Ident;
     use crate::types::decl::{
         ConstructorArguments as DeclConstructorArguments, ModuleType as DeclModuleType,
@@ -1119,7 +1119,7 @@ pub struct CompilerOptions {
     pub module_name: Option<String>,
 }
 
-pub(crate) fn jsx_version_for_structure(
+pub fn jsx_version_for_structure(
     structure: &Structure,
     options: &CompilerOptions,
     arena: &crate::parse_arena::ParseArena,
@@ -2055,7 +2055,7 @@ fn normalize_lexical_path(path: PathBuf) -> PathBuf {
 /// that module name is skipped to prevent circular self-loading (matching
 /// OCaml's `res_compmisc.ml:initial_env` which filters `modulename` from
 /// `open_modules`).
-pub(crate) fn load_pervasives<'a>(
+pub fn load_pervasives<'a>(
     pers_env: &mut PersistentEnv,
     env: &mut Env,
     ctx: &'a TypeContext<'a>,

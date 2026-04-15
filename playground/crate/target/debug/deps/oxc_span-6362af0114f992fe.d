@@ -1,0 +1,11 @@
+/Users/jake/dev/workspaces/rescript-rust/demo2/playground/crate/target/debug/deps/oxc_span-6362af0114f992fe.d: /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/lib.rs /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/atom.rs /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/cmp.rs /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/compact_str.rs /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/source_type/mod.rs /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/source_type/error.rs /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/span.rs
+
+/Users/jake/dev/workspaces/rescript-rust/demo2/playground/crate/target/debug/deps/liboxc_span-6362af0114f992fe.rmeta: /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/lib.rs /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/atom.rs /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/cmp.rs /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/compact_str.rs /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/source_type/mod.rs /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/source_type/error.rs /Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/span.rs
+
+/Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/lib.rs:
+/Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/atom.rs:
+/Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/cmp.rs:
+/Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/compact_str.rs:
+/Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/source_type/mod.rs:
+/Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/source_type/error.rs:
+/Users/jake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_span-0.49.0/src/span.rs:
