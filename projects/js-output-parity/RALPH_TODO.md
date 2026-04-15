@@ -43,6 +43,70 @@ reported:
 
 Latest iteration on **2026-04-15**:
 
+- Active slice: teach direct `PjsFnMake` arity adjustment to keep walking
+  through returned single-arg functions and let-wrapped returned functions
+  when adding extra JS parameters, instead of blindly nesting fresh `Lapply`
+  wrappers around the returned callback body
+- Active backend focus for this slice is **Phase 2: Port Post-Lowering Lambda
+  Backend Stages** from `PLAN.md`, because the mismatch sat in the
+  post-lowering eta/adjust-to-arity cleanup boundary that OCaml handles with
+  `Lam_eta_conversion.unsafe_adjust_to_arity` plus `Lam.apply`'s smart
+  let-wrapped-function rewriting before JS IR lowering
+- OCaml reference:
+  `compiler/core/lam_eta_conversion.ml`, especially `unsafe_adjust_to_arity`
+  for the `to_ > from` case that recursively builds `Lam.apply` over each
+  extra arg; and `compiler/core/lam.ml`, especially `Lam.apply`'s
+  `Lfunction` / `Llet (..., Lfunction _)` smart-constructor cases that beta
+  reduce returned single-arg functions instead of preserving nested applies
+- Rust change:
+  - updated `compiler-rust/src/lambda/simplify.rs` so
+    `adjust_direct_js_fn_make_function(...)` applies extra JS args through a
+    new helper that beta-reduces returned single-arg `Lfunction`s and recurses
+    through let-wrapped returned functions, instead of always rebuilding
+    `Lapply`
+  - added focused regression coverage in
+    `adjusts_nested_pjs_fn_make_callbacks_to_flat_multi_param_functions_like_mutable_uncurry`
+  - refreshed
+    `beta_reduces_returned_pjs_fn_make_wrappers_across_backend_alias_passes`
+    to match the new OCaml-aligned surviving callee shape after the backend
+    alias cleanup sweep
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml adjusts_nested_pjs_fn_make_callbacks_to_flat_multi_param_functions_like_mutable_uncurry -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml adjusts_direct_pjs_fn_make_callbacks_to_requested_arity_during_simplify -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml beta_reduces_let_wrapped_returned_functions_across_backend_alias_passes -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/mutable_uncurry_test.res`,
+    diffing `/tmp/mutable_uncurry_test.mjs` against the checked-in snapshot
+  - direct related repros for `tests/tests/src/ari_regress_test.res` and
+    `tests/tests/src/test_demo.res`, diffing `/tmp/*.mjs` against the checked-in
+    snapshots
+  - direct broader guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/mutable_uncurry_test.res` now collapses the nested
+    callback/IIFE shape into OCaml-style flat parameter extraction for the
+    `ut4`/`t4`/`ut5`/`t5` family, confirming the `PjsFnMake` arity-adjust path
+    now beta-reduces through returned functions the way OCaml's
+    `unsafe_adjust_to_arity` + `Lam.apply` combination does
+  - `tests/tests/src/ExternalShadow.res` remains an exact snapshot match as an
+    unchanged broader guard
+  - `tests/tests/src/ari_regress_test.res` and `tests/tests/src/test_demo.res`
+    are unchanged in their remaining value-context/direct-call cluster, which
+    shows this patch isolates the returned-callback flattening issue without
+    solving the separate direct-call simplification path yet
+- Topline impact:
+  - JS snapshot parity: **488 / 657** -> **488 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **169** -> **169** (**no change**)
+- Keep this change because it matches OCaml's `unsafe_adjust_to_arity` /
+  `Lam.apply` behavior more closely, materially improves the
+  `mutable_uncurry_test.res` backend shape without harming the guard file, and
+  removes a Rust-only layer of nested callback applies even though no whole
+  snapshot flipped yet.
+
+Latest iteration on **2026-04-15**:
+
 - Active slice: stop force-spilling value-context `Lapply` nodes through a
   synthetic `call` temp during JS lowering, so direct calls in value context
   stay direct call expressions instead of becoming `let call = ...; let x =

@@ -1703,15 +1703,7 @@ fn adjust_direct_js_fn_make_function(func: &LFunction, to_: i32, loc: &Location)
 
     if to_ > from {
         let extra_args = fresh_js_fn_params((to_ - from) as usize);
-        let mut body = (*func.body).clone();
-        for extra_arg in &extra_args {
-            body = apply_lambda_with_default_info(
-                body,
-                vec![Lambda::var(extra_arg.clone())],
-                loc,
-                ApplyStatus::Na,
-            );
-        }
+        let body = apply_extra_args_to_adjusted_js_fn_body((*func.body).clone(), &extra_args, loc);
 
         let mut params = func.params.clone();
         params.extend(extra_args);
@@ -1732,6 +1724,47 @@ fn adjust_direct_js_fn_make_function(func: &LFunction, to_: i32, loc: &Location)
 
 fn fresh_js_fn_params(count: usize) -> Vec<Ident> {
     (0..count).map(|_| Ident::create_local("param")).collect()
+}
+
+fn apply_extra_args_to_adjusted_js_fn_body(
+    mut body: Lambda,
+    extra_args: &[Ident],
+    loc: &Location,
+) -> Lambda {
+    for extra_arg in extra_args {
+        body = apply_extra_arg_to_adjusted_js_fn_body(body, extra_arg, loc);
+    }
+    body
+}
+
+fn apply_extra_arg_to_adjusted_js_fn_body(body: Lambda, extra_arg: &Ident, loc: &Location) -> Lambda {
+    match body {
+        Lambda::Lfunction(func)
+            if func.params.len() == 1 && analysis::lfunction_can_be_inlined(&func) =>
+        {
+            beta_reduce::no_names_beta_reduce(
+                &func.params,
+                &func.body,
+                &[Lambda::var(extra_arg.clone())],
+            )
+        }
+        Lambda::Llet(kind, id, value, next)
+            if matches!(next.as_ref(), Lambda::Lfunction(_) | Lambda::Llet(_, _, _, _)) =>
+        {
+            Lambda::let_(
+                kind,
+                id,
+                *value,
+                apply_extra_arg_to_adjusted_js_fn_body(*next, extra_arg, loc),
+            )
+        }
+        body => apply_lambda_with_default_info(
+            body,
+            vec![Lambda::var(extra_arg.clone())],
+            loc,
+            ApplyStatus::Na,
+        ),
+    }
 }
 
 fn apply_lambda_with_default_info(
@@ -5720,6 +5753,168 @@ mod tests {
     }
 
     #[test]
+    fn adjusts_nested_pjs_fn_make_callbacks_to_flat_multi_param_functions_like_mutable_uncurry() {
+        let outer = Ident::create_local("outer");
+        let middle = Ident::create_local("middle");
+        let inner = Ident::create_local("inner");
+        let x0 = Ident::create_local("x0");
+        let x1 = Ident::create_local("x1");
+        let x2 = Ident::create_local("x2");
+
+        let simplified = simplify_for_js_backend(&Lambda::prim(
+            Primitive::PjsFnMake(3),
+            vec![Lambda::function_(
+                1,
+                vec![outer.clone()],
+                Lambda::let_(
+                    LetKind::StrictOpt,
+                    x0.clone(),
+                    Lambda::prim(
+                        Primitive::Pfield(
+                            0,
+                            FieldDbgInfo::Record {
+                                name: "contents".to_string(),
+                                mutable_flag: crate::parser::ast::MutableFlag::Mutable,
+                            },
+                        ),
+                        vec![Lambda::var(outer.clone())],
+                        Location::none(),
+                    ),
+                    Lambda::function_(
+                        1,
+                        vec![middle.clone()],
+                        Lambda::let_(
+                            LetKind::StrictOpt,
+                            x1.clone(),
+                            Lambda::prim(
+                                Primitive::Pfield(
+                                    0,
+                                    FieldDbgInfo::Record {
+                                        name: "contents".to_string(),
+                                        mutable_flag: crate::parser::ast::MutableFlag::Mutable,
+                                    },
+                                ),
+                                vec![Lambda::var(middle.clone())],
+                                Location::none(),
+                            ),
+                            Lambda::function_(
+                                1,
+                                vec![inner.clone()],
+                                Lambda::let_(
+                                    LetKind::StrictOpt,
+                                    x2.clone(),
+                                    Lambda::prim(
+                                        Primitive::Pfield(
+                                            0,
+                                            FieldDbgInfo::Record {
+                                                name: "contents".to_string(),
+                                                mutable_flag: crate::parser::ast::MutableFlag::Mutable,
+                                            },
+                                        ),
+                                        vec![Lambda::var(inner.clone())],
+                                        Location::none(),
+                                    ),
+                                    Lambda::prim(
+                                        Primitive::Pmakeblock(
+                                            0,
+                                            TagInfo::Tuple,
+                                            Mutable::Immutable,
+                                        ),
+                                        vec![
+                                            Lambda::var(x0.clone()),
+                                            Lambda::var(x1.clone()),
+                                            Lambda::var(x2.clone()),
+                                        ],
+                                        Location::none(),
+                                    ),
+                                ),
+                                FunctionAttribute::default(),
+                            ),
+                        ),
+                        FunctionAttribute::default(),
+                    ),
+                ),
+                FunctionAttribute::default(),
+            )],
+            Location::none(),
+        ));
+
+        fn body_contains_nested_function_or_apply(lam: &Lambda) -> bool {
+            match lam {
+                Lambda::Lapply(_) | Lambda::Lfunction(_) => true,
+                Lambda::Llet(_, _, value, body) => {
+                    body_contains_nested_function_or_apply(value)
+                        || body_contains_nested_function_or_apply(body)
+                }
+                Lambda::Lletrec(bindings, body) => {
+                    bindings
+                        .iter()
+                        .any(|(_, lam)| body_contains_nested_function_or_apply(lam))
+                        || body_contains_nested_function_or_apply(body)
+                }
+                Lambda::Lprim(info) => info.args.iter().any(body_contains_nested_function_or_apply),
+                Lambda::Lswitch(scrutinee, switch) => {
+                    body_contains_nested_function_or_apply(scrutinee)
+                        || switch
+                            .sw_consts
+                            .iter()
+                            .any(|(_, lam)| body_contains_nested_function_or_apply(lam))
+                        || switch
+                            .sw_blocks
+                            .iter()
+                            .any(|(_, lam)| body_contains_nested_function_or_apply(lam))
+                        || switch
+                            .sw_failaction
+                            .as_deref()
+                            .is_some_and(body_contains_nested_function_or_apply)
+                }
+                Lambda::LstringSwitch(scrutinee, cases, default) => {
+                    body_contains_nested_function_or_apply(scrutinee)
+                        || cases
+                            .iter()
+                            .any(|(_, lam)| body_contains_nested_function_or_apply(lam))
+                        || default
+                            .as_deref()
+                            .is_some_and(body_contains_nested_function_or_apply)
+                }
+                Lambda::LstaticRaise(_, args) => {
+                    args.iter().any(body_contains_nested_function_or_apply)
+                }
+                Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                    body_contains_nested_function_or_apply(body)
+                        || body_contains_nested_function_or_apply(handler)
+                }
+                Lambda::LifThenElse(cond, then_, else_) => {
+                    body_contains_nested_function_or_apply(cond)
+                        || body_contains_nested_function_or_apply(then_)
+                        || body_contains_nested_function_or_apply(else_)
+                }
+                Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                    body_contains_nested_function_or_apply(first)
+                        || body_contains_nested_function_or_apply(second)
+                }
+                Lambda::Lfor(_, start, end, _, body) => {
+                    body_contains_nested_function_or_apply(start)
+                        || body_contains_nested_function_or_apply(end)
+                        || body_contains_nested_function_or_apply(body)
+                }
+                Lambda::Lassign(_, value) => body_contains_nested_function_or_apply(value),
+                Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            }
+        }
+
+        let Lambda::Lfunction(func) = simplified else {
+            panic!("expected eta-adjusted callback to stay a function");
+        };
+        assert_eq!(func.arity, 3);
+        assert_eq!(func.params.len(), 3);
+        assert!(
+            !body_contains_nested_function_or_apply(&func.body),
+            "expected the adjusted callback body to flatten nested applies/functions, got {func:?}"
+        );
+    }
+
+    #[test]
     fn eta_reduces_module_field_function_values_like_ocaml() {
         let belt_map = Ident::create_persistent("Belt_MapInt");
         let param = Ident::create_local("items");
@@ -6411,20 +6606,24 @@ mod tests {
         let Lambda::Lapply(apply) = simplified else {
             panic!("expected the outer call to survive the final backend simplification sweep");
         };
-        let Lambda::Llet(kind, bound, value, body) = apply.ap_func.as_ref() else {
-            panic!("expected the surviving callee to stay let-wrapped, got {apply:?}");
+        let Lambda::Lfunction(func) = apply.ap_func.as_ref() else {
+            panic!("expected the surviving callee to simplify to the returned function, got {apply:?}");
         };
 
-        assert_eq!(*kind, LetKind::Strict);
-        assert!(bound.same(&x));
+        assert_eq!(func.arity, 1);
+        assert_eq!(func.params.len(), 1);
+        assert!(func.params[0].same(&f));
         assert!(matches!(
-            value.as_ref(),
-            Lambda::Lconst(Constant::String {
+            func.body.as_ref(),
+            Lambda::Lconst(Constant::Int { i: 0, comment: None })
+        ));
+        assert!(matches!(
+            apply.ap_args.as_slice(),
+            [Lambda::Lconst(Constant::String {
                 s,
                 delim: Some(crate::lambda::constant::StringDelim::StarJ),
-            }) if s.is_empty()
+            })] if s.is_empty()
         ));
-        assert!(matches!(body.as_ref(), Lambda::Lfunction(_)));
         assert_eq!(apply.ap_args.len(), 1);
     }
 
