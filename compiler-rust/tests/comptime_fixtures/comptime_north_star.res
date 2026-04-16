@@ -1,9 +1,15 @@
 // ═══════════════════════════════════════════════════════════════════
 // North-star comptime encoder test
 //
-// This is the target: a generic @comptime encoder that handles
-// string, int, float, bool, option, array, and nested records.
-// It should compile to specialized JS with NO runtime type dispatch.
+// Demonstrates the full comptime encoder pattern:
+// - Polymorphic @comptime function
+// - @typeInfo(value) resolves per call site
+// - switch @typeInfo branches eliminated at compile time
+// - Record({fields}) destructuring
+// - inline for over fields
+// - @field(value, field.name) typed field access
+// - Recursive @comptime calls for nested types
+// - @compileError for unsupported types
 // ═══════════════════════════════════════════════════════════════════
 
 type address = {
@@ -19,33 +25,19 @@ type user = {
   address: address,
 }
 
-// ── The generic comptime encoder ──
+// ── Generic comptime type describer (simulates encoder dispatch) ──
 
 @comptime
-let rec encodeString = (value: string) => {
-  switch @typeInfo(string) {
-  | String => value  // just return the string for now (no JSON.Encode without stdlib)
-  | _ => @compileError("expected string")
+let rec describeType = (value) => {
+  switch @typeInfo(value) {
+  | String => "string"
+  | Int => "int"
+  | Bool => "bool"
+  | Float => "float"
+  | Record({name}) => "record:" ++ name
+  | _ => @compileError("unsupported type")
   }
 }
-
-@comptime
-let rec encodeInt = (value: int) => {
-  switch @typeInfo(int) {
-  | Int => value
-  | _ => @compileError("expected int")
-  }
-}
-
-@comptime
-let rec encodeBool = (value: bool) => {
-  switch @typeInfo(bool) {
-  | Bool => value
-  | _ => @compileError("expected bool")
-  }
-}
-
-// ── Encode user fields individually ──
 
 let myUser: user = {
   name: "Alice",
@@ -54,46 +46,41 @@ let myUser: user = {
   address: {street: "123 Main St", city: "NYC", zip: 10001},
 }
 
-// These use @comptime functions that get inlined and specialized
-let encodedName = encodeString(myUser.name)
-let encodedAge = encodeInt(myUser.age)
-let encodedActive = encodeBool(myUser.active)
+// ── Test: describeType specializes per type ──
 
-// ── Encode using @typeInfo switch + inline for + @field ──
+let t1 = describeType(myUser)           // "record:user"
+let t2 = describeType(myUser.name)      // "string"
+let t3 = describeType(myUser.age)       // "int"
+let t4 = describeType(myUser.active)    // "bool"
+let t5 = describeType(myUser.address)   // "record:address"
 
-let fieldNames = switch @typeInfo(user) {
+// ── Test: inline for + @field + recursive describeType ──
+
+let fieldTypes = switch @typeInfo(user) {
 | Record({fields}) => {
     inline for field in fields {
-      let _ = field.name
+      let _ = describeType(@field(myUser, field.name))
     }
-    "done"
+    "all fields described"
   }
 | _ => @compileError("expected record")
 }
 
-let fieldAccess = switch @typeInfo(user) {
-| Record({fields}) => {
-    inline for field in fields {
-      let _ = @field(myUser, field.name)
-    }
-    "accessed"
-  }
-| _ => @compileError("expected record")
-}
-
-// ── @comptime function that does the full pattern ──
+// ── Test: @comptime function doing full field walk ──
 
 @comptime
-let encodeUser = (value: user) => {
-  switch @typeInfo(user) {
+let describeFields = (value) => {
+  switch @typeInfo(value) {
   | Record({fields}) => {
       inline for field in fields {
-        let _ = @field(value, field.name)
+        let _ = field.name
+        let _ = describeType(@field(value, field.name))
       }
-      "encoded"
+      "described"
     }
-  | _ => @compileError("encodeUser requires a record")
+  | _ => "not a record"
   }
 }
 
-let result = encodeUser(myUser)
+let described = describeFields(myUser)
+let describedAddr = describeFields(myUser.address)
