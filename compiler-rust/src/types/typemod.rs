@@ -8409,20 +8409,9 @@ pub fn type_structure<'a>(
         typed_items.push(typed_item);
         current_env = new_env;
 
-        // Check for comptime derive attributes on type declarations
-        if let ParsedStructureItemDesc::Pstr_type(inner) = &*item.pstr_desc {
-            let (_, ref decls) = **inner;
-            for decl in decls {
-                let derive_items = process_comptime_derives(tctx, &current_env, arena, decl);
-                if let Ok(extra_items) = derive_items {
-                    for (extra_item, extra_sig, extra_env) in extra_items {
-                        sig_items.extend(extra_sig);
-                        typed_items.push(extra_item);
-                        current_env = extra_env;
-                    }
-                }
-            }
-        }
+        // TODO: @comptime.derive system — when @typeInfo is a predefined type,
+        // derive handlers will be @comptime functions that produce type declarations.
+        // For now, derive attributes on types are ignored.
     }
 
     let structure = Structure {
@@ -12107,9 +12096,14 @@ module M3: {
 
 // ── Comptime Registration ──────────────────────────────────────────────────
 
-/// Process comptime derive attributes (@keyOf, @partial, @encoder, @decoder)
-/// on a type declaration. Returns additional structure items to splice in.
-fn process_comptime_derives<'a>(
+// process_comptime_derives and compile_generated_source removed.
+// The derive system will be reimplemented using the predefined typeInfo type
+// and @comptime.inline evaluation. The optimizer handles switch elimination
+// on literal typeInfo values automatically.
+
+// Legacy function kept for reference — will be removed once predefined typeInfo works.
+#[allow(dead_code)]
+fn _process_comptime_derives_legacy<'a>(
     tctx: &mut crate::types::typecore::TypeCheckContext<'a>,
     env: &Env,
     arena: &'a crate::parse_arena::ParseArena,

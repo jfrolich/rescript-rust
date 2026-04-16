@@ -729,8 +729,6 @@ pub struct TypeCheckContext<'a> {
         HashMap<crate::parse_arena::LocIdx, crate::types::decl::ModuleType>,
     /// Registry of @comptime functions for compile-time specialization.
     pub comptime_functions: HashMap<String, crate::types::comptime::ComptimeFunction>,
-    /// Registry of @comptime.derive handlers: derive_name → comptime function.
-    pub comptime_derive_handlers: HashMap<String, crate::types::comptime::ComptimeFunction>,
 }
 
 /// A diagnostic from type checking.
@@ -760,7 +758,6 @@ impl<'a> TypeCheckContext<'a> {
             generic_constraint_body_ty: None,
             module_expr_semantic_types: HashMap::new(),
             comptime_functions: HashMap::new(),
-            comptime_derive_handlers: HashMap::new(),
         }
     }
 
@@ -19984,10 +19981,14 @@ fn lookup_type_decl_for_path<'a>(
 /// Check if a function application is a call to a registered @comptime function.
 /// If so, generate specialized code, parse and type-check it.
 /// Returns None if not a comptime call.
+/// Check if a function application is a call to a registered @comptime function.
+/// If so, inline the function body at the call site. The body will have
+/// @typeInfo(T) expanded to literal values by the type checker, and the
+/// optimizer handles switch elimination and constant folding.
 fn try_comptime_application(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    loc: LocIdx,
+    _loc: LocIdx,
     funct_expr: &ParsedExpression,
     args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
     expected_ty: TypeExprRef,
@@ -20002,66 +20003,27 @@ fn try_comptime_application(
     };
 
     // Check if it's a registered comptime function
-    let _ = std::fs::write("/tmp/comptime_lookup.txt", format!(
-        "lookup '{}' in {:?}\n", func_name, tctx.comptime_functions.keys().collect::<Vec<_>>()
-    ));
     let comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
 
-    // Type-check the arguments to determine their concrete types
-    let mut typed_args = Vec::new();
-    for (_label, arg_idx) in args {
-        let arg_expr = tctx.arena.get_expr(*arg_idx);
-        let arg_ty = tctx.type_ctx.new_var(None);
-        match type_expect(tctx, env, arg_expr, arg_ty, None) {
-            Ok(typed_arg) => typed_args.push(typed_arg),
-            Err(e) => return Some(Err(e)),
-        }
-    }
+    // Get the function's parse tree body and extract the inner body
+    let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx);
+    let inner_body = extract_function_body(body_expr, tctx.arena);
 
-    // Build TypeInfo from the first argument's concrete type.
-    // This is used to resolve @typeInfo(T) in the function body.
-    let concrete_type = typed_args.first().map(|a| a.exp_type);
-    let type_info = concrete_type.map(|ty| {
-        let mut visited = Vec::new();
-        crate::types::comptime::build_type_info(tctx.type_ctx, env, ty, &mut visited)
-    });
-
-    // Get the function's parse tree body.
-    let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx).clone();
-
-    // Unwrap the function: (params) => body → extract body
-    let inner_body = extract_function_body(&body_expr, tctx.arena);
-
-    // Partially evaluate the body: resolve @typeInfo, pick switch branches, etc.
-    let specialized_body = crate::types::comptime::partially_evaluate_parse_tree(
-        &inner_body,
-        tctx.arena,
-        type_info.as_ref(),
-        &typed_args,
-        tctx.type_ctx,
-        env,
-    );
-
-    // Type-check the specialized body directly.
-    // The partial evaluator has already resolved @typeInfo, picked switch
-    // branches, etc. The result is plain ReScript ready for type checking.
-    let _ = std::fs::write("/tmp/comptime_spec.txt", format!(
-        "specialized body desc: {:?}\n", std::mem::discriminant(&*specialized_body.pexp_desc)
-    ));
-    match type_expect(tctx, env, &specialized_body, expected_ty, None) {
+    // Type-check the inner body in the current environment.
+    // @typeInfo(T) expressions will be expanded to literal values
+    // by the type checker (once the predefined typeInfo type is added).
+    // The optimizer then handles switch elimination automatically.
+    match type_expect(tctx, env, &inner_body, expected_ty, None) {
         Ok(typed_expr) => Some(Ok(typed_expr)),
-        Err(e) => {
-            let _ = std::fs::write("/tmp/comptime_err.txt", format!("{:?}\n", e));
-            None
-        }
+        Err(_) => None, // Fall through to normal application
     }
 }
 
 /// Extract the innermost body expression from a function parse tree.
 /// Unwraps (x) => (y) => body → body.
-fn extract_function_body(
-    expr: &ParsedExpression,
-    arena: &crate::parse_arena::ParseArena,
+fn extract_function_body<'a>(
+    expr: &'a ParsedExpression,
+    arena: &'a crate::parse_arena::ParseArena,
 ) -> ParsedExpression {
     match &*expr.pexp_desc {
         crate::parser::ast::ExpressionDesc::Pexp_fun(inner) => {
