@@ -8426,6 +8426,11 @@ pub fn type_structure<'a>(
         }
     }
 
+    // TODO: Emit monomorphized comptime functions as structure items.
+    // Currently the monomorph cache is used for cycle detection only —
+    // the body is still inlined at the call site. Named function emission
+    // is pending (requires mutable arena access for Arity creation).
+
     let structure = Structure {
         str_items: typed_items,
         str_type: sig_items,
