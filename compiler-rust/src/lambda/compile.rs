@@ -4603,8 +4603,8 @@ impl LambdaCompiler {
 
     fn compile_if_return_block(&mut self, cond: &Lambda, then_: &Lambda, else_: &Lambda) -> Block {
         let cond_compiled = self.compile_expr(cond);
-        let then_block = self.compile_return_block(then_);
-        let else_block = self.compile_return_block(else_);
+        let then_block = Self::peel_single_block_statement(self.compile_return_block(then_));
+        let else_block = Self::peel_single_block_statement(self.compile_return_block(else_));
 
         let mut block = cond_compiled.prelude;
         match (
@@ -18923,6 +18923,20 @@ mod tests {
         assert!(
             !output.contains("if (Number.parseInt(x) !== 3) {"),
             "unexpected unit-return guard for the checked-in fixture:\n{output}"
+        );
+    }
+
+    #[test]
+    fn bal_set_mini_unwraps_terminal_return_blocks_before_if_fallthrough_flattening() {
+        let output = compile_checked_in_test_file_to_js("bal_set_mini");
+        assert!(
+            output.contains("  }\n  if (hr <= (hl + 2 | 0)) {"),
+            "expected the checked-in fixture to keep the right-balance guard as fallthrough after the left branch, got:\n{output}"
+        );
+        assert!(
+            !output.contains("    } else {\n    if (hr <= (hl + 2 | 0)) {")
+                && !output.contains("    } else {\n      if (hr <= (hl + 2 | 0)) {"),
+            "unexpected nested else-wrapper around the right-balance guard in the checked-in fixture:\n{output}"
         );
     }
 

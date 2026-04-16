@@ -83,6 +83,53 @@ baseline.
 
 Latest iteration on **2026-04-16**:
 
+- Active slice: mirror OCaml's single-block `Js_output.output_as_block`
+  unnesting on the return-`if` lowering path only, so terminal return branches
+  are flattened before `Statement::if_` decides whether the fallthrough can
+  stay outside the `else`
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/js_output.ml`, especially `unnest_block` /
+    `output_as_block`
+  - `compiler/core/lam_compile.ml`, especially the `compile_ifthenelse`
+    branches that feed `S.if_` from `Js_output.output_as_block (...)`
+- Rust change:
+  - narrowed `compile_if_return_block(...)` to peel single wrapped blocks from
+    both return branches before the final `Statement::if_(...)` normalization
+  - added focused checked-in fixture coverage
+    `bal_set_mini_unwraps_terminal_return_blocks_before_if_fallthrough_flattening`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release bal_set_mini_unwraps_terminal_return_blocks_before_if_fallthrough_flattening -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release array_subtle_tail_guard_keeps_positive_if_shape -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh bal_set_mini --diff`
+  - `timeout 30 ./scripts/test_js_single.sh test_set --diff`
+  - `timeout 30 ./scripts/test_js_single.sh bdd --diff`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bal_set_mini.res` now matches the checked-in `bal`
+    control-flow shape again; the remaining drift there is the separate final
+    alias difference (`let match = v`)
+  - `tests/tests/src/test_set.res` drops the matching `bal` else-nesting hunk
+    and keeps the rest of its pre-existing diffs unchanged
+  - narrowed follow-up checks confirmed that the earlier experimental broad
+    unnesting was the source of the `bdd` / `UntaggedVariants` regressions, so
+    the final kept change is limited to the return-`if` path only
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **550 / 657** -> **546 / 657** (**-4**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **99** -> **103** (**+4**)
+- Keep this change because OCaml really does strip single nested blocks before
+  passing return branches into `S.if_`; the `bal_set_mini` / `test_set`
+  control-flow fix comes directly from that behavior. The negative dirty-tree
+  delta means follow-up backend slices still need to recover four downstream
+  files that rely on the old Rust-only shape.
+
+Latest iteration on **2026-04-16**:
+
 - Active slice: route named-variant payload cases through the recursive
   tail-loop switch path so self tailcalls in `sw_blocks` stop falling back to
   direct recursion
