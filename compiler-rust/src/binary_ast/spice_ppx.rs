@@ -4407,11 +4407,8 @@ impl<'a> LocCloner<'a> {
                 self.expression_idx(expr);
             }
             ExpressionDesc::Pexp_comptime_record(inner) => {
-                let (ref _ct, ref mut fields) = **inner;
-                for (key, value) in fields {
-                    self.expression_idx(key);
-                    self.expression_idx(value);
-                }
+                let (ref _ct, ref mut fields_expr) = **inner;
+                self.expression_idx(fields_expr);
             }
             ExpressionDesc::Pexp_comptime_variant(inner) => {
                 let (ref _ct, ref mut expr, ref mut opt_expr) = **inner;
