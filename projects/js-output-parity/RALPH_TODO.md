@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **549 / 657**
+- JS snapshot parity: **550 / 657**
 - Compile errors: **8**
-- Output diffs: **100**
+- Output diffs: **99**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,63 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `549 / 657` unless the
+Do **not** replace the recorded project baseline with `550 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: keep OCaml's return-switch `break` behavior only for
+  nontrivial case bodies that exit to a shared plain staticcatch handler, while
+  leaving direct `case -> exit handler` cases inlined inside the switch
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially `compile_general_cases`,
+    `compile_switch`, and `compile_staticcatch`
+  - `compiler/core/js_output.ml`, especially `to_break_block` and its
+    return-position `should_break` behavior
+- Rust change:
+  - return-position int/string switch clauses now set `should_break` when the
+    compiled case body is non-empty, non-terminating, and still contains an
+    exit, matching OCaml's `to_break_block` behavior for partial case bodies
+  - narrowed `uses_fallthrough_staticcatch_return(...)` so plain handlers only
+    move outside the switch when the body has either outward re-raises or a
+    nontrivial case body that exits to that handler; direct `case -> exit
+    handler` bodies stay inline
+  - added focused regression coverage in
+    `partial_int_return_switch_cases_break_to_shared_handler_like_test_set`
+    and
+    `direct_return_switch_cases_keep_plain_handlers_inline_like_variant_spreads`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release partial_int_return_switch_cases_break_to_shared_handler_like_test_set -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release direct_return_switch_cases_keep_plain_handlers_inline_like_variant_spreads -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release nested_plain_int_return_switches_can_fall_through_like_gpr_1438 -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh VariantPatternMatchingSpreads --diff`
+  - `timeout 30 ./scripts/test_js_single.sh set_gen --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/VariantPatternMatchingSpreads.res` is back to an exact
+    snapshot match; the narrowed rule no longer hoists its direct plain handler
+    out of `lookup3`
+  - `tests/tests/src/set_gen.res` keeps the intended `sub(...)` switch-tail
+    improvement: the old duplicated recursive fallback is gone, leaving only
+    separate earlier `if`/`else` shaping drift in that file
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained an exact
+    snapshot match throughout the slice
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **550 / 657** -> **550 / 657** (**no change**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **99** -> **99** (**no change**)
+- Keep this change because it matches the OCaml backend's actual split:
+  partial return-switch cases that still exit to the shared handler must break
+  out to the handler, but direct shared-handler cases stay inside the switch.
+  The flat dirty-tree totals mean this slice traded one remaining backend
+  cluster (`set_gen`) against another already-known cluster rather than moving
+  the overall count yet.
 
 Latest iteration on **2026-04-16**:
 

@@ -1577,7 +1577,13 @@ impl LambdaCompiler {
                         bindings.len(),
                     )
                     && lambda_contains_static_raise_to_label(body, label, bindings.len())
-                    && lambda_contains_static_raise_to_other_label(body, label) =>
+                    && (lambda_contains_static_raise_to_other_label(body, label)
+                        || switch_cases_contain_nontrivial_static_raise_to_label(
+                            &switch.sw_consts,
+                            &switch.sw_blocks,
+                            label,
+                            bindings.len(),
+                        )) =>
                 {
                     true
                 }
@@ -1614,7 +1620,12 @@ impl LambdaCompiler {
                         bindings.len(),
                     )
                     && lambda_contains_static_raise_to_label(body, label, bindings.len())
-                    && lambda_contains_static_raise_to_other_label(body, label) =>
+                    && (lambda_contains_static_raise_to_other_label(body, label)
+                        || string_switch_cases_contain_nontrivial_static_raise_to_label(
+                            cases,
+                            label,
+                            bindings.len(),
+                        )) =>
                 {
                     true
                 }
@@ -1703,6 +1714,8 @@ impl LambdaCompiler {
             let (_, body, _) = &grouped_cases[group_end];
             let compiled_body = self.compile_return_block(body);
             let group_falls_through = compiled_body.is_empty();
+            let should_break =
+                !compiled_body.is_empty() && !block_terminates(&compiled_body) && lambda_has_exit(body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
@@ -1711,11 +1724,11 @@ impl LambdaCompiler {
                     group_falls_through,
                 ));
             }
-            clauses.push((
+                clauses.push((
                 to_tag(grouped_cases[group_end].0.clone()),
                 CaseClause {
                     body: compiled_body,
-                    should_break: false,
+                    should_break,
                     comment: None,
                 },
                 group_falls_through,
@@ -4881,6 +4894,8 @@ impl LambdaCompiler {
             let (_, body, _) = &grouped_cases[group_end];
             let compiled_body = self.compile_return_block(body);
             let group_falls_through = compiled_body.is_empty();
+            let should_break =
+                !compiled_body.is_empty() && !block_terminates(&compiled_body) && lambda_has_exit(body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
@@ -4889,7 +4904,7 @@ impl LambdaCompiler {
                 grouped_cases[group_end].0,
                 crate::js_ir::CaseClause {
                     body: compiled_body,
-                    should_break: false,
+                    should_break,
                     comment: None,
                 },
                 group_falls_through,
@@ -9458,6 +9473,36 @@ fn string_switch_cases_contain_static_raise_to_label(
     cases
         .iter()
         .any(|(_, body)| lambda_contains_static_raise_to_label(body, label, arity))
+}
+
+fn lambda_is_direct_static_raise_to_label(lam: &Lambda, label: i32, arity: usize) -> bool {
+    matches!(lam, Lambda::LstaticRaise(raise_label, args) if *raise_label == label && args.len() == arity)
+}
+
+fn switch_cases_contain_nontrivial_static_raise_to_label(
+    const_cases: &[(i32, Lambda)],
+    block_cases: &[(i32, Lambda)],
+    label: i32,
+    arity: usize,
+) -> bool {
+    const_cases.iter().any(|(_, body)| {
+        lambda_contains_static_raise_to_label(body, label, arity)
+            && !lambda_is_direct_static_raise_to_label(body, label, arity)
+    }) || block_cases.iter().any(|(_, body)| {
+        lambda_contains_static_raise_to_label(body, label, arity)
+            && !lambda_is_direct_static_raise_to_label(body, label, arity)
+    })
+}
+
+fn string_switch_cases_contain_nontrivial_static_raise_to_label(
+    cases: &[(String, Lambda)],
+    label: i32,
+    arity: usize,
+) -> bool {
+    cases.iter().any(|(_, body)| {
+        lambda_contains_static_raise_to_label(body, label, arity)
+            && !lambda_is_direct_static_raise_to_label(body, label, arity)
+    })
 }
 
 fn lambda_has_multiple_static_raises_to_label(lam: &Lambda, label: i32, arity: usize) -> bool {
@@ -17315,6 +17360,119 @@ mod tests {
             StatementDesc::Return(expr) => assert_int_expr(expr, 30),
             other => panic!("expected the outer handler return, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn partial_int_return_switch_cases_break_to_shared_handler_like_test_set() {
+        let mut compiler = LambdaCompiler::new();
+        let action = Ident::create_local("action");
+        let cond = Ident::create_local("cond");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::Lswitch(
+                Box::new(Lambda::var(action.clone())),
+                LambdaSwitch {
+                    sw_consts_full: false,
+                    sw_consts: vec![
+                        (
+                            1,
+                            Lambda::if_(
+                                Lambda::var(cond.clone()),
+                                Lambda::const_(Constant::int(10)),
+                                Lambda::static_raise(1, Vec::new()),
+                            ),
+                        ),
+                        (2, Lambda::const_(Constant::int(20))),
+                    ],
+                    sw_blocks_full: true,
+                    sw_blocks: vec![],
+                    sw_failaction: None,
+                    sw_names: None,
+                },
+            )),
+            (1, vec![]),
+            Box::new(Lambda::const_(Constant::int(30))),
+        ));
+
+        let [switch_stmt, handler_return] = block.as_slice() else {
+            panic!("expected a switch followed by the shared handler return");
+        };
+        let StatementDesc::IntSwitch(test, clauses, None) = &switch_stmt.desc else {
+            panic!("expected the shared handler to stay outside the switch");
+        };
+        assert!(matches!(
+            test,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&action)
+        ));
+        assert_eq!(clauses.len(), 2);
+        assert_eq!(clauses[0].0, 1);
+        assert!(
+            clauses[0].1.should_break,
+            "expected the partial case to break to the shared handler"
+        );
+        assert_eq!(clauses[1].0, 2);
+        assert_switch_case_returns_int_result(&clauses[1].1.body, 20);
+        assert!(
+            !clauses[1].1.should_break,
+            "expected the fully returning case to omit break"
+        );
+
+        let rendered = print_block(&block);
+        assert_eq!(
+            rendered,
+            "switch (action) {\n  case 1 :\n    if (cond) {\n      return 10;\n    }\n    break;\n  case 2 :\n    return 20;\n}\n\nreturn 30;"
+        );
+
+        match &handler_return.desc {
+            StatementDesc::Return(expr) => assert_int_expr(expr, 30),
+            other => panic!("expected the shared handler return, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn direct_return_switch_cases_keep_plain_handlers_inline_like_variant_spreads() {
+        let mut compiler = LambdaCompiler::new();
+        let action = Ident::create_local("action");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::Lswitch(
+                Box::new(Lambda::var(action.clone())),
+                LambdaSwitch {
+                    sw_consts_full: false,
+                    sw_consts: vec![
+                        (1, Lambda::static_raise(1, Vec::new())),
+                        (2, Lambda::static_raise(1, Vec::new())),
+                        (3, Lambda::const_(Constant::int(40))),
+                    ],
+                    sw_blocks_full: true,
+                    sw_blocks: vec![],
+                    sw_failaction: None,
+                    sw_names: None,
+                },
+            )),
+            (1, vec![]),
+            Box::new(Lambda::const_(Constant::int(30))),
+        ));
+
+        let [switch_stmt] = block.as_slice() else {
+            panic!("expected the plain handler to stay inlined inside the switch");
+        };
+        let StatementDesc::IntSwitch(test, clauses, None) = &switch_stmt.desc else {
+            panic!("expected a single switch statement");
+        };
+        assert!(matches!(
+            test,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&action)
+        ));
+        assert_eq!(clauses.len(), 3);
+        assert_eq!(
+            print_block(&block),
+            "switch (action) {\n  case 1 :\n  case 2 :\n    return 30;\n  case 3 :\n    return 40;\n}"
+        );
     }
 
     #[test]
