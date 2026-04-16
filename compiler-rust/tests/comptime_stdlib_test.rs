@@ -5,11 +5,9 @@
 //! - JSON.Encode.string/int/float/bool/object (all %identity — zero-cost)
 //! - Dict.make() + Dict.set()
 //!
-//! NOTE: External resolution from source-loaded modules currently emits
-//! `undefined` for some primitives (@set_index, %identity from submodules).
-//! This is a known JS codegen issue, not a comptime issue. The comptime
-//! specialization (branch elimination, inline for unrolling, recursive
-//! inlining) works correctly — only the final JS extern calls are wrong.
+//! The full pipeline works: comptime specialization produces per-field code,
+//! JSON.Encode.* compiles to identity (values ARE JSON), Dict operations
+//! compile to clean property assignments.
 
 use rescript_compiler::driver::{compile_source_in_process, CompilerOptions};
 use rescript_compiler::cmi::persistent_env::ModuleRegistry;
@@ -109,14 +107,20 @@ let json = encode(myUser)
             // Verify comptime specialization worked:
             // - No typeInfo/switch at runtime
             assert!(!output.contains("typeInfo"), "Should not have runtime typeInfo:\n{output}");
-            // - Field names present (from inline for unrolling)
-            assert!(output.contains("name"), "Expected 'name' field:\n{output}");
-            assert!(output.contains("age"), "Expected 'age' field:\n{output}");
-            assert!(output.contains("street"), "Expected nested 'street':\n{output}");
+            // - No undefined (all externals resolved correctly)
+            assert!(!output.contains("undefined"), "Should not have undefined:\n{output}");
+            // - Dict operations compiled correctly
+            assert!(output.contains(r#"["name"]"#), "Expected Dict.set for 'name':\n{output}");
+            assert!(output.contains(r#"["age"]"#), "Expected Dict.set for 'age':\n{output}");
+            assert!(output.contains(r#"["street"]"#), "Expected nested 'street':\n{output}");
+            assert!(output.contains(r#"["city"]"#), "Expected nested 'city':\n{output}");
+            assert!(output.contains(r#"["address"]"#), "Expected Dict.set for 'address':\n{output}");
+            // - JSON.Encode.* compiled as identity (values appear directly)
+            assert!(output.contains(r#""Alice""#), "Expected 'Alice' value:\n{output}");
+            assert!(output.contains("30"), "Expected 30 value:\n{output}");
         }
         Err(e) => {
-            eprintln!("North star encoder compilation error: {e}");
-            // Don't panic — this may fail until extern resolution is fixed
+            panic!("North star encoder should compile: {e}");
         }
     }
 }
