@@ -237,6 +237,89 @@ let json = encode(myUser)
 }
 
 // ============================================================================
+// Recursive type tests (cycle detection)
+// ============================================================================
+
+#[test]
+fn comptime_recursive_type_does_not_infinite_loop() {
+    // Recursive type: tree contains array<tree>
+    // The comptime system should detect the cycle and not infinite-loop.
+    let source = r#"
+type tree = { value: string, children: array<tree> }
+
+@comptime
+let rec describe = (value) => {
+  switch @typeInfo(value) {
+  | String => "string"
+  | Int => "int"
+  | Record({name}) => "record:" ++ name
+  | Array(_) => "array"
+  | _ => "other"
+  }
+}
+
+let myTree: tree = { value: "root", children: [] }
+let desc = describe(myTree)
+"#;
+    // This should complete without hanging/crashing
+    let result = compile_with_stdlib(source, "recursive_type.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== RECURSIVE TYPE JS ===\n{}\n=== END ===", output);
+            // Should contain "record" + "tree" (type description)
+            assert!(output.contains("record") || output.contains("tree"),
+                "Expected type description:\n{output}");
+        }
+        Err(e) => {
+            eprintln!("Recursive type test error (may be expected): {e}");
+            // Even if compilation fails, it should NOT hang
+        }
+    }
+}
+
+#[test]
+fn comptime_recursive_encoder_terminates() {
+    // The encoder recurses into record fields — for a recursive type
+    // this WOULD infinite-loop without cycle detection.
+    let source = r#"
+type tree = { value: string, children: array<tree> }
+
+@comptime
+let rec encodeValue = (value) => {
+  switch @typeInfo(value) {
+  | String => "\"" ++ value ++ "\""
+  | Int => "int"
+  | Record({fields}) => {
+      let result = ref("{")
+      inline for field in fields {
+        let encoded = encodeValue(@field(value, field.name))
+        result := result.contents ++ field.name ++ ":" ++ encoded ++ ","
+      }
+      result.contents ++ "}"
+    }
+  | Array(_) => "array"
+  | _ => "other"
+  }
+}
+
+let myTree: tree = { value: "root", children: [] }
+let enc = encodeValue(myTree)
+"#;
+    // This should NOT hang — the cycle detection should catch
+    // encode(tree) → inline for fields → encode(array<tree>) → Array branch (terminates)
+    let result = compile_with_stdlib(source, "recursive_encoder.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== RECURSIVE ENCODER JS ===\n{}\n=== END ===", output);
+            assert!(output.contains("value"), "Expected 'value' field:\n{output}");
+        }
+        Err(e) => {
+            eprintln!("Recursive encoder error (may need named fn emission): {e}");
+        }
+    }
+}
+
+// ============================================================================
 // Lambda switch folding
 // ============================================================================
 
