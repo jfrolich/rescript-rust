@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 522 / 657 with 8 unrelated compile errors and 127 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 525 / 657 with 8 unrelated compile errors and 124 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **522 / 657**
+- JS snapshot parity: **525 / 657**
 - Compile errors: **8**
-- Output diffs: **127**
+- Output diffs: **124**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,67 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `522 / 657` unless the
+Do **not** replace the recorded project baseline with `525 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: keep explicit positive nullish success guards except when the
+  fallback branch simply returns the same guarded nullish value; that fallback
+  case should still lower to the OCaml-style failure-first guard clause used by
+  `let?` option unwraps like `LetUnwrap`
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/js_ir/mod.rs`
+- OCaml reference:
+  `compiler/core/js_stmt_make.ml`, especially the `if_` helper branch
+  `| _, [{statement_desc = Return _}] -> ...`, which emits the failure-first
+  guard-clause form for fallback returns, while the already-materialized
+  explicit positive nullish guards from other backend paths remain intact
+- Rust change:
+  - narrowed the single-return-else preservation in
+    `simplify_if_statement(...)` so
+    `preserves_nullish_success_guard(...)` still protects explicit positive
+    nullish guards like `return_check`, `undef_regression_test`, and
+    `unit_undefined_test`
+  - added `nullish_guard_target(...)` and
+    `nullish_guard_fallback_returns_guard_target(...)` so the preservation is
+    skipped when the fallback return is just the guarded nullable value itself,
+    restoring OCaml's `if (x == nullish) return x; ...` shape for `LetUnwrap`
+  - added focused regression coverage for the fallback-returns-guarded-value
+    case alongside the existing positive nullish guard tests
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh LetUnwrap`
+  - `timeout 30 ./scripts/test_js_single.sh return_check`
+  - `timeout 30 ./scripts/test_js_single.sh undef_regression_test`
+  - `timeout 30 ./scripts/test_js_single.sh unit_undefined_test`
+  - `timeout 30 ./scripts/test_js_single.sh js_nullable_test`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/LetUnwrap.res` now matches its checked-in snapshot again;
+    the option unwrap fallback now lowers back to OCaml's failure-first
+    `if (y === undefined) return y;` form instead of keeping a Rust-only
+    success-first `else`
+  - `tests/tests/src/return_check.res`,
+    `tests/tests/src/undef_regression_test.res`,
+    `tests/tests/src/unit_undefined_test.res`,
+    `tests/tests/src/js_nullable_test.res`, and
+    `tests/tests/src/ExternalShadow.res` remained exact as guards
+  - the current dirty-tree wrapper improved by two exact JS snapshots while
+    keeping the unrelated compile-error set unchanged
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **523 / 657** -> **525 / 657** (**+2**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **126** -> **124** (**-2**)
+- Keep this change because the broader nullish-guard preservation was
+  overmatching OCaml's backend. The new exception only rewrites the
+  fallback-returns-guarded-value case, which matches the checked-in OCaml
+  snapshot shape without regressing the explicit positive nullish guards that
+  are already correct.
 
 Latest iteration on **2026-04-16**:
 

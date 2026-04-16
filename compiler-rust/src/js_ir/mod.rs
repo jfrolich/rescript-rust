@@ -1393,7 +1393,8 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         // flips them into `if (!cond) return; ...` too soon.
         if preserves_positive_return_undefined_tail(&then_, else_ret)
             || preserves_positive_literal_dispatch_return_tail(&cond, &then_, else_ret)
-            || preserves_nullish_success_guard(&cond, &then_, &else_)
+            || (preserves_nullish_success_guard(&cond, &then_, &else_)
+                && !nullish_guard_fallback_returns_guard_target(&cond, else_ret))
         {
             return Statement::new(StatementDesc::If(cond, then_, else_));
         }
@@ -1644,6 +1645,39 @@ fn preserves_nullish_success_guard(cond: &Expression, then_: &Block, else_: &Blo
 
     (then_nontrivial_terminal && else_simple_fallback)
         || (else_nontrivial_terminal && then_simple_fallback)
+}
+
+fn nullish_guard_fallback_returns_guard_target(cond: &Expression, expr: &Expression) -> bool {
+    let ExpressionDesc::Var(fallback_vident) = &expr.desc else {
+        return false;
+    };
+
+    let Some(target_vident) = nullish_guard_target(cond) else {
+        return false;
+    };
+
+    same_vident(target_vident, fallback_vident)
+}
+
+fn nullish_guard_target(expr: &Expression) -> Option<&VIdent> {
+    match &expr.desc {
+        ExpressionDesc::IsNullOrUndefined(inner) => match &inner.as_ref().desc {
+            ExpressionDesc::Var(vident) => Some(vident),
+            _ => None,
+        },
+        ExpressionDesc::JsNot(inner) => nullish_guard_target(inner),
+        _ => match strict_var_literal_comparison(expr) {
+            Some((
+                BinOp::EqEqEq | BinOp::NotEqEq,
+                vident,
+                Expression {
+                    desc: ExpressionDesc::Null | ExpressionDesc::Undefined { .. },
+                    ..
+                },
+            )) => Some(vident),
+            _ => None,
+        },
+    }
 }
 
 fn is_nullish_refinement_guard(expr: &Expression) -> bool {
@@ -3579,7 +3613,7 @@ mod tests {
         let then_block = vec![
             Statement::exp(Expression::call(
                 Expression::var(Ident::create_local("seen")),
-                vec![Expression::var(value)],
+                vec![Expression::var(value.clone())],
                 CallInfo::default(),
             )),
             Statement::return_(Expression::undefined(true)),
@@ -3594,6 +3628,69 @@ mod tests {
         assert!(ocaml_eq_expression(test, &cond));
         assert!(ocaml_eq_block(kept_then, &then_block));
         assert!(ocaml_eq_block(kept_else, &else_block));
+    }
+
+    #[test]
+    fn test_if_statement_rewrites_nullish_guard_when_fallback_returns_guarded_value() {
+        let value = Ident::create_local("value");
+        let cond = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::var(value.clone()),
+            Expression::undefined(false),
+        );
+        let then_block = vec![
+            Statement::exp(Expression::call(
+                Expression::var(Ident::create_local("seen")),
+                vec![Expression::var(value.clone())],
+                CallInfo::default(),
+            )),
+            Statement::return_(Expression::number(Number::int(2))),
+        ];
+        let else_block = vec![Statement::return_(Expression::var(value.clone()))];
+
+        let stmt = Statement::if_(cond.clone(), then_block, else_block);
+
+        let StatementDesc::Block(block) = &stmt.desc else {
+            panic!("expected fallback-to-guarded-value case to become a negative guard: {stmt:#?}");
+        };
+        let [guard, fallthrough, return_stmt] = block.as_slice() else {
+            panic!("expected guard + fallthrough effect + trailing return");
+        };
+        assert!(matches!(
+            &guard.desc,
+            StatementDesc::If(test, then_block, else_block)
+                if matches!(
+                    &test.desc,
+                    ExpressionDesc::Bin(
+                        BinOp::EqEqEq,
+                        left,
+                        right
+                    ) if matches!(
+                        (&left.desc, &right.desc),
+                        (
+                            ExpressionDesc::Var(VIdent::Id(id)),
+                            ExpressionDesc::Undefined { .. }
+                        ) if id.same(&value)
+                    )
+                ) && matches!(
+                    then_block.as_slice(),
+                    [Statement {
+                        desc: StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Var(VIdent::Id(id)),
+                            ..
+                        }) ,
+                        ..
+                    }] if id.same(&value)
+                ) && else_block.is_empty()
+        ));
+        assert!(matches!(fallthrough.desc, StatementDesc::Exp(_)));
+        assert!(matches!(
+            return_stmt.desc,
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Number(Number::Int { i: 2, .. }),
+                ..
+            })
+        ));
     }
 
     #[test]
