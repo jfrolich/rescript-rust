@@ -17,8 +17,11 @@ type user = {
 
 // ── Encoder ──────────────────────────────────────────────────────────
 //
-// Specializes per call-site type. Since JSON.Encode.* are all %identity,
-// the output is just Dict operations and raw values — zero overhead.
+// Specializes per call-site type. @typeInfo(value) resolves from the
+// argument's type, so no explicit type parameter needed.
+//
+// Since JSON.Encode.* are all %identity, the output is just Dict
+// operations and raw values — zero overhead.
 
 @comptime
 let rec encode = (value): JSON.t => {
@@ -46,13 +49,16 @@ let rec encode = (value): JSON.t => {
 
 // ── Decoder ──────────────────────────────────────────────────────────
 //
-// Also specializes per call-site. Uses the expected return type to
-// determine which JSON branch to take and how to build records.
-// Returns result<T, string> so decoding failures are explicit.
+// Unlike the encoder, the decoder has no value to infer the target type
+// from — it receives opaque JSON. So it takes an explicit comptime type
+// parameter: decode(user, json) tells it to produce a user.
+//
+// @typeInfo(t) resolves the comptime type parameter, and each recursive
+// call passes the field's type: decode(field.type, ...).
 
 @comptime
-let rec decode = (json: JSON.t): result<_, string> => {
-  switch @typeInfo(@return) {
+let rec decode = (type t, json: JSON.t): result<t, string> => {
+  switch @typeInfo(t) {
   | String =>
     switch json {
     | String(s) => Ok(s)
@@ -76,8 +82,8 @@ let rec decode = (json: JSON.t): result<_, string> => {
   | Record({fields}) =>
     switch json {
     | Object(dict) =>
-      @record(inline for field in fields {
-        switch decode(Dict.getUnsafe(dict, field.name)) {
+      @record(t, inline for field in fields {
+        switch decode(field.type, Dict.getUnsafe(dict, field.name)) {
         | Ok(v) => v
         | Error(e) => return Error(field.name ++ ": " ++ e)
         }
@@ -85,22 +91,22 @@ let rec decode = (json: JSON.t): result<_, string> => {
       ->Ok
     | _ => Error("expected object")
     }
-  | Option(_) =>
+  | Option({inner}) =>
     switch json {
     | Null => Ok(None)
     | _ =>
-      switch decode(json) {
+      switch decode(inner, json) {
       | Ok(v) => Ok(Some(v))
       | Error(e) => Error(e)
       }
     }
-  | Array(_) =>
+  | Array({element}) =>
     json
     ->JSON.Decode.array
     ->Option.mapOr(Error("expected array"), arr => {
       let result = []
       for i in 0 to Array.length(arr) - 1 {
-        switch decode(Array.getUnsafe(arr, i)) {
+        switch decode(element, Array.getUnsafe(arr, i)) {
         | Ok(v) => result->Array.push(v)
         | Error(e) => return Error("[" ++ Int.toString(i) ++ "]: " ++ e)
         }
@@ -126,14 +132,14 @@ let json = encode(alice)
 
 // ── Decode ───────────────────────────────────────────────────────────
 
-let decoded: result<user, string> = decode(json)
+let decoded = decode(user, json)
 
 // ── Roundtrip primitives ─────────────────────────────────────────────
 
-let s: result<string, string> = decode(encode("hello"))
-let n: result<int, string> = decode(encode(42))
-let b: result<bool, string> = decode(encode(true))
+let s = decode(string, encode("hello"))
+let n = decode(int, encode(42))
+let b = decode(bool, encode(true))
 
 // ── Roundtrip nested ─────────────────────────────────────────────────
 
-let addr: result<address, string> = decode(encode(alice.address))
+let addr = decode(address, encode(alice.address))
