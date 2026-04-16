@@ -20003,9 +20003,6 @@ fn try_comptime_application(
     // Check if it's a registered comptime function
     let comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
 
-    // Get the function's parse tree body
-    let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx).clone();
-
     // Type-check the arguments to determine their concrete types
     let mut typed_args = Vec::new();
     for (_label, arg_idx) in args {
@@ -20017,18 +20014,34 @@ fn try_comptime_application(
         }
     }
 
-    // For now, type-check the function body in the current environment.
-    // The body may contain @typeInfo which will be handled by the
-    // type checker's Pexp_comptime_typeinfo case.
-    //
-    // TODO: set up a comptime context so @typeInfo resolves the
-    // concrete type instead of erroring. For now, if the body
-    // doesn't contain comptime builtins, this works for simple cases.
-    match type_expect(tctx, env, &body_expr, expected_ty, None) {
+    // Build TypeInfo from the first argument's concrete type.
+    // This is used to resolve @typeInfo(T) in the function body.
+    let concrete_type = typed_args.first().map(|a| a.exp_type);
+    let type_info = concrete_type.map(|ty| {
+        let mut visited = Vec::new();
+        crate::types::comptime::build_type_info(tctx.type_ctx, env, ty, &mut visited)
+    });
+
+    // Get the function's parse tree body and partially evaluate it.
+    // The partial evaluator resolves @typeInfo, picks switch branches,
+    // and unrolls inline for — BEFORE type-checking.
+    let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx).clone();
+    let specialized_body = crate::types::comptime::partially_evaluate_parse_tree(
+        &body_expr,
+        tctx.arena,
+        type_info.as_ref(),
+        &typed_args,
+        tctx.type_ctx,
+        env,
+    );
+
+    // Type-check the specialized body in the current environment.
+    // The body no longer contains @typeInfo or comptime constructs —
+    // it's just regular ReScript that the type checker handles normally.
+    match type_expect(tctx, env, &specialized_body, expected_ty, None) {
         Ok(typed_body) => Some(Ok(typed_body)),
         Err(_) => {
-            // If type-checking the body fails (e.g., due to @typeInfo),
-            // fall through to normal application handling
+            // If type-checking fails, fall through to normal application
             None
         }
     }

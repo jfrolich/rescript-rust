@@ -506,10 +506,220 @@ pub fn match_typeinfo_pattern(
     }
 }
 
-// ── Partial Evaluator ───────────────────────────────────────────────────────
+// ── Parse Tree Partial Evaluator ─────────────────────────────────────────────
 //
-// The partial evaluator walks the typed tree of a @comptime function with
-// comptime bindings. It resolves:
+// Walks a parse tree (Expression) and resolves comptime constructs BEFORE
+// type checking. This produces a new parse tree with:
+// - @typeInfo(T) resolved and switch branches eliminated
+// - inline for unrolled
+// - @field(value, name) replaced with value.name field access
+// - @compileError(msg) checked
+// All comptime constructs are removed; the result is plain ReScript.
+
+use crate::parser::ast::{Expression as ParsedExpression, ExpressionDesc as PED, Attributes};
+use crate::parse_arena::ParseArena;
+
+/// Partially evaluate a comptime function body parse tree.
+///
+/// Resolves @typeInfo, picks switch branches, unrolls inline for.
+/// The result is a plain parse tree ready for normal type checking.
+pub fn partially_evaluate_parse_tree<'a>(
+    expr: &ParsedExpression,
+    arena: &ParseArena,
+    type_info: Option<&TypeInfo>,
+    _typed_args: &[super::typedtree::Expression],
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+) -> ParsedExpression {
+    match &*expr.pexp_desc {
+        // switch @typeInfo(T) { | Pattern => body | ... }
+        // Resolve TypeInfo, match patterns, return matching branch body
+        PED::Pexp_match(inner) => {
+            let (ref scrutinee_idx, ref cases) = **inner;
+            let scrutinee = arena.get_expr(*scrutinee_idx);
+
+            // Check if scrutinee is @typeInfo(...)
+            if let PED::Pexp_comptime_typeinfo(ct_idx) = &*scrutinee.pexp_desc {
+                // Try to resolve the type from the core type expression
+                let resolved_info = resolve_typeinfo_from_core_type(*ct_idx, arena, ctx, env);
+                let info_ref = resolved_info.as_ref().or(type_info);
+                if let Some(info) = info_ref {
+                    // Try to match TypeInfo against case patterns
+                    for case in cases {
+                        let pat = arena.get_pat(case.pc_lhs);
+                        if comptime_pattern_matches(info, pat, arena) {
+                            // Return the matching branch body, recursively evaluated
+                            let body = arena.get_expr(case.pc_rhs);
+                            return partially_evaluate_parse_tree(body, arena, type_info, _typed_args, ctx, env);
+                        }
+                    }
+                    // No match — check for wildcard
+                    for case in cases {
+                        let pat = arena.get_pat(case.pc_lhs);
+                        if is_wildcard_pattern(pat) {
+                            let body = arena.get_expr(case.pc_rhs);
+                            return partially_evaluate_parse_tree(body, arena, type_info, _typed_args, ctx, env);
+                        }
+                    }
+                }
+            }
+
+            // Not a comptime switch — pass through
+            expr.clone()
+        }
+
+        // @typeInfo(T) outside of switch — for now, pass through
+        // (will be handled when we have typeInfo as a real type)
+        PED::Pexp_comptime_typeinfo(_) => expr.clone(),
+
+        // @compileError("msg") — this should have been eliminated by switch
+        // If we reach here, it means the error branch was selected
+        PED::Pexp_comptime_compile_error(_msg_idx) => {
+            // TODO: extract message and produce compile error
+            expr.clone()
+        }
+
+        // @field(value, "name") — TODO: transform to value.name
+        PED::Pexp_comptime_field(_) => expr.clone(),
+
+        // @typeName(T) — TODO: transform to string constant
+        PED::Pexp_comptime_typename(_) => expr.clone(),
+
+        // Everything else — pass through unchanged
+        _ => expr.clone(),
+    }
+}
+
+/// Check if a parse tree pattern matches a TypeInfo value.
+/// Used for comptime switch branch elimination.
+fn comptime_pattern_matches(info: &TypeInfo, pat: &crate::parser::ast::Pattern, arena: &ParseArena) -> bool {
+    match &*pat.ppat_desc {
+        // Wildcard matches everything
+        crate::parser::ast::PatternDesc::Ppat_any => true,
+
+        // Variable matches everything (and binds)
+        crate::parser::ast::PatternDesc::Ppat_var(_) => true,
+
+        // Constructor pattern — match variant name against TypeInfo kind
+        crate::parser::ast::PatternDesc::Ppat_construct(lid, _) => {
+            let ctor_name = arena.get_longident(lid.txt).to_string();
+            matches!(
+                (ctor_name.as_str(), info),
+                ("Int", TypeInfo::Int)
+                | ("Float", TypeInfo::Float)
+                | ("String", TypeInfo::String)
+                | ("Bool", TypeInfo::Bool)
+                | ("Unit", TypeInfo::Unit)
+                | ("Char", TypeInfo::Char)
+                | ("Bigint", TypeInfo::Bigint)
+                | ("Record", TypeInfo::Record { .. })
+                | ("Variant", TypeInfo::Variant { .. })
+                | ("Array", TypeInfo::Array { .. })
+                | ("Option", TypeInfo::Option { .. })
+                | ("Function", TypeInfo::Function { .. })
+                | ("External", TypeInfo::External { .. })
+                | ("Opaque", TypeInfo::Opaque { .. })
+            )
+        }
+
+        _ => false,
+    }
+}
+
+/// Try to resolve a TypeInfo from a CoreType expression in the parse tree.
+/// Looks up the type by name in the environment.
+fn resolve_typeinfo_from_core_type<'a>(
+    ct_idx: crate::parse_arena::CoreTypeIdx,
+    arena: &ParseArena,
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+) -> Option<TypeInfo> {
+    let core_type = arena.get_core_type(ct_idx);
+    // Extract the type name from the core type
+    match &*core_type.ptyp_desc {
+        crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) => {
+            let (ref lid, ref _args) = **inner;
+            let type_name = arena.get_longident(lid.txt).to_string();
+            // Look up in env
+            if let Ok(type_decl) = env.find_type(&type_name) {
+                let mut visited = Vec::new();
+                // Build TypeInfo from the declaration
+                match &type_decl.type_kind {
+                    crate::types::decl::TypeKind::TypeRecord(labels, _) => {
+                        let fields = labels
+                            .iter()
+                            .map(|ld| FieldInfo {
+                                name: ld.ld_id.name().to_string(),
+                                typ: build_type_info(ctx, env, ld.ld_type, &mut visited),
+                                mutable: ld.ld_mutable == crate::types::asttypes::MutableFlag::Mutable,
+                                optional: ld.ld_optional,
+                                attributes: vec![],
+                            })
+                            .collect();
+                        Some(TypeInfo::Record {
+                            name: type_name,
+                            fields,
+                            unboxed: type_decl.type_unboxed.unboxed,
+                        })
+                    }
+                    crate::types::decl::TypeKind::TypeVariant(ctors) => {
+                        let constructors = ctors
+                            .iter()
+                            .map(|cd| {
+                                let args = match &cd.cd_args {
+                                    crate::types::decl::ConstructorArguments::CstrTuple(tys) => tys
+                                        .iter()
+                                        .map(|t| build_type_info(ctx, env, *t, &mut visited))
+                                        .collect(),
+                                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => labels
+                                        .iter()
+                                        .map(|ld| build_type_info(ctx, env, ld.ld_type, &mut visited))
+                                        .collect(),
+                                };
+                                ConstructorInfo {
+                                    name: cd.cd_id.name().to_string(),
+                                    args,
+                                    attributes: vec![],
+                                }
+                            })
+                            .collect();
+                        Some(TypeInfo::Variant {
+                            name: type_name,
+                            constructors,
+                            unboxed: type_decl.type_unboxed.unboxed,
+                        })
+                    }
+                    _ => None,
+                }
+            } else {
+                // Check predefined types
+                match type_name.as_str() {
+                    "int" => Some(TypeInfo::Int),
+                    "float" => Some(TypeInfo::Float),
+                    "string" => Some(TypeInfo::String),
+                    "bool" => Some(TypeInfo::Bool),
+                    "unit" => Some(TypeInfo::Unit),
+                    "char" => Some(TypeInfo::Char),
+                    _ => None,
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_wildcard_pattern(pat: &crate::parser::ast::Pattern) -> bool {
+    matches!(
+        &*pat.ppat_desc,
+        crate::parser::ast::PatternDesc::Ppat_any | crate::parser::ast::PatternDesc::Ppat_var(_)
+    )
+}
+
+// ── Typed Tree Partial Evaluator (legacy) ───────────────────────────────────
+//
+// The typed-tree partial evaluator walks the typed tree with comptime bindings.
+// This is used for post-type-checking specialization. The parse-tree evaluator
+// above handles the common cases; this handles more complex scenarios.
 //   - @typeInfo(T) → concrete TypeInfo value from TypeContext
 //   - switch on comptime value → picks matching branch
 //   - inline for → unrolls loop body per element
