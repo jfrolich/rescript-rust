@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 579 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 78 output diffs
+**Status:** 581 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 76 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **579 / 657**
+- JS snapshot parity: **581 / 657**
 - Compile errors: **0**
-- Output diffs: **78**
+- Output diffs: **76**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,72 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **579 / 657**
+- JS snapshot parity: **581 / 657**
 - Compile errors: **0**
-- Output diffs: **78**
+- Output diffs: **76**
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: restore the OCaml snapshot shape for implicit unit-function
+  fallthrough tails so `print_function_body(...)` can re-materialize the
+  explicit outer `else` form even after the trailing `return undefined` has
+  already fallen off the function body, and collapse the nested shared-fallback
+  guard chain in `gpr_1891_test` back to the combined positive guard
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change is entirely in `compiler-rust/src/js_ir/printer.rs`
+- OCaml reference:
+  - `compiler/core/js_dump.ml`, especially `function_body` and `statement` for
+    how final dump output preserves the explicit outer `else` byte shape once
+    the backend has already decided on the branch structure
+  - checked-in OCaml snapshots
+    `tests/tests/src/gpr_1891_test.mjs` and
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.mjs`, which keep
+    the unit-return outer `else` explicit and keep the `#Foo(3)` success path
+    collapsed to one combined `&&` guard
+- Rust change:
+  - taught `print_function_body(...)` to synthesize the implicit trailing
+    `return undefined` when matching unit-return body tails of the form
+    `[if ..., trailing_stmt]`, so the existing nested-tail merge can still fire
+    after the explicit return has already been elided from the body
+  - added `try_function_body_shared_tail_outer_else_merge(...)` so
+    `[if (...) { ... return; }, trailing_stmt]` can re-materialize the explicit
+    outer `else { trailing_stmt; return; }` snapshot shape for the nested
+    `doWithA` / `doWithB` family
+  - added `try_unit_function_tail_shared_else_guard_chain_merge(...)` plus
+    `strip_leading_negative_guard_shared_else(...)` so the rebuilt outer-else
+    form can collapse the `typeof/object` + `NAME === "Foo"` + `VAL !== 3`
+    shared-fallback chain back to OCaml's combined positive guard in
+    `gpr_1891_test`
+  - updated/added focused regression coverage in
+    `test_print_unit_function_body_merges_implicit_shared_tail_into_nested_if_else_like_ocaml`,
+    `test_print_unit_function_body_merges_implicit_terminal_outer_else_like_do_with_a`,
+    and
+    `test_print_unit_function_body_merges_implicit_shared_else_guard_chain_like_gpr_1891`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_unit_function_body_merges_implicit_ -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_unit_function_tail_merges_shared_else_guard_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_1891_test.res -o /tmp/gpr_1891_test.mjs`
+  - `diff -u tests/tests/src/gpr_1891_test.mjs /tmp/gpr_1891_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res -o /tmp/VariantPatternMatchingSpreadsWithPayloads.mjs`
+  - `diff -u tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.mjs /tmp/VariantPatternMatchingSpreadsWithPayloads.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `diff -u tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1891_test.res` now matches its checked-in snapshot
+    again; the unit-return `#Foo(3)` cases no longer stay in the Rust-only
+    nested `if (...) { if (...) { if (...) ... } ... }` form
+  - `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` now matches
+    its checked-in snapshot again; both `doWithA` and `doWithB` keep OCaml's
+    explicit outer `else { ...; return; }` form instead of falling through to a
+    trailing top-level `console.log(...)`
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained an exact
+    snapshot match after the same Phase 5 printer rewrite
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **579 / 657** -> **581 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **78** -> **76** (**-2**)
 
 Latest iteration on **2026-04-16**:
 

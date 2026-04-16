@@ -2399,10 +2399,37 @@ impl JsPrinter {
             return;
         }
 
+        if return_unit {
+            let implicit_return = Statement::return_(Expression::undefined(true));
+
+            if let [stmt, trailing_stmt] = stmts.as_slice() {
+                if let Some(merged) =
+                    try_function_body_shared_tail_nested_if_merge(stmt, trailing_stmt, &implicit_return)
+                {
+                    self.print_function_tail_statement(&merged, return_unit);
+                    return;
+                }
+
+                if let Some(merged) =
+                    try_function_body_shared_tail_outer_else_merge(stmt, trailing_stmt, &implicit_return)
+                {
+                    self.print_function_tail_statement(&merged, return_unit);
+                    return;
+                }
+            }
+        }
+
         if let [stmt, trailing_stmt, trailing_return] = stmts.as_slice() {
             if return_is_undefined(trailing_return) {
                 if let Some(merged) =
                     try_function_body_shared_tail_nested_if_merge(stmt, trailing_stmt, trailing_return)
+                {
+                    self.print_function_tail_statement(&merged, return_unit);
+                    return;
+                }
+
+                if let Some(merged) =
+                    try_function_body_shared_tail_outer_else_merge(stmt, trailing_stmt, trailing_return)
                 {
                     self.print_function_tail_statement(&merged, return_unit);
                     return;
@@ -2450,6 +2477,11 @@ impl JsPrinter {
         }
 
         if return_unit {
+            if let Some(merged) = try_unit_function_tail_shared_else_guard_chain_merge(stmt) {
+                self.print_function_tail_statement(&merged, return_unit);
+                return;
+            }
+
             if let Some(merged) = try_unit_function_tail_shared_else_guard_merge(stmt) {
                 self.print_function_tail_statement(&merged, return_unit);
                 return;
@@ -2639,6 +2671,72 @@ fn try_function_body_shared_tail_nested_if_merge(
     })
 }
 
+fn try_function_body_shared_tail_outer_else_merge(
+    stmt: &Statement,
+    trailing_stmt: &Statement,
+    trailing_return: &Statement,
+) -> Option<Statement> {
+    let stmt = unwrap_single_block_stmt(stmt);
+    let StatementDesc::If(cond, then_, else_) = &stmt.desc else {
+        return None;
+    };
+    if !else_.is_empty() {
+        return None;
+    }
+
+    let shared_tail = vec![trailing_stmt.clone(), trailing_return.clone()];
+    let stripped_then = strip_trailing_return_undefined_block(then_)?;
+    if stripped_then.is_empty() {
+        return None;
+    }
+
+    match unwrap_single_block_stmt(&then_[0]).desc {
+        StatementDesc::If(_, _, _) => Some(Statement {
+            desc: StatementDesc::If(cond.clone(), then_.clone(), shared_tail),
+            comment: stmt.comment.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn try_unit_function_tail_shared_else_guard_chain_merge(stmt: &Statement) -> Option<Statement> {
+    let stmt = unwrap_single_block_stmt(stmt);
+    let StatementDesc::If(outer_cond, then_block, else_block) = &stmt.desc else {
+        return None;
+    };
+    let stripped_else = strip_trailing_return_undefined_block(else_block)?;
+    if stripped_else.is_empty() {
+        return None;
+    }
+
+    let (first_then, remaining_then) = then_block.split_first()?;
+    if !ocaml_eq_block(&remaining_then.to_vec(), else_block) {
+        return None;
+    }
+
+    let StatementDesc::If(inner_cond, inner_then, inner_else) =
+        &unwrap_single_block_stmt(first_then).desc
+    else {
+        return None;
+    };
+    if !inner_else.is_empty() {
+        return None;
+    }
+
+    let (guard_cond, stripped_then) =
+        strip_leading_negative_guard_shared_else(inner_then, else_block)?;
+
+    Some(Statement::new(StatementDesc::If(
+        Expression::bin(
+            BinOp::And,
+            Expression::bin(BinOp::And, outer_cond.clone(), inner_cond.clone()),
+            negate_tail_merge_condition(&guard_cond),
+        ),
+        stripped_then,
+        stripped_else,
+    )))
+}
+
 fn try_unit_function_tail_shared_else_guard_merge(stmt: &Statement) -> Option<Statement> {
     let stmt = unwrap_single_block_stmt(stmt);
     let StatementDesc::If(outer_cond, then_block, else_block) = &stmt.desc else {
@@ -2698,6 +2796,27 @@ fn strip_trailing_return_undefined_block(block: &Block) -> Option<Block> {
         return None;
     }
     Some(body.to_vec())
+}
+
+fn strip_leading_negative_guard_shared_else(
+    block: &Block,
+    else_block: &Block,
+) -> Option<(Expression, Block)> {
+    let (first, remaining) = block.split_first()?;
+    let StatementDesc::If(cond, then_block, else_block_inner) = &unwrap_single_block_stmt(first).desc
+    else {
+        return None;
+    };
+    if !else_block_inner.is_empty() || !ocaml_eq_block(then_block, else_block) {
+        return None;
+    }
+
+    let stripped_block = strip_trailing_return_undefined_block(&remaining.to_vec())?;
+    if stripped_block.is_empty() {
+        return None;
+    }
+
+    Some((cond.clone(), stripped_block))
 }
 
 fn try_function_body_negative_guard_chain_merge(stmts: &Block) -> Option<Statement> {
@@ -2900,18 +3019,24 @@ fn else_block_is_omitted_like_ocaml(block: &Block) -> bool {
 
 fn single_else_if_stmt_like_ocaml(block: &Block) -> Option<&Statement> {
     match block.as_slice() {
-        [stmt @ Statement {
-            desc: StatementDesc::If(_, _, _),
-            ..
-        }] => Some(stmt),
-        [Statement {
-            desc: StatementDesc::Block(inner),
-            ..
-        }] => match inner.as_slice() {
-            [stmt @ Statement {
+        [
+            stmt @ Statement {
                 desc: StatementDesc::If(_, _, _),
                 ..
-            }] => Some(stmt),
+            },
+        ] => Some(stmt),
+        [
+            Statement {
+                desc: StatementDesc::Block(inner),
+                ..
+            },
+        ] => match inner.as_slice() {
+            [
+                stmt @ Statement {
+                    desc: StatementDesc::If(_, _, _),
+                    ..
+                },
+            ] => Some(stmt),
             _ => None,
         },
         _ => None,
@@ -4339,7 +4464,9 @@ mod tests {
         let stmt = Statement::new(StatementDesc::If(
             Expression::bool(true),
             vec![Statement::return_(Expression::number(Number::int(1)))],
-            vec![Statement::exp(Expression::var(Ident::create_local("ignored")))],
+            vec![Statement::exp(Expression::var(Ident::create_local(
+                "ignored",
+            )))],
         ));
 
         assert_eq!(print_block(&vec![stmt]), "if (true) {\n  return 1;\n}");
@@ -5507,7 +5634,7 @@ mod tests {
     }
 
     #[test]
-    fn test_print_unit_function_body_keeps_shared_tail_sequential_like_ocaml() {
+    fn test_print_unit_function_body_merges_implicit_shared_tail_into_nested_if_else_like_ocaml() {
         let do_with_b = Ident::create_local("doWithB");
         let console_log = Expression::qualified(
             ModuleId {
@@ -5559,7 +5686,6 @@ mod tests {
                         vec![Expression::string("twwwoooo")],
                         CallInfo::default(),
                     )),
-                    Statement::return_(Expression::undefined(true)),
                 ],
                 env: Default::default(),
                 return_unit: true,
@@ -5582,7 +5708,193 @@ mod tests {
         );
         assert!(rendered.contains("return;"), "{rendered}");
         assert!(!rendered.contains("&&"), "{rendered}");
-        assert!(!rendered.contains("} else {"), "{rendered}");
+        assert!(rendered.contains("} else {"), "{rendered}");
+    }
+
+    #[test]
+    fn test_print_unit_function_body_merges_implicit_terminal_outer_else_like_do_with_a() {
+        let do_with_a = Ident::create_local("doWithA");
+        let console_log = Expression::qualified(
+            ModuleId {
+                id: Ident::create_local("console"),
+                kind: Kind::External {
+                    name: "console".to_string(),
+                    default: false,
+                    import_attributes: None,
+                },
+                dynamic_import: false,
+            },
+            Some("log".to_string()),
+        );
+        let a = Ident::create_local("a");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: do_with_a,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![a.clone()],
+                body: vec![
+                    Statement::new(StatementDesc::If(
+                        Expression::bin(
+                            BinOp::NotEqEq,
+                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
+                                a.clone(),
+                            )))),
+                            Expression::string("object"),
+                        ),
+                        vec![
+                            Statement::new(StatementDesc::If(
+                                Expression::bin(
+                                    BinOp::EqEqEq,
+                                    Expression::var(a),
+                                    Expression::string("One"),
+                                ),
+                                vec![
+                                    Statement::exp(Expression::call(
+                                        console_log.clone(),
+                                        vec![Expression::string("aaa")],
+                                        CallInfo::default(),
+                                    )),
+                                    Statement::return_(Expression::undefined(true)),
+                                ],
+                                vec![],
+                            )),
+                            Statement::exp(Expression::call(
+                                console_log.clone(),
+                                vec![Expression::string("threeeee")],
+                                CallInfo::default(),
+                            )),
+                            Statement::return_(Expression::undefined(true)),
+                        ],
+                        vec![],
+                    )),
+                    Statement::exp(Expression::call(
+                        console_log,
+                        vec![Expression::string("twwwoooo")],
+                        CallInfo::default(),
+                    )),
+                ],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (typeof a !== \"object\") {"), "{rendered}");
+        assert!(rendered.contains("if (a === \"One\") {"), "{rendered}");
+        assert!(rendered.contains("console.log(\"threeeee\");"), "{rendered}");
+        assert!(rendered.contains("} else {"), "{rendered}");
+        assert!(rendered.contains("console.log(\"twwwoooo\");"), "{rendered}");
+        assert!(rendered.contains("return;"), "{rendered}");
+    }
+
+    #[test]
+    fn test_print_unit_function_body_merges_implicit_shared_else_guard_chain_like_gpr_1891() {
+        let foo = Ident::create_local("foo");
+        let x = Ident::create_local("x");
+        let console_log = Expression::qualified(
+            ModuleId {
+                id: Ident::create_local("console"),
+                kind: Kind::External {
+                    name: "console".to_string(),
+                    default: false,
+                    import_attributes: None,
+                },
+                dynamic_import: false,
+            },
+            Some("log".to_string()),
+        );
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: foo,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![x.clone()],
+                body: vec![
+                    Statement::new(StatementDesc::If(
+                        Expression::bin(
+                            BinOp::EqEqEq,
+                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
+                                x.clone(),
+                            )))),
+                            Expression::string("object"),
+                        ),
+                        vec![
+                            Statement::new(StatementDesc::If(
+                                Expression::bin(
+                                    BinOp::EqEqEq,
+                                    Expression::new(ExpressionDesc::StaticIndex(
+                                        Box::new(Expression::var(x.clone())),
+                                        "NAME".to_string(),
+                                        None,
+                                    )),
+                                    Expression::string("Foo"),
+                                ),
+                                vec![
+                                    Statement::new(StatementDesc::If(
+                                        Expression::bin(
+                                            BinOp::NotEqEq,
+                                            Expression::new(ExpressionDesc::StaticIndex(
+                                                Box::new(Expression::var(x.clone())),
+                                                "VAL".to_string(),
+                                                None,
+                                            )),
+                                            Expression::number(Number::int(3)),
+                                        ),
+                                        vec![
+                                            Statement::exp(Expression::call(
+                                                console_log.clone(),
+                                                vec![Expression::string("2")],
+                                                CallInfo::default(),
+                                            )),
+                                            Statement::return_(Expression::undefined(true)),
+                                        ],
+                                        vec![],
+                                    )),
+                                    Statement::exp(Expression::call(
+                                        console_log.clone(),
+                                        vec![Expression::string("1")],
+                                        CallInfo::default(),
+                                    )),
+                                    Statement::return_(Expression::undefined(true)),
+                                ],
+                                vec![],
+                            )),
+                            Statement::exp(Expression::call(
+                                console_log.clone(),
+                                vec![Expression::string("2")],
+                                CallInfo::default(),
+                            )),
+                            Statement::return_(Expression::undefined(true)),
+                        ],
+                        vec![],
+                    )),
+                    Statement::exp(Expression::call(
+                        console_log,
+                        vec![Expression::string("2")],
+                        CallInfo::default(),
+                    )),
+                ],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(
+            rendered.contains("if (typeof x === \"object\" && x.NAME === \"Foo\" && x.VAL === 3) {"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("console.log(\"1\");"), "{rendered}");
+        assert!(rendered.contains("} else {"), "{rendered}");
+        assert!(rendered.contains("console.log(\"2\");"), "{rendered}");
+        assert!(!rendered.contains("if (x.NAME === \"Foo\")"), "{rendered}");
+        assert!(!rendered.contains("x.VAL !== 3"), "{rendered}");
+        assert!(!rendered.contains("return;"), "{rendered}");
     }
 
     #[test]
