@@ -5153,21 +5153,61 @@ pub fn type_expect<'a>(
                         }
                     }
 
-                    // Produce an array of results
-                    let array_ty = ctx.new_constr(
-                        crate::types::predef::path_array(),
-                        vec![elem_result_ty],
+                    // Check if we're in an array context (expected type is array<_>)
+                    // or statement context (expected type is unit/unknown).
+                    // Don't try-unify since that has side effects.
+                    let expected_repr = ctx.repr(expected_ty);
+                    let expected_desc = ctx.get_desc(expected_repr);
+                    let is_array_context = matches!(&*expected_desc,
+                        crate::types::type_expr::TypeDesc::Tconstr { path, .. }
+                        if path.same(&crate::types::predef::path_array())
                     );
-                    crate::types::ctype::unify(ctx, &mut tctx.unify_state, array_ty, expected_ty)
-                        .map_err(|e| super::TypeCoreError::Other(format!("inline for type mismatch: {:?}", e)))?;
 
-                    Ok(Expression::new(
-                        ExpressionDesc::Texp_array(typed_iterations),
-                        loc,
-                        array_ty,
-                        ctx.store_typed_env(env),
-                        crate::parser::ast::Attributes::new(),
-                    ))
+                    let array_ty = if is_array_context {
+                        let arr = ctx.new_constr(crate::types::predef::path_array(), vec![elem_result_ty]);
+                        crate::types::ctype::unify(ctx, &mut tctx.unify_state, arr, expected_ty)
+                            .map_err(|e| super::TypeCoreError::Other(format!("inline for array type: {:?}", e)))?;
+                        arr
+                    } else {
+                        ctx.new_var(None)
+                    };
+
+                    if is_array_context {
+                        Ok(Expression::new(
+                            ExpressionDesc::Texp_array(typed_iterations),
+                            loc,
+                            array_ty,
+                            ctx.store_typed_env(env),
+                            crate::parser::ast::Attributes::new(),
+                        ))
+                    } else {
+                        // Statement context — produce a sequence
+                        if typed_iterations.len() == 1 {
+                            Ok(typed_iterations.into_iter().next().unwrap())
+                        } else if typed_iterations.is_empty() {
+                            let unit_ty = ctx.new_constr(crate::types::predef::path_unit(), vec![]);
+                            let void_cstr = env.find_constructor("()").map_err(|_| {
+                                super::TypeCoreError::Other("cannot find ()".into())
+                            })?.clone();
+                            Ok(Expression::new(
+                                ExpressionDesc::Texp_construct(
+                                    crate::parse_arena::Located { txt: crate::parse_arena::LidentIdx(0), loc: crate::parse_arena::LocIdx::none() },
+                                    void_cstr, vec![],
+                                ),
+                                loc, unit_ty, ctx.store_typed_env(env), crate::parser::ast::Attributes::new(),
+                            ))
+                        } else {
+                            let mut result = typed_iterations.pop().unwrap();
+                            while let Some(prev) = typed_iterations.pop() {
+                                let result_ty = result.exp_type;
+                                result = Expression::new(
+                                    ExpressionDesc::Texp_sequence(Box::new(prev), Box::new(result)),
+                                    loc, result_ty, ctx.store_typed_env(env), crate::parser::ast::Attributes::new(),
+                                );
+                            }
+                            Ok(result)
+                        }
+                    }
                 }
                 Some(_) => {
                     // Empty array — produce empty array
@@ -5441,63 +5481,89 @@ pub fn type_expect<'a>(
                 Err(e) => { ctx.end_def(); return Err(e); }
             };
 
-            // Type-check the fields expression — should produce a Texp_array
-            // of (name, value) tuples, or an inline for that produces such an array
+            // The fields expression must be an inline for that produces
+            // record fields. @record unrolls it directly to handle
+            // heterogeneous field types (each field can have a different type).
             let fields_expr = tctx.arena.get_expr(*fields_expr_idx);
-            let fields_array_ty = ctx.new_var(None);
-            let typed_fields_array = type_expect(tctx, env, fields_expr, fields_array_ty, None)?;
-
-            // Extract the array elements from the typed expression
-            let field_elements = match &typed_fields_array.exp_desc {
-                ExpressionDesc::Texp_array(elems) => elems.clone(),
-                _ => return Err(super::TypeCoreError::Other(
-                    "@record: second argument must be an array of (name, value) tuples".to_string(),
-                )),
-            };
-
-            // Build record fields from the array elements
-            // Each element should be a Texp_tuple([name_const, value_expr])
             let mut typed_fields = Vec::new();
-            for elem in &field_elements {
-                let (field_name, field_value) = match &elem.exp_desc {
-                    ExpressionDesc::Texp_tuple(parts) if parts.len() == 2 => {
-                        // Extract the field name (must be a string constant)
-                        let name = match &parts[0].exp_desc {
-                            ExpressionDesc::Texp_constant(super::typedtree::Constant::String(s, _)) => s.clone(),
-                            _ => return Err(super::TypeCoreError::Other(
-                                "@record: field name must be a string constant".to_string(),
-                            )),
+
+            match &*fields_expr.pexp_desc {
+                crate::parser::ast::ExpressionDesc::Pexp_inline_for(for_inner) => {
+                    let (ref pat_idx, ref collection_idx, ref body_idx) = **for_inner;
+
+                    let coll_expr = tctx.arena.get_expr(*collection_idx);
+                    let comptime_array = match &*coll_expr.pexp_desc {
+                        crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
+                            let longident = tctx.arena.get_longident(lid.txt);
+                            if longident.is_simple() {
+                                let vname = tctx.arena.get_string(longident.last_idx());
+                                match tctx.comptime_bindings.get(vname) {
+                                    Some(crate::types::comptime::ComptimeValue::Array(elements)) => Some(elements.clone()),
+                                    _ => None,
+                                }
+                            } else { None }
+                        }
+                        _ => None,
+                    }.ok_or_else(|| super::TypeCoreError::Other(
+                        "@record: inline for collection must be comptime-known".into(),
+                    ))?;
+
+                    let pat = tctx.arena.get_pat(*pat_idx);
+                    let var_name = match &*pat.ppat_desc {
+                        crate::parser::ast::PatternDesc::Ppat_var(name_loc) => tctx.arena.get_string(name_loc.txt).to_string(),
+                        _ => "__field".to_string(),
+                    };
+
+                    let body_expr = tctx.arena.get_expr(*body_idx);
+                    let saved_bindings = tctx.comptime_bindings.clone();
+
+                    for element in &comptime_array {
+                        tctx.comptime_bindings.insert(var_name.clone(), element.clone());
+
+                        let mut iter_env = env.clone();
+                        let elem_ty = ctx.new_var(None);
+                        let id = ctx.create_ident(&var_name);
+                        let vd = crate::types::decl::ValueDescription {
+                            val_type: elem_ty,
+                            val_kind: crate::types::decl::ValueKind::ValReg,
+                            val_loc: crate::location::Location::none(),
+                            val_attributes: vec![],
+                            val_path: None,
                         };
-                        (name, parts[1].clone())
+                        iter_env.add_value(id, vd);
+
+                        // Extract field name from comptime element's "name" property
+                        let field_name = if let crate::types::comptime::ComptimeValue::Record(entries) = element {
+                            entries.iter().find(|(k, _)| k == "name").and_then(|(_, v)| {
+                                if let crate::types::comptime::ComptimeValue::String(s) = v { Some(s.clone()) } else { None }
+                            })
+                        } else { None }
+                        .ok_or_else(|| super::TypeCoreError::Other("@record: element must have 'name'".into()))?;
+
+                        let label_desc = env.find_label(&field_name).map_err(|_| {
+                            super::TypeCoreError::Other(format!("@record: field '{}' not found", field_name))
+                        })?.clone();
+
+                        // Type-check body with the field's expected type
+                        let field_ty = crate::types::instance(ctx, label_desc.lbl_arg);
+                        let typed_value = type_expect(tctx, &iter_env, body_expr, field_ty, None)?;
+
+                        let lid_loc = crate::parse_arena::Located { txt: crate::parse_arena::LidentIdx(0), loc: crate::parse_arena::LocIdx::none() };
+                        typed_fields.push((
+                            lid_loc,
+                            label_desc,
+                            super::typedtree::RecordLabelDefinition::Overridden(
+                                crate::parse_arena::Located { txt: crate::parse_arena::LidentIdx(0), loc: crate::parse_arena::LocIdx::none() },
+                                typed_value,
+                            ),
+                            false,
+                        ));
                     }
-                    _ => return Err(super::TypeCoreError::Other(
-                        "@record: each element must be a (name, value) tuple".to_string(),
-                    )),
-                };
-
-                // Look up the label description
-                let label_desc = env.find_label(&field_name).map_err(|_| {
-                    super::TypeCoreError::Other(format!("@record: field '{}' not found on type", field_name))
-                })?.clone();
-
-                // Unify the value's type with the field's expected type
-                let field_ty = crate::types::instance(ctx, label_desc.lbl_arg);
-                crate::types::ctype::unify(ctx, &mut tctx.unify_state, field_value.exp_type, field_ty)
-                    .map_err(|e| super::TypeCoreError::Other(format!("@record field '{}' type mismatch: {:?}", field_name, e)))?;
-
-                let lid_loc = crate::parse_arena::Located {
-                    txt: crate::parse_arena::LidentIdx(0),
-                    loc: crate::parse_arena::LocIdx::none(),
-                };
-                typed_fields.push((
-                    lid_loc,
-                    label_desc,
-                    super::typedtree::RecordLabelDefinition::Overridden(
-                        crate::parse_arena::Located { txt: crate::parse_arena::LidentIdx(0), loc: crate::parse_arena::LocIdx::none() },
-                        field_value,
-                    ),
-                    false,
-                ));
+                    tctx.comptime_bindings = saved_bindings;
+                }
+                _ => return Err(super::TypeCoreError::Other(
+                    "@record: second argument must be inline for".into(),
+                )),
             }
 
             // Unify the record type with expected type

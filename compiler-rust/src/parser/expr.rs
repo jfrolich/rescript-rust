@@ -6096,60 +6096,15 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             ExpressionDesc::Pexp_comptime_compile_error(m_idx)
         }
         "record" => {
-            // @record(TypeName, "field1", value1, "field2", value2, ...)
-            // OR @record(TypeName, inline for field in fields { field.name, valueExpr })
+            // @record(TypeName, arrayOfFieldSpecs)
+            // The second arg is an expression: array literal, inline for, or variable
             let core_type = super::typ::parse_typ_expr(p);
             let ct_idx = p.arena_mut().push_core_type(core_type);
-            let mut field_pairs = Vec::new();
-
-            // Check for inline for as field source
-            if p.token == Token::Comma {
-                p.next();
-                if matches!(&p.token, Token::Lident(s) if s == "inline") {
-                    let is_inline_for = p.lookahead(|p| {
-                        p.next();
-                        p.token == Token::For
-                    });
-                    if is_inline_for {
-                        // Parse inline for — store as a single special pair
-                        // with the inline for expression as the "value"
-                        let inline_for_expr = parse_inline_for_expr(p);
-                        let for_idx = p.arena_mut().push_expr(inline_for_expr);
-                        // Use a sentinel: name = for_idx, value = for_idx (same)
-                        // The type checker detects this pattern
-                        field_pairs.push((for_idx, for_idx));
-                        p.expect(Token::Rparen);
-                        return Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_comptime_record(Box::new((ct_idx, field_pairs)))),
-                            pexp_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
-                            pexp_attributes: Attributes::new(),
-                        };
-                    }
-                }
-                // Normal field pairs
-                if p.token != Token::Rparen {
-                    let field_name_expr = parse_expr(p);
-                    p.expect(Token::Comma);
-                    let field_value_expr = parse_expr(p);
-                    let name_idx = p.arena_mut().push_expr(field_name_expr);
-                    let value_idx = p.arena_mut().push_expr(field_value_expr);
-                    field_pairs.push((name_idx, value_idx));
-                }
-            }
-            while p.token == Token::Comma {
-                p.next();
-                if p.token == Token::Rparen {
-                    break;
-                }
-                let field_name_expr = parse_expr(p);
-                p.expect(Token::Comma);
-                let field_value_expr = parse_expr(p);
-                let name_idx = p.arena_mut().push_expr(field_name_expr);
-                let value_idx = p.arena_mut().push_expr(field_value_expr);
-                field_pairs.push((name_idx, value_idx));
-            }
+            p.expect(Token::Comma);
+            let fields_expr = parse_expr(p);
+            let fields_idx = p.arena_mut().push_expr(fields_expr);
             p.expect(Token::Rparen);
-            ExpressionDesc::Pexp_comptime_record(Box::new((ct_idx, field_pairs)))
+            ExpressionDesc::Pexp_comptime_record(Box::new((ct_idx, fields_idx)))
         }
         "variant" => {
             // @variant(TypeName, "CtorName") or @variant(TypeName, "CtorName", payload)

@@ -1,9 +1,4 @@
-// ═══════════════════════════════════════════════════════════════════
-// Comptime decoder test
-//
-// Tests @record builder for constructing typed records
-// from decoded field values.
-// ═══════════════════════════════════════════════════════════════════
+// Comptime decoder test using @record with inline for
 
 type address = {
   street: string,
@@ -16,27 +11,22 @@ type user = {
   address: address,
 }
 
-// ── Simple decoder: build records from decoded values ──
-
-// Simulate decoding a flat record
-let decodedAddress: address = @record(address, "street", "123 Main", "city", "NYC")
-
-// Simulate decoding a nested record
-let decodedUser: user = @record(user,
-  "name", "Alice",
-  "age", 30,
-  "address", @record(address, "street", "Main St", "city", "Springfield")
-)
-
-// ── @comptime decoder function ──
-
-@comptime
-let decodeAddress = (street: string, city: string) => {
-  @record(address, "street", street, "city", city)
+// Decode address from a source record
+let source_addr: address = {street: "123 Main", city: "NYC"}
+let decoded_addr: address = switch @typeInfo(address) {
+| Record({fields}) =>
+  @record(address, inline for field in fields {
+    @field(source_addr, field.name)
+  })
+| _ => @compileError("not a record")
 }
 
-let addr = decodeAddress("Oak Ave", "Boston")
-
-// ── Type-safe: wrong field name is compile error ──
-// let bad: user = @record(user, "name", "Bob", "age", 25, "wrong", "x")
-// Would produce: @record: field 'wrong' not found on type 'user'
+// Decode user from a source record (with nested address)
+let source_user: user = {name: "Alice", age: 30, address: {street: "Main St", city: "Springfield"}}
+let decoded_user: user = switch @typeInfo(user) {
+| Record({fields}) =>
+  @record(user, inline for field in fields {
+    @field(source_user, field.name)
+  })
+| _ => @compileError("not a record")
+}

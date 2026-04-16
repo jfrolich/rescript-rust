@@ -47,12 +47,12 @@ let rec encode = (value) => {
 
 // ═══ DECODER (using @record) ═══
 
-let decodeAddress = (street: string, city: string) => {
-  @record(address, "street", street, "city", city)
+let decodeAddress = (street: string, city: string): address => {
+  {street, city}
 }
 
-let decodeUser = (name: string, age: int, active: bool, email: option<string>, address: address) => {
-  @record(user, "name", name, "age", age, "active", active, "email", email, "address", address)
+let decodeUser = (name: string, age: int, active: bool, email: option<string>, address: address): user => {
+  {name, age, active, email, address}
 }
 
 // ═══ TEST DATA ═══

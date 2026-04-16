@@ -665,9 +665,10 @@ pub enum ExpressionDesc {
     Pexp_comptime_compile_error(ExprIdx),
     /// Comptime type name: `@typeName(T)` — returns the type name as a string.
     Pexp_comptime_typename(CoreTypeIdx),
-    /// Comptime record builder: `@record(TypeName, {name: expr, ...})`.
-    /// Builds a typed record from comptime-known field names and runtime values.
-    Pexp_comptime_record(Box<(CoreTypeIdx, Vec<(ExprIdx, ExprIdx)>)>),
+    /// Comptime record builder: `@record(TypeName, arrayOfFieldSpecs)`.
+    /// The array contains @field({name: comptimeName, value: runtimeExpr}) items.
+    /// Can be a literal array or an inline for expression.
+    Pexp_comptime_record(Box<(CoreTypeIdx, ExprIdx)>),
     /// Comptime variant builder: `@variant(TypeName, "CtorName", payload?)`.
     /// Builds a typed variant constructor from comptime-known constructor name.
     Pexp_comptime_variant(Box<(CoreTypeIdx, ExprIdx, Option<ExprIdx>)>),
