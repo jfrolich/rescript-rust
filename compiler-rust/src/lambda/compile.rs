@@ -10230,7 +10230,7 @@ fn pure_indexed_block_item(target: &Expression, idx: i32) -> Option<Expression> 
 
 fn direct_projection_from_pure_literal(
     target: &Expression,
-    field: Option<&str>,
+    _field: Option<&str>,
     index: Option<i32>,
 ) -> Option<Expression> {
     if !js_expr_no_side_effects(target) {
@@ -10241,13 +10241,6 @@ fn direct_projection_from_pure_literal(
         ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _, _) => {
             let index = usize::try_from(index?).ok()?;
             items.get(index).cloned()
-        }
-        ExpressionDesc::Object(None, props) => {
-            let field = field?;
-            props.iter().find_map(|(name, value)| match name {
-                PropertyName::Lit(name) if name == field => Some(value.clone()),
-                _ => None,
-            })
         }
         _ => None,
     }
@@ -23797,7 +23790,7 @@ mod tests {
     }
 
     #[test]
-    fn js_flatten_and_mark_dead_collapses_direct_object_property_reads_like_ocaml() {
+    fn js_flatten_and_mark_dead_keeps_direct_object_property_reads_materialized_like_ocaml() {
         let value = Ident::create_local("value");
         let deps = apply_js_flatten_and_mark_dead_pass(
             DepsProgram {
@@ -23830,13 +23823,29 @@ mod tests {
             StatementDesc::Variable(VariableDeclaration {
                 value:
                     Some(Expression {
-                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        desc: ExpressionDesc::StaticIndex(target, field, None),
                         ..
                     }),
                 ..
-            }) if id.same(&value) => {}
+            }) if field == "d"
+                && matches!(
+                    target.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Object(
+                            None,
+                            props
+                        ),
+                        ..
+                    } if matches!(
+                        props.as_slice(),
+                        [(PropertyName::Lit(name), Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                            ..
+                        })] if name == "d" && id.same(&value)
+                    )
+                ) => {}
             other => panic!(
-                "expected the direct object property projection to inline to the field value, got {other:?}"
+                "expected the direct object property projection to stay materialized, got {other:?}"
             ),
         }
     }

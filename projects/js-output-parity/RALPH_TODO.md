@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 562 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 95 output diffs
+**Status:** 564 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 93 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **562 / 657**
+- JS snapshot parity: **564 / 657**
 - Compile errors: **0**
-- Output diffs: **95**
+- Output diffs: **93**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,12 +63,68 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **562 / 657**
+- JS snapshot parity: **564 / 657**
 - Compile errors: **0**
-- Output diffs: **95**
+- Output diffs: **93**
 
 This current worktree measurement now supersedes the earlier stale warning
 about the temporary `RefCell already borrowed` compile failures.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: narrow the flatten-and-mark-dead literal projection rewrite
+  back to OCaml's immutable `Caml_block` / array cases and stop collapsing
+  plain JS object property reads, fixing the over-optimization cluster behind
+  `chain_code_test` and `method_string_name`
+- Active backend focus stays in **Phase 4: Port JS Passes** from `PLAN.md`;
+  the observable mismatch was in `Js_pass_flatten_and_mark_dead`, and the fix
+  lands in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/js_exp_make.ml`, especially `dot`, `record_access`, and
+    `extension_access`
+  - `compiler/core/js_pass_flatten_and_mark_dead.ml`, especially the
+    substitution rewrite that only peels `Static_index` / `Array_index` from
+    immutable `Caml_block` bindings and leaves plain object property reads
+    materialized
+- Rust change:
+  - removed the unverified `ExpressionDesc::Object(None, props)` branch from
+    `direct_projection_from_pure_literal(...)`, so flatten-and-mark-dead no
+    longer folds plain object property reads into their literal payload values
+  - corrected the regression coverage by renaming
+    `js_flatten_and_mark_dead_collapses_direct_object_property_reads_like_ocaml`
+    to
+    `js_flatten_and_mark_dead_keeps_direct_object_property_reads_materialized_like_ocaml`
+    and asserting the `StaticIndex(Object(...), "d", None)` shape instead of
+    a collapsed variable
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_flatten_and_mark_dead_keeps_direct_object_property_reads_materialized_like_ocaml -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release derive_projector_test_collapses_pure_record_projection_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh chain_code_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh method_string_name --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_1946_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/chain_code_test.res` and
+    `tests/tests/src/method_string_name.res` now match their checked-in
+    snapshots exactly; Rust no longer folds those plain object property reads
+    down to literal payload values
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained exact after
+    the same JS-pass change
+  - `tests/tests/src/gpr_1946_test.res` still differs, but only on the
+    separate `.TAG` object-access rule; the earlier `_5` field collapses are
+    gone, which confirms this slice narrowed the correct cluster
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **561 / 657** -> **564 / 657** (**+3**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **96** -> **93** (**-3**)
+- Keep this change because it is a direct OCaml backend correction:
+  `js_exp_make` only folds record/extension-style indexed reads from arrays or
+  `Caml_block`s, and `js_pass_flatten_and_mark_dead` only substitutes
+  immutable `Caml_block` bindings there. The previous Rust object-literal fold
+  had no OCaml basis and was exactly why chained and quoted-name object reads
+  were over-collapsing in the emitted JS.
 
 Latest iteration on **2026-04-16**:
 
