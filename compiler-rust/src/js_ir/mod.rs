@@ -1957,7 +1957,13 @@ fn expression_stmt_is_trivial(expr: &Expression) -> bool {
 }
 
 fn last_statement(block: &Block) -> Option<&Statement> {
-    block.last()
+    match block.last() {
+        Some(Statement {
+            desc: StatementDesc::Block(inner),
+            ..
+        }) => last_statement(inner),
+        other => other,
+    }
 }
 
 fn preserves_typeof_refinement_guard(outer_cond: &Expression, inner_cond: &Expression) -> bool {
@@ -4117,6 +4123,46 @@ mod tests {
             )
         ));
         assert!(matches!(continue_stmt.desc, StatementDesc::Continue));
+    }
+
+    #[test]
+    fn test_if_statement_rewrites_nested_block_continue_tail_like_ocaml() {
+        let value = Ident::create_local("value");
+        let next_value = Ident::create_local("nextValue");
+        let cond = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::var(value.clone()),
+            Expression::undefined(false),
+        );
+        let then_block = vec![Statement::block(vec![
+            Statement::exp(Expression::bin(
+                BinOp::Eq,
+                Expression::var(next_value.clone()),
+                Expression::var(value),
+            )),
+            Statement::continue_(),
+        ])];
+        let else_block = vec![Statement::throw(Expression::string("boom".to_string()))];
+
+        let stmt = Statement::if_(cond, then_block, else_block);
+
+        let StatementDesc::Block(block) = &stmt.desc else {
+            panic!("expected nested continue tail to hoist the else block: {stmt:#?}");
+        };
+        let [guard, throw_stmt] = block.as_slice() else {
+            panic!("expected a guard if followed by the hoisted throw");
+        };
+        let StatementDesc::If(_, _, else_block) = &guard.desc else {
+            panic!("expected the first statement to stay as an if guard");
+        };
+        assert!(else_block.is_empty());
+        assert!(matches!(
+            throw_stmt.desc,
+            StatementDesc::Throw(Expression {
+                desc: ExpressionDesc::Str { .. },
+                ..
+            })
+        ));
     }
 
     #[test]

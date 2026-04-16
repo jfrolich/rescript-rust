@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 577 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 80 output diffs
+**Status:** 578 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 79 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **577 / 657**
+- JS snapshot parity: **578 / 657**
 - Compile errors: **0**
-- Output diffs: **80**
+- Output diffs: **79**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,49 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **577 / 657**
+- JS snapshot parity: **578 / 657**
 - Compile errors: **0**
-- Output diffs: **80**
+- Output diffs: **79**
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: port OCaml's terminal-tail `Js_stmt_make.if_` rewrite so a
+  then-branch ending in `continue` still hoists the else block out of the `if`
+  even when the terminal tail is wrapped in a nested `Block`
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; the OCaml behavior lives in `compiler/core/js_stmt_make.ml`,
+  and the Rust change stays in `compiler-rust/src/js_ir/mod.rs`
+- OCaml reference:
+  - `compiler/core/js_stmt_make.ml`, especially the
+    `block_last_is_return_throw_or_continue` check inside `if_`
+  - that helper emits `if (cond) { ... continue; }` followed by the hoisted
+    fallthrough block, instead of retaining `else { throw ... }`, whenever the
+    then-branch tail is terminal
+- Rust change:
+  - taught `last_statement(...)` in the JS IR helper layer to recurse through a
+    trailing nested `StatementDesc::Block(...)` before `Statement::if_`
+    decides whether the then-branch tail is terminal
+  - added regression coverage in
+    `test_if_statement_rewrites_nested_block_continue_tail_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release test_if_statement_rewrites_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_seq.res -o /tmp/test_seq.mjs`
+  - `diff -u tests/tests/src/test_seq.mjs /tmp/test_seq.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `diff -u tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_seq.res` now matches its checked-in snapshot again;
+    the recursive `assoc3` loop keeps OCaml's `if (...) { ...; continue; }`
+    plus fallthrough `throw`, instead of nesting the `throw` under a Rust-only
+    `else`
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained exact after
+    the same JS IR tail-normalization change
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **577 / 657** -> **578 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **80** -> **79** (**-1**)
 
 Latest iteration on **2026-04-16**:
 
