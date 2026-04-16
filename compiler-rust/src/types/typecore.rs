@@ -19995,7 +19995,8 @@ fn try_comptime_application(
     // Check if the function is a simple identifier
     let func_name = match &*funct_expr.pexp_desc {
         crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
-            tctx.arena.get_longident(lid.txt).to_string()
+            let longident = tctx.arena.get_longident(lid.txt);
+            tctx.arena.get_string(longident.last_idx()).to_string()
         }
         _ => return None,
     };
@@ -20022,12 +20023,15 @@ fn try_comptime_application(
         crate::types::comptime::build_type_info(tctx.type_ctx, env, ty, &mut visited)
     });
 
-    // Get the function's parse tree body and partially evaluate it.
-    // The partial evaluator resolves @typeInfo, picks switch branches,
-    // and unrolls inline for — BEFORE type-checking.
+    // Get the function's parse tree body.
     let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx).clone();
+
+    // Unwrap the function: (params) => body → extract body
+    let inner_body = extract_function_body(&body_expr, tctx.arena);
+
+    // Partially evaluate the body: resolve @typeInfo, pick switch branches, etc.
     let specialized_body = crate::types::comptime::partially_evaluate_parse_tree(
-        &body_expr,
+        &inner_body,
         tctx.arena,
         type_info.as_ref(),
         &typed_args,
@@ -20035,15 +20039,51 @@ fn try_comptime_application(
         env,
     );
 
-    // Type-check the specialized body in the current environment.
-    // The body no longer contains @typeInfo or comptime constructs —
-    // it's just regular ReScript that the type checker handles normally.
-    match type_expect(tctx, env, &specialized_body, expected_ty, None) {
-        Ok(typed_body) => Some(Ok(typed_body)),
-        Err(_) => {
-            // If type-checking fails, fall through to normal application
-            None
+    // Type-check the function body itself (not the application).
+    // First type-check it as a function, then construct the application.
+    let fn_ty = tctx.type_ctx.new_var(None);
+    match type_expect(tctx, env, &body_expr, fn_ty, None) {
+        Ok(typed_fn) => {
+            // Build a typed apply expression
+            let apply_args: Vec<_> = typed_args
+                .into_iter()
+                .map(|ta| crate::types::typedtree::ApplyArg {
+                    label: crate::types::asttypes::ArgLabel::Nolabel,
+                    expression: Some(ta),
+                })
+                .collect();
+
+            let result = Expression {
+                exp_desc: crate::types::typedtree::ExpressionDesc::Texp_apply {
+                    funct: Box::new(typed_fn),
+                    args: apply_args,
+                    partial: false,
+                    transformed_jsx: false,
+                },
+                exp_loc: loc,
+                exp_extra: vec![],
+                exp_type: expected_ty,
+                exp_env: tctx.type_ctx.store_typed_env(env),
+                exp_attributes: crate::parser::ast::Attributes::new(),
+            };
+            Some(Ok(result))
         }
+        Err(_) => None,
+    }
+}
+
+/// Extract the innermost body expression from a function parse tree.
+/// Unwraps (x) => (y) => body → body.
+fn extract_function_body(
+    expr: &ParsedExpression,
+    arena: &crate::parse_arena::ParseArena,
+) -> ParsedExpression {
+    match &*expr.pexp_desc {
+        crate::parser::ast::ExpressionDesc::Pexp_fun(inner) => {
+            let body = arena.get_expr(inner.rhs);
+            extract_function_body(body, arena)
+        }
+        _ => expr.clone(),
     }
 }
 

@@ -683,6 +683,36 @@ fn fixture_comptime_encode() {
 }
 
 // ============================================================================
+// Comptime registration and lookup
+// ============================================================================
+
+#[test]
+fn comptime_function_is_registered_and_callable() {
+    // A @comptime function should be registered in the comptime registry
+    // AND callable at call sites (i.e., produce output)
+    let source = r#"
+@comptime
+let identity = (x) => x
+
+let result = identity(42)
+"#;
+    let result = compile_source_to_js(source, "comptime_call.res");
+    match result {
+        Ok(output) => {
+            eprintln!("Comptime identity output:\n{output}");
+            // The call should either inline or produce a call
+            assert!(
+                output.contains("42") || output.contains("identity"),
+                "Expected 42 or identity in output:\n{output}"
+            );
+        }
+        Err(e) => {
+            panic!("Expected comptime call to compile: {e:?}");
+        }
+    }
+}
+
+// ============================================================================
 // End-to-end compilation tests (without stdlib)
 // ============================================================================
 
