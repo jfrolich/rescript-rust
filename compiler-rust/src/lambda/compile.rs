@@ -1076,29 +1076,10 @@ impl LambdaCompiler {
                 ]
             }
             Lambda::Lswitch(scrut, switch) => {
-                let mut block = vec![Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
-                    value: None,
-                    property: kind,
-                    ident_info: IdentInfo::default(),
-                })];
-                block.extend(self.compile_switch_assignment_block(id, scrut, switch));
-                block
+                self.compile_switch_binding_block(kind, id, scrut, switch)
             }
             Lambda::LstringSwitch(scrut, cases, default) => {
-                let mut block = vec![Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
-                    value: None,
-                    property: kind,
-                    ident_info: IdentInfo::default(),
-                })];
-                block.extend(self.compile_string_switch_assignment_block(
-                    id,
-                    scrut,
-                    cases,
-                    default.as_deref(),
-                ));
-                block
+                self.compile_string_switch_binding_block(kind, id, scrut, cases, default.as_deref())
             }
             _ => {
                 let value_compiled = self.compile_expr(value);
@@ -1186,6 +1167,41 @@ impl LambdaCompiler {
             else_block,
         ));
         block
+    }
+
+    fn compile_switch_binding_block(
+        &mut self,
+        kind: LetKind,
+        id: &Ident,
+        scrut: &Lambda,
+        switch: &LambdaSwitch,
+    ) -> Block {
+        let mut declared = vec![Statement::variable(VariableDeclaration {
+            ident: id.clone(),
+            value: None,
+            property: kind,
+            ident_info: IdentInfo::default(),
+        })];
+        declared.extend(self.compile_switch_assignment_block(id, scrut, switch));
+        declared
+    }
+
+    fn compile_string_switch_binding_block(
+        &mut self,
+        kind: LetKind,
+        id: &Ident,
+        scrut: &Lambda,
+        cases: &[(String, Lambda)],
+        default: Option<&Lambda>,
+    ) -> Block {
+        let mut declared = vec![Statement::variable(VariableDeclaration {
+            ident: id.clone(),
+            value: None,
+            property: kind,
+            ident_info: IdentInfo::default(),
+        })];
+        declared.extend(self.compile_string_switch_assignment_block(id, scrut, cases, default));
+        declared
     }
 
     fn compile_short_circuit_expr(
@@ -18937,6 +18953,19 @@ mod tests {
             !output.contains("    } else {\n    if (hr <= (hl + 2 | 0)) {")
                 && !output.contains("    } else {\n      if (hr <= (hl + 2 | 0)) {"),
             "unexpected nested else-wrapper around the right-balance guard in the checked-in fixture:\n{output}"
+        );
+    }
+
+    #[test]
+    fn let_unwrap_keeps_declared_switch_binding_shape_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("LetUnwrap");
+        assert!(
+            output.contains("let someResult;\n\nsomeResult = x.TAG === \"Ok\" ? x._0 : ("),
+            "expected LetUnwrap to keep the declared result binding before the switch assignment, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let someResult = x.TAG === \"Ok\" ? x._0 : ("),
+            "unexpected initialized declaration for LetUnwrap's switch-bound result:\n{output}"
         );
     }
 

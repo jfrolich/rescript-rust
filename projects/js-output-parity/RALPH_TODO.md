@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 550 / 657 with 8 unrelated compile errors and 99 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 549 / 657 with 8 unrelated compile errors and 100 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **550 / 657**
+- JS snapshot parity: **549 / 657**
 - Compile errors: **8**
-- Output diffs: **99**
+- Output diffs: **100**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,59 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `550 / 657` unless the
+Do **not** replace the recorded project baseline with `549 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: keep `Lswitch` / `LstringSwitch` let-bindings on OCaml's
+  declared-binding path instead of folding the switch assignment back into an
+  initialized declaration on the Rust backend
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially `Llet` lowering through
+    `Declare (kind, id)` together with `compile_switch` /
+    `compile_stringswitch`
+  - `compiler/core/js_stmt_make.ml`, especially the declare-vs-define split in
+    `declare_variable`, `int_switch`, and `string_switch`
+- Rust change:
+  - restored explicit declared-binding lowering for
+    `compile_switch_binding_block(...)` and
+    `compile_string_switch_binding_block(...)` so switch-bound lets keep
+    `let x; ... x = ...`
+  - added checked-in regression coverage
+    `let_unwrap_keeps_declared_switch_binding_shape_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release let_unwrap_keeps_declared_switch_binding_shape_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/LetUnwrap.res -o /tmp/LetUnwrap.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/bal_set_mini.res -o /tmp/bal_set_mini.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 30 ./scripts/test_js_single.sh LetUnwrap --diff`
+  - `timeout 30 ./scripts/test_js_single.sh bal_set_mini --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/LetUnwrap.res` now matches its checked-in snapshot again;
+    Rust restores the OCaml-emitted `let someResult; someResult = ...` binding
+    shape instead of collapsing it to `let someResult = ...`
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remains an exact
+    snapshot match after the same slice
+  - sibling file `tests/tests/src/bal_set_mini.res` stays on its separate
+    remaining alias drift (`let match = v`), which confirms this fix is
+    isolated to declared switch bindings rather than that later aliasing issue
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **546 / 657** -> **549 / 657** (**+3**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **103** -> **100** (**-3**)
+- Keep this change because OCaml's `Llet` + `compile_switch` /
+  `compile_stringswitch` path really does declare the binding first and then
+  assign within the switch/if body. The earlier Rust folding was a backend-only
+  shortcut that removed the checked-in `LetUnwrap` binding shape and three
+  corresponding snapshot matches.
 
 Latest iteration on **2026-04-16**:
 
