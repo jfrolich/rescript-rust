@@ -732,6 +732,9 @@ pub struct TypeCheckContext<'a> {
     /// Comptime-known variable bindings (from @typeInfo destructuring, inline for, etc.)
     pub comptime_bindings: HashMap<String, crate::types::comptime::ComptimeValue>,
     pub monomorph_cache: crate::types::comptime::MonomorphCache,
+    /// Comptime let bindings whose body is a type builder — to be evaluated
+    /// at end of type_structure and emitted as type declarations.
+    pub pending_type_builders: Vec<(String, crate::parse_arena::ExprIdx)>,
 }
 
 /// A diagnostic from type checking.
@@ -763,6 +766,7 @@ impl<'a> TypeCheckContext<'a> {
             comptime_functions: HashMap::new(),
             comptime_bindings: HashMap::new(),
             monomorph_cache: crate::types::comptime::MonomorphCache::new(),
+            pending_type_builders: Vec::new(),
         }
     }
 
@@ -21216,6 +21220,338 @@ fn resolve_comptime_type_arg(
         }
         _ => None,
     }
+}
+
+/// Check if an expression tree contains @buildVariant (possibly nested in
+/// switch/match branches). Used to detect @comptime let bindings that
+/// should be emitted as type declarations rather than registered as
+/// comptime functions.
+pub fn contains_build_variant(
+    expr: &ParsedExpression,
+    arena: &crate::parse_arena::ParseArena,
+) -> bool {
+    use crate::parser::ast::ExpressionDesc as ED;
+    match &*expr.pexp_desc {
+        ED::Pexp_comptime_build_variant(_) => true,
+        ED::Pexp_match(inner) => {
+            let (_, ref cases) = **inner;
+            cases.iter().any(|c| {
+                contains_build_variant(arena.get_expr(c.pc_rhs), arena)
+            })
+        }
+        ED::Pexp_ifthenelse(inner) => {
+            let (_, then_idx, else_opt) = &**inner;
+            contains_build_variant(arena.get_expr(*then_idx), arena)
+                || else_opt.map_or(false, |e| contains_build_variant(arena.get_expr(e), arena))
+        }
+        _ => false,
+    }
+}
+
+/// Evaluate a type-builder expression to a TypeBuilderResult.
+/// Used for @comptime type declarations — the body should produce a TypeKind.
+///
+/// Handles:
+/// - `@buildVariant(array_expr)` → TypeBuilderResult::Variant(constructor_names)
+/// - `@variantCase({name: "X"})` → single VariantCaseSpec (used inside @buildVariant)
+/// - `switch @typeInfo(t) { ... }` → pick matching branch, recurse
+/// - `inline for x in arr { ... }` → unroll, collect results
+pub fn evaluate_type_builder(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    expr: &ParsedExpression,
+) -> TypeCoreResult<crate::types::comptime::TypeBuilderResult> {
+    use crate::parser::ast::ExpressionDesc as ED;
+    use crate::types::comptime::{TypeBuilderResult, VariantCaseSpec};
+
+    match &*expr.pexp_desc {
+        ED::Pexp_comptime_build_variant(inner_idx) => {
+            // @buildVariant(arrayOrInlineFor) — collect variant cases, build variant type
+            let inner_expr = tctx.arena.get_expr(*inner_idx);
+            let cases = evaluate_variant_cases(tctx, env, inner_expr)?;
+            let names: Vec<String> = cases.into_iter().map(|c| c.name).collect();
+            Ok(TypeBuilderResult::Variant(names))
+        }
+        ED::Pexp_match(match_inner) => {
+            let (ref scrut_idx, ref cases) = **match_inner;
+            // switch @typeInfo(t) { ... } — pick the matching branch
+            let scrut = tctx.arena.get_expr(*scrut_idx);
+            if let ED::Pexp_comptime_typeinfo(ct_idx) = &*scrut.pexp_desc {
+                let core_type = tctx.arena.get_core_type(*ct_idx);
+                let type_info = resolve_typeinfo_in_builder(tctx, env, core_type)?;
+                let ctor_name = constructor_name_of(&type_info);
+                for case in cases {
+                    let pat = tctx.arena.get_pat(case.pc_lhs);
+                    let matches = match &*pat.ppat_desc {
+                        crate::parser::ast::PatternDesc::Ppat_construct(lid, _) => {
+                            let pat_name = {
+                                let longident = tctx.arena.get_longident(lid.txt);
+                                tctx.arena.get_string(longident.last_idx()).to_string()
+                            };
+                            pat_name == ctor_name
+                        }
+                        crate::parser::ast::PatternDesc::Ppat_any => true,
+                        crate::parser::ast::PatternDesc::Ppat_var(_) => true,
+                        _ => false,
+                    };
+                    if matches {
+                        // Bind destructured fields (like Record({fields}))
+                        let saved_bindings = tctx.comptime_bindings.clone();
+                        let mut branch_env = env.clone();
+                        if let crate::parser::ast::PatternDesc::Ppat_construct(_, Some(arg_pat_idx)) = &*pat.ppat_desc {
+                            let arg_pat = tctx.arena.get_pat(*arg_pat_idx);
+                            if let crate::parser::ast::PatternDesc::Ppat_record(rec_inner) = &*arg_pat.ppat_desc {
+                                let (ref fields, _) = **rec_inner;
+                                bind_comptime_record_fields(tctx, &mut branch_env, fields, &type_info);
+                            }
+                        }
+                        let body_expr = tctx.arena.get_expr(case.pc_rhs);
+                        let result = evaluate_type_builder(tctx, &branch_env, body_expr);
+                        tctx.comptime_bindings = saved_bindings;
+                        return result;
+                    }
+                }
+                Err(super::TypeCoreError::Other(
+                    "evaluate_type_builder: no matching switch branch".into(),
+                ))
+            } else {
+                Err(super::TypeCoreError::Other(
+                    "evaluate_type_builder: switch scrutinee must be @typeInfo(...)".into(),
+                ))
+            }
+        }
+        ED::Pexp_comptime_compile_error(msg_idx) => {
+            let msg_expr = tctx.arena.get_expr(*msg_idx);
+            let msg = if let ED::Pexp_constant(c) = &*msg_expr.pexp_desc {
+                if let crate::parser::ast::Constant::String(s, _) = &**c {
+                    s.to_string()
+                } else {
+                    "<non-string message>".to_string()
+                }
+            } else {
+                "<dynamic message>".to_string()
+            };
+            Err(super::TypeCoreError::Other(format!("@compileError: {msg}")))
+        }
+        _ => Err(super::TypeCoreError::Other(format!(
+            "evaluate_type_builder: unsupported expression — expected @buildVariant or switch",
+        ))),
+    }
+}
+
+/// Evaluate an expression that should produce a list of variant cases.
+/// Handles array literals and inline-for expressions.
+fn evaluate_variant_cases(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    expr: &ParsedExpression,
+) -> TypeCoreResult<Vec<crate::types::comptime::VariantCaseSpec>> {
+    use crate::parser::ast::ExpressionDesc as ED;
+    use crate::types::comptime::VariantCaseSpec;
+
+    match &*expr.pexp_desc {
+        ED::Pexp_array(exprs) => {
+            let mut cases = Vec::new();
+            for e_idx in exprs.iter() {
+                let e = tctx.arena.get_expr(*e_idx);
+                cases.push(evaluate_single_variant_case(tctx, env, e)?);
+            }
+            Ok(cases)
+        }
+        ED::Pexp_inline_for(inner) => {
+            let (ref pat_idx, ref collection_idx, ref body_idx) = **inner;
+            let coll_expr = tctx.arena.get_expr(*collection_idx);
+            let comptime_array = match &*coll_expr.pexp_desc {
+                ED::Pexp_ident(lid) => {
+                    let longident = tctx.arena.get_longident(lid.txt);
+                    if longident.is_simple() {
+                        let vname = tctx.arena.get_string(longident.last_idx());
+                        match tctx.comptime_bindings.get(vname) {
+                            Some(crate::types::comptime::ComptimeValue::Array(elements)) => Some(elements.clone()),
+                            _ => None,
+                        }
+                    } else { None }
+                }
+                _ => None,
+            }.ok_or_else(|| super::TypeCoreError::Other(
+                "evaluate_variant_cases: inline for collection must be comptime-known".into(),
+            ))?;
+
+            let pat = tctx.arena.get_pat(*pat_idx);
+            let var_name = match &*pat.ppat_desc {
+                crate::parser::ast::PatternDesc::Ppat_var(name_loc) => tctx.arena.get_string(name_loc.txt).to_string(),
+                _ => "__case".to_string(),
+            };
+            let body_expr = tctx.arena.get_expr(*body_idx);
+            let saved = tctx.comptime_bindings.clone();
+            let mut cases = Vec::new();
+            for element in &comptime_array {
+                tctx.comptime_bindings.insert(var_name.clone(), element.clone());
+                cases.push(evaluate_single_variant_case(tctx, env, body_expr)?);
+            }
+            tctx.comptime_bindings = saved;
+            Ok(cases)
+        }
+        _ => {
+            // Single case (not array) — just evaluate it
+            Ok(vec![evaluate_single_variant_case(tctx, env, expr)?])
+        }
+    }
+}
+
+/// Evaluate a single @variantCase({name: ...}) expression.
+fn evaluate_single_variant_case(
+    tctx: &mut TypeCheckContext<'_>,
+    _env: &Env,
+    expr: &ParsedExpression,
+) -> TypeCoreResult<crate::types::comptime::VariantCaseSpec> {
+    use crate::parser::ast::ExpressionDesc as ED;
+
+    // Expected form: @variantCase({name: ..., ...})
+    let rec_idx = match &*expr.pexp_desc {
+        ED::Pexp_comptime_variant_case(e) => *e,
+        _ => return Err(super::TypeCoreError::Other(
+            "evaluate_variant_cases: expected @variantCase({...})".into(),
+        )),
+    };
+
+    let rec_expr = tctx.arena.get_expr(rec_idx);
+    // The record literal: {name: "Name"}
+    if let ED::Pexp_record(inner) = &*rec_expr.pexp_desc {
+        let (ref fields, _) = **inner;
+        for field in fields {
+            let fname = {
+                let longident = tctx.arena.get_longident(field.lid.txt);
+                tctx.arena.get_string(longident.last_idx()).to_string()
+            };
+            if fname == "name" {
+                // Evaluate the value — should be a comptime-known string
+                let val_expr = tctx.arena.get_expr(field.expr);
+                let name_str = evaluate_comptime_string(tctx, val_expr)?;
+                // Capitalize the first letter to make a valid constructor name
+                let capitalized = capitalize_first(&name_str);
+                return Ok(crate::types::comptime::VariantCaseSpec { name: capitalized });
+            }
+        }
+    }
+    Err(super::TypeCoreError::Other(
+        "@variantCase: expected {name: \"...\"}".into(),
+    ))
+}
+
+/// Evaluate an expression that should be a comptime-known string.
+fn evaluate_comptime_string(
+    tctx: &TypeCheckContext<'_>,
+    expr: &ParsedExpression,
+) -> TypeCoreResult<String> {
+    use crate::parser::ast::ExpressionDesc as ED;
+
+    match &*expr.pexp_desc {
+        ED::Pexp_constant(c) => {
+            if let crate::parser::ast::Constant::String(s, _) = &**c {
+                Ok(s.to_string())
+            } else {
+                Err(super::TypeCoreError::Other(
+                    "expected string literal".into(),
+                ))
+            }
+        }
+        ED::Pexp_ident(lid) => {
+            let longident = tctx.arena.get_longident(lid.txt);
+            let name = tctx.arena.get_string(longident.last_idx());
+            if let Some(crate::types::comptime::ComptimeValue::String(s)) = tctx.comptime_bindings.get(name) {
+                Ok(s.clone())
+            } else {
+                Err(super::TypeCoreError::Other(format!(
+                    "expected comptime string, got variable '{}'", name
+                )))
+            }
+        }
+        ED::Pexp_field(rec_idx, field_lid) => {
+            // field.name — look up in comptime bindings
+            let rec_expr = tctx.arena.get_expr(*rec_idx);
+            if let ED::Pexp_ident(rec_lid) = &*rec_expr.pexp_desc {
+                let rec_longident = tctx.arena.get_longident(rec_lid.txt);
+                if rec_longident.is_simple() {
+                    let rec_name = tctx.arena.get_string(rec_longident.last_idx());
+                    if let Some(crate::types::comptime::ComptimeValue::Record(entries)) = tctx.comptime_bindings.get(rec_name) {
+                        let field_name = {
+                            let fl = tctx.arena.get_longident(field_lid.txt);
+                            tctx.arena.get_string(fl.last_idx()).to_string()
+                        };
+                        if let Some((_, crate::types::comptime::ComptimeValue::String(s))) =
+                            entries.iter().find(|(k, _)| k == &field_name)
+                        {
+                            return Ok(s.clone());
+                        }
+                    }
+                }
+            }
+            Err(super::TypeCoreError::Other("expected comptime string from field access".into()))
+        }
+        _ => Err(super::TypeCoreError::Other("expected comptime-known string".into())),
+    }
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Constructor name to match in a typeInfo switch (e.g., TypeInfo::Record → "Record").
+fn constructor_name_of(ti: &crate::types::comptime::TypeInfo) -> &'static str {
+    use crate::types::comptime::TypeInfo;
+    match ti {
+        TypeInfo::Int => "Int",
+        TypeInfo::Float => "Float",
+        TypeInfo::String => "String",
+        TypeInfo::Bool => "Bool",
+        TypeInfo::Unit => "Unit",
+        TypeInfo::Char => "Char",
+        TypeInfo::Bigint => "Bigint",
+        TypeInfo::Record { .. } => "Record",
+        TypeInfo::Variant { .. } => "Variant",
+        TypeInfo::Array { .. } => "Array",
+        TypeInfo::Option { .. } => "Option",
+        TypeInfo::Function { .. } => "Function",
+        TypeInfo::External { .. } => "External",
+        TypeInfo::Opaque { .. } => "Opaque",
+        TypeInfo::Tuple { .. } => "Tuple",
+        TypeInfo::Unknown { .. } => "Unknown",
+    }
+}
+
+/// Resolve @typeInfo(t) in a type-builder context.
+fn resolve_typeinfo_in_builder(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    core_type: &crate::parser::ast::CoreType,
+) -> TypeCoreResult<crate::types::comptime::TypeInfo> {
+    // First check if the type arg is a comptime type binding (for generic @comptime type)
+    if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
+        let (ref lid, _) = **inner;
+        let longident = tctx.arena.get_longident(lid.txt);
+        let name = tctx.arena.get_string(longident.last_idx());
+        if let Some(crate::types::comptime::ComptimeValue::Type(ti)) =
+            tctx.comptime_bindings.get(name).cloned()
+        {
+            return Ok(ti);
+        }
+    }
+
+    // Otherwise resolve as a normal type
+    let ctx = tctx.type_ctx;
+    ctx.begin_def();
+    let resolved_ty = match transl_type(tctx, env, core_type) {
+        Ok((_, ty)) => { ctx.end_def(); ty }
+        Err(e) => { ctx.end_def(); return Err(e); }
+    };
+    Ok(crate::types::comptime::build_type_info(
+        ctx, env, resolved_ty, &mut vec![],
+    ))
 }
 
 /// Build a Texp_apply calling a generated monomorphized function.

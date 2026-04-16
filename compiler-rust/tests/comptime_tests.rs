@@ -225,6 +225,58 @@ let y = describe(int, 42)
 // ============================================================================
 
 #[test]
+fn comptime_type_builder_variant_from_record_fields() {
+    // The target: @comptime let produces a type declaration.
+    let source = r#"
+type user = { name: string, age: int, email: string }
+
+@comptime
+let userKey =
+  switch @typeInfo(user) {
+  | Record({fields}) =>
+    @buildVariant(inline for field in fields {
+      @variantCase({name: field.name})
+    })
+  | _ => @compileError("expected record")
+  }
+
+let myKey: userKey = Name
+let myKey2: userKey = Age
+"#;
+    let result = compile_with_stdlib(source, "variant_from_fields.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== VARIANT FROM FIELDS JS ===\n{}\n=== END ===", output);
+            // Should contain constructor references
+            assert!(output.contains("Name") || output.contains("\"Name\"") || output.contains("/* Name */"),
+                "Expected Name constructor:\n{output}");
+            assert!(output.contains("Age") || output.contains("\"Age\"") || output.contains("/* Age */"),
+                "Expected Age constructor:\n{output}");
+        }
+        Err(e) => panic!("@comptime type builder should compile: {e}"),
+    }
+}
+
+#[test]
+fn parse_comptime_type_decl() {
+    // Test if @comptime type userKeys = @buildVariant(...) can parse
+    let source = r#"
+type user = { name: string, age: int }
+
+@comptime
+type userKeys = @buildVariant([@variantCase({name: "Name"})])
+"#;
+    let mut parser = rescript_compiler::parser::Parser::new("test.res", source);
+    let _structure = rescript_compiler::parser::module::parse_structure(&mut parser);
+    if parser.has_errors() {
+        eprintln!("Parse errors:");
+        for d in parser.diagnostics() {
+            eprintln!("  {:?}", d);
+        }
+    }
+}
+
+#[test]
 fn parse_comptime_attribute() {
     let source = "@comptime\nlet double = x => x * 2\n";
     let mut parser = rescript_compiler::parser::Parser::new("test.res", source);

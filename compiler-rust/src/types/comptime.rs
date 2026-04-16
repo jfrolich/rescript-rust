@@ -175,6 +175,22 @@ pub fn make_monomorph_name(func_name: &str, type_key: &TypeInfo) -> String {
     }
 }
 
+// ── Type-builder evaluator ──────────────────────────────────────────────────
+
+/// Result of evaluating a type-builder expression.
+#[derive(Debug, Clone)]
+pub enum TypeBuilderResult {
+    /// A variant TypeKind with these constructors (no args).
+    Variant(Vec<String>),
+}
+
+/// Description of a single variant case (from @variantCase).
+#[derive(Debug, Clone)]
+pub struct VariantCaseSpec {
+    pub name: String,
+    // Future: pub as_: Option<String>, pub payload: Option<TypeInfo>, etc.
+}
+
 // ── TypeInfo ────────────────────────────────────────────────────────────────
 
 /// Type structure information, produced by `@typeInfo(T)`.

@@ -8426,6 +8426,121 @@ pub fn type_structure<'a>(
         }
     }
 
+    // Evaluate pending @comptime type-builder bindings and emit type decls.
+    // (Currently unused — type builders are emitted inline at their Pstr_value.
+    //  This path reserved for future use, e.g., generic type builders.)
+    let pending: Vec<_> = std::mem::take(&mut tctx.pending_type_builders);
+    for (name, expr_idx) in pending {
+        let body_expr = arena.get_expr(expr_idx).clone();
+        match crate::types::typecore::evaluate_type_builder(tctx, &current_env, &body_expr) {
+            Ok(crate::types::comptime::TypeBuilderResult::Variant(ctor_names)) => {
+                let ctx = tctx.type_ctx;
+                let type_id = ctx.create_ident(&name);
+
+                // Build internal ConstructorDeclarations
+                let mut constructors = Vec::new();
+                for cname in &ctor_names {
+                    let cid = ctx.create_ident(cname);
+                    constructors.push(crate::types::decl::ConstructorDeclaration {
+                        cd_id: cid,
+                        cd_args: crate::types::decl::ConstructorArguments::CstrTuple(vec![]),
+                        cd_res: None,
+                        cd_loc: crate::location::Location::none(),
+                        cd_attributes: vec![],
+                    });
+                }
+
+                let decl = crate::types::TypeDeclaration {
+                    type_params: vec![],
+                    type_arity: 0,
+                    type_kind: crate::types::TypeKind::TypeVariant(constructors),
+                    type_private: crate::types::asttypes::PrivateFlag::Public,
+                    type_manifest: None,
+                    type_variance: vec![],
+                    type_newtype_level: None,
+                    type_loc: crate::location::Location::none(),
+                    type_attributes: vec![],
+                    type_immediate: false,
+                    type_unboxed: crate::types::UnboxedStatus::default(),
+                    type_inlined_types: vec![],
+                    type_path: Some(crate::types::Path::pident(type_id.clone())),
+                };
+                current_env.add_type(type_id.clone(), decl.clone());
+
+                // Also register in global type store so @typeInfo can find it
+                ctx.register_type_decl(&name, decl.clone());
+                if type_id.stamp() != 0 {
+                    ctx.register_type_decl_by_stamp(type_id.stamp(), decl.clone());
+                }
+
+                // Add constructors to environment so they can be referenced
+                let type_path = crate::types::Path::pident(type_id.clone());
+                let num_consts = ctor_names.len() as i32;
+                for (i, cname) in ctor_names.iter().enumerate() {
+                    let cstr_desc = crate::types::ConstructorDescription {
+                        cstr_name: cname.clone(),
+                        cstr_res: ctx.new_generic_constr(type_path.clone(), vec![]),
+                        cstr_existentials: vec![],
+                        cstr_args: vec![],
+                        cstr_arity: 0,
+                        cstr_tag: crate::types::decl::ConstructorTag::CstrConstant(i as i32),
+                        cstr_consts: num_consts,
+                        cstr_nonconsts: 0,
+                        cstr_generalized: false,
+                        cstr_private: crate::types::asttypes::PrivateFlag::Public,
+                        cstr_loc: crate::location::Location::none(),
+                        cstr_attributes: vec![],
+                        cstr_inlined: None,
+                    };
+                    let cid = ctx.create_ident(cname);
+                    current_env.add_constructor(cid, cstr_desc);
+                }
+
+                // Build typed constructor declarations
+                let mut typed_cds = Vec::new();
+                for cname in &ctor_names {
+                    typed_cds.push(crate::types::typedtree::TypedConstructorDeclaration {
+                        cd_id: ctx.create_ident(cname),
+                        cd_name: crate::parse_arena::Located { txt: cname.clone(), loc: LocIdx(0) },
+                        cd_args: crate::types::typedtree::TypedConstructorArguments::Cstr_tuple(vec![]),
+                        cd_res: None,
+                        cd_loc: LocIdx(0),
+                        cd_attributes: crate::parser::ast::Attributes::new(),
+                    });
+                }
+
+                let typed_decl = crate::types::typedtree::TypedTypeDeclaration {
+                    typ_id: type_id.clone(),
+                    typ_name: crate::parse_arena::Located { txt: name.clone(), loc: LocIdx(0) },
+                    typ_params: vec![],
+                    typ_cstrs: vec![],
+                    typ_kind: crate::types::typedtree::TypedTypeKind::Ttype_variant(typed_cds),
+                    typ_private: crate::parser::ast::PrivateFlag::Public,
+                    typ_manifest: None,
+                    typ_loc: LocIdx(0),
+                    typ_attributes: crate::parser::ast::Attributes::new(),
+                    typ_type: decl.clone(),
+                };
+
+                // Register in signature
+                sig_items.push(crate::types::decl::SignatureItem::SigType(
+                    type_id.clone(),
+                    decl,
+                    crate::types::decl::RecStatus::TrecNot,
+                ));
+
+                typed_items.push(StructureItem {
+                    str_desc: StructureItemDesc::Tstr_type(RecFlag::Nonrecursive, vec![typed_decl]),
+                    str_loc: LocIdx(0),
+                    str_env: crate::types::typedtree::EnvRef(0),
+                });
+            }
+            Err(e) => {
+                return Err(TypeModError::CoreError(e));
+            }
+        }
+    }
+
     // Emit monomorphized comptime functions as structure items.
     // Each generated function is a specialized version of a @comptime function
     // for a specific type (e.g., encode$user, encode$address).
@@ -8658,6 +8773,135 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_value(inner) => {
             let (ref rec_flag, ref bindings) = **inner;
+
+            // Early detection: @comptime let that builds a type declaration.
+            // When we see `@comptime let foo = @buildVariant(...)` (possibly
+            // wrapped in switch/match), evaluate the body NOW and return a
+            // Tstr_type item instead of going through normal let-binding.
+            for vb in bindings {
+                let is_comptime = vb.pvb_attributes.iter().any(|(name, _)| {
+                    arena.get_string(name.txt) == "comptime"
+                });
+                if !is_comptime { continue; }
+                let body_expr = arena.get_expr(vb.pvb_expr);
+                if !crate::types::typecore::contains_build_variant(body_expr, arena) {
+                    continue;
+                }
+                let pat = arena.get_pat(vb.pvb_pat);
+                let name = if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) = &*pat.ppat_desc {
+                    arena.get_string(name_loc.txt).to_string()
+                } else {
+                    continue;
+                };
+
+                // Evaluate the body to produce a TypeBuilderResult
+                let body_clone = body_expr.clone();
+                let result = crate::types::typecore::evaluate_type_builder(tctx, env, &body_clone)
+                    .map_err(TypeModError::CoreError)?;
+
+                let ctx = tctx.type_ctx;
+                let type_id = ctx.create_ident(&name);
+                match result {
+                    crate::types::comptime::TypeBuilderResult::Variant(ctor_names) => {
+                        let mut constructors = Vec::new();
+                        for cname in &ctor_names {
+                            let cid = ctx.create_ident(cname);
+                            constructors.push(crate::types::decl::ConstructorDeclaration {
+                                cd_id: cid,
+                                cd_args: crate::types::decl::ConstructorArguments::CstrTuple(vec![]),
+                                cd_res: None,
+                                cd_loc: crate::location::Location::none(),
+                                cd_attributes: vec![],
+                            });
+                        }
+                        let decl = crate::types::TypeDeclaration {
+                            type_params: vec![],
+                            type_arity: 0,
+                            type_kind: crate::types::TypeKind::TypeVariant(constructors),
+                            type_private: crate::types::asttypes::PrivateFlag::Public,
+                            type_manifest: None,
+                            type_variance: vec![],
+                            type_newtype_level: None,
+                            type_loc: crate::location::Location::none(),
+                            type_attributes: vec![],
+                            type_immediate: false,
+                            type_unboxed: crate::types::UnboxedStatus::default(),
+                            type_inlined_types: vec![],
+                            type_path: Some(crate::types::Path::pident(type_id.clone())),
+                        };
+
+                        let mut new_env = env.clone();
+                        new_env.add_type(type_id.clone(), decl.clone());
+                        ctx.register_type_decl(&name, decl.clone());
+                        if type_id.stamp() != 0 {
+                            ctx.register_type_decl_by_stamp(type_id.stamp(), decl.clone());
+                        }
+
+                        let type_path = crate::types::Path::pident(type_id.clone());
+                        let num_consts = ctor_names.len() as i32;
+                        for (i, cname) in ctor_names.iter().enumerate() {
+                            let cstr_desc = crate::types::ConstructorDescription {
+                                cstr_name: cname.clone(),
+                                cstr_res: ctx.new_generic_constr(type_path.clone(), vec![]),
+                                cstr_existentials: vec![],
+                                cstr_args: vec![],
+                                cstr_arity: 0,
+                                cstr_tag: crate::types::decl::ConstructorTag::CstrConstant(i as i32),
+                                cstr_consts: num_consts,
+                                cstr_nonconsts: 0,
+                                cstr_generalized: false,
+                                cstr_private: crate::types::asttypes::PrivateFlag::Public,
+                                cstr_loc: crate::location::Location::none(),
+                                cstr_attributes: vec![],
+                                cstr_inlined: None,
+                            };
+                            let cid = ctx.create_ident(cname);
+                            new_env.add_constructor(cid, cstr_desc);
+                        }
+
+                        let mut typed_cds = Vec::new();
+                        for cname in &ctor_names {
+                            typed_cds.push(crate::types::typedtree::TypedConstructorDeclaration {
+                                cd_id: ctx.create_ident(cname),
+                                cd_name: crate::parse_arena::Located { txt: cname.clone(), loc: LocIdx(0) },
+                                cd_args: crate::types::typedtree::TypedConstructorArguments::Cstr_tuple(vec![]),
+                                cd_res: None,
+                                cd_loc: LocIdx(0),
+                                cd_attributes: crate::parser::ast::Attributes::new(),
+                            });
+                        }
+
+                        let typed_decl = crate::types::typedtree::TypedTypeDeclaration {
+                            typ_id: type_id.clone(),
+                            typ_name: crate::parse_arena::Located { txt: name.clone(), loc: LocIdx(0) },
+                            typ_params: vec![],
+                            typ_cstrs: vec![],
+                            typ_kind: crate::types::typedtree::TypedTypeKind::Ttype_variant(typed_cds),
+                            typ_private: crate::parser::ast::PrivateFlag::Public,
+                            typ_manifest: None,
+                            typ_loc: LocIdx(0),
+                            typ_attributes: crate::parser::ast::Attributes::new(),
+                            typ_type: decl.clone(),
+                        };
+
+                        let sig_item = crate::types::decl::SignatureItem::SigType(
+                            type_id.clone(),
+                            decl,
+                            crate::types::decl::RecStatus::TrecNot,
+                        );
+
+                        return Ok((
+                            StructureItem {
+                                str_desc: StructureItemDesc::Tstr_type(RecFlag::Nonrecursive, vec![typed_decl]),
+                                str_loc: loc,
+                                str_env: EnvRef(0),
+                            },
+                            vec![sig_item],
+                            new_env,
+                        ));
+                    }
+                }
+            }
 
             // Check for @comptime bindings BEFORE type-checking.
             // Comptime function bodies contain comptime-only expressions
