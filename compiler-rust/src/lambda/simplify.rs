@@ -1694,6 +1694,35 @@ fn simplify_primitive(
     env: &SimplifyEnv,
     exports: &HashSet<Ident>,
 ) -> Lambda {
+    // Constant fold: Pmakeblock with all-constant args → Const_block
+    if let Primitive::Pmakeblock(tag, tag_info, crate::lambda::primitive::Mutable::Immutable) = &info.primitive {
+        if !matches!(tag_info, TagInfo::ModuleExport(_)) {
+            let simplified_args: Vec<_> = info.args.iter()
+                .map(|arg| simplify_with_env(arg, env, exports))
+                .collect();
+            let all_const = simplified_args.iter().all(|a| matches!(a, Lambda::Lconst(_)));
+            if all_const {
+                let const_args: Vec<_> = simplified_args.into_iter().map(|a| {
+                    match a { Lambda::Lconst(c) => c, _ => unreachable!() }
+                }).collect();
+                return Lambda::Lconst(Constant::Block {
+                    tag: *tag,
+                    tag_info: tag_info.clone(),
+                    elements: const_args,
+                });
+            }
+        }
+    }
+
+    // Constant fold: Pfield on known Const_block → extract the field
+    if let Primitive::Pfield(idx, _) = &info.primitive {
+        if let Some(Lambda::Lconst(Constant::Block { elements, .. })) = info.args.first() {
+            if let Some(element) = elements.get(*idx as usize) {
+                return Lambda::Lconst(element.clone());
+            }
+        }
+    }
+
     if let Primitive::Pmakeblock(_, TagInfo::ModuleExport(export_ids), _) = &info.primitive {
         debug_assert_eq!(
             export_ids.len(),
