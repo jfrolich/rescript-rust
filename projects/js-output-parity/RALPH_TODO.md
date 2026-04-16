@@ -83,6 +83,55 @@ baseline.
 
 Latest iteration on **2026-04-16**:
 
+- Active slice: port OCaml's literal `int_switch` / `string_switch`
+  normalization from `js_stmt_make.ml` so JS IR statement construction folds
+  switches with literal scrutinees directly to the selected branch body instead
+  of leaving dead `switch (...) { ... }` statements in the Rust output
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md` for this slice; the OCaml behavior lives in
+  `compiler/core/js_stmt_make.ml`, and the Rust port lands in
+  `compiler-rust/src/js_ir/mod.rs`
+- OCaml reference:
+  - `compiler/core/js_stmt_make.ml`, especially `int_switch`
+  - `compiler/core/js_stmt_make.ml`, especially `string_switch`
+- Rust change:
+  - `Statement::new(...)` / `Statement::with_comment(...)` now normalize
+    literal `IntSwitch` and `StringSwitch` nodes through a shared
+    `normalize_statement(...)` path that selects the matching clause body or
+    default body immediately, mirroring OCaml's `js_stmt_make`
+  - added JS IR regression coverage in
+    `test_literal_string_switch_simplifies_to_selected_case_body_like_ocaml`
+    and
+    `test_literal_int_switch_simplifies_to_default_body_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release test_literal_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh const_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh coercion_module_alias_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/const_test.res` now matches its checked-in snapshot
+    exactly; Rust no longer leaves the dead `switch ("x") { ... }` in `hh()`
+    after the JS IR construction step where OCaml already folds it to
+    `return 3`
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained an exact
+    snapshot match after the same normalization
+  - sibling diff `tests/tests/src/coercion_module_alias_test.res` stayed
+    unchanged, which keeps this slice isolated to literal-switch statement
+    normalization rather than broader alias/export behavior
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **554 / 657** -> **554 / 657** (**no change**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **95** -> **95** (**no change**)
+- Keep this change because it is a direct OCaml port from `js_stmt_make.ml`:
+  literal switch scrutinees are normalized immediately in the reference
+  backend. The flat dirty-tree total means another unrelated diff entered the
+  current noisy worktree while this slice made `const_test` exact, not that the
+  normalization itself was incorrect.
+
+Latest iteration on **2026-04-16**:
+
 - Active slice: match OCaml's `while` dump shape on the printer path by
   keeping multiline `while (...)` conditions under the dumper's hanging-indent
   paren group and by printing empty statement blocks with the same blank

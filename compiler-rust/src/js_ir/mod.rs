@@ -1292,18 +1292,12 @@ pub struct Statement {
 impl Statement {
     /// Create a new statement
     pub fn new(desc: StatementDesc) -> Self {
-        Self {
-            desc,
-            comment: None,
-        }
+        normalize_statement(desc, None)
     }
 
     /// Create a new statement with a comment
     pub fn with_comment(desc: StatementDesc, comment: impl Into<String>) -> Self {
-        Self {
-            desc,
-            comment: Some(comment.into()),
-        }
+        normalize_statement(desc, Some(comment.into()))
     }
 
     /// Create an expression statement
@@ -1376,6 +1370,62 @@ impl Statement {
     /// Create a variable declaration
     pub fn variable(decl: VariableDeclaration) -> Self {
         Self::new(StatementDesc::Variable(decl))
+    }
+}
+
+fn block_with_comment(block: Block, comment: Option<String>) -> Statement {
+    match block.as_slice() {
+        [] => Statement {
+            desc: StatementDesc::Block(vec![]),
+            comment,
+        },
+        [stmt] => match &stmt.desc {
+            StatementDesc::Block(inner) => block_with_comment(inner.clone(), comment),
+            _ => stmt.clone(),
+        },
+        _ => Statement {
+            desc: StatementDesc::Block(block),
+            comment,
+        },
+    }
+}
+
+fn normalize_statement(desc: StatementDesc, comment: Option<String>) -> Statement {
+    match desc {
+        StatementDesc::IntSwitch(
+            Expression {
+                desc: ExpressionDesc::Number(Number::Int { i, .. }),
+                ..
+            },
+            clauses,
+            default,
+        ) => {
+            let continuation = clauses
+                .into_iter()
+                .find_map(|(switch_case, clause)| (switch_case == i).then_some(clause.body))
+                .or(default)
+                .expect("literal int switch must have a matching case or default");
+            block_with_comment(continuation, comment)
+        }
+        StatementDesc::StringSwitch(
+            Expression {
+                desc: ExpressionDesc::Str { txt, .. },
+                ..
+            },
+            clauses,
+            default,
+        ) => {
+            let continuation = clauses
+                .into_iter()
+                .find_map(|clause| match clause.tag_type {
+                    SwitchCaseTag::String(s) if s == txt => Some(clause.clause.body),
+                    _ => None,
+                })
+                .or(default)
+                .expect("literal string switch must have a matching case or default");
+            block_with_comment(continuation, comment)
+        }
+        _ => Statement { desc, comment },
     }
 }
 
@@ -3088,6 +3138,64 @@ mod tests {
             StatementDesc::Break => {}
             _ => panic!("Expected Break"),
         }
+    }
+
+    #[test]
+    fn test_literal_string_switch_simplifies_to_selected_case_body_like_ocaml() {
+        let stmt = Statement::new(StatementDesc::StringSwitch(
+            Expression::string("x"),
+            vec![
+                StringClause {
+                    tag_type: SwitchCaseTag::String("y".to_string()),
+                    clause: CaseClause {
+                        body: vec![Statement::return_(Expression::number(Number::int(1)))],
+                        should_break: false,
+                        comment: None,
+                    },
+                },
+                StringClause {
+                    tag_type: SwitchCaseTag::String("x".to_string()),
+                    clause: CaseClause {
+                        body: vec![Statement::return_(Expression::number(Number::int(3)))],
+                        should_break: false,
+                        comment: None,
+                    },
+                },
+            ],
+            Some(vec![Statement::return_(Expression::number(Number::int(4)))]),
+        ));
+
+        assert!(matches!(
+            stmt.desc,
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_literal_int_switch_simplifies_to_default_body_like_ocaml() {
+        let stmt = Statement::new(StatementDesc::IntSwitch(
+            Expression::number(Number::int(9)),
+            vec![(
+                3,
+                CaseClause {
+                    body: vec![Statement::return_(Expression::number(Number::int(1)))],
+                    should_break: false,
+                    comment: None,
+                },
+            )],
+            Some(vec![Statement::return_(Expression::number(Number::int(4)))]),
+        ));
+
+        assert!(matches!(
+            stmt.desc,
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Number(Number::Int { i: 4, .. }),
+                ..
+            })
+        ));
     }
 
     #[test]
