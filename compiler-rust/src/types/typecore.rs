@@ -5062,10 +5062,121 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_inline_for(_) => {
-            Err(super::TypeCoreError::Other(
-                "inline for can only be used inside @comptime functions".to_string(),
-            ))
+        ED::Pexp_inline_for(inner) => {
+            let (ref pat_idx, ref collection_idx, ref body_idx) = **inner;
+
+            // Check if the collection is a comptime-known variable
+            let collection_expr = tctx.arena.get_expr(*collection_idx);
+            let comptime_array = match &*collection_expr.pexp_desc {
+                crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
+                    let longident = tctx.arena.get_longident(lid.txt);
+                    if longident.is_simple() {
+                        let name = tctx.arena.get_string(longident.last_idx());
+                        match tctx.comptime_bindings.get(name) {
+                            Some(crate::types::comptime::ComptimeValue::Array(elements)) => {
+                                Some(elements.clone())
+                            }
+                            _ => None,
+                        }
+                    } else { None }
+                }
+                _ => None,
+            };
+
+            match comptime_array {
+                Some(elements) if !elements.is_empty() => {
+                    // Unroll: type-check body once per element, binding the pattern variable
+                    let pat = tctx.arena.get_pat(*pat_idx);
+                    let var_name = match &*pat.ppat_desc {
+                        crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
+                            tctx.arena.get_string(name_loc.txt).to_string()
+                        }
+                        _ => "__inline_for_var".to_string(),
+                    };
+
+                    let body_expr = tctx.arena.get_expr(*body_idx);
+                    let mut typed_iterations: Vec<Expression> = Vec::new();
+
+                    for element in &elements {
+                        // Save and set the comptime binding for this iteration
+                        let prev_binding = tctx.comptime_bindings.get(&var_name).cloned();
+                        tctx.comptime_bindings.insert(var_name.clone(), element.clone());
+
+                        // Also add the variable to the env with the right type
+                        let mut iter_env = env.clone();
+                        let elem_ty = ctx.new_var(None);
+                        let id = ctx.create_ident(&var_name);
+                        let vd = crate::types::decl::ValueDescription {
+                            val_type: elem_ty,
+                            val_kind: crate::types::decl::ValueKind::ValReg,
+                            val_loc: crate::location::Location::none(),
+                            val_attributes: vec![],
+                            val_path: None,
+                        };
+                        iter_env.add_value(id, vd);
+
+                        // Type-check the body for this iteration
+                        let unit_ty = ctx.new_constr(crate::types::predef::path_unit(), vec![]);
+                        match type_expect(tctx, &iter_env, body_expr, unit_ty, None) {
+                            Ok(typed_body) => typed_iterations.push(typed_body),
+                            Err(e) => {
+                                // Restore binding
+                                match prev_binding {
+                                    Some(v) => { tctx.comptime_bindings.insert(var_name.clone(), v); }
+                                    None => { tctx.comptime_bindings.remove(&var_name); }
+                                }
+                                return Err(e);
+                            }
+                        }
+
+                        // Restore previous binding
+                        match prev_binding {
+                            Some(v) => { tctx.comptime_bindings.insert(var_name.clone(), v); }
+                            None => { tctx.comptime_bindings.remove(&var_name); }
+                        }
+                    }
+
+                    // Splice iterations as a sequence
+                    if typed_iterations.len() == 1 {
+                        Ok(typed_iterations.into_iter().next().unwrap())
+                    } else {
+                        let mut result = typed_iterations.pop().unwrap();
+                        while let Some(prev) = typed_iterations.pop() {
+                            let result_ty = result.exp_type;
+                            result = Expression::new(
+                                ExpressionDesc::Texp_sequence(Box::new(prev), Box::new(result)),
+                                loc,
+                                result_ty,
+                                ctx.store_typed_env(env),
+                                crate::parser::ast::Attributes::new(),
+                            );
+                        }
+                        Ok(result)
+                    }
+                }
+                Some(_) => {
+                    // Empty array — produce unit
+                    let unit_ty = ctx.new_constr(crate::types::predef::path_unit(), vec![]);
+                    crate::types::ctype::unify(ctx, &mut tctx.unify_state, unit_ty, expected_ty)
+                        .map_err(|e| super::TypeCoreError::Other(format!("{:?}", e)))?;
+                    let void_cstr = env.find_constructor("()").map_err(|_| {
+                        super::TypeCoreError::Other("cannot find () constructor".to_string())
+                    })?.clone();
+                    Ok(Expression::new(
+                        ExpressionDesc::Texp_construct(
+                            crate::parse_arena::Located { txt: crate::parse_arena::LidentIdx(0), loc: crate::parse_arena::LocIdx::none() },
+                            void_cstr,
+                            vec![],
+                        ),
+                        loc, unit_ty, ctx.store_typed_env(env), crate::parser::ast::Attributes::new(),
+                    ))
+                }
+                None => {
+                    Err(super::TypeCoreError::Other(
+                        "inline for requires a comptime-known array (e.g., from @typeInfo fields)".to_string(),
+                    ))
+                }
+            }
         }
         ED::Pexp_comptime_typeinfo(ct_idx) => {
             // Resolve the core type to a concrete type
