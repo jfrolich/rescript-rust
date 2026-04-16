@@ -10,7 +10,7 @@
 //! - build_type_info: constructs TypeInfo from the compiler's type context
 //! - ComptimeFunction: registration of @comptime functions
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::context::TypeContext;
 use super::ctype;
@@ -20,6 +20,7 @@ use super::path::Path;
 use super::predef;
 use super::type_expr::{TypeDesc, TypeExprRef};
 use super::typedtree;
+use crate::ident::Ident;
 
 // ── Comptime Function Registration ─────────────────────────────────────────
 
@@ -52,6 +53,126 @@ pub struct ComptimeParam {
 /// Default fuel for comptime evaluation (prevents infinite recursion).
 pub const DEFAULT_FUEL: usize = 100_000;
 
+// ── Monomorphization Cache ────────────────────────────────────────────────
+
+/// Cache for comptime function monomorphization.
+///
+/// Each unique (function_name, type_key) pair produces one specialized
+/// function. Recursive types terminate because re-entering the same
+/// pair during specialization emits a self-reference instead of
+/// expanding again.
+pub struct MonomorphCache {
+    /// Completed specializations: (func_name, type_key) → generated name.
+    completed: HashMap<(String, TypeInfo), String>,
+    /// In-progress specializations (for recursion detection).
+    in_progress: HashSet<(String, TypeInfo)>,
+    /// Generated function bodies to emit as structure items.
+    pub generated: Vec<GeneratedFunction>,
+}
+
+/// A monomorphized function to be emitted as a let binding.
+pub struct GeneratedFunction {
+    /// Generated name (e.g. "encode$user").
+    pub name: String,
+    /// Identifier for the let binding.
+    pub ident: Ident,
+    /// The specialized function body.
+    pub body: typedtree::Expression,
+    /// Parameter name for the runtime argument.
+    pub param_name: String,
+    /// Type of the runtime parameter.
+    pub param_type: TypeExprRef,
+    /// Return type of the function.
+    pub return_type: TypeExprRef,
+    /// Whether this function calls itself (needs rec).
+    pub recursive: bool,
+}
+
+impl MonomorphCache {
+    pub fn new() -> Self {
+        Self {
+            completed: HashMap::new(),
+            in_progress: HashSet::new(),
+            generated: Vec::new(),
+        }
+    }
+
+    /// Check if a specialization is already completed.
+    /// Returns the generated function name if so.
+    pub fn lookup(&self, func_name: &str, type_key: &TypeInfo) -> Option<&str> {
+        self.completed
+            .get(&(func_name.to_string(), type_key.clone()))
+            .map(|s| s.as_str())
+    }
+
+    /// Check if a specialization is currently in progress (recursion).
+    pub fn is_in_progress(&self, func_name: &str, type_key: &TypeInfo) -> bool {
+        self.in_progress
+            .contains(&(func_name.to_string(), type_key.clone()))
+    }
+
+    /// Mark a specialization as in-progress. Returns the generated name.
+    pub fn begin(&mut self, func_name: &str, type_key: &TypeInfo) -> String {
+        let generated_name = make_monomorph_name(func_name, type_key);
+        self.in_progress
+            .insert((func_name.to_string(), type_key.clone()));
+        generated_name
+    }
+
+    /// Complete a specialization: move from in-progress to completed.
+    pub fn complete(
+        &mut self,
+        func_name: &str,
+        type_key: &TypeInfo,
+        generated_name: String,
+        func: GeneratedFunction,
+    ) {
+        self.in_progress
+            .remove(&(func_name.to_string(), type_key.clone()));
+        self.completed
+            .insert((func_name.to_string(), type_key.clone()), generated_name);
+        self.generated.push(func);
+    }
+}
+
+/// Generate a name for a monomorphized function.
+/// e.g. "encode" + Record{name: "user", ...} → "encode$user"
+fn make_monomorph_name(func_name: &str, type_key: &TypeInfo) -> String {
+    let type_suffix = match type_key {
+        TypeInfo::Int => "int".to_string(),
+        TypeInfo::Float => "float".to_string(),
+        TypeInfo::String => "string".to_string(),
+        TypeInfo::Bool => "bool".to_string(),
+        TypeInfo::Unit => "unit".to_string(),
+        TypeInfo::Char => "char".to_string(),
+        TypeInfo::Bigint => "bigint".to_string(),
+        TypeInfo::Array { element } => {
+            format!("array_{}", make_monomorph_name("", element).trim_start_matches('$'))
+        }
+        TypeInfo::Option { inner } => {
+            format!("option_{}", make_monomorph_name("", inner).trim_start_matches('$'))
+        }
+        TypeInfo::Tuple { elements } => {
+            let parts: Vec<String> = elements
+                .iter()
+                .map(|e| make_monomorph_name("", e).trim_start_matches('$').to_string())
+                .collect();
+            format!("tuple_{}", parts.join("_"))
+        }
+        TypeInfo::Record { name, .. } => name.clone(),
+        TypeInfo::Variant { name, .. } => name.clone(),
+        TypeInfo::Function { .. } => "fn".to_string(),
+        TypeInfo::External { name } => name.clone(),
+        TypeInfo::Opaque { name } => name.clone(),
+        TypeInfo::Unknown { .. } => "unknown".to_string(),
+    };
+    if func_name.is_empty() {
+        format!("${type_suffix}")
+    } else {
+        format!("{func_name}${type_suffix}")
+    }
+}
+
 // ── TypeInfo ────────────────────────────────────────────────────────────────
 
 /// Type structure information, produced by `@typeInfo(T)`.
@@ -60,7 +181,7 @@ pub const DEFAULT_FUEL: usize = 100_000;
 /// variant type in the ReScript type system. When `@typeInfo(T)` is
 /// encountered, the compiler constructs a TypeInfo from the type context
 /// and expands it to a literal value of the predefined type.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeInfo {
     Int,
     Float,
@@ -92,7 +213,7 @@ pub enum TypeInfo {
 }
 
 /// A record field descriptor.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FieldInfo {
     pub name: std::string::String,
     pub typ: TypeInfo,
@@ -102,7 +223,7 @@ pub struct FieldInfo {
 }
 
 /// A variant constructor descriptor.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConstructorInfo {
     pub name: std::string::String,
     pub args: Vec<TypeInfo>,

@@ -731,6 +731,7 @@ pub struct TypeCheckContext<'a> {
     pub comptime_functions: HashMap<String, crate::types::comptime::ComptimeFunction>,
     /// Comptime-known variable bindings (from @typeInfo destructuring, inline for, etc.)
     pub comptime_bindings: HashMap<String, crate::types::comptime::ComptimeValue>,
+    pub monomorph_cache: crate::types::comptime::MonomorphCache,
 }
 
 /// A diagnostic from type checking.
@@ -761,6 +762,7 @@ impl<'a> TypeCheckContext<'a> {
             module_expr_semantic_types: HashMap::new(),
             comptime_functions: HashMap::new(),
             comptime_bindings: HashMap::new(),
+            monomorph_cache: crate::types::comptime::MonomorphCache::new(),
         }
     }
 
