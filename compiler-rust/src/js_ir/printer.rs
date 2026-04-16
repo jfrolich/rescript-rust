@@ -521,14 +521,11 @@ impl JsPrinter {
                 self.write(") ");
                 self.print_brace_block(then_block);
 
-                if !else_block.is_empty() {
+                if !else_block_is_omitted_like_ocaml(else_block) {
                     self.write(" else ");
-                    // Check if else block is just another if
-                    if else_block.len() == 1 {
-                        if let StatementDesc::If(_, _, _) = &else_block[0].desc {
-                            self.print_statement(&else_block[0], false);
-                            return;
-                        }
+                    if let Some(nested_if) = single_else_if_stmt_like_ocaml(else_block) {
+                        self.print_statement(nested_if, false);
+                        return;
                     }
                     self.print_brace_block(else_block);
                 }
@@ -2824,6 +2821,47 @@ fn else_is_single_return_undefined(block: &Block) -> bool {
     return_is_undefined_block(block)
 }
 
+fn else_block_is_omitted_like_ocaml(block: &Block) -> bool {
+    matches!(block.as_slice(), [])
+        || matches!(
+            block.as_slice(),
+            [Statement {
+                desc: StatementDesc::Block(inner),
+                ..
+            }] if inner.is_empty()
+        )
+        || matches!(
+            block.as_slice(),
+            [Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Var(_),
+                    ..
+                }),
+                ..
+            }]
+        )
+}
+
+fn single_else_if_stmt_like_ocaml(block: &Block) -> Option<&Statement> {
+    match block.as_slice() {
+        [stmt @ Statement {
+            desc: StatementDesc::If(_, _, _),
+            ..
+        }] => Some(stmt),
+        [Statement {
+            desc: StatementDesc::Block(inner),
+            ..
+        }] => match inner.as_slice() {
+            [stmt @ Statement {
+                desc: StatementDesc::If(_, _, _),
+                ..
+            }] => Some(stmt),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn return_is_undefined_block(block: &Block) -> bool {
     matches!(block.as_slice(), [stmt] if return_is_undefined(stmt))
 }
@@ -4191,6 +4229,47 @@ mod tests {
         assert!(result.contains("return 1;"));
         assert!(result.contains("else"));
         assert!(result.contains("return 2;"));
+    }
+
+    #[test]
+    fn test_print_if_omits_else_for_single_empty_block_like_ocaml() {
+        let stmt = Statement::new(StatementDesc::If(
+            Expression::bool(true),
+            vec![Statement::return_(Expression::number(Number::int(1)))],
+            vec![Statement::new(StatementDesc::Block(vec![]))],
+        ));
+
+        assert_eq!(print_block(&vec![stmt]), "if (true) {\n  return 1;\n}");
+    }
+
+    #[test]
+    fn test_print_if_omits_else_for_single_var_expression_like_ocaml() {
+        let stmt = Statement::new(StatementDesc::If(
+            Expression::bool(true),
+            vec![Statement::return_(Expression::number(Number::int(1)))],
+            vec![Statement::exp(Expression::var(Ident::create_local("ignored")))],
+        ));
+
+        assert_eq!(print_block(&vec![stmt]), "if (true) {\n  return 1;\n}");
+    }
+
+    #[test]
+    fn test_print_if_unwraps_single_block_else_if_like_ocaml() {
+        let nested = Statement::new(StatementDesc::If(
+            Expression::bool(false),
+            vec![Statement::return_(Expression::number(Number::int(2)))],
+            vec![],
+        ));
+        let stmt = Statement::new(StatementDesc::If(
+            Expression::bool(true),
+            vec![Statement::return_(Expression::number(Number::int(1)))],
+            vec![Statement::new(StatementDesc::Block(vec![nested]))],
+        ));
+
+        assert_eq!(
+            print_block(&vec![stmt]),
+            "if (true) {\n  return 1;\n} else if (false) {\n  return 2;\n}"
+        );
     }
 
     #[test]

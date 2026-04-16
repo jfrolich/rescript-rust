@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 553 / 657 with 8 unrelated compile errors and 96 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 555 / 657 with 8 unrelated compile errors and 94 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **553 / 657**
+- JS snapshot parity: **555 / 657**
 - Compile errors: **8**
-- Output diffs: **96**
+- Output diffs: **94**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,66 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `553 / 657` unless the
+Do **not** replace the recorded project baseline with `555 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: port OCaml's `js_dump.ml` `If` printer behavior so the dumper
+  omits `else` arms for `[Block []]` / `[Exp (Var _)]` and unwraps
+  `else { if (...) ... }` into `else if (...)`
+- Active backend focus moves to **Phase 5: Byte-Exact Dumping** from `PLAN.md`
+  for this slice; the lowering was already producing the right JS IR drift, and
+  the remaining mismatch was in `compiler-rust/src/js_ir/printer.rs`
+- OCaml reference:
+  - `compiler/core/js_dump.ml`, especially the `If (e, s1, s2)` branch
+  - `compiler/core/js_dump.ml`, especially the explicit omission cases
+    `[] | [Block [] | Exp (Var _)]` and the
+    `[Block [If _]] -> else if ...` unwrap
+- Rust change:
+  - added `else_block_is_omitted_like_ocaml(...)` so the printer suppresses
+    Rust-only `else {}` output when the alternate is just a single empty block
+    or a single no-op variable expression
+  - added `single_else_if_stmt_like_ocaml(...)` so a single wrapped nested `if`
+    prints as `else if (...)` instead of `else { if (...) ... }`
+  - added printer regression coverage in
+    `test_print_if_omits_else_for_single_empty_block_like_ocaml`,
+    `test_print_if_omits_else_for_single_var_expression_like_ocaml`, and
+    `test_print_if_unwraps_single_block_else_if_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_if_omits_else -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_if_unwraps_single_block_else_if_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh bal_set_mini --diff`
+  - `timeout 30 ./scripts/test_js_single.sh rec_fun_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh test_primitive --diff`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_4491_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bal_set_mini.res` matches its checked-in snapshot again;
+    Rust no longer prints the stray `else {}` on the membership guard loop
+  - `tests/tests/src/rec_fun_test.res` also matches again for the same no-op
+    alternate-arm printer drift
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained exact after
+    the same printer change
+  - sibling drift `tests/tests/src/test_primitive.res` stayed on its separate
+    early-return/negative-guard lowering mismatch, which keeps this slice
+    isolated to the final dumper rather than JS IR simplification
+  - `tests/tests/src/gpr_4491_test.res` still differs only on the blank line
+    layout inside its explicit non-empty `else` block, which is a narrower
+    printer shape issue than the removed empty-arm case
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **553 / 657** -> **555 / 657** (**+2**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **96** -> **94** (**-2**)
+- Keep this change because it is a direct OCaml dumper port from
+  `js_dump.ml`: the reference backend suppresses these empty/no-op alternate
+  arms and unwraps single block-wrapped nested `if`s before printing. The
+  improvement shows up exactly where the current dirty diff set had the Rust-only
+  `else {}` drift.
 
 Latest iteration on **2026-04-16**:
 
