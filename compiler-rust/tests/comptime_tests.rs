@@ -225,6 +225,45 @@ let y = describe(int, 42)
 // ============================================================================
 
 #[test]
+fn comptime_generic_keysof() {
+    // Generic: @comptime let keysOf takes a type parameter, returns a type.
+    // Each `@comptime let x = keysOf(T)` instantiates a specialized type.
+    let source = r#"
+type user = { name: string, age: int, email: string }
+type admin = { role: string, level: int }
+
+@comptime
+let keysOf = (type t) =>
+  switch @typeInfo(t) {
+  | Record({fields}) =>
+    @buildVariant(inline for field in fields {
+      @variantCase({name: field.name})
+    })
+  | _ => @compileError("keysOf: expected record")
+  }
+
+@comptime
+let userKey = keysOf(user)
+
+@comptime
+let adminKey = keysOf(admin)
+
+let u: userKey = Name
+let a: adminKey = Role
+"#;
+    let result = compile_with_stdlib(source, "generic_keysof.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== GENERIC KEYSOF JS ===\n{}\n=== END ===", output);
+            // u should reference a userKey constructor
+            assert!(output.contains("Name"), "Expected Name in output:\n{output}");
+            assert!(output.contains("Role"), "Expected Role in output:\n{output}");
+        }
+        Err(e) => panic!("generic keysOf should compile: {e}"),
+    }
+}
+
+#[test]
 fn comptime_type_builder_variant_from_record_fields() {
     // The target: @comptime let produces a type declaration.
     let source = r#"

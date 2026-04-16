@@ -21223,26 +21223,72 @@ fn resolve_comptime_type_arg(
 }
 
 /// Check if an expression tree contains @buildVariant (possibly nested in
-/// switch/match branches). Used to detect @comptime let bindings that
-/// should be emitted as type declarations rather than registered as
-/// comptime functions.
+/// switch/match branches, or via a call to a @comptime function whose body
+/// contains one). Used to detect @comptime let bindings that should be
+/// emitted as type declarations rather than registered as comptime functions.
 pub fn contains_build_variant(
     expr: &ParsedExpression,
     arena: &crate::parse_arena::ParseArena,
 ) -> bool {
+    contains_build_variant_with_registry(expr, arena, None)
+}
+
+/// Like contains_build_variant, but can follow calls to registered @comptime
+/// functions (provided via the registry) to check their bodies.
+pub fn contains_build_variant_with_registry(
+    expr: &ParsedExpression,
+    arena: &crate::parse_arena::ParseArena,
+    registry: Option<&ahash::AHashMap<String, crate::types::comptime::ComptimeFunction>>,
+) -> bool {
+    use crate::parser::ast::ExpressionDesc as ED;
+    // Top-level: if this is a function (has parameters), it's a TEMPLATE,
+    // not a type declaration. Return false so it registers as a function.
+    if matches!(&*expr.pexp_desc, ED::Pexp_fun(_) | ED::Pexp_newtype(_)) {
+        return false;
+    }
+    contains_build_variant_inside(expr, arena, registry)
+}
+
+/// Inner check that DOES follow through function-parameter wrappers.
+fn contains_build_variant_inside(
+    expr: &ParsedExpression,
+    arena: &crate::parse_arena::ParseArena,
+    registry: Option<&ahash::AHashMap<String, crate::types::comptime::ComptimeFunction>>,
+) -> bool {
     use crate::parser::ast::ExpressionDesc as ED;
     match &*expr.pexp_desc {
         ED::Pexp_comptime_build_variant(_) => true,
+        ED::Pexp_fun(inner) => {
+            contains_build_variant_inside(arena.get_expr(inner.rhs), arena, registry)
+        }
+        ED::Pexp_newtype(inner) => {
+            let (_, ref body) = **inner;
+            contains_build_variant_inside(arena.get_expr(*body), arena, registry)
+        }
         ED::Pexp_match(inner) => {
             let (_, ref cases) = **inner;
             cases.iter().any(|c| {
-                contains_build_variant(arena.get_expr(c.pc_rhs), arena)
+                contains_build_variant_inside(arena.get_expr(c.pc_rhs), arena, registry)
             })
         }
         ED::Pexp_ifthenelse(inner) => {
             let (_, then_idx, else_opt) = &**inner;
-            contains_build_variant(arena.get_expr(*then_idx), arena)
-                || else_opt.map_or(false, |e| contains_build_variant(arena.get_expr(e), arena))
+            contains_build_variant_inside(arena.get_expr(*then_idx), arena, registry)
+                || else_opt.map_or(false, |e| contains_build_variant_inside(arena.get_expr(e), arena, registry))
+        }
+        ED::Pexp_apply(inner) => {
+            if let Some(reg) = registry {
+                let funct_expr = arena.get_expr(inner.funct);
+                if let ED::Pexp_ident(lid) = &*funct_expr.pexp_desc {
+                    let longident = arena.get_longident(lid.txt);
+                    let name = arena.get_string(longident.last_idx());
+                    if let Some(cf) = reg.get(name) {
+                        let callee_body = arena.get_expr(cf.body_expr_idx);
+                        return contains_build_variant_inside(callee_body, arena, registry);
+                    }
+                }
+            }
+            false
         }
         _ => false,
     }
@@ -21333,9 +21379,73 @@ pub fn evaluate_type_builder(
             };
             Err(super::TypeCoreError::Other(format!("@compileError: {msg}")))
         }
-        _ => Err(super::TypeCoreError::Other(format!(
-            "evaluate_type_builder: unsupported expression — expected @buildVariant or switch",
-        ))),
+        ED::Pexp_apply(inner) => {
+            // Comptime call: keysOf(user) where keysOf is a registered @comptime function
+            let crate::parser::ast::PexpApply { ref funct, ref args, .. } = **inner;
+            let funct_expr = tctx.arena.get_expr(*funct);
+            let func_name = match &*funct_expr.pexp_desc {
+                ED::Pexp_ident(lid) => {
+                    let longident = tctx.arena.get_longident(lid.txt);
+                    tctx.arena.get_string(longident.last_idx()).to_string()
+                }
+                _ => return Err(super::TypeCoreError::Other(
+                    "evaluate_type_builder: call target must be a simple identifier".into(),
+                )),
+            };
+            let comptime_fn = tctx.comptime_functions.get(&func_name).cloned()
+                .ok_or_else(|| super::TypeCoreError::Other(format!(
+                    "evaluate_type_builder: '{}' is not a registered @comptime function", func_name
+                )))?;
+
+            // Extract the function's parameters and body
+            let body_expr_idx = comptime_fn.body_expr_idx;
+            let body_expr = tctx.arena.get_expr(body_expr_idx);
+            let (params, inner_body) = extract_function_params_and_body(body_expr, tctx.arena);
+
+            // Bind each argument
+            let saved_bindings = tctx.comptime_bindings.clone();
+            for (i, (_label, arg_idx)) in args.iter().enumerate() {
+                let param = params.get(i);
+                if let Some(p) = param {
+                    if p.is_type {
+                        let arg_expr = tctx.arena.get_expr(*arg_idx);
+                        let type_info = resolve_comptime_type_arg(tctx, env, arg_expr)
+                            .ok_or_else(|| super::TypeCoreError::Other(format!(
+                                "evaluate_type_builder: could not resolve type arg for '{}'", p.name
+                            )))?;
+                        tctx.comptime_bindings.insert(
+                            p.name.clone(),
+                            crate::types::comptime::ComptimeValue::Type(type_info),
+                        );
+                    }
+                    // Non-type params not supported in type-builder calls yet
+                }
+            }
+
+            // Recursively evaluate the body
+            let result = evaluate_type_builder(tctx, env, &inner_body);
+            tctx.comptime_bindings = saved_bindings;
+            result
+        }
+        other => {
+            let kind = match other {
+                ED::Pexp_ident(_) => "Pexp_ident",
+                ED::Pexp_constant(_) => "Pexp_constant",
+                ED::Pexp_fun(_) => "Pexp_fun",
+                ED::Pexp_newtype(_) => "Pexp_newtype",
+                ED::Pexp_let(_) => "Pexp_let",
+                ED::Pexp_construct(_, _) => "Pexp_construct",
+                ED::Pexp_tuple(_) => "Pexp_tuple",
+                ED::Pexp_array(_) => "Pexp_array",
+                ED::Pexp_record(_) => "Pexp_record",
+                ED::Pexp_field(_, _) => "Pexp_field",
+                ED::Pexp_sequence(_, _) => "Pexp_sequence",
+                _ => "other",
+            };
+            Err(super::TypeCoreError::Other(format!(
+                "evaluate_type_builder: unsupported expression kind '{kind}'",
+            )))
+        }
     }
 }
 

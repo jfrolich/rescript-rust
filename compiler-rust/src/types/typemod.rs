@@ -8784,7 +8784,9 @@ fn type_structure_item<'a>(
                 });
                 if !is_comptime { continue; }
                 let body_expr = arena.get_expr(vb.pvb_expr);
-                if !crate::types::typecore::contains_build_variant(body_expr, arena) {
+                if !crate::types::typecore::contains_build_variant_with_registry(
+                    body_expr, arena, Some(&tctx.comptime_functions),
+                ) {
                     continue;
                 }
                 let pat = arena.get_pat(vb.pvb_pat);
