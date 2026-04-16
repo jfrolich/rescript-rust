@@ -48,48 +48,65 @@ let rec encode = (value): JSON.t => {
 //
 // Also specializes per call-site. Uses the expected return type to
 // determine which JSON branch to take and how to build records.
+// Returns result<T, string> so decoding failures are explicit.
 
 @comptime
-let rec decode = (json: JSON.t) => {
+let rec decode = (json: JSON.t): result<_, string> => {
   switch @typeInfo(@return) {
   | String =>
     switch json {
-    | String(s) => s
-    | _ => panic("expected string")
+    | String(s) => Ok(s)
+    | _ => Error("expected string")
     }
   | Int =>
     switch json {
-    | Number(n) => Float.toInt(n)
-    | _ => panic("expected int")
+    | Number(n) => Ok(Float.toInt(n))
+    | _ => Error("expected int")
     }
   | Float =>
     switch json {
-    | Number(n) => n
-    | _ => panic("expected float")
+    | Number(n) => Ok(n)
+    | _ => Error("expected float")
     }
   | Bool =>
     switch json {
-    | Boolean(b) => b
-    | _ => panic("expected bool")
+    | Boolean(b) => Ok(b)
+    | _ => Error("expected bool")
     }
   | Record({fields}) =>
     switch json {
     | Object(dict) =>
       @record(inline for field in fields {
-        decode(Dict.getUnsafe(dict, field.name))
+        switch decode(Dict.getUnsafe(dict, field.name)) {
+        | Ok(v) => v
+        | Error(e) => return Error(field.name ++ ": " ++ e)
+        }
       })
-    | _ => panic("expected object")
+      ->Ok
+    | _ => Error("expected object")
     }
   | Option(_) =>
     switch json {
-    | Null => None
-    | _ => Some(decode(json))
+    | Null => Ok(None)
+    | _ =>
+      switch decode(json) {
+      | Ok(v) => Ok(Some(v))
+      | Error(e) => Error(e)
+      }
     }
   | Array(_) =>
-    switch json {
-    | Array(arr) => Array.map(arr, item => decode(item))
-    | _ => panic("expected array")
-    }
+    json
+    ->JSON.Decode.array
+    ->Option.mapOr(Error("expected array"), arr => {
+      let result = []
+      for i in 0 to Array.length(arr) - 1 {
+        switch decode(Array.getUnsafe(arr, i)) {
+        | Ok(v) => result->Array.push(v)
+        | Error(e) => return Error("[" ++ Int.toString(i) ++ "]: " ++ e)
+        }
+      }
+      Ok(result)
+    })
   | _ => @compileError("decode: unsupported type")
   }
 }
@@ -109,14 +126,14 @@ let json = encode(alice)
 
 // ── Decode ───────────────────────────────────────────────────────────
 
-let decoded: user = decode(json)
+let decoded: result<user, string> = decode(json)
 
 // ── Roundtrip primitives ─────────────────────────────────────────────
 
-let s: string = decode(encode("hello"))
-let n: int = decode(encode(42))
-let b: bool = decode(encode(true))
+let s: result<string, string> = decode(encode("hello"))
+let n: result<int, string> = decode(encode(42))
+let b: result<bool, string> = decode(encode(true))
 
 // ── Roundtrip nested ─────────────────────────────────────────────────
 
-let addr: address = decode(encode(alice.address))
+let addr: result<address, string> = decode(encode(alice.address))
