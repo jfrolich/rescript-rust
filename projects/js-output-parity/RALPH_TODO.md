@@ -83,6 +83,64 @@ baseline.
 
 Latest iteration on **2026-04-16**:
 
+- Active slice: port OCaml `compile_for`'s start/finish prelude ordering so
+  `Lfor` preserves side effects from loop bounds instead of dropping them when
+  Rust lowers directly to `StatementDesc::ForRange`
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_for`'s `(b1, b2)` cases
+  that preserve start/finish preludes and only hoist the loop variable when
+  the start expression itself is not side-effect-free
+- Rust change:
+  - routed `Lambda::Lfor` through a dedicated `compile_for_loop(...)` helper
+    instead of the old shortcut that compiled `start`/`finish` with
+    `.compile_expr(...).expr` and silently discarded their preludes
+  - matched OCaml's three-way lowering:
+    keep `start` in the initializer when `finish` has no prelude, reorder
+    `finish`'s prelude ahead of the loop when `start`'s resulting expression is
+    pure, and emit `let i = start_expr; ... for (; i <= finish; ++i)` when the
+    start expression is effectful and the finish path also has a prelude
+  - added focused unit coverage for both the pure-start and effectful-start
+    OCaml cases so future loop changes keep the same prelude ordering
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_for_bounds_preludes_in_ocaml_order_when_start_expr_is_pure -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_effectful_for_start_out_of_initializer_when_finish_has_prelude -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - manual single-file repro with `rescript.exe compiler-args` +
+    `compiler-rust/target/release/bsc` for:
+    `tests/tests/src/for_side_effect_test.res`
+  - manual single-file repro with `rescript.exe compiler-args` +
+    `compiler-rust/target/release/bsc` for:
+    `tests/tests/src/for_loop_test.res`
+  - manual exact-check repro for:
+    `tests/tests/src/ari_regress_test.res`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/for_side_effect_test.res` now preserves OCaml's loop-bound
+    side effects again: the Rust output restored `v = 3;` / `v = 10;` and kept
+    the bound-ordering behavior, leaving only the separate empty-loop-block
+    formatting drift in that file
+  - `tests/tests/src/for_loop_test.res` remained on its existing captured-loop-
+    variable naming drift, so the new `compile_for` port did not reopen that
+    separate cluster
+  - `tests/tests/src/ari_regress_test.res` now matches its checked-in snapshot
+    again and drops out of the diff cache after the `Lfor` fix
+  - the current dirty-tree wrapper improved by one exact JS snapshot while
+    keeping the unrelated compile-error set unchanged
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **527 / 657** -> **528 / 657** (**+1**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **122** -> **121** (**-1**)
+- Keep this change because the previous Rust `Lfor` lowering was not OCaml-
+  aligned at all: it threw away the compiled preludes for `start` and `finish`
+  and therefore reordered or deleted loop-bound side effects. Porting
+  `compile_for` restores the backend stage behavior directly and converts at
+  least one real snapshot (`ari_regress_test`) back to exact parity without
+  touching the unrelated compile-error cluster.
+
+Latest iteration on **2026-04-16**:
+
 - Active slice: use the OCaml single-handler tail-return staticcatch path for
   bound unit-return handlers whose shared handler has no static raises, instead
   of always forcing a local `exit` temp in that case

@@ -645,23 +645,7 @@ impl LambdaCompiler {
                     expr: Expression::undefined(false),
                 }
             }
-            Lambda::Lfor(var, start, end, dir, body) => {
-                let start_expr = self.compile_expr(start).expr;
-                let (end, dir) = lower_ocaml_for_range_direction(dir, end);
-                let end_expr = self.compile_expr(end).expr;
-                let body_block = self.compile_block(body);
-                let stmt = Statement::new(StatementDesc::ForRange(
-                    Some(start_expr),
-                    end_expr,
-                    var.clone(),
-                    dir,
-                    body_block,
-                ));
-                Compiled {
-                    prelude: vec![stmt],
-                    expr: Expression::undefined(false),
-                }
-            }
+            Lambda::Lfor(var, start, end, dir, body) => self.compile_for_loop(var, start, end, dir, body),
             Lambda::Lassign(id, value) => {
                 let compiled = self.compile_expr(value);
                 let mut prelude = compiled.prelude;
@@ -682,6 +666,71 @@ impl LambdaCompiler {
 
     fn compile_block(&mut self, lam: &Lambda) -> Block {
         self.compile_effect_block(lam)
+    }
+
+    fn compile_for_loop(
+        &mut self,
+        var: &Ident,
+        start: &Lambda,
+        end: &Lambda,
+        dir: &crate::lambda::DirectionFlag,
+        body: &Lambda,
+    ) -> Compiled {
+        let start_compiled = self.compile_expr(start);
+        let (finish, direction) = lower_ocaml_for_range_direction(dir, end);
+        let finish_compiled = self.compile_expr(finish);
+        let body_block = self.compile_block(body);
+
+        let mut prelude = start_compiled.prelude;
+        if block_terminates(&prelude) {
+            return Compiled {
+                prelude,
+                expr: Expression::undefined(false),
+            };
+        }
+
+        let push_loop = |block: &mut Block, init: Option<Expression>, finish: Expression| {
+            block.push(Statement::new(StatementDesc::ForRange(
+                init,
+                finish,
+                var.clone(),
+                direction,
+                body_block.clone(),
+            )));
+        };
+
+        if finish_compiled.prelude.is_empty() {
+            push_loop(&mut prelude, Some(start_compiled.expr), finish_compiled.expr);
+        } else if js_expr_no_side_effects(&start_compiled.expr) {
+            prelude.extend(finish_compiled.prelude);
+            if block_terminates(&prelude) {
+                return Compiled {
+                    prelude,
+                    expr: Expression::undefined(false),
+                };
+            }
+            push_loop(&mut prelude, Some(start_compiled.expr), finish_compiled.expr);
+        } else {
+            prelude.push(Statement::variable(VariableDeclaration {
+                ident: var.clone(),
+                value: Some(start_compiled.expr),
+                property: LetKind::Variable,
+                ident_info: IdentInfo::default(),
+            }));
+            prelude.extend(finish_compiled.prelude);
+            if block_terminates(&prelude) {
+                return Compiled {
+                    prelude,
+                    expr: Expression::undefined(false),
+                };
+            }
+            push_loop(&mut prelude, None, finish_compiled.expr);
+        }
+
+        Compiled {
+            prelude,
+            expr: Expression::undefined(false),
+        }
     }
 
     fn compile_recursive_bindings(&mut self, bindings: &[(Ident, Lambda)]) -> Block {
@@ -13888,6 +13937,67 @@ mod tests {
         let rendered = print_block(&compiled.prelude);
 
         assert_eq!(rendered.trim(), "for (let i = 0; i < xs; ++i) {}");
+    }
+
+    #[test]
+    fn lowers_for_bounds_preludes_in_ocaml_order_when_start_expr_is_pure() {
+        let mut compiler = LambdaCompiler::new();
+        let i = Ident::create_local("i");
+        let probe = Ident::create_local("probe");
+        let probe_finish = Ident::create_local("probe_finish");
+        let lam = Lambda::for_(
+            i,
+            Lambda::seq(
+                Lambda::assign(probe, Lambda::const_(Constant::int(1))),
+                Lambda::const_(Constant::int(0)),
+            ),
+            Lambda::seq(
+                Lambda::assign(probe_finish, Lambda::const_(Constant::int(2))),
+                Lambda::const_(Constant::int(1)),
+            ),
+            crate::lambda::DirectionFlag::Upto,
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert_eq!(
+            rendered.trim(),
+            "probe = 1;\n\nprobe_finish = 2;\n\nfor (let i = 0; i <= 1; ++i) {}"
+        );
+    }
+
+    #[test]
+    fn lowers_effectful_for_start_out_of_initializer_when_finish_has_prelude() {
+        let mut compiler = LambdaCompiler::new();
+        let i = Ident::create_local("i");
+        let probe_finish = Ident::create_local("probe_finish");
+        let lam = Lambda::for_(
+            i,
+            Lambda::prim(
+                Primitive::PrawJsCode(JsRawInfo {
+                    code: "start()".to_string(),
+                    is_stmt: false,
+                }),
+                vec![],
+                Location::none(),
+            ),
+            Lambda::seq(
+                Lambda::assign(probe_finish, Lambda::const_(Constant::int(2))),
+                Lambda::const_(Constant::int(1)),
+            ),
+            crate::lambda::DirectionFlag::Upto,
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert_eq!(
+            rendered.trim(),
+            "let i = (start());\n\nprobe_finish = 2;\n\nfor (; i <= 1; ++i) {}"
+        );
     }
 
     #[test]
