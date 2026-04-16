@@ -20522,17 +20522,74 @@ fn try_comptime_application(
     // Check if it's a registered comptime function
     let comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
 
-    // Get the function's parse tree body and extract the inner body
+    // Extract function parameters and body
     let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx);
-    let inner_body = extract_function_body(body_expr, tctx.arena);
+    let (param_names, inner_body) = extract_function_params_and_body(body_expr, tctx.arena);
 
-    // Type-check the inner body in the current environment.
-    // @typeInfo(T) expressions will be expanded to literal values
-    // by the type checker (once the predefined typeInfo type is added).
-    // The optimizer then handles switch elimination automatically.
-    match type_expect(tctx, env, &inner_body, expected_ty, None) {
+    // Type-check arguments and build an extended environment
+    // where parameter names are bound to the argument values
+    let mut inline_env = env.clone();
+    let ctx = tctx.type_ctx;
+
+    for (i, (_label, arg_idx)) in args.iter().enumerate() {
+        let arg_expr = tctx.arena.get_expr(*arg_idx);
+        let arg_ty = ctx.new_var(None);
+        match type_expect(tctx, &inline_env, arg_expr, arg_ty, None) {
+            Ok(typed_arg) => {
+                // Bind the parameter name to the argument's type
+                if let Some(param_name) = param_names.get(i) {
+                    let id = ctx.create_ident(param_name);
+                    let vd = crate::types::decl::ValueDescription {
+                        val_type: typed_arg.exp_type,
+                        val_kind: crate::types::decl::ValueKind::ValReg,
+                        val_loc: crate::location::Location::none(),
+                        val_attributes: vec![],
+                        val_path: None,
+                    };
+                    inline_env.add_value(id, vd);
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+
+    // Type-check the body in the extended environment
+    match type_expect(tctx, &inline_env, &inner_body, expected_ty, None) {
         Ok(typed_expr) => Some(Ok(typed_expr)),
-        Err(_) => None, // Fall through to normal application
+        Err(_) => None,
+    }
+}
+
+/// Extract parameter names and innermost body from a function parse tree.
+fn extract_function_params_and_body<'a>(
+    expr: &'a ParsedExpression,
+    arena: &'a crate::parse_arena::ParseArena,
+) -> (Vec<String>, ParsedExpression) {
+    let mut params = Vec::new();
+    let mut current = expr;
+
+    loop {
+        match &*current.pexp_desc {
+            crate::parser::ast::ExpressionDesc::Pexp_fun(inner) => {
+                // Extract parameter name from pattern
+                let pat = arena.get_pat(inner.lhs);
+                match &*pat.ppat_desc {
+                    crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
+                        params.push(arena.get_string(name_loc.txt).to_string());
+                    }
+                    crate::parser::ast::PatternDesc::Ppat_constraint(inner_box) => {
+                        let (inner_pat_idx, _) = &**inner_box;
+                        let inner_pat = arena.get_pat(*inner_pat_idx);
+                        if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) = &*inner_pat.ppat_desc {
+                            params.push(arena.get_string(name_loc.txt).to_string());
+                        }
+                    }
+                    _ => {}
+                }
+                current = arena.get_expr(inner.rhs);
+            }
+            _ => return (params, current.clone()),
+        }
     }
 }
 

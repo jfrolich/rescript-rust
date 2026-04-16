@@ -162,18 +162,27 @@ let double = (x) => x * 2
 
 #[test]
 fn comptime_function_is_registered_and_callable() {
+    // @comptime function with @typeInfo — the core use case
     let source = r#"
-@comptime
-let identity = (x) => x
+type user = { name: string, age: int }
 
-let result = identity(42)
+@comptime
+let isRecord = (value: user) => {
+  switch @typeInfo(user) {
+  | Record(_) => true
+  | _ => false
+  }
+}
+
+let u: user = { name: "Alice", age: 30 }
+let result = isRecord(u)
 "#;
     let result = compile_source_to_js(source, "comptime_call.res");
     match result {
         Ok(output) => {
             assert!(
-                output.contains("42"),
-                "Expected 42 in output (function should be inlined):\n{output}"
+                output.contains("true"),
+                "Expected true in output (switch should be eliminated):\n{output}"
             );
         }
         Err(e) => {
