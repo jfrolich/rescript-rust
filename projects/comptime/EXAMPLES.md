@@ -436,79 +436,206 @@ let make = () => {
 
 ---
 
-## 6. KeyOf / Utility Types (replaces `ppx_ts`)
+## 6. Type Building (replaces `ppx_ts` utility types)
 
-### Comptime library
+Comptime value functions (`@comptime let`) take values and return values. Comptime type functions (`@comptime type`) take types and return types. Both use `@typeInfo` for introspection, but type functions use type-building builtins (`@buildVariant`, `@buildRecord`) to construct new type declarations.
+
+### KeyOf — variant of record field names
 
 ```rescript
 // === TypeUtils.res ===
 
-@comptime.derive("keyOf")
-let keyOf = (comptime T: type) => {
-  switch @typeInfo(T) {
+// Type-level comptime: takes a type, returns a type
+@comptime
+type keyOf<'T> = {
+  switch @typeInfo('T) {
   | Record({fields}) =>
     @buildVariant(inline for field in fields {
-      @variantCase(String.capitalize(field.name), @as(field.name))
+      @variantCase({name: field.name->String.capitalize, as: field.name})
     })
-  | _ => @compileError("@keyOf requires a record type")
+  | _ => @compileError("keyOf requires a record type")
   }
 }
+```
 
-@comptime.derive("pick")
-let pick = (comptime T: type, comptime keys: array<string>) => {
-  switch @typeInfo(T) {
+```rescript
+// === Usage — just a type expression, no attributes needed ===
+
+type user = { name: string, age: int, email: string }
+
+type user_key = keyOf<user>
+// Compiler evaluates at compile time, produces:
+// type user_key =
+//   | @as("name") Name
+//   | @as("age") Age
+//   | @as("email") Email
+
+// Use it:
+let fieldName = (key: user_key): string => {
+  switch key {
+  | Name => "name"
+  | Age => "age"
+  | Email => "email"
+  }
+}
+```
+
+### Partial — make all fields optional
+
+```rescript
+@comptime
+type partial<'T> = {
+  switch @typeInfo('T) {
   | Record({fields}) =>
+    @buildRecord(inline for field in fields {
+      @recordField({name: field.name, typ: field.typ, optional: true})
+    })
+  | _ => @compileError("partial requires a record type")
+  }
+}
+```
+
+```rescript
+type user = { name: string, age: int, email: string }
+
+type userPatch = partial<user>
+// Produces:
+// type userPatch = { name?: string, age?: int, email?: string }
+
+let patch: userPatch = { name: "Alice" }  // age and email omitted
+```
+
+### Pick — subset of record fields
+
+```rescript
+@comptime
+type pick<'T, 'Keys> = {
+  switch @typeInfo('T) {
+  | Record({fields}) =>
+    let keys = @comptimeValue('Keys)  // extract the comptime string array
     let picked = fields->Array.filter(f => Array.includes(keys, f.name))
     if Array.length(picked) != Array.length(keys) {
       let unknown = keys->Array.filter(k => !Array.some(fields, f => f.name == k))
       @compileError(`Unknown fields: ${Array.join(unknown, ", ")}`)
     }
-    @buildRecord(picked)
-  | _ => @compileError("@pick requires a record type")
-  }
-}
-
-@comptime.derive("partial")
-let partial = (comptime T: type) => {
-  switch @typeInfo(T) {
-  | Record({fields}) =>
-    @buildRecord(fields->Array.map(f => {...f, optional: true}))
-  | _ => @compileError("@partial requires a record type")
+    @buildRecord(inline for field in picked {
+      @recordField({name: field.name, typ: field.typ})
+    })
+  | _ => @compileError("pick requires a record type")
   }
 }
 ```
 
-### Usage
+```rescript
+type user = { name: string, age: int, email: string }
+
+type userPreview = pick<user, ["name", "email"]>
+// Produces:
+// type userPreview = { name: string, email: string }
+
+// Typo in field name = compile error:
+type bad = pick<user, ["name", "emial"]>
+// Error: Unknown fields: emial
+```
+
+### Readonly — make all fields immutable (strip mutable)
 
 ```rescript
-@keyOf @partial
-type user = {
-  name: string,
-  age: int,
-  email: string,
+@comptime
+type readonly<'T> = {
+  switch @typeInfo('T) {
+  | Record({fields}) =>
+    @buildRecord(inline for field in fields {
+      @recordField({name: field.name, typ: field.typ, mutable_: false})
+    })
+  | _ => @compileError("readonly requires a record type")
+  }
 }
+```
 
-// Generated:
-// type user_key = Name | Age | Email  (each @as("name") etc.)
-// type user_partial = { name?: string, age?: int, email?: string }
+```rescript
+type state = { mutable count: int, mutable label: string }
 
-type userPreview = TypeUtils.pick<user, ["name", "email"]>
-// = { name: string, email: string }
+type frozenState = readonly<state>
+// Produces:
+// type frozenState = { count: int, label: string }
+```
+
+### Enum from string array
+
+```rescript
+@comptime
+type makeEnum<'Values> = {
+  let values = @comptimeValue('Values)
+  @buildVariant(inline for v in values {
+    @variantCase({name: v->String.capitalize, as: v})
+  })
+}
+```
+
+```rescript
+type status = makeEnum<["active", "inactive", "suspended"]>
+// Produces:
+// type status =
+//   | @as("active") Active
+//   | @as("inactive") Inactive
+//   | @as("suspended") Suspended
+```
+
+### Composing type-level comptime
+
+Comptime types compose naturally — the output of one can be the input to another:
+
+```rescript
+type user = { name: string, age: int, email: string, password: string }
+
+// Pick some fields, then make them optional
+type userPatch = partial<pick<user, ["name", "age", "email"]>>
+// Produces:
+// type userPatch = { name?: string, age?: int, email?: string }
+
+// Keys of a subset
+type editableFields = keyOf<pick<user, ["name", "age", "email"]>>
+// Produces:
+// type editableFields = | @as("name") Name | @as("age") Age | @as("email") Email
+```
+
+### Derive attributes still work for type-level comptime
+
+If you want attribute-triggered type generation (like `@keyOf` on a type declaration), `@comptime.derive` works with comptime types too:
+
+```rescript
+// Register keyOf as a derive attribute
+@comptime.derive("keyOf")
+type keyOf<'T> = { ... }  // same body as above
+
+// Now both styles work:
+type user_key = keyOf<user>           // explicit call
+@keyOf type user = { ... }            // derive attribute — generates user_key alongside
 ```
 
 ---
 
 ## Summary
 
-The common pattern across all examples:
+Comptime has two modes, matching the two things you do in a language — compute values and define types:
 
-1. **PPX today**: Write OCaml code that manipulates raw AST nodes. Requires separate toolchain, hard to debug, breaks on AST changes.
-2. **Comptime**: Write ReScript code that works with structured `typeInfo` data. Runs in QuickJS during compilation. Produces specialized code with zero runtime overhead.
+| | Value-level comptime | Type-level comptime |
+|---|---|---|
+| **Syntax** | `@comptime let f = ...` | `@comptime type f<'T> = ...` |
+| **Input** | Types + runtime values | Types only |
+| **Output** | Specialized runtime code | New type declarations |
+| **Usage** | `f(myType, myValue)` | `type t = f<myType>` |
+| **Example** | JSON encoder | keyOf, partial, pick |
 
-Key primitives that make it work:
+Both use the same introspection (`@typeInfo`, `@getAttr`, `inline for`) and the same execution model (QuickJS). The difference is just what they produce — runtime expressions vs type declarations.
+
+Key primitives:
 - `@typeInfo(T)` — structured type introspection
 - `inline for` — compile-time loop unrolling
 - `@compileError(msg)` — user-friendly error messages
 - `@field(value, name)` — comptime-known field access
 - `@getAttr(field, name)` — read custom attributes
 - `@embedFile(path)` — embed file contents at compile time
+- `@buildVariant` / `@variantCase` — construct variant types
+- `@buildRecord` / `@recordField` — construct record types

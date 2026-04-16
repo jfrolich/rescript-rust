@@ -195,6 +195,88 @@ Console.log("name")
 Console.log("email")
 ```
 
+### Comptime Types
+
+Comptime functions (value → value) use `@comptime` on `let` bindings. For type-level computation (type → type), use `@comptime` on a type declaration:
+
+```rescript
+@comptime
+type keyOf<'T> = {
+  switch @typeInfo('T) {
+  | Record({fields}) =>
+    @buildVariant(inline for field in fields {
+      @variantCase({name: field.name->String.capitalize, as: field.name})
+    })
+  | _ => @compileError("@keyOf requires a record type")
+  }
+}
+
+type user = { name: string, age: int, email: string }
+type user_key = keyOf<user>
+// Produces:
+// type user_key =
+//   | @as("name") Name
+//   | @as("age") Age
+//   | @as("email") Email
+```
+
+The type parameter `'T` must be fully resolved at the call site — `keyOf<user>` works, `keyOf<'a>` is a compile error. This is consistent with comptime value functions: comptime parameters must be known at compile time.
+
+**Two kinds of comptime, same model:**
+
+| | Value-level | Type-level |
+|---|---|---|
+| **Syntax** | `@comptime let f = (comptime T: type, value: T) => ...` | `@comptime type f<'T> = ...` |
+| **Input** | Comptime params + runtime values | Type parameters (must be concrete) |
+| **Output** | Specialized runtime code | A new type declaration |
+| **Usage** | `f(myType, myValue)` | `type t = f<myType>` |
+| **Body** | Mix of comptime decisions + runtime expressions | Comptime only — type-building directives |
+
+#### Type-Building Builtins
+
+Comptime type bodies use these builtins to construct types:
+
+**`@buildVariant`** — build a variant type from `@variantCase` entries:
+
+```rescript
+@buildVariant(
+  @variantCase({name: "Active", as: "active"}),
+  @variantCase({name: "Inactive"}),
+  @variantCase({name: "Suspended", deprecated: "Use Inactive instead"}),
+)
+```
+
+**`@variantCase`** — describe a single variant constructor. Takes a record:
+
+```rescript
+@variantCase({
+  name: string,                          // required: constructor name
+  as?: string,                           // @as("...") JS representation
+  payload?: typeInfo,                    // constructor argument type(s)
+  deprecated?: string,                  // @deprecated("...")
+})
+```
+
+**`@buildRecord`** — build a record type from field descriptions:
+
+```rescript
+@buildRecord(inline for field in fields {
+  @recordField({name: field.name, typ: field.typ, optional: true})
+})
+```
+
+**`@recordField`** — describe a single record field:
+
+```rescript
+@recordField({
+  name: string,                          // required: field name
+  typ: typeInfo,                         // required: field type
+  optional?: bool,                       // x?: int
+  mutable_?: bool,                       // mutable x: int
+  as?: string,                           // @as("userName")
+})
+```
+
 ---
 
 ## Type Introspection
