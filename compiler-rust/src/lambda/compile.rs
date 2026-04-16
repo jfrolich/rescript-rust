@@ -1979,6 +1979,24 @@ impl LambdaCompiler {
         switch: &LambdaSwitch,
         tail_loop: &mut TailLoopState,
     ) -> Block {
+        if self.uses_named_variant_switch(switch) {
+            let scrut_compiled = self.compile_expr(scrut);
+            let (mut block, scrut_expr) = if self.named_variant_switch_needs_bound_scrutinee(switch)
+            {
+                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr)
+            } else {
+                (scrut_compiled.prelude, scrut_compiled.expr)
+            };
+            block.extend(
+                self.compile_named_variant_switch_tail_loop_return_statements(
+                    scrut_expr,
+                    switch,
+                    tail_loop,
+                ),
+            );
+            return block;
+        }
+
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
         let cases: Vec<_> = self
@@ -4016,6 +4034,121 @@ impl LambdaCompiler {
         self.compile_named_string_switch_return_with_strategy(test, cases, default, complete, true)
     }
 
+    fn compile_small_string_switch_tail_loop_return(
+        &mut self,
+        test: Expression,
+        cases: &[(SwitchCaseTag, &Lambda)],
+        default: Option<&Lambda>,
+        complete: bool,
+        tail_loop: &mut TailLoopState,
+    ) -> Option<Block> {
+        match cases {
+            [] => Some(
+                default
+                    .map(|fallback| self.compile_tail_loop_return_block(fallback, tail_loop))
+                    .unwrap_or_default(),
+            ),
+            [(_tag, body)] if complete && default.is_none() => {
+                Some(self.compile_tail_loop_return_block(body, tail_loop))
+            }
+            [(tag, body)] => Some(vec![Statement::if_(
+                self.switch_case_test(test, tag),
+                self.compile_tail_loop_return_block(body, tail_loop),
+                default
+                    .map(|fallback| self.compile_tail_loop_return_block(fallback, tail_loop))
+                    .unwrap_or_default(),
+            )]),
+            [(tag, then_body), (_, else_body)] if complete && default.is_none() => {
+                Some(vec![Statement::if_(
+                    self.switch_case_test(test, tag),
+                    self.compile_tail_loop_return_block(then_body, tail_loop),
+                    self.compile_tail_loop_return_block(else_body, tail_loop),
+                )])
+            }
+            _ => None,
+        }
+    }
+
+    fn grouped_tail_loop_return_string_clauses<'a, T: Clone>(
+        &mut self,
+        grouped_cases: Vec<(T, &'a Lambda, bool)>,
+        mut to_tag: impl FnMut(T) -> SwitchCaseTag,
+        tail_loop: &mut TailLoopState,
+    ) -> Vec<StringClause> {
+        let mut clauses = Vec::with_capacity(grouped_cases.len());
+        let mut group_start = 0;
+        while group_start < grouped_cases.len() {
+            let mut group_end = group_start;
+            while !grouped_cases[group_end].2 {
+                group_end += 1;
+            }
+
+            let (_, body, _) = &grouped_cases[group_end];
+            let compiled_body = self.compile_tail_loop_return_block(body, tail_loop);
+            let group_falls_through = compiled_body.is_empty();
+
+            for (tag, _, _) in &grouped_cases[group_start..group_end] {
+                clauses.push((
+                    to_tag(tag.clone()),
+                    empty_switch_case_clause(),
+                    group_falls_through,
+                ));
+            }
+            clauses.push((
+                to_tag(grouped_cases[group_end].0.clone()),
+                CaseClause {
+                    body: compiled_body,
+                    should_break: false,
+                    comment: None,
+                },
+                group_falls_through,
+            ));
+
+            group_start = group_end + 1;
+        }
+
+        self.reorder_fallthrough_return_clauses(clauses, |(_, _, falls_through)| *falls_through)
+            .into_iter()
+            .map(|(tag_type, clause, _)| StringClause { tag_type, clause })
+            .collect()
+    }
+
+    fn compile_named_string_switch_tail_loop_return(
+        &mut self,
+        test: Expression,
+        cases: &[(SwitchCaseTag, &Lambda)],
+        default: Option<&Lambda>,
+        complete: bool,
+        tail_loop: &mut TailLoopState,
+    ) -> Block {
+        let filtered_cases = self.filtered_switch_case_refs(cases, default);
+        if let Some(block) = self.compile_small_string_switch_tail_loop_return(
+            test.clone(),
+            filtered_cases.as_slice(),
+            default,
+            complete,
+            tail_loop,
+        ) {
+            return block;
+        }
+
+        let clauses = self.grouped_tail_loop_return_string_clauses(
+            stable_group_switch_cases(filtered_cases, |_, _| true),
+            |tag| tag,
+            tail_loop,
+        );
+
+        let default_block = default
+            .map(|fallback| self.compile_tail_loop_return_block(fallback, tail_loop))
+            .filter(|body| !body.is_empty());
+
+        vec![Statement::new(StatementDesc::StringSwitch(
+            test,
+            clauses,
+            default_block,
+        ))]
+    }
+
     fn compile_named_string_switch_effect_with_strategy(
         &mut self,
         test: Expression,
@@ -4190,6 +4323,67 @@ impl LambdaCompiler {
                 &block_cases,
                 block_default,
                 block_complete,
+            )
+        };
+
+        if const_cases.is_empty() && const_complete {
+            block_branch
+        } else if block_cases.is_empty() && block_complete {
+            const_branch
+        } else {
+            self.dispatch_named_variant_branches(scrut_expr, const_branch, block_branch)
+        }
+    }
+
+    fn compile_named_variant_switch_tail_loop_return_statements(
+        &mut self,
+        scrut_expr: Expression,
+        switch: &LambdaSwitch,
+        tail_loop: &mut TailLoopState,
+    ) -> Block {
+        let Some(const_cases) = self.named_const_cases(switch) else {
+            return vec![];
+        };
+        let Some(block_cases) = self.named_block_cases(switch) else {
+            return vec![];
+        };
+
+        let const_default = self.const_switch_default(switch);
+        let block_default = self.block_switch_default(switch);
+        let tag_name = self.variant_tag_name(switch);
+
+        if const_cases.is_empty() && block_cases.is_empty() {
+            return const_default
+                .map(|fallback| self.compile_tail_loop_return_block(fallback, tail_loop))
+                .unwrap_or_default();
+        }
+
+        let const_complete = self.const_switch_complete(switch);
+        let block_complete = self.block_switch_complete(switch);
+        let const_branch = if const_cases.is_empty() {
+            const_default
+                .map(|fallback| self.compile_tail_loop_return_block(fallback, tail_loop))
+                .unwrap_or_default()
+        } else {
+            self.compile_named_string_switch_tail_loop_return(
+                scrut_expr.clone(),
+                &const_cases,
+                const_default,
+                const_complete,
+                tail_loop,
+            )
+        };
+        let block_branch = if block_cases.is_empty() {
+            block_default
+                .map(|fallback| self.compile_tail_loop_return_block(fallback, tail_loop))
+                .unwrap_or_default()
+        } else {
+            self.compile_named_string_switch_tail_loop_return(
+                self.variant_tag_expr(scrut_expr.clone(), &tag_name),
+                &block_cases,
+                block_default,
+                block_complete,
+                tail_loop,
             )
         };
 
@@ -13961,7 +14155,8 @@ mod tests {
         Primitive,
     };
     use crate::lambda::{
-        ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, Lambda, SwitchNames,
+        ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, Lambda, SwitchBlock,
+        SwitchNames, SwitchTag,
     };
     use crate::location::Location;
     use std::fs;
@@ -27405,6 +27600,60 @@ let fib3 = n => {
         assert!(
             !rendered.contains("return loop("),
             "unexpected wrapped recursive return call remained:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn recursive_named_variant_block_cases_reenter_tail_loops() {
+        let mut compiler = LambdaCompiler::new();
+        let loop_ = Ident::create_local("loop");
+        let value = Ident::create_local("value");
+        let tailcall = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::var(loop_.clone())),
+            ap_args: vec![Lambda::var(value.clone())],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+        let body = Lambda::Lswitch(
+            Box::new(Lambda::var(value.clone())),
+            LambdaSwitch {
+                sw_consts_full: true,
+                sw_consts: vec![(0, Lambda::const_(Constant::int(0)))],
+                sw_blocks_full: true,
+                sw_blocks: vec![(0, tailcall)],
+                sw_failaction: None,
+                sw_names: Some(SwitchNames {
+                    consts: vec![SwitchTag::named("Empty")],
+                    blocks: vec![SwitchBlock::named("Node")],
+                }),
+            },
+        );
+        let lam = Lambda::letrec(
+            vec![(
+                loop_.clone(),
+                Lambda::function_(1, vec![value], body, FunctionAttribute::default()),
+            )],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert!(
+            rendered.contains("while (true)"),
+            "expected named-variant tail recursion to lower to a loop:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("continue;"),
+            "expected the block case to continue the loop instead of returning recursively:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("return loop("),
+            "unexpected recursive call remained in named-variant switch lowering:\n{rendered}"
         );
     }
 

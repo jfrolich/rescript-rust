@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 547 / 657 with 8 unrelated compile errors and 102 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 550 / 657 with 8 unrelated compile errors and 99 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **547 / 657**
+- JS snapshot parity: **550 / 657**
 - Compile errors: **8**
-- Output diffs: **102**
+- Output diffs: **99**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,58 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `547 / 657` unless the
+Do **not** replace the recorded project baseline with `550 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: route named-variant payload cases through the recursive
+  tail-loop switch path so self tailcalls in `sw_blocks` stop falling back to
+  direct recursion
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially `compile_recursive_let`'s
+    `Maybe_tail_is_return (Tail_with_name ...)` loop-lowering path together
+    with the named-variant switch return handling under `compile_cases` /
+    `compile_general_cases`, which still descends through payload-carrying
+    block cases
+- Rust change:
+  - updated `compile_tail_loop_switch_return_block(...)` so named-variant
+    switches stop using the Rust-only `sw_consts`-only path
+  - added tail-loop-aware named string / named variant switch helpers so
+    payload-carrying block arms compile via `compile_tail_loop_return_block(...)`
+    instead of the ordinary return-block lowering
+  - added the focused regression
+    `recursive_named_variant_block_cases_reenter_tail_loops`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release recursive_named_variant_block_cases_reenter_tail_loops -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release recursive_wrapped_js_fn_make_bindings_lower_to_looping_while_bodies -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release recursive_self_tailcalls_lower_to_looping_while_bodies -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh bal_set_mini --diff`
+  - `timeout 30 ./scripts/test_js_single.sh bdd --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bdd.res` now matches its checked-in snapshot again; the
+    recursive helpers go back through OCaml-style `while (true)` loop bodies
+    instead of direct recursive returns
+  - `tests/tests/src/bal_set_mini.res` no longer diffs on the recursive
+    `min_elt` / `mem` helpers; the remaining drift there is the separate `bal`
+    else-nesting shape plus the final `let match = v` alias
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained exact after
+    the same slice
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **547 / 657** -> **550 / 657** (**+3**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **102** -> **99** (**-3**)
+- Keep this change because the old Rust path was not OCaml-aligned: once a
+  recursive function enters the tail-return lowering, OCaml still walks named
+  variant payload cases and loopifies self calls there. Rust was dropping
+  those block arms from the tail-loop path by only inspecting `sw_consts`.
 
 Latest iteration on **2026-04-16**:
 
