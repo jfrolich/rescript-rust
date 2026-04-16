@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 535 / 657 with 8 unrelated compile errors and 114 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 536 / 657 with 8 unrelated compile errors and 113 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **535 / 657**
+- JS snapshot parity: **536 / 657**
 - Compile errors: **8**
-- Output diffs: **114**
+- Output diffs: **113**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,72 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `535 / 657` unless the
+Do **not** replace the recorded project baseline with `536 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: port the OCaml `js_stmt_make.if_` split for nullish success
+  guards so Rust preserves the positive branch for loose-nullish / strict-
+  `undefined` cases and strict-`null` value returns, but still rewrites the
+  strict-`null` unit tail shape into the negative early-return form that OCaml
+  snapshots use
+- Active backend focus moved back to **Phase 3: Port JS IR Lowering And
+  Metadata** from `PLAN.md` for this slice; the change stays in
+  `compiler-rust/src/js_ir/mod.rs`
+- OCaml reference:
+  `compiler/core/js_stmt_make.ml`, especially `if_`'s rewrites for
+  `_, [{statement_desc = Return _}]` and
+  `block_last_is_return_throw_or_continue ifso`
+- Rust change:
+  - tightened `Statement::if_` / `simplify_if_statement` in
+    `compiler-rust/src/js_ir/mod.rs` so Rust no longer treats every nullish
+    success guard the same
+  - restored the positive materialization that existing OCaml snapshots expect
+    for loose-nullish guards, strict-`undefined` unit tails, and strict-`null`
+    branches that return real values
+  - added a strict-`null`-only carveout for unit-return tails so shapes like
+    `untagged_variants_heuristic` rewrite to the OCaml negative early-return
+    form instead of staying as a positive success branch
+  - replaced the earlier overbroad nullish constructor expectations with a
+    focused test matrix that now covers the preserved `null` / `undefined`
+    cases and the rewritten strict-`null` unit-tail case separately
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/untagged_variants_heuristic.res -o /tmp/untagged_variants_heuristic.mjs`
+  - `diff -u tests/tests/src/untagged_variants_heuristic.mjs /tmp/untagged_variants_heuristic.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/bs_auto_uncurry.res -o /tmp/bs_auto_uncurry.mjs`
+  - `diff -u tests/tests/src/bs_auto_uncurry.mjs /tmp/bs_auto_uncurry.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_1245_test.res -o /tmp/gpr_1245_test.mjs`
+  - `diff -u tests/tests/src/gpr_1245_test.mjs /tmp/gpr_1245_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/bs_splice_partial.res -o /tmp/bs_splice_partial.mjs`
+  - `diff -u tests/tests/src/bs_splice_partial.mjs /tmp/bs_splice_partial.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `diff -u tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/queue_402.res -o /tmp/queue_402.mjs`
+  - `diff -u tests/tests/src/queue_402.mjs /tmp/queue_402.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/untagged_variants_heuristic.res` now matches its checked-
+    in snapshot again, which confirms the strict-`null` unit-tail carveout is
+    hitting the intended OCaml shape
+  - the preserved-side guards also stayed exact after the carveout:
+    `bs_auto_uncurry`, `gpr_1245_test`, and `bs_splice_partial` all still emit
+    the positive success-branch form that OCaml snapshots check in
+  - `tests/tests/src/ExternalShadow.res` and `tests/tests/src/queue_402.res`
+    remained exact as broader unchanged guards
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **535 / 657** -> **536 / 657** (**+1**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **114** -> **113** (**-1**)
+- Keep this change because the previous Rust JS statement simplifier collapsed
+  several distinct OCaml backend cases into one nullish-success heuristic. The
+  narrowed port now matches the checked-in snapshot split: strict-`null`
+  unit-tail functions rewrite to negative guards, while the broader nullish /
+  `undefined` success-guard family stays materialized in positive form.
 
 Latest iteration on **2026-04-16**:
 
