@@ -2460,7 +2460,7 @@ fn conjunction_contains_expression(conjunction: &Expression, needle: &Expression
     }
 }
 
-fn ocaml_eq_block(left: &Block, right: &Block) -> bool {
+pub(crate) fn ocaml_eq_block(left: &Block, right: &Block) -> bool {
     left.len() == right.len()
         && left
             .iter()

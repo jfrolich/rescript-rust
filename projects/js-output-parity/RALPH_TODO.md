@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **541 / 657**
+- JS snapshot parity: **542 / 657**
 - Compile errors: **8**
-- Output diffs: **108**
+- Output diffs: **107**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -10642,6 +10642,54 @@ Remaining internal compile errors under the measured wrapper baseline:
 - none
 
 ## Latest Session Findings
+
+- `compiler-rust/src/js_ir/printer.rs` now matches one more slice of the
+  OCaml final dump path for unit-return function tails:
+  nested positive guards with an explicit shared fallback no longer stay in
+  the Rust-only `if (outer) { if (value !== 3) { fallback; return; } ... }`
+  shape when the final emitted JS should be the OCaml combined-success guard
+- Active slice: merge unit-return tail `if` statements with a shared explicit
+  fallback into the OCaml combined positive guard during final JS dumping
+- Active backend focus moved to **Phase 5: Byte-Exact Dumping** from `PLAN.md`;
+  this slice stays in `compiler-rust/src/js_ir/printer.rs` with a small helper
+  export in `compiler-rust/src/js_ir/mod.rs`
+- OCaml reference:
+  - `compiler/core/js_dump.ml`, especially `function_body`'s unit-return tail
+    handling at the final dump stage
+  - checked-in OCaml snapshot shape in `tests/tests/src/gpr_1891_test.mjs`,
+    which keeps the explicit outer `else` and the combined success guard
+- Rust change:
+  - exported `ocaml_eq_block(...)` from `compiler-rust/src/js_ir/mod.rs` for
+    final-dump block-shape comparisons
+  - added `try_unit_function_tail_shared_else_guard_merge(...)`,
+    `strip_trailing_return_undefined_block(...)`, and
+    `negate_tail_merge_condition(...)` in
+    `compiler-rust/src/js_ir/printer.rs`
+  - wired that merge into `print_function_tail_statement(...)` for
+    `return_unit` function tails only
+  - added focused regression coverage in
+    `test_print_unit_function_tail_merges_shared_else_guard_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_unit_function_tail_merges_shared_else_guard_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_1891_test.res -o /tmp/gpr_1891_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1891_test.res` now matches its checked-in snapshot
+    exactly again; Rust emits the OCaml-style
+    `if (typeof x === "object" && x.NAME === "Foo" && x.VAL === 3) { ... } else { ... }`
+    tail instead of leaving the nested negative guard with duplicated fallback
+  - `tests/tests/src/ExternalShadow.res` remained an exact guard-file match
+    after the same printer slice
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **541 / 657** -> **542 / 657** (**+1**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **108** -> **107** (**-1**)
+- Keep this change because the remaining drift was at the final dump stage, not
+  in `Lam_compile`: OCaml's checked-in JS keeps the shared fallback as an
+  explicit outer `else` while collapsing the success path to the combined
+  positive guard, and the Rust printer now emits that same byte shape.
 
 - `compiler-rust/src/lambda/compile.rs` now matches one more slice of
   OCaml `core/lam_compile.ml` more closely on the Rust JS path:

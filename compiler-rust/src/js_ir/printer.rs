@@ -7,7 +7,7 @@ use super::op::{BinOp, Kind, Number, PropertyName, UsedStats};
 use super::{
     Block, CallInfo, CaseClause, Delim, DepsProgram, Expression, ExpressionDesc, ForDirection,
     JsRawInfo, ModulePathResolver, Program, Statement, StatementDesc, StringClause, VIdent,
-    VariableDeclaration,
+    VariableDeclaration, ocaml_eq_block,
 };
 use crate::binary_ast::ppx::{JsExpClassification, classify_js_exp};
 use crate::ident::Ident;
@@ -2436,6 +2436,13 @@ impl JsPrinter {
             return;
         }
 
+        if return_unit {
+            if let Some(merged) = try_unit_function_tail_shared_else_guard_merge(stmt) {
+                self.print_function_tail_statement(&merged, return_unit);
+                return;
+            }
+        }
+
         match &stmt.desc {
             StatementDesc::Block(inner) if inner.len() == 1 => {
                 self.print_function_tail_statement(&inner[0], return_unit);
@@ -2577,6 +2584,42 @@ fn try_function_body_trailing_return_nested_if_merge(
     }
 }
 
+fn try_unit_function_tail_shared_else_guard_merge(stmt: &Statement) -> Option<Statement> {
+    let stmt = unwrap_single_block_stmt(stmt);
+    let StatementDesc::If(outer_cond, then_block, else_block) = &stmt.desc else {
+        return None;
+    };
+    let stripped_else = strip_trailing_return_undefined_block(else_block)?;
+    if stripped_else.is_empty() {
+        return None;
+    }
+
+    let (first_then, remaining_then) = then_block.split_first()?;
+    let StatementDesc::If(inner_cond, inner_then, inner_else) =
+        &unwrap_single_block_stmt(first_then).desc
+    else {
+        return None;
+    };
+    if !inner_else.is_empty() || !ocaml_eq_block(inner_then, else_block) {
+        return None;
+    }
+
+    let stripped_then = strip_trailing_return_undefined_block(&remaining_then.to_vec())?;
+    if stripped_then.is_empty() {
+        return None;
+    }
+
+    Some(Statement::new(StatementDesc::If(
+        Expression::bin(
+            BinOp::And,
+            outer_cond.clone(),
+            negate_tail_merge_condition(inner_cond),
+        ),
+        stripped_then,
+        stripped_else,
+    )))
+}
+
 fn try_function_tail_negative_guard_chain_merge(stmt: &Statement) -> Option<Statement> {
     let mut guards = Vec::new();
     let body = collect_function_tail_negative_guard_chain_stmt(stmt, &mut guards)?;
@@ -2592,6 +2635,14 @@ fn try_function_tail_negative_guard_chain_merge(stmt: &Statement) -> Option<Stat
         desc: StatementDesc::If(cond, body, vec![]),
         comment: stmt.comment.clone(),
     })
+}
+
+fn strip_trailing_return_undefined_block(block: &Block) -> Option<Block> {
+    let (tail, body) = block.split_last()?;
+    if !return_is_undefined(unwrap_single_block_stmt(tail)) {
+        return None;
+    }
+    Some(body.to_vec())
 }
 
 fn try_function_body_negative_guard_chain_merge(stmts: &Block) -> Option<Statement> {
@@ -2775,6 +2826,22 @@ fn return_is_undefined(stmt: &Statement) -> bool {
             ..
         }
     )
+}
+
+fn negate_tail_merge_condition(cond: &Expression) -> Expression {
+    match &cond.desc {
+        ExpressionDesc::Bool(value) => Expression::bool(!value),
+        ExpressionDesc::JsNot(inner) => inner.as_ref().clone(),
+        ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => Expression::bin(
+            BinOp::NotEqEq,
+            left.as_ref().clone(),
+            right.as_ref().clone(),
+        ),
+        ExpressionDesc::Bin(BinOp::NotEqEq, left, right) => {
+            Expression::bin(BinOp::EqEqEq, left.as_ref().clone(), right.as_ref().clone())
+        }
+        _ => Expression::not(cond.clone()),
+    }
 }
 
 fn function_tail_statement_prints(stmt: &Statement) -> bool {
@@ -5054,6 +5121,70 @@ mod tests {
         assert!(rendered.contains("return;"));
         assert!(!rendered.contains("if (state.active)"));
         assert!(!rendered.contains("else"));
+    }
+
+    #[test]
+    fn test_print_unit_function_tail_merges_shared_else_guard_like_ocaml() {
+        let handle = Ident::create_local("handle");
+        let outer = Ident::create_local("outer");
+        let value = Ident::create_local("value");
+        let yes = Ident::create_local("yes");
+        let no = Ident::create_local("no");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: handle,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![outer.clone(), value.clone()],
+                body: vec![Statement::new(StatementDesc::If(
+                    Expression::var(outer.clone()),
+                    vec![
+                        Statement::new(StatementDesc::If(
+                            Expression::bin(
+                                BinOp::NotEqEq,
+                                Expression::var(value.clone()),
+                                Expression::number(Number::int(3)),
+                            ),
+                            vec![
+                                Statement::exp(Expression::call(
+                                    Expression::var(no.clone()),
+                                    vec![],
+                                    CallInfo::default(),
+                                )),
+                                Statement::return_(Expression::undefined(true)),
+                            ],
+                            vec![],
+                        )),
+                        Statement::exp(Expression::call(
+                            Expression::var(yes),
+                            vec![],
+                            CallInfo::default(),
+                        )),
+                        Statement::return_(Expression::undefined(true)),
+                    ],
+                    vec![
+                        Statement::exp(Expression::call(
+                            Expression::var(no),
+                            vec![],
+                            CallInfo::default(),
+                        )),
+                        Statement::return_(Expression::undefined(true)),
+                    ],
+                ))],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (outer && value === 3) {"));
+        assert!(rendered.contains("yes();"));
+        assert!(rendered.contains("} else {"));
+        assert!(rendered.contains("no();"));
+        assert!(!rendered.contains("if (value !== 3)"));
+        assert!(!rendered.contains("return;"));
     }
 
     #[test]
