@@ -728,6 +728,9 @@ impl Expression {
         if let Some(expr) = rewrite_length_bin_comparison(op, &left, &right) {
             return expr;
         }
+        if let Some(value) = fold_int_comparison(op, &left, &right) {
+            return Expression::bool(value);
+        }
         if let Some(value) = fold_strict_comparison(op, &left, &right) {
             return Expression::bool(value);
         }
@@ -916,6 +919,29 @@ impl Expression {
             }
         }
     }
+}
+
+fn fold_int_comparison(op: BinOp, left: &Expression, right: &Expression) -> Option<bool> {
+    let (
+        ExpressionDesc::Number(Number::Int { i: left_int, .. }),
+        ExpressionDesc::Number(Number::Int { i: right_int, .. }),
+    ) = (&left.desc, &right.desc)
+    else {
+        return None;
+    };
+
+    // OCaml's Js_exp_make.int_comp compares the left literal via
+    // Ext_int.int32_unsigned_to_int and the right via Int32.to_int.
+    let left_int = (*left_int as u32) as i64;
+    let right_int = *right_int as i64;
+
+    Some(match op {
+        BinOp::Lt => left_int < right_int,
+        BinOp::Le => left_int <= right_int,
+        BinOp::Gt => left_int > right_int,
+        BinOp::Ge => left_int >= right_int,
+        _ => return None,
+    })
 }
 
 fn fold_strict_comparison(op: BinOp, left: &Expression, right: &Expression) -> Option<bool> {
@@ -4742,5 +4768,46 @@ mod tests {
 
         assert_eq!(program.block.len(), 1);
         assert!(program.exports.is_empty());
+    }
+
+    #[test]
+    fn test_bin_folds_relational_int_comparisons_like_ocaml() {
+        let gt = Expression::bin(
+            BinOp::Gt,
+            Expression::number(Number::int(-299)),
+            Expression::number(Number::int(99)),
+        );
+        let lt = Expression::bin(
+            BinOp::Lt,
+            Expression::number(Number::int(-311)),
+            Expression::number(Number::int(85)),
+        );
+        let ge = Expression::bin(
+            BinOp::Ge,
+            Expression::number(Number::int(304)),
+            Expression::number(Number::int(1)),
+        );
+
+        assert!(matches!(gt.desc, ExpressionDesc::Bool(true)));
+        assert!(matches!(lt.desc, ExpressionDesc::Bool(false)));
+        assert!(matches!(ge.desc, ExpressionDesc::Bool(true)));
+    }
+
+    #[test]
+    fn test_cond_folds_after_relational_int_comparison_like_gpr_3877() {
+        let expr = Expression::cond(
+            Expression::bin(
+                BinOp::Gt,
+                Expression::number(Number::int(-299)),
+                Expression::number(Number::int(99)),
+            ),
+            Expression::string("then branch"),
+            Expression::string("else branch"),
+        );
+
+        match expr.desc {
+            ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "then branch"),
+            other => panic!("expected folded string branch, got {other:?}"),
+        }
     }
 }

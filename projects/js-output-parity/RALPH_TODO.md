@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-16
-**Status:** 584 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 73 output diffs
+**Last Updated:** 2026-04-17
+**Status:** 585 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 72 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -44,7 +44,7 @@ JS backend only.
 
 ## Current Baseline
 
-Latest authoritative wrapper run on **2026-04-16** using:
+Latest authoritative wrapper run on **2026-04-17** using:
 
 ```bash
 timeout 1800 ./scripts/test_js_output_parity.sh
@@ -52,20 +52,61 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **584 / 657**
+- JS snapshot parity: **585 / 657**
 - Compile errors: **0**
-- Output diffs: **73**
+- Output diffs: **72**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 ## Current Worktree Status
 
-A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
+A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **584 / 657**
+- JS snapshot parity: **585 / 657**
 - Compile errors: **0**
-- Output diffs: **73**
+- Output diffs: **72**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: match OCaml's `Js_exp_make.int_comp` constant-folding rule for
+  relational JS-IR integer comparisons created after range-rewrite
+  normalization, so inlined range checks like `gpr_3877_test` fold with the
+  same unsigned-left / signed-right behavior as OCaml instead of Rust's
+  incorrect signed `i32` comparison
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change stays in `compiler-rust/src/js_ir/mod.rs`
+- OCaml reference:
+  - `compiler/core/js_exp_make.ml`, especially `compare_int_aux` and
+    `int_comp`
+- Rust change:
+  - added `fold_int_comparison(...)` to `compiler-rust/src/js_ir/mod.rs` and
+    wired it into `Expression::bin(...)`
+  - matched OCaml's literal folding rule for relational operators only:
+    convert the left literal like `Ext_int.int32_unsigned_to_int`, convert the
+    right like `Int32.to_int`, then fold `<`, `<=`, `>`, and `>=`
+  - added focused regression coverage in
+    `test_bin_folds_relational_int_comparisons_like_ocaml` and
+    `test_cond_folds_after_relational_int_comparison_like_gpr_3877`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh src/gpr_3877_test.res --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh src/gpr_5280_optimize_test.res --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_3877_test.res` now matches its checked-in snapshot
+    again; the inlined range dispatch no longer mis-folds to `"the catch all"`
+    after constant propagation
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained an exact
+    snapshot match after the same JS-IR fold
+  - broader guard `tests/tests/src/gpr_5280_optimize_test.res` still differs
+    on a separate conditional / let-hoist cluster, which confirms this slice
+    stayed scoped to integer-comparison folding
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **584 / 657** -> **585 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **73** -> **72** (**-1**)
 
 Latest iteration on **2026-04-16**:
 
