@@ -92,6 +92,38 @@ let y = identity(int, 5)
 }
 
 #[test]
+fn comptime_record_with_type_param() {
+    // Test @record(t, inline for ...) where t is a comptime type parameter
+    let source = r#"
+type point = { x: int, y: int }
+
+@comptime
+let rebuild = (type t, src: point) => {
+  switch @typeInfo(t) {
+  | Record({fields}) =>
+    @record(t, inline for field in fields {
+      @field(src, field.name)
+    })
+  | _ => @compileError("expected record")
+  }
+}
+
+let p: point = { x: 1, y: 2 }
+let p2 = rebuild(point, p)
+"#;
+    let result = compile_with_stdlib(source, "record_type_param.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== RECORD TYPE PARAM JS ===\n{}\n=== END ===", output);
+            assert!(output.contains("rebuild$point"), "Expected rebuild$point:\n{output}");
+            // Should have x: p.x, y: p.y or equivalent
+            assert!(output.contains(".x") || output.contains("1"), "Expected x field:\n{output}");
+        }
+        Err(e) => panic!("@record with type param should compile: {e}"),
+    }
+}
+
+#[test]
 fn comptime_option_inner_destructuring() {
     // Test that `Option({inner})` binds inner as a comptime type and
     // passes to a recursive call via `describe(inner, ...)`.

@@ -5501,10 +5501,46 @@ pub fn type_expect<'a>(
             // Resolve the target record type
             let core_type = tctx.arena.get_core_type(*ct_idx);
             let ctx = tctx.type_ctx;
+
+            // First check if the type argument is a comptime type parameter
+            // (from `(type t, ...)` — `@record(t, ...)`). If so, resolve it
+            // via the type binding's TypeInfo.
+            let comptime_type: Option<crate::types::comptime::TypeInfo> =
+                if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
+                    let (ref lid, _) = **inner;
+                    let longident = tctx.arena.get_longident(lid.txt);
+                    let name = tctx.arena.get_string(longident.last_idx());
+                    if let Some(crate::types::comptime::ComptimeValue::Type(ti)) =
+                        tctx.comptime_bindings.get(name).cloned()
+                    {
+                        Some(ti)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
             ctx.begin_def();
-            let resolved_ty = match transl_type(tctx, env, core_type) {
-                Ok((_, ty)) => { ctx.end_def(); ty }
-                Err(e) => { ctx.end_def(); return Err(e); }
+            let resolved_ty = if let Some(crate::types::comptime::TypeInfo::Record { name, .. }) = &comptime_type {
+                // Look up the record type by name
+                match env.find_type_with_id(name) {
+                    Ok((id, _)) => {
+                        ctx.end_def();
+                        ctx.new_constr(crate::types::Path::Pident(id.clone()), vec![])
+                    }
+                    Err(_) => {
+                        ctx.end_def();
+                        return Err(super::TypeCoreError::Other(format!(
+                            "@record: comptime type '{}' not found in env", name
+                        )));
+                    }
+                }
+            } else {
+                match transl_type(tctx, env, core_type) {
+                    Ok((_, ty)) => { ctx.end_def(); ty }
+                    Err(e) => { ctx.end_def(); return Err(e); }
+                }
             };
 
             // The fields expression must be an inline for that produces
