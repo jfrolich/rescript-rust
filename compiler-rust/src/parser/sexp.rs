@@ -1021,6 +1021,18 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
             }
             Sexp::list(items)
         }
+        ExpressionDesc::Pexp_comptime_build_variant(e) => {
+            Sexp::list(vec![
+                Sexp::atom("Pexp_comptime_build_variant"),
+                expression(arena, arena.get_expr(*e)),
+            ])
+        }
+        ExpressionDesc::Pexp_comptime_variant_case(e) => {
+            Sexp::list(vec![
+                Sexp::atom("Pexp_comptime_variant_case"),
+                expression(arena, arena.get_expr(*e)),
+            ])
+        }
     };
     Sexp::list(vec![Sexp::atom("expression"), desc])
 }

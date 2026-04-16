@@ -5643,6 +5643,15 @@ pub fn type_expect<'a>(
                 crate::parser::ast::Attributes::new(),
             ))
         }
+        ED::Pexp_comptime_build_variant(_) | ED::Pexp_comptime_variant_case(_) => {
+            // @buildVariant and @variantCase are type-builder builtins.
+            // They only appear inside @comptime type declarations, evaluated
+            // by evaluate_type_builder — they should not appear in normal
+            // expression context.
+            Err(super::TypeCoreError::Other(
+                "@buildVariant / @variantCase may only appear in @comptime type declarations".into(),
+            ))
+        }
     }
 }
 
@@ -10155,6 +10164,12 @@ fn collect_lident_idents_in_expression(
             if let Some(e) = opt_expr {
                 collect_lident_idents_in_expression(arena, arena.get_expr(*e), out);
             }
+        }
+        ED::Pexp_comptime_build_variant(e) => {
+            collect_lident_idents_in_expression(arena, arena.get_expr(*e), out);
+        }
+        ED::Pexp_comptime_variant_case(e) => {
+            collect_lident_idents_in_expression(arena, arena.get_expr(*e), out);
         }
     }
 }

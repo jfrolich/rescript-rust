@@ -878,7 +878,9 @@ fn expression_has_string_literal(
         | ED::Pexp_comptime_compile_error(_)
         | ED::Pexp_comptime_typename(_)
         | ED::Pexp_comptime_record(_)
-        | ED::Pexp_comptime_variant(_) => false,
+        | ED::Pexp_comptime_variant(_)
+        | ED::Pexp_comptime_build_variant(_)
+        | ED::Pexp_comptime_variant_case(_) => false,
     }
 }
 

@@ -682,6 +682,12 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expr_idx(*e);
                 }
             }
+            ExpressionDesc::Pexp_comptime_build_variant(e) => {
+                self.add_expr_idx(*e);
+            }
+            ExpressionDesc::Pexp_comptime_variant_case(e) => {
+                self.add_expr_idx(*e);
+            }
         }
     }
 

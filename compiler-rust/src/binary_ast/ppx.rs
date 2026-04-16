@@ -6691,6 +6691,16 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             });
             ExpressionDesc::Pexp_comptime_variant(Box::new((*ct, new_expr, new_opt)))
         }
+        ExpressionDesc::Pexp_comptime_build_variant(e) => {
+            let ie = arena.get_expr(*e).clone();
+            let rw = rewrite_expression_generic(&ie, arena);
+            ExpressionDesc::Pexp_comptime_build_variant(arena.push_expr(rw))
+        }
+        ExpressionDesc::Pexp_comptime_variant_case(e) => {
+            let ie = arena.get_expr(*e).clone();
+            let rw = rewrite_expression_generic(&ie, arena);
+            ExpressionDesc::Pexp_comptime_variant_case(arena.push_expr(rw))
+        }
     };
 
     Expression {

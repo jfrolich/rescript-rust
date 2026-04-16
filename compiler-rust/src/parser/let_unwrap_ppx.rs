@@ -499,6 +499,14 @@ fn rewrite_expression(
                 .transpose()?;
             ExpressionDesc::Pexp_comptime_variant(Box::new((*ct, new_expr, new_opt)))
         }
+        ExpressionDesc::Pexp_comptime_build_variant(e) => {
+            let new_e = rewrite_expr_idx(*e, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_comptime_build_variant(new_e)
+        }
+        ExpressionDesc::Pexp_comptime_variant_case(e) => {
+            let new_e = rewrite_expr_idx(*e, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_comptime_variant_case(new_e)
+        }
     };
 
     Ok(Expression {

@@ -4417,6 +4417,12 @@ impl<'a> LocCloner<'a> {
                     self.expression_idx(e);
                 }
             }
+            ExpressionDesc::Pexp_comptime_build_variant(e) => {
+                self.expression_idx(e);
+            }
+            ExpressionDesc::Pexp_comptime_variant_case(e) => {
+                self.expression_idx(e);
+            }
         }
     }
 

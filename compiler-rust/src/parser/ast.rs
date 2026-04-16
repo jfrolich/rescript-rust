@@ -672,6 +672,13 @@ pub enum ExpressionDesc {
     /// Comptime variant builder: `@variant(TypeName, "CtorName", payload?)`.
     /// Builds a typed variant constructor from comptime-known constructor name.
     Pexp_comptime_variant(Box<(CoreTypeIdx, ExprIdx, Option<ExprIdx>)>),
+    /// Type-level variant builder: `@buildVariant(arrayOfCases)`.
+    /// Produces a variant TYPE declaration, not a value.
+    /// The array must contain @variantCase({...}) elements.
+    Pexp_comptime_build_variant(ExprIdx),
+    /// Type-level variant case descriptor: `@variantCase({name: "Name", as_?: "..."})`.
+    /// Evaluates to a comptime record describing one constructor.
+    Pexp_comptime_variant_case(ExprIdx),
 }
 
 /// A record field in an expression.

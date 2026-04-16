@@ -1811,6 +1811,12 @@ pub fn print_expression(
         ExpressionDesc::Pexp_comptime_variant(_) => {
             Doc::text("@variant(...)")
         }
+        ExpressionDesc::Pexp_comptime_build_variant(_) => {
+            Doc::text("@buildVariant(...)")
+        }
+        ExpressionDesc::Pexp_comptime_variant_case(_) => {
+            Doc::text("@variantCase(...)")
+        }
         // Send (method call): expr#method -> expr["method"]
         ExpressionDesc::Pexp_send(inner) => {
             let (ref parent_expr_idx, ref label) = **inner;

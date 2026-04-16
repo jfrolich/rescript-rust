@@ -2525,6 +2525,26 @@ fn walk_expression(
                 t.attach_trailing(expr.pexp_loc, remaining, arena);
             }
         }
+        ExpressionDesc::Pexp_comptime_build_variant(e) => {
+            let (leading, trailing) = partition_leading_trailing(comments, expr.pexp_loc, arena);
+            t.attach_leading(expr.pexp_loc, leading, arena);
+            let inner_expr = arena.get_expr(*e).clone();
+            let (before, rest) = partition_leading_trailing(trailing, inner_expr.pexp_loc, arena);
+            walk_expression(&inner_expr, t, before, arena);
+            if !rest.is_empty() {
+                t.attach_trailing(expr.pexp_loc, rest, arena);
+            }
+        }
+        ExpressionDesc::Pexp_comptime_variant_case(e) => {
+            let (leading, trailing) = partition_leading_trailing(comments, expr.pexp_loc, arena);
+            t.attach_leading(expr.pexp_loc, leading, arena);
+            let inner_expr = arena.get_expr(*e).clone();
+            let (before, rest) = partition_leading_trailing(trailing, inner_expr.pexp_loc, arena);
+            walk_expression(&inner_expr, t, before, arena);
+            if !rest.is_empty() {
+                t.attach_trailing(expr.pexp_loc, rest, arena);
+            }
+        }
     }
 }
 

@@ -592,7 +592,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         let is_comptime_builtin = p.lookahead(|p| {
             p.next(); // skip @
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "buildVariant" | "variantCase"),
                 _ => false,
             }
         });
@@ -4224,7 +4224,7 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
         let is_comptime_builtin = p.lookahead(|p| {
             p.next();
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "buildVariant" | "variantCase"),
                 _ => false,
             }
         });
@@ -6126,6 +6126,20 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             };
             p.expect(Token::Rparen);
             ExpressionDesc::Pexp_comptime_variant(Box::new((ct_idx, ctor_idx, payload)))
+        }
+        "buildVariant" => {
+            // @buildVariant(arrayOrInlineForOfVariantCases) — produces a variant TYPE
+            let cases_expr = parse_expr(p);
+            let cases_idx = p.arena_mut().push_expr(cases_expr);
+            p.expect(Token::Rparen);
+            ExpressionDesc::Pexp_comptime_build_variant(cases_idx)
+        }
+        "variantCase" => {
+            // @variantCase({name: "Name", as_?: "..."}) — describes one constructor
+            let rec_expr = parse_expr(p);
+            let rec_idx = p.arena_mut().push_expr(rec_expr);
+            p.expect(Token::Rparen);
+            ExpressionDesc::Pexp_comptime_variant_case(rec_idx)
         }
         _ => {
             p.err(super::diagnostics::DiagnosticCategory::Message(

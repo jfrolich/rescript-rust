@@ -2225,6 +2225,12 @@ fn print_expression_inner<W: Write>(
         ExpressionDesc::Pexp_comptime_variant(_) => {
             f.string("(* @variant(...) *)");
         }
+        ExpressionDesc::Pexp_comptime_build_variant(_) => {
+            f.string("(* @buildVariant(...) *)");
+        }
+        ExpressionDesc::Pexp_comptime_variant_case(_) => {
+            f.string("(* @variantCase(...) *)");
+        }
     }
 }
 
