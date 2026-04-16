@@ -5318,10 +5318,19 @@ pub fn type_expect<'a>(
                 )),
             }
         }
-        ED::Pexp_comptime_compile_error(_) => {
-            Err(super::TypeCoreError::Other(
-                "comptime builtin @compileError can only be used inside @comptime functions".to_string(),
-            ))
+        ED::Pexp_comptime_compile_error(msg_idx) => {
+            // Extract the error message
+            let msg_expr = tctx.arena.get_expr(*msg_idx);
+            let msg = match &*msg_expr.pexp_desc {
+                crate::parser::ast::ExpressionDesc::Pexp_constant(c) => {
+                    match &**c {
+                        crate::parser::ast::Constant::String(s, _) => s.to_string(),
+                        _ => "compile error".to_string(),
+                    }
+                }
+                _ => "compile error".to_string(),
+            };
+            Err(super::TypeCoreError::Other(format!("@compileError: {}", msg)))
         }
         ED::Pexp_comptime_typename(_) => {
             Err(super::TypeCoreError::Other(

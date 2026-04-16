@@ -4219,6 +4219,39 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
         return None;
     }
 
+    // Check for comptime builtins before consuming attributes
+    if p.token == Token::At {
+        let is_comptime_builtin = p.lookahead(|p| {
+            p.next();
+            match &p.token {
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName"),
+                _ => false,
+            }
+        });
+        if is_comptime_builtin {
+            let expr = parse_comptime_builtin_expr(p);
+            let expr = parse_primary_expr(p, expr, false);
+            // Check for sequence continuation
+            if p.token == Token::Semicolon {
+                p.next();
+                return match parse_block_body(p) {
+                    Some(rest) => {
+                        let loc = expr.pexp_loc;
+                        let e_idx = p.arena_mut().push_expr(expr);
+                        let r_idx = p.arena_mut().push_expr(rest);
+                        Some(Expression {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_sequence(e_idx, r_idx)),
+                            pexp_loc: loc,
+                            pexp_attributes: Attributes::new(),
+                        })
+                    }
+                    None => Some(expr),
+                };
+            }
+            return Some(expr);
+        }
+    }
+
     // Parse any leading attributes
     let attrs = parse_attributes(p);
 

@@ -354,9 +354,13 @@ let desc = describe(u)
 }
 
 #[test]
-#[ignore = "requires predefined typeInfo type + inline for + @field"]
-fn comptime_encode_full_example() {
-    // The full encode example from DESIGN.md
+fn comptime_encode_simple() {
+    run_fixture("comptime_encode_simple");
+}
+
+#[test]
+fn comptime_encoder() {
+    run_fixture("comptime_encoder");
 }
 
 #[test]
