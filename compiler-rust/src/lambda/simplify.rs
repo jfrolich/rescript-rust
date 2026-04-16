@@ -113,7 +113,8 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
 }
 
 pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: bool) -> Lambda {
-    let flattened = deep_flatten_for_js_backend(lam);
+    let exits_simplified = simplify_static_exits_for_js_backend(lam);
+    let flattened = deep_flatten_for_js_backend(&exits_simplified);
     let exports = collect_exported_idents(&flattened);
     let preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
     let preserved_local_module_eta_alias_bindings =
@@ -149,7 +150,8 @@ fn simplify_for_js_backend_once(
     jsx_preserve: bool,
     allow_direct_function_beta_reduce: bool,
 ) -> Lambda {
-    let flattened = deep_flatten_for_js_backend(lam);
+    let exits_simplified = simplify_static_exits_for_js_backend(lam);
+    let flattened = deep_flatten_for_js_backend(&exits_simplified);
     let exports = collect_exported_idents(&flattened);
     let env = SimplifyEnv {
         functions: collect_inlineable_functions(&flattened),
@@ -162,6 +164,361 @@ fn simplify_for_js_backend_once(
         ..SimplifyEnv::default()
     };
     simplify_with_env(&flattened, &env, &exports)
+}
+
+fn simplify_static_exits_for_js_backend(lam: &Lambda) -> Lambda {
+    fn count_static_raises_in_body(lam: &Lambda, target: i32) -> usize {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => 0,
+            Lambda::Lapply(apply) => {
+                count_static_raises_in_body(&apply.ap_func, target)
+                    + apply
+                        .ap_args
+                        .iter()
+                        .map(|arg| count_static_raises_in_body(arg, target))
+                        .sum::<usize>()
+            }
+            Lambda::Lfunction(func) => count_static_raises_in_body(&func.body, target),
+            Lambda::Llet(_, _, value, body) => {
+                count_static_raises_in_body(value, target)
+                    + count_static_raises_in_body(body, target)
+            }
+            Lambda::Lletrec(bindings, body) => {
+                bindings
+                    .iter()
+                    .map(|(_, value)| count_static_raises_in_body(value, target))
+                    .sum::<usize>()
+                    + count_static_raises_in_body(body, target)
+            }
+            Lambda::Lprim(info) => info
+                .args
+                .iter()
+                .map(|arg| count_static_raises_in_body(arg, target))
+                .sum(),
+            Lambda::Lswitch(scrutinee, switch) => {
+                count_static_raises_in_body(scrutinee, target)
+                    + switch
+                        .sw_consts
+                        .iter()
+                        .map(|(_, body)| count_static_raises_in_body(body, target))
+                        .sum::<usize>()
+                    + switch
+                        .sw_blocks
+                        .iter()
+                        .map(|(_, body)| count_static_raises_in_body(body, target))
+                        .sum::<usize>()
+                    + switch
+                        .sw_failaction
+                        .as_deref()
+                        .map_or(0, |body| count_static_raises_in_body(body, target))
+            }
+            Lambda::LstringSwitch(scrutinee, cases, default) => {
+                count_static_raises_in_body(scrutinee, target)
+                    + cases
+                        .iter()
+                        .map(|(_, body)| count_static_raises_in_body(body, target))
+                        .sum::<usize>()
+                    + default
+                        .as_deref()
+                        .map_or(0, |body| count_static_raises_in_body(body, target))
+            }
+            Lambda::LstaticRaise(label, args) => {
+                usize::from(*label == target)
+                    + args
+                        .iter()
+                        .map(|arg| count_static_raises_in_body(arg, target))
+                        .sum::<usize>()
+            }
+            Lambda::LstaticCatch(body, (label, _), handler) => {
+                let body_count = if *label == target {
+                    0
+                } else {
+                    count_static_raises_in_body(body, target)
+                };
+                body_count + count_static_raises_in_body(handler, target)
+            }
+            Lambda::LtryWith(body, _, handler) => {
+                count_static_raises_in_body(body, target)
+                    + count_static_raises_in_body(handler, target)
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                count_static_raises_in_body(cond, target)
+                    + count_static_raises_in_body(then_, target)
+                    + count_static_raises_in_body(else_, target)
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                count_static_raises_in_body(first, target)
+                    + count_static_raises_in_body(second, target)
+            }
+            Lambda::Lfor(_, start, finish, _, body) => {
+                count_static_raises_in_body(start, target)
+                    + count_static_raises_in_body(finish, target)
+                    + count_static_raises_in_body(body, target)
+            }
+            Lambda::Lassign(_, value) => count_static_raises_in_body(value, target),
+        }
+    }
+
+    fn inline_zero_arg_static_raises(lam: &Lambda, target: i32, replacement: &Lambda) -> Lambda {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
+            Lambda::Lapply(apply) => Lambda::Lapply(Apply {
+                ap_func: Box::new(inline_zero_arg_static_raises(
+                    &apply.ap_func,
+                    target,
+                    replacement,
+                )),
+                ap_args: apply
+                    .ap_args
+                    .iter()
+                    .map(|arg| inline_zero_arg_static_raises(arg, target, replacement))
+                    .collect(),
+                ap_info: apply.ap_info.clone(),
+                ap_transformed_jsx: apply.ap_transformed_jsx,
+            }),
+            Lambda::Lfunction(func) => Lambda::Lfunction(LFunction {
+                arity: func.arity,
+                params: func.params.clone(),
+                body: Box::new(inline_zero_arg_static_raises(
+                    &func.body,
+                    target,
+                    replacement,
+                )),
+                attr: func.attr.clone(),
+            }),
+            Lambda::Llet(kind, id, value, body) => Lambda::Llet(
+                *kind,
+                id.clone(),
+                Box::new(inline_zero_arg_static_raises(value, target, replacement)),
+                Box::new(inline_zero_arg_static_raises(body, target, replacement)),
+            ),
+            Lambda::Lletrec(bindings, body) => Lambda::Lletrec(
+                bindings
+                    .iter()
+                    .map(|(id, value)| {
+                        (
+                            id.clone(),
+                            inline_zero_arg_static_raises(value, target, replacement),
+                        )
+                    })
+                    .collect(),
+                Box::new(inline_zero_arg_static_raises(body, target, replacement)),
+            ),
+            Lambda::Lprim(info) => Lambda::prim(
+                info.primitive.clone(),
+                info.args
+                    .iter()
+                    .map(|arg| inline_zero_arg_static_raises(arg, target, replacement))
+                    .collect(),
+                info.loc.clone(),
+            ),
+            Lambda::Lswitch(scrutinee, switch) => Lambda::Lswitch(
+                Box::new(inline_zero_arg_static_raises(
+                    scrutinee,
+                    target,
+                    replacement,
+                )),
+                LambdaSwitch {
+                    sw_consts_full: switch.sw_consts_full,
+                    sw_consts: switch
+                        .sw_consts
+                        .iter()
+                        .map(|(tag, body)| {
+                            (
+                                *tag,
+                                inline_zero_arg_static_raises(body, target, replacement),
+                            )
+                        })
+                        .collect(),
+                    sw_blocks_full: switch.sw_blocks_full,
+                    sw_blocks: switch
+                        .sw_blocks
+                        .iter()
+                        .map(|(tag, body)| {
+                            (
+                                *tag,
+                                inline_zero_arg_static_raises(body, target, replacement),
+                            )
+                        })
+                        .collect(),
+                    sw_failaction: switch.sw_failaction.as_deref().map(|body| {
+                        Box::new(inline_zero_arg_static_raises(body, target, replacement))
+                    }),
+                    sw_names: switch.sw_names.clone(),
+                },
+            ),
+            Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
+                Box::new(inline_zero_arg_static_raises(
+                    scrutinee,
+                    target,
+                    replacement,
+                )),
+                cases
+                    .iter()
+                    .map(|(tag, body)| {
+                        (
+                            tag.clone(),
+                            inline_zero_arg_static_raises(body, target, replacement),
+                        )
+                    })
+                    .collect(),
+                default
+                    .as_deref()
+                    .map(|body| Box::new(inline_zero_arg_static_raises(body, target, replacement))),
+            ),
+            Lambda::LstaticRaise(label, args) => {
+                if *label == target && args.is_empty() {
+                    replacement.clone()
+                } else {
+                    Lambda::LstaticRaise(
+                        *label,
+                        args.iter()
+                            .map(|arg| inline_zero_arg_static_raises(arg, target, replacement))
+                            .collect(),
+                    )
+                }
+            }
+            Lambda::LstaticCatch(body, (label, vars), handler) => {
+                let body = if *label == target {
+                    body.as_ref().clone()
+                } else {
+                    inline_zero_arg_static_raises(body, target, replacement)
+                };
+                let handler = inline_zero_arg_static_raises(handler, target, replacement);
+                Lambda::LstaticCatch(Box::new(body), (*label, vars.clone()), Box::new(handler))
+            }
+            Lambda::LtryWith(body, exn, handler) => Lambda::LtryWith(
+                Box::new(inline_zero_arg_static_raises(body, target, replacement)),
+                exn.clone(),
+                Box::new(inline_zero_arg_static_raises(handler, target, replacement)),
+            ),
+            Lambda::LifThenElse(cond, then_, else_) => Lambda::LifThenElse(
+                Box::new(inline_zero_arg_static_raises(cond, target, replacement)),
+                Box::new(inline_zero_arg_static_raises(then_, target, replacement)),
+                Box::new(inline_zero_arg_static_raises(else_, target, replacement)),
+            ),
+            Lambda::Lsequence(first, second) => Lambda::seq(
+                inline_zero_arg_static_raises(first, target, replacement),
+                inline_zero_arg_static_raises(second, target, replacement),
+            ),
+            Lambda::Lwhile(cond, body) => Lambda::while_(
+                inline_zero_arg_static_raises(cond, target, replacement),
+                inline_zero_arg_static_raises(body, target, replacement),
+            ),
+            Lambda::Lfor(var, start, finish, dir, body) => Lambda::for_(
+                var.clone(),
+                inline_zero_arg_static_raises(start, target, replacement),
+                inline_zero_arg_static_raises(finish, target, replacement),
+                *dir,
+                inline_zero_arg_static_raises(body, target, replacement),
+            ),
+            Lambda::Lassign(id, value) => Lambda::assign(
+                id.clone(),
+                inline_zero_arg_static_raises(value, target, replacement),
+            ),
+        }
+    }
+
+    fn simplify(lam: &Lambda) -> Lambda {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
+            Lambda::Lapply(apply) => Lambda::Lapply(Apply {
+                ap_func: Box::new(simplify(&apply.ap_func)),
+                ap_args: apply.ap_args.iter().map(simplify).collect(),
+                ap_info: apply.ap_info.clone(),
+                ap_transformed_jsx: apply.ap_transformed_jsx,
+            }),
+            Lambda::Lfunction(func) => Lambda::Lfunction(LFunction {
+                arity: func.arity,
+                params: func.params.clone(),
+                body: Box::new(simplify(&func.body)),
+                attr: func.attr.clone(),
+            }),
+            Lambda::Llet(kind, id, value, body) => {
+                Lambda::let_(*kind, id.clone(), simplify(value), simplify(body))
+            }
+            Lambda::Lletrec(bindings, body) => Lambda::letrec(
+                bindings
+                    .iter()
+                    .map(|(id, value)| (id.clone(), simplify(value)))
+                    .collect(),
+                simplify(body),
+            ),
+            Lambda::Lprim(info) => Lambda::prim(
+                info.primitive.clone(),
+                info.args.iter().map(simplify).collect(),
+                info.loc.clone(),
+            ),
+            Lambda::Lswitch(scrutinee, switch) => Lambda::Lswitch(
+                Box::new(simplify(scrutinee)),
+                LambdaSwitch {
+                    sw_consts_full: switch.sw_consts_full,
+                    sw_consts: switch
+                        .sw_consts
+                        .iter()
+                        .map(|(tag, body)| (*tag, simplify(body)))
+                        .collect(),
+                    sw_blocks_full: switch.sw_blocks_full,
+                    sw_blocks: switch
+                        .sw_blocks
+                        .iter()
+                        .map(|(tag, body)| (*tag, simplify(body)))
+                        .collect(),
+                    sw_failaction: switch
+                        .sw_failaction
+                        .as_deref()
+                        .map(|body| Box::new(simplify(body))),
+                    sw_names: switch.sw_names.clone(),
+                },
+            ),
+            Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
+                Box::new(simplify(scrutinee)),
+                cases
+                    .iter()
+                    .map(|(tag, body)| (tag.clone(), simplify(body)))
+                    .collect(),
+                default.as_deref().map(|body| Box::new(simplify(body))),
+            ),
+            Lambda::LstaticRaise(label, args) => {
+                Lambda::LstaticRaise(*label, args.iter().map(simplify).collect())
+            }
+            Lambda::LstaticCatch(body, (label, vars), handler) => {
+                let simplified_body = simplify(body);
+                let simplified_handler = simplify(handler);
+                if count_static_raises_in_body(&simplified_body, *label) == 0 {
+                    simplified_body
+                } else if vars.is_empty()
+                    && matches!(simplified_handler, Lambda::Lconst(_) | Lambda::Lvar(_))
+                {
+                    inline_zero_arg_static_raises(&simplified_body, *label, &simplified_handler)
+                } else {
+                    Lambda::LstaticCatch(
+                        Box::new(simplified_body),
+                        (*label, vars.clone()),
+                        Box::new(simplified_handler),
+                    )
+                }
+            }
+            Lambda::LtryWith(body, exn, handler) => {
+                Lambda::try_(simplify(body), exn.clone(), simplify(handler))
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                Lambda::if_(simplify(cond), simplify(then_), simplify(else_))
+            }
+            Lambda::Lsequence(first, second) => Lambda::seq(simplify(first), simplify(second)),
+            Lambda::Lwhile(cond, body) => Lambda::while_(simplify(cond), simplify(body)),
+            Lambda::Lfor(var, start, finish, dir, body) => Lambda::for_(
+                var.clone(),
+                simplify(start),
+                simplify(finish),
+                *dir,
+                simplify(body),
+            ),
+            Lambda::Lassign(id, value) => Lambda::assign(id.clone(), simplify(value)),
+        }
+    }
+
+    simplify(lam)
 }
 
 fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
@@ -8407,6 +8764,55 @@ mod tests {
         };
         assert_eq!(fields, vec!["sheep".to_string()]);
         assert!(matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&kept_sheep)));
+    }
+
+    #[test]
+    fn backend_exit_simplifier_inlines_zero_arg_constant_handlers_like_ocaml() {
+        let cond = Ident::create_local("cond");
+        let lambda = Lambda::static_catch(
+            Lambda::if_(
+                Lambda::var(cond.clone()),
+                Lambda::const_(Constant::int(1)),
+                Lambda::static_raise(7, vec![]),
+            ),
+            7,
+            vec![],
+            Lambda::const_(Constant::none()),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::LifThenElse(test, then_, else_) = simplified else {
+            panic!("expected constant-handler staticcatch to inline away, got {simplified:?}");
+        };
+
+        assert!(matches!(
+            test.as_ref(),
+            Lambda::Lvar(id) if id.same(&cond)
+        ));
+        assert!(matches!(
+            then_.as_ref(),
+            Lambda::Lconst(Constant::Int { i: 1, .. })
+        ));
+        assert!(matches!(
+            else_.as_ref(),
+            Lambda::Lconst(Constant::JsUndefined { is_unit: false })
+        ));
+    }
+
+    #[test]
+    fn backend_exit_simplifier_drops_unused_staticcatch_like_ocaml() {
+        let lambda = Lambda::static_catch(
+            Lambda::const_(Constant::int(1)),
+            9,
+            vec![],
+            Lambda::const_(Constant::int(2)),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        assert!(matches!(
+            simplified,
+            Lambda::Lconst(Constant::Int { i: 1, .. })
+        ));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 542 / 657 with 8 unrelated compile errors and 107 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 547 / 657 with 8 unrelated compile errors and 102 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **542 / 657**
+- JS snapshot parity: **547 / 657**
 - Compile errors: **8**
-- Output diffs: **107**
+- Output diffs: **102**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,57 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `537 / 657` unless the
+Do **not** replace the recorded project baseline with `547 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: port the first OCaml `Lam_pass_exits` simplifications that
+  remove unused `LstaticCatch` nodes and inline zero-arg const/var handlers on
+  the JS-backend simplify path before lambda lowering
+- Active backend focus moved to **Phase 2: Port Post-Lowering Lambda Backend
+  Stages** from `PLAN.md`; this slice stays in
+  `compiler-rust/src/lambda/simplify.rs`
+- OCaml reference:
+  - `compiler/core/lam_pass_exits.ml`, especially the `Lstaticcatch`
+    simplifier cases that:
+    - drop the catch when the exit label does not occur in the body
+    - inline all exits immediately when the handler is a constant or variable
+- Rust change:
+  - added `simplify_static_exits_for_js_backend(...)` to run before each
+    JS-backend simplify/deep-flatten round
+  - implemented shadow-aware exit counting for `LstaticCatch` bodies so an
+    outer label does not accidentally count raises captured by an inner catch
+  - implemented the OCaml-aligned zero-arg const/var inlining path for
+    `LstaticRaise(label, [])` plus the dead-catch removal when the label no
+    longer occurs
+  - added focused unit coverage for both behaviors in
+    `compiler-rust/src/lambda/simplify.rs`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release backend_exit_simplifier_ -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release folds_constant_subint_loop_finish_before_for_range_lowering_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh json_decorders --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - the new exit pass is a real harness win in this dirty worktree even though
+    `tests/tests/src/json_decorders.res` is still diffing on the separate
+    `let tmp; tmp = ...` vs `let tmp = ...` declaration-shape issue
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained exact after
+    the same slice
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **542 / 657** -> **547 / 657** (**+5**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **107** -> **102** (**-5**)
+- Keep this change because OCaml really does eliminate dead catches and inline
+  zero-arg const/var handlers in `Lam_pass_exits` before backend lowering. The
+  Rust JS path now mirrors that pass boundary more closely, and the broader
+  parity harness improved materially even though the remaining
+  `json_decorders` declaration-style drift still needs a follow-up lowering
+  slice.
 
 Latest iteration on **2026-04-16**:
 
