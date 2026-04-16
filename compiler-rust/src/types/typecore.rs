@@ -5200,15 +5200,60 @@ pub fn type_expect<'a>(
             }
         }
         ED::Pexp_comptime_typeinfo(ct_idx) => {
-            // Resolve the core type to a concrete type
+            // Resolve the core type to a concrete type.
+            // If the name is a variable (not a type), use its static type.
             let core_type = tctx.arena.get_core_type(*ct_idx);
             let ctx = tctx.type_ctx;
+
+            // Try as a type name first
             ctx.begin_def();
-            let (_, resolved_ty) = match crate::types::typecore::transl_type(tctx, env, core_type) {
-                Ok(result) => result,
-                Err(e) => return Err(e),
+            let resolved_ty = match transl_type(tctx, env, core_type) {
+                Ok((_, ty)) => {
+                    ctx.end_def();
+                    ty
+                }
+                Err(_) => {
+                    ctx.end_def();
+                    // Type resolution failed — try as a variable name
+                    // Extract the name from the core type
+                    let var_ty = match &*core_type.ptyp_desc {
+                        crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) => {
+                            let (ref lid, _) = **inner;
+                            let longident = tctx.arena.get_longident(lid.txt);
+                            let name = tctx.arena.get_string(longident.last_idx());
+                            // Look up as a value in the environment
+                            env.find_value(name).ok().map(|vd| vd.val_type)
+                        }
+                        _ => None,
+                    };
+                    match var_ty {
+                        Some(ty) => ty,
+                        None => return Err(super::TypeCoreError::Other(
+                            "@typeInfo: could not resolve type or variable".to_string(),
+                        )),
+                    }
+                }
             };
-            ctx.end_def();
+
+            // Also check: if the resolved type is External (unknown type name),
+            // try as a variable name
+            let mut visited_check = Vec::new();
+            let check_info = crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited_check);
+            let resolved_ty = if matches!(check_info, crate::types::comptime::TypeInfo::External { .. }) {
+                // Might be a variable name, not a type
+                let var_ty = match &*core_type.ptyp_desc {
+                    crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) => {
+                        let (ref lid, _) = **inner;
+                        let longident = tctx.arena.get_longident(lid.txt);
+                        let name = tctx.arena.get_string(longident.last_idx());
+                        env.find_value(name).ok().map(|vd| vd.val_type)
+                    }
+                    _ => None,
+                };
+                var_ty.unwrap_or(resolved_ty)
+            } else {
+                resolved_ty
+            };
 
             // Check that the type is concrete (no unresolved type variables)
             let repr_ty = ctx.repr(resolved_ty);
@@ -20272,15 +20317,32 @@ fn try_comptime_match(
         _ => return None,
     };
 
-    // Resolve the type
+    // Resolve the type (with variable fallback)
     let core_type = tctx.arena.get_core_type(ct_idx);
     let ctx = tctx.type_ctx;
     ctx.begin_def();
-    let resolved_ty = match transl_type(tctx, env, core_type) {
+    let mut resolved_ty = match transl_type(tctx, env, core_type) {
         Ok((_, ty)) => ty,
-        Err(_) => return None,
+        Err(_) => {
+            ctx.end_def();
+            return None;
+        }
     };
     ctx.end_def();
+
+    // If type resolves to External (unknown type name), try as variable
+    let mut visited_check = Vec::new();
+    let check_info = crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited_check);
+    if matches!(check_info, crate::types::comptime::TypeInfo::External { .. }) {
+        if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
+            let (ref lid, _) = **inner;
+            let longident = tctx.arena.get_longident(lid.txt);
+            let name = tctx.arena.get_string(longident.last_idx());
+            if let Ok(vd) = env.find_value(name) {
+                resolved_ty = vd.val_type;
+            }
+        }
+    }
 
     // Build TypeInfo
     let mut visited = Vec::new();
