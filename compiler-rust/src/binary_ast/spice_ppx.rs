@@ -4413,6 +4413,13 @@ impl<'a> LocCloner<'a> {
                     self.expression_idx(value);
                 }
             }
+            ExpressionDesc::Pexp_comptime_variant(inner) => {
+                let (ref _ct, ref mut expr, ref mut opt_expr) = **inner;
+                self.expression_idx(expr);
+                if let Some(e) = opt_expr {
+                    self.expression_idx(e);
+                }
+            }
         }
     }
 

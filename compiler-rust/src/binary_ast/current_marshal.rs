@@ -1615,7 +1615,8 @@ impl Marshal for ExpressionDesc {
             | ExpressionDesc::Pexp_comptime_field(_)
             | ExpressionDesc::Pexp_comptime_compile_error(_)
             | ExpressionDesc::Pexp_comptime_typename(_)
-            | ExpressionDesc::Pexp_comptime_record(_) => {
+            | ExpressionDesc::Pexp_comptime_record(_)
+            | ExpressionDesc::Pexp_comptime_variant(_) => {
                 unreachable!("comptime builtins eliminated before serialization")
             }
         }

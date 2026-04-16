@@ -678,6 +678,13 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expr_idx(*value);
                 }
             }
+            ExpressionDesc::Pexp_comptime_variant(inner) => {
+                let (ref _ct, ref expr, ref opt_expr) = **inner;
+                self.add_expr_idx(*expr);
+                if let Some(e) = opt_expr {
+                    self.add_expr_idx(*e);
+                }
+            }
         }
     }
 

@@ -6685,6 +6685,18 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             }
             ExpressionDesc::Pexp_comptime_record(Box::new((*ct, new_fields)))
         }
+        ExpressionDesc::Pexp_comptime_variant(inner) => {
+            let (ref ct, ref expr_idx, ref opt_expr_idx) = **inner;
+            let inner_expr = arena.get_expr(*expr_idx).clone();
+            let rw_expr = rewrite_expression_generic(&inner_expr, arena);
+            let new_expr = arena.push_expr(rw_expr);
+            let new_opt = opt_expr_idx.map(|e| {
+                let oe = arena.get_expr(e).clone();
+                let rw = rewrite_expression_generic(&oe, arena);
+                arena.push_expr(rw)
+            });
+            ExpressionDesc::Pexp_comptime_variant(Box::new((*ct, new_expr, new_opt)))
+        }
     };
 
     Expression {

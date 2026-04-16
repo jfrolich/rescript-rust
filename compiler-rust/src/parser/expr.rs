@@ -592,7 +592,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         let is_comptime_builtin = p.lookahead(|p| {
             p.next(); // skip @
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant"),
                 _ => false,
             }
         });
@@ -4224,7 +4224,7 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
         let is_comptime_builtin = p.lookahead(|p| {
             p.next();
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant"),
                 _ => false,
             }
         });
@@ -6114,6 +6114,27 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             }
             p.expect(Token::Rparen);
             ExpressionDesc::Pexp_comptime_record(Box::new((ct_idx, field_pairs)))
+        }
+        "variant" => {
+            // @variant(TypeName, "CtorName") or @variant(TypeName, "CtorName", payload)
+            let core_type = super::typ::parse_typ_expr(p);
+            let ct_idx = p.arena_mut().push_core_type(core_type);
+            p.expect(Token::Comma);
+            let ctor_name_expr = parse_expr(p);
+            let ctor_idx = p.arena_mut().push_expr(ctor_name_expr);
+            let payload = if p.token == Token::Comma {
+                p.next();
+                if p.token == Token::Rparen {
+                    None
+                } else {
+                    let payload_expr = parse_expr(p);
+                    Some(p.arena_mut().push_expr(payload_expr))
+                }
+            } else {
+                None
+            };
+            p.expect(Token::Rparen);
+            ExpressionDesc::Pexp_comptime_variant(Box::new((ct_idx, ctor_idx, payload)))
         }
         _ => {
             p.err(super::diagnostics::DiagnosticCategory::Message(

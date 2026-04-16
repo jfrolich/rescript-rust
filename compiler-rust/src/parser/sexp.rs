@@ -1015,6 +1015,18 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
             }
             Sexp::list(items)
         }
+        ExpressionDesc::Pexp_comptime_variant(inner) => {
+            let (ref ct, ref expr_idx, ref opt_expr_idx) = **inner;
+            let mut items = vec![
+                Sexp::atom("Pexp_comptime_variant"),
+                core_type(arena, arena.get_core_type(*ct)),
+                expression(arena, arena.get_expr(*expr_idx)),
+            ];
+            if let Some(e) = opt_expr_idx {
+                items.push(expression(arena, arena.get_expr(*e)));
+            }
+            Sexp::list(items)
+        }
     };
     Sexp::list(vec![Sexp::atom("expression"), desc])
 }

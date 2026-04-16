@@ -2513,6 +2513,22 @@ fn walk_expression(
                 walk_expression(&val_expr, t, before_next, arena);
                 remaining = rest2;
             }
+        }
+        ExpressionDesc::Pexp_comptime_variant(inner) => {
+            let (ref _ct, ref expr_idx, ref opt_expr_idx) = **inner;
+            let (leading, trailing) = partition_leading_trailing(comments, expr.pexp_loc, arena);
+            t.attach_leading(expr.pexp_loc, leading, arena);
+            let inner_expr = arena.get_expr(*expr_idx).clone();
+            let mut remaining = trailing;
+            let (before, rest) = partition_leading_trailing(remaining, inner_expr.pexp_loc, arena);
+            walk_expression(&inner_expr, t, before, arena);
+            remaining = rest;
+            if let Some(opt_idx) = opt_expr_idx {
+                let opt_expr = arena.get_expr(*opt_idx).clone();
+                let (before_opt, rest2) = partition_leading_trailing(remaining, opt_expr.pexp_loc, arena);
+                walk_expression(&opt_expr, t, before_opt, arena);
+                remaining = rest2;
+            }
             if !remaining.is_empty() {
                 t.attach_trailing(expr.pexp_loc, remaining, arena);
             }

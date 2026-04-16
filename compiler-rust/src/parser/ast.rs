@@ -668,6 +668,9 @@ pub enum ExpressionDesc {
     /// Comptime record builder: `@record(TypeName, {name: expr, ...})`.
     /// Builds a typed record from comptime-known field names and runtime values.
     Pexp_comptime_record(Box<(CoreTypeIdx, Vec<(ExprIdx, ExprIdx)>)>),
+    /// Comptime variant builder: `@variant(TypeName, "CtorName", payload?)`.
+    /// Builds a typed variant constructor from comptime-known constructor name.
+    Pexp_comptime_variant(Box<(CoreTypeIdx, ExprIdx, Option<ExprIdx>)>),
 }
 
 /// A record field in an expression.

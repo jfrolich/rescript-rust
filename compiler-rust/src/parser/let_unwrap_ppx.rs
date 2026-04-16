@@ -496,6 +496,14 @@ fn rewrite_expression(
             }
             ExpressionDesc::Pexp_comptime_record(Box::new((*ct, new_fields)))
         }
+        ExpressionDesc::Pexp_comptime_variant(inner) => {
+            let (ref ct, ref expr_idx, ref opt_expr_idx) = **inner;
+            let new_expr = rewrite_expr_idx(*expr_idx, arena, let_unwrap_enabled)?;
+            let new_opt = opt_expr_idx
+                .map(|e| rewrite_expr_idx(e, arena, let_unwrap_enabled))
+                .transpose()?;
+            ExpressionDesc::Pexp_comptime_variant(Box::new((*ct, new_expr, new_opt)))
+        }
     };
 
     Ok(Expression {

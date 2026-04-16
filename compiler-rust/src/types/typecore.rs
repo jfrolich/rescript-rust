@@ -5382,6 +5382,11 @@ pub fn type_expect<'a>(
                 "comptime builtin @typeName can only be used inside @comptime functions".to_string(),
             ))
         }
+        ED::Pexp_comptime_variant(_) => {
+            Err(super::TypeCoreError::Other(
+                "comptime builtin @variant can only be used inside @comptime functions".to_string(),
+            ))
+        }
         ED::Pexp_comptime_record(inner) => {
             let (ref ct_idx, ref field_pairs) = **inner;
 
@@ -9984,6 +9989,13 @@ fn collect_lident_idents_in_expression(
             for (key, value) in fields {
                 collect_lident_idents_in_expression(arena, arena.get_expr(*key), out);
                 collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
+            }
+        }
+        ED::Pexp_comptime_variant(inner) => {
+            let (ref _ct, ref expr, ref opt_expr) = **inner;
+            collect_lident_idents_in_expression(arena, arena.get_expr(*expr), out);
+            if let Some(e) = opt_expr {
+                collect_lident_idents_in_expression(arena, arena.get_expr(*e), out);
             }
         }
     }

@@ -2222,6 +2222,9 @@ fn print_expression_inner<W: Write>(
         ExpressionDesc::Pexp_comptime_record(_) => {
             f.string("(* @record(...) *)");
         }
+        ExpressionDesc::Pexp_comptime_variant(_) => {
+            f.string("(* @variant(...) *)");
+        }
     }
 }
 

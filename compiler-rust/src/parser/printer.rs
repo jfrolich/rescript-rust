@@ -1808,6 +1808,9 @@ pub fn print_expression(
         ExpressionDesc::Pexp_comptime_record(_) => {
             Doc::text("@record(...)")
         }
+        ExpressionDesc::Pexp_comptime_variant(_) => {
+            Doc::text("@variant(...)")
+        }
         // Send (method call): expr#method -> expr["method"]
         ExpressionDesc::Pexp_send(inner) => {
             let (ref parent_expr_idx, ref label) = **inner;
