@@ -6025,13 +6025,9 @@ pub(crate) fn decl_module_type_from_typed(
                             // @inline and external values have non-empty val_prim;
                             // mark them as ValPrim so they don't get runtime slots
                             // (matching OCaml's transl_value_decl behavior).
-                            ValueKind::ValPrim(crate::types::PrimitiveDescription {
-                                prim_name: vd.val_prim.first().cloned().unwrap_or_default(),
-                                prim_arity: 0,
-                                prim_native_name: vd.val_prim.get(1).cloned().unwrap_or_default(),
-                                prim_native_float: false,
-                                prim_from_constructor: false,
-                            })
+                            ValueKind::ValPrim(
+                                primitive_description_from_typed_value_desc(None, None, vd),
+                            )
                         };
                         out.push(SigItem::SigValue(
                             vd.val_id.clone(),
