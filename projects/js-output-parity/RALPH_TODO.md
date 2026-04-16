@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 578 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 79 output diffs
+**Status:** 579 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 78 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **578 / 657**
+- JS snapshot parity: **579 / 657**
 - Compile errors: **0**
-- Output diffs: **79**
+- Output diffs: **78**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,60 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **578 / 657**
+- JS snapshot parity: **579 / 657**
 - Compile errors: **0**
-- Output diffs: **79**
+- Output diffs: **78**
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: keep complete named-variant return switches with plain
+  non-raising nested `staticcatch` handlers inline in the switch instead of
+  peeling one handler out as a trailing fallthrough tail
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this is `Lam_compile` control-flow lowering in
+  `compiler-rust/src/lambda/compile.rs`, not a printer rewrite
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially `flatten_nested_caches`,
+    `compile_staticcatch`, and the downstream `compile_cases` path that keeps
+    all handlers explicit once the nested catch table is lowered through an
+    exit switch
+  - checked-in OCaml snapshot shape in `tests/tests/src/test_incomplete.mjs`,
+    where the complete `A | C` / `B | D` payload cases stay inside one
+    `switch (x.TAG)` instead of becoming a Rust-only post-switch trailing
+    `return x._0 + 1 | 0;`
+- Rust change:
+  - narrowed `uses_fallthrough_staticcatch_return(...)` so the plain-handler
+    fallthrough shortcut does not trigger for complete named-variant
+    `Lswitch` return lowering when another label is also present; that keeps
+    the repeated plain handler cases inside the switch the way OCaml does
+  - applied the same guard to the sibling switch/string-switch fallthrough
+    branches so the control-flow rule stays internally consistent
+  - added regression coverage in
+    `nested_named_variant_complete_return_switches_keep_plain_handlers_inside_switch_like_test_incomplete`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release plain_handlers -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_1438 -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release moves_fallthrough_cases_last -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_incomplete.res -o /tmp/test_incomplete.mjs`
+  - `diff -u tests/tests/src/test_incomplete.mjs /tmp/test_incomplete.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_1438.res -o /tmp/gpr_1438.mjs`
+  - `diff -u tests/tests/src/gpr_1438.mjs /tmp/gpr_1438.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `diff -u tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_incomplete.res` now matches its checked-in snapshot
+    again; the complete payload switch keeps OCaml's `A | C` and `B | D`
+    handlers inside one `switch (x.TAG)` instead of moving the `A | C` return
+    out after the switch
+  - unchanged guards `tests/tests/src/gpr_1438.res` and
+    `tests/tests/src/ExternalShadow.res` both remained exact after the same
+    `staticcatch` lowering change
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **578 / 657** -> **579 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **79** -> **78** (**-1**)
 
 Latest iteration on **2026-04-16**:
 

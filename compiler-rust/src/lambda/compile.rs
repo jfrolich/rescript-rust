@@ -1604,11 +1604,22 @@ impl LambdaCompiler {
             !self.static_handlers.is_empty() || !self.static_jump_handlers.is_empty();
         let arity = bindings.len();
         let body_has_target_exit = lambda_contains_static_raise_to_label(body, label, arity);
+        let keep_complete_named_variant_plain_handler_inline = matches!(
+            body,
+            Lambda::Lswitch(_, switch)
+                if self.uses_named_variant_switch(switch)
+                    && switch.sw_failaction.is_none()
+                    && switch.sw_consts_full
+                    && switch.sw_blocks_full
+                    && !lambda_contains_static_raise(handler)
+                    && lambda_contains_static_raise_to_other_label(body, label)
+        );
         // Lam_pass_exits can inline outward handlers away before backend
         // lowering. OCaml's compile_staticcatch pseudo-jump path still keeps a
         // shared non-raising handler outside the switch when several direct
         // exits now target the same label.
         let shared_multi_exit_fallthrough_like_ocaml = !inside_enclosing_staticcatch_chain
+            && !keep_complete_named_variant_plain_handler_inline
             && !self.handler_returns_unit_undefined(bindings, handler)
             && !lambda_contains_static_raise(handler)
             && body_has_target_exit
@@ -1621,11 +1632,13 @@ impl LambdaCompiler {
                     true
                 }
                 _ if !self.uses_untagged_variant_switch(switch)
+                    && !keep_complete_named_variant_plain_handler_inline
                     && shared_multi_exit_fallthrough_like_ocaml =>
                 {
                     true
                 }
                 _ if !self.uses_untagged_variant_switch(switch)
+                    && !keep_complete_named_variant_plain_handler_inline
                     && !lambda_contains_static_raise(handler)
                     && !lambda_contains_staticcatch(handler)
                     && switch_cases_contain_static_raise_to_label(
@@ -1669,8 +1682,13 @@ impl LambdaCompiler {
                 {
                     true
                 }
-                _ if shared_multi_exit_fallthrough_like_ocaml => true,
+                _ if !keep_complete_named_variant_plain_handler_inline
+                    && shared_multi_exit_fallthrough_like_ocaml =>
+                {
+                    true
+                }
                 _ if !lambda_contains_static_raise(handler)
+                    && !keep_complete_named_variant_plain_handler_inline
                     && !lambda_contains_staticcatch(handler)
                     && string_switch_cases_contain_static_raise_to_label(
                         cases,
@@ -21324,6 +21342,85 @@ mod tests {
         assert!(
             !clauses[2].clause.should_break,
             "plain shared return groups should stay in the switch without an exit-driven break"
+        );
+    }
+
+    #[test]
+    fn nested_named_variant_complete_return_switches_keep_plain_handlers_inside_switch_like_test_incomplete(
+    ) {
+        let mut compiler = LambdaCompiler::new();
+        let action = Ident::create_local("action");
+        let action_field = || {
+            Lambda::prim(
+                Primitive::Pfield(0, FieldDbgInfo::Variant),
+                vec![Lambda::var(action.clone())],
+                Location::none(),
+            )
+        };
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::LstaticCatch(
+                Box::new(Lambda::Lswitch(
+                    Box::new(Lambda::var(action.clone())),
+                    LambdaSwitch {
+                        sw_consts_full: true,
+                        sw_consts: vec![],
+                        sw_blocks_full: true,
+                        sw_blocks: vec![
+                            (0, Lambda::static_raise(1, Vec::new())),
+                            (1, Lambda::static_raise(2, Vec::new())),
+                            (2, Lambda::static_raise(1, Vec::new())),
+                            (3, Lambda::static_raise(2, Vec::new())),
+                        ],
+                        sw_failaction: None,
+                        sw_names: Some(SwitchNames {
+                            consts: vec![],
+                            blocks: vec![
+                                crate::lambda::SwitchBlock::named("A"),
+                                crate::lambda::SwitchBlock::named("B"),
+                                crate::lambda::SwitchBlock::named("C"),
+                                crate::lambda::SwitchBlock::named("D"),
+                            ],
+                        }),
+                    },
+                )),
+                (1, vec![]),
+                Box::new(Lambda::prim(
+                    Primitive::Paddint,
+                    vec![action_field(), Lambda::const_(Constant::int(1))],
+                    Location::none(),
+                )),
+            )),
+            (2, vec![]),
+            Box::new(Lambda::prim(
+                Primitive::Paddint,
+                vec![action_field(), Lambda::const_(Constant::int(2))],
+                Location::none(),
+            )),
+        ));
+        let rendered = print_block(&block);
+
+        let [switch_stmt] = block.as_slice() else {
+            panic!(
+                "expected the complete named-variant handlers to stay inside one switch:\n{rendered}"
+            );
+        };
+        let StatementDesc::StringSwitch(test, clauses, None) = &switch_stmt.desc else {
+            panic!(
+                "expected a complete named-variant string switch without a trailing handler:\n{rendered}"
+            );
+        };
+        assert_tag_field_access(test, &action);
+        assert_eq!(clauses.len(), 4);
+        assert_eq!(clauses[0].tag_type, SwitchCaseTag::String("A".to_string()));
+        assert!(clauses[0].clause.body.is_empty());
+        assert_eq!(clauses[1].tag_type, SwitchCaseTag::String("C".to_string()));
+        assert_eq!(clauses[2].tag_type, SwitchCaseTag::String("B".to_string()));
+        assert!(clauses[2].clause.body.is_empty());
+        assert_eq!(clauses[3].tag_type, SwitchCaseTag::String("D".to_string()));
+
+        assert_eq!(
+            rendered,
+            "switch (action.TAG) {\n  case \"A\" :\n  case \"C\" :\n    return action._0 + 1 | 0;\n  case \"B\" :\n  case \"D\" :\n    return action._0 + 2 | 0;\n}"
         );
     }
 
