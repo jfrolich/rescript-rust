@@ -585,6 +585,23 @@ pub fn parse_ternary_expr(p: &mut Parser<'_>, left_operand: Expression) -> Expre
 pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expression {
     let start_pos_idx = p.start_pos_idx();
 
+    // Check for comptime builtin expressions before parsing attributes.
+    // @typeInfo(T), @field(v, name), @compileError(msg), @typeName(T)
+    // are expressions, not attributes.
+    if p.token == Token::At {
+        let is_comptime_builtin = p.lookahead(|p| {
+            p.next(); // skip @
+            match &p.token {
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName"),
+                _ => false,
+            }
+        });
+        if is_comptime_builtin {
+            let expr = parse_comptime_builtin_expr(p);
+            return parse_primary_expr(p, expr, false);
+        }
+    }
+
     // Parse leading attributes first (e.g., @attr expr)
     let attrs = parse_attributes(p);
 
@@ -5990,6 +6007,76 @@ fn parse_for_expr(p: &mut Parser<'_>) -> Expression {
                 pat_idx, s_idx, e_idx, direction, b_idx,
             ))))
         },
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    }
+}
+
+/// Parse a comptime builtin expression: @typeInfo(T), @field(v, name), @compileError(msg), @typeName(T).
+fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
+    let start_pos_idx = p.start_pos_idx();
+    p.expect(Token::At);
+
+    let name = match &p.token {
+        Token::Lident(s) => s.to_string(),
+        _ => {
+            p.err(super::diagnostics::DiagnosticCategory::Message(
+                "Expected comptime builtin name after @".to_string(),
+            ));
+            return ast_helper::make_constant(
+                Constant::String(std::borrow::Cow::Borrowed(""), None),
+                p.mk_loc_idx_to_prev_end(start_pos_idx),
+            );
+        }
+    };
+    p.next(); // consume the name
+
+    p.expect(Token::Lparen);
+
+    let desc = match name.as_str() {
+        "typeInfo" | "typeName" => {
+            // @typeInfo(T) / @typeName(T) — parse a type
+            let core_type = super::typ::parse_typ_expr(p);
+            p.expect(Token::Rparen);
+            let ct_idx = p.arena_mut().push_core_type(core_type);
+            if name == "typeInfo" {
+                ExpressionDesc::Pexp_comptime_typeinfo(ct_idx)
+            } else {
+                ExpressionDesc::Pexp_comptime_typename(ct_idx)
+            }
+        }
+        "field" => {
+            // @field(value, "name") — parse two expressions
+            let value_expr = parse_expr(p);
+            p.expect(Token::Comma);
+            let name_expr = parse_expr(p);
+            p.expect(Token::Rparen);
+            let v_idx = p.arena_mut().push_expr(value_expr);
+            let n_idx = p.arena_mut().push_expr(name_expr);
+            ExpressionDesc::Pexp_comptime_field(Box::new((v_idx, n_idx)))
+        }
+        "compileError" => {
+            // @compileError("msg") — parse one expression
+            let msg_expr = parse_expr(p);
+            p.expect(Token::Rparen);
+            let m_idx = p.arena_mut().push_expr(msg_expr);
+            ExpressionDesc::Pexp_comptime_compile_error(m_idx)
+        }
+        _ => {
+            p.err(super::diagnostics::DiagnosticCategory::Message(
+                format!("Unknown comptime builtin @{}", name),
+            ));
+            p.expect(Token::Rparen);
+            ExpressionDesc::Pexp_construct(
+                with_loc(p.push_lident_static("()"), LocIdx::none()),
+                None,
+            )
+        }
+    };
+
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    Expression {
+        pexp_desc: Box::new(desc),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }

@@ -657,6 +657,14 @@ pub enum ExpressionDesc {
     Pexp_jsx_element(Box<JsxElement>),
     /// Inline for: `inline for pat in collection { body }` (comptime loop unrolling).
     Pexp_inline_for(Box<(PatIdx, ExprIdx, ExprIdx)>),
+    /// Comptime type info: `@typeInfo(T)` — returns type information for T.
+    Pexp_comptime_typeinfo(CoreTypeIdx),
+    /// Comptime field access: `@field(value, "name")` — accesses a field by comptime-known name.
+    Pexp_comptime_field(Box<(ExprIdx, ExprIdx)>),
+    /// Comptime compile error: `@compileError("msg")` — compile-time error.
+    Pexp_comptime_compile_error(ExprIdx),
+    /// Comptime type name: `@typeName(T)` — returns the type name as a string.
+    Pexp_comptime_typename(CoreTypeIdx),
 }
 
 /// A record field in an expression.
