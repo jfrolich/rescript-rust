@@ -5382,9 +5382,49 @@ pub fn type_expect<'a>(
                 "comptime builtin @typeName can only be used inside @comptime functions".to_string(),
             ))
         }
-        ED::Pexp_comptime_variant(_) => {
-            Err(super::TypeCoreError::Other(
-                "comptime builtin @variant can only be used inside @comptime functions".to_string(),
+        ED::Pexp_comptime_variant(inner) => {
+            let (ref ct_idx, ref ctor_name_idx, ref payload_idx) = **inner;
+            let core_type = tctx.arena.get_core_type(*ct_idx);
+            let ctx = tctx.type_ctx;
+            ctx.begin_def();
+            let resolved_ty = match transl_type(tctx, env, core_type) {
+                Ok((_, ty)) => { ctx.end_def(); ty }
+                Err(e) => { ctx.end_def(); return Err(e); }
+            };
+            let ctor_name_expr = tctx.arena.get_expr(*ctor_name_idx);
+            let ctor_name = match &*ctor_name_expr.pexp_desc {
+                crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &**c {
+                    crate::parser::ast::Constant::String(s, _) => s.to_string(),
+                    _ => return Err(super::TypeCoreError::Other("@variant ctor name must be a string".into())),
+                },
+                crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
+                    let longident = tctx.arena.get_longident(lid.txt);
+                    if longident.is_simple() {
+                        let vname = tctx.arena.get_string(longident.last_idx());
+                        match tctx.comptime_bindings.get(vname) {
+                            Some(crate::types::comptime::ComptimeValue::String(s)) => s.clone(),
+                            _ => return Err(super::TypeCoreError::Other("@variant ctor name must be comptime-known".into())),
+                        }
+                    } else { return Err(super::TypeCoreError::Other("@variant ctor name must be simple".into())); }
+                }
+                _ => return Err(super::TypeCoreError::Other("@variant ctor name must be a string".into())),
+            };
+            let cstr_desc = env.find_constructor(&ctor_name).map_err(|_| {
+                super::TypeCoreError::Other(format!("@variant: constructor '{}' not found", ctor_name))
+            })?.clone();
+            let typed_args = if let Some(payload_expr_idx) = payload_idx {
+                let payload_expr = tctx.arena.get_expr(*payload_expr_idx);
+                let arg_ty = ctx.new_var(None);
+                vec![type_expect(tctx, env, payload_expr, arg_ty, None)?]
+            } else {
+                vec![]
+            };
+            crate::types::ctype::unify(ctx, &mut tctx.unify_state, resolved_ty, expected_ty)
+                .map_err(|e| super::TypeCoreError::Other(format!("@variant type mismatch: {:?}", e)))?;
+            let lid_loc = crate::parse_arena::Located { txt: crate::parse_arena::LidentIdx(0), loc: crate::parse_arena::LocIdx::none() };
+            Ok(Expression::new(
+                ExpressionDesc::Texp_construct(lid_loc, cstr_desc, typed_args),
+                loc, resolved_ty, ctx.store_typed_env(env), crate::parser::ast::Attributes::new(),
             ))
         }
         ED::Pexp_comptime_record(inner) => {
