@@ -69,6 +69,57 @@ reproduces a stable no-compile-error baseline in the current dirty worktree:
 
 Latest iteration on **2026-04-16**:
 
+- Active slice: port OCaml's literal-bigint equality folding in
+  `Js_exp_make.bigint_comp` so typed bigint `==` / `!=` collapse before later
+  conditional-expression cleanup, instead of leaving raw `1n !== 1n ? ...`
+  chains in the emitted JS
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; the OCaml behavior lives in
+  `compiler/core/lam_compile_primitive.ml` and `compiler/core/js_exp_make.ml`,
+  and the Rust change stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile_primitive.ml`, especially the `Pbigintcomp`
+    branch that routes typed bigint comparisons through `E.bigint_comp`
+  - `compiler/core/js_exp_make.ml`, especially `bigint_comp` and its literal
+    `Ceq` / `Cneq` folding path
+- Rust change:
+  - added `compile_bigint_comparison(...)` and rewired the `Pbigintcomp`
+    lowering through it instead of the raw generic comparison helper
+  - added `compare_bigint_literals(...)` plus
+    `normalize_bigint_literal_digits(...)` so Rust matches OCaml's bigint
+    literal normalization before testing equality
+  - added regression coverage in
+    `compile_bigint_literal_equality_folds_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_bigint_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh bigint_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bigint_test.res` now matches its checked-in snapshot
+    again; the typed bigint equality cases fold to `true` / `false`, and the
+    literal `switch` results collapse the way OCaml's `bigint_comp` unlocks
+    downstream
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained exact after
+    the same backend-lowering change
+  - under the full authoritative harness, `bigint_test` dropped out of the
+    failure set but an unrelated `ari_regress_test` helper-retention diff
+    surfaced, so the topline stayed flat while this bigint slice still moved
+    the intended cluster forward
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **573 / 657** -> **573 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **84** -> **84** (**no change**)
+- Keep this change because it is a direct OCaml backend port:
+  `lam_compile_primitive.ml` routes typed bigint comparisons through
+  `js_exp_make.bigint_comp`, and that helper folds literal equality /
+  inequality before later expression cleanup. The flat wrapper total reflects
+  a separate harness diff surfacing elsewhere, not a mismatch in the bigint
+  comparison lowering itself.
+
+Latest iteration on **2026-04-16**:
+
 - Active slice: port OCaml's `Js_exp_make.typeof` folding for supported
   literal expressions and keep the resulting strict `typeof` comparisons
   materialized instead of letting Rust fold them past the OCaml JS shape

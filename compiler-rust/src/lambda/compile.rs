@@ -5366,7 +5366,12 @@ impl LambdaCompiler {
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
-            Pbigintcomp(cmp) | Pjscomp(cmp) => {
+            Pbigintcomp(cmp) => self.compile_bigint_comparison(
+                *cmp,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Pjscomp(cmp) => {
                 compile_raw_comparison(*cmp, compiled_args[0].clone(), compiled_args[1].clone())
             }
             Pstringcomp(cmp) => self.compile_string_comparison(
@@ -6537,6 +6542,24 @@ impl LambdaCompiler {
         right: Expression,
     ) -> Expression {
         match compare_string_literals(&left, &right) {
+            Some(equal) => match cmp {
+                Comparison::Eq => Expression::bool(equal),
+                Comparison::Neq => Expression::bool(!equal),
+                Comparison::Lt | Comparison::Le | Comparison::Gt | Comparison::Ge => {
+                    compile_raw_comparison(cmp, left, right)
+                }
+            },
+            None => compile_raw_comparison(cmp, left, right),
+        }
+    }
+
+    fn compile_bigint_comparison(
+        &self,
+        cmp: Comparison,
+        left: Expression,
+        right: Expression,
+    ) -> Expression {
+        match compare_bigint_literals(&left, &right) {
             Some(equal) => match cmp {
                 Comparison::Eq => Expression::bool(equal),
                 Comparison::Neq => Expression::bool(!equal),
@@ -10034,6 +10057,30 @@ fn compare_string_literals(left: &Expression, right: &Expression) -> Option<bool
                 None
             }
         }
+        _ => None,
+    }
+}
+
+fn normalize_bigint_literal_digits(digits: &str) -> String {
+    let trimmed: String = digits.chars().filter(|c| *c != '_').collect();
+    let trimmed = trimmed.trim_start_matches('0');
+    if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn compare_bigint_literals(left: &Expression, right: &Expression) -> Option<bool> {
+    match (&left.desc, &right.desc) {
+        (
+            ExpressionDesc::Number(Number::BigInt(left_bigint)),
+            ExpressionDesc::Number(Number::BigInt(right_bigint)),
+        ) => Some(
+            left_bigint.positive == right_bigint.positive
+                && normalize_bigint_literal_digits(&left_bigint.value)
+                    == normalize_bigint_literal_digits(&right_bigint.value),
+        ),
         _ => None,
     }
 }
@@ -15751,6 +15798,28 @@ mod tests {
 
         assert!(compiled.prelude.is_empty());
         assert_eq!(print_expression(&compiled.expr), "123n < 555555n");
+    }
+
+    #[test]
+    fn compile_bigint_literal_equality_folds_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pbigintcomp(Comparison::Eq),
+            vec![
+                Lambda::const_(Constant::BigInt {
+                    negative: false,
+                    value: "001000".to_string(),
+                }),
+                Lambda::const_(Constant::BigInt {
+                    negative: false,
+                    value: "1000".to_string(),
+                }),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "true");
     }
 
     #[test]
