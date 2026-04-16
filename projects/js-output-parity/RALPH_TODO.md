@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 558 / 657 with 4 unrelated compile errors and 95 output diffs
+**Status:** 562 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 95 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -44,7 +44,7 @@ JS backend only.
 
 ## Current Baseline
 
-Latest authoritative wrapper run on **2026-04-15** using:
+Latest authoritative wrapper run on **2026-04-16** using:
 
 ```bash
 timeout 1800 ./scripts/test_js_output_parity.sh
@@ -52,34 +52,68 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **539 / 657**
+- JS snapshot parity: **562 / 657**
 - Compile errors: **0**
-- Output diffs: **118**
+- Output diffs: **95**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
-## Current Worktree Warning
+## Current Worktree Status
 
-Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
-worktree do **not** reproduce the project baseline above. They currently
-report:
+A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
+reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **558 / 657**
-- Compile errors: **4**
+- JS snapshot parity: **562 / 657**
+- Compile errors: **0**
 - Output diffs: **95**
 
-Those 4 compile failures are not in the JS backend slice and are currently the
-same unrelated typechecker/runtime panic:
+This current worktree measurement now supersedes the earlier stale warning
+about the temporary `RefCell already borrowed` compile failures.
 
-- `submodule.res`: `RefCell already borrowed` panic in `src/types/context.rs`
-- `submodule_call.res`: `RefCell already borrowed` panic in `src/types/context.rs`
-- `stdlib/Stdlib_IntTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
-- `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
+Latest iteration on **2026-04-16**:
 
-Do **not** replace the recorded project baseline with `558 / 657` unless the
-worktree is first restored to a stable state. For JS-output work, continue to
-use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
-baseline.
+- Active slice: match OCaml's `Ext_pp.brace_vgroup` / `js_dump.ml` block
+  printer behavior so explicit branches keep separator-driven blank lines for
+  hidden statements and always force a newline before `}`, covering
+  `gpr_4491_test`
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from `PLAN.md`;
+  this slice stays in `compiler-rust/src/js_ir/printer.rs`
+- OCaml reference:
+  - `compiler/ext/ext_pp.ml`, especially `iter_lst`, `newline`,
+    `force_newline`, and `brace_vgroup`
+  - `compiler/core/js_dump.ml`, especially `statements` and `brace_block`
+- Rust change:
+  - added `force_newline(...)` to mirror `Ext_pp.force_newline`
+  - rewired `print_statements(...)` to preserve OCaml separator placement
+    across original statements even when a statement prints nothing
+  - rewired `print_brace_block(...)` to use the forced-newline closing path
+    instead of Rust's compact close-on-the-current-line behavior
+  - added printer regression coverage in
+    `test_print_if_keeps_blank_lines_for_hidden_branch_statements_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_if_keeps_blank_lines_for_hidden_branch_statements_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_4491_test.res -o /tmp/gpr_4491_test.mjs`
+  - `diff -u tests/tests/src/gpr_4491_test.mjs /tmp/gpr_4491_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `diff -u tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_4491_test.res` now matches its checked-in snapshot
+    exactly; the explicit empty-effect branches keep OCaml's blank interior
+    line instead of collapsing to Rust's compact closing-brace shape
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained an exact
+    snapshot match after the same printer slice
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **561 / 657** -> **562 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **96** -> **95** (**-1**)
+- Keep this change because it is a direct OCaml printer port:
+  `Ext_pp.brace_vgroup` always forces a newline before `}`, and `js_dump.ml`
+  preserves statement separators from the original block even when a statement
+  prints nothing. The previous Rust printer only inserted separators between
+  visible statements and only conditionally emitted the closing newline, which
+  is exactly why `gpr_4491_test` lost OCaml's blank-line block shape.
 
 Latest iteration on **2026-04-16**:
 

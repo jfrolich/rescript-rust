@@ -180,6 +180,15 @@ impl JsPrinter {
         self.last_new_line = true;
     }
 
+    /// Match OCaml's Ext_pp.force_newline.
+    fn force_newline(&mut self) {
+        self.output.push('\n');
+        for _ in 0..self.indent {
+            self.output.push_str(self.indent_str);
+        }
+        self.last_new_line = true;
+    }
+
     /// Write a space
     fn space(&mut self) {
         self.output.push(' ');
@@ -405,20 +414,17 @@ impl JsPrinter {
 
     /// Print statements
     pub fn print_statements(&mut self, stmts: &Block, top_level: bool) {
-        let mut printed_any = false;
-        for stmt in stmts {
-            if !self.statement_prints_anything(stmt, top_level) {
-                continue;
-            }
-            if printed_any {
+        for (index, stmt) in stmts.iter().enumerate() {
+            if index > 0 {
                 if top_level {
                     self.at_least_two_lines();
                 } else {
                     self.newline();
                 }
             }
-            self.print_statement(stmt, top_level);
-            printed_any = true;
+            if self.statement_prints_anything(stmt, top_level) {
+                self.print_statement(stmt, top_level);
+            }
         }
     }
 
@@ -739,26 +745,11 @@ impl JsPrinter {
     /// Print a brace-enclosed block
     fn print_brace_block(&mut self, stmts: &Block) {
         self.write_char('{');
-        if stmts.is_empty() {
-            self.indent();
-            self.output.push('\n');
-            for _ in 0..self.indent {
-                self.output.push_str(self.indent_str);
-            }
-            self.output.push('\n');
-            self.dedent();
-            for _ in 0..self.indent {
-                self.output.push_str(self.indent_str);
-            }
-            self.last_new_line = true;
-            self.write_char('}');
-            return;
-        }
         self.indent();
         self.newline();
         self.print_statements(stmts, false);
         self.dedent();
-        self.newline();
+        self.force_newline();
         self.write_char('}');
     }
 
@@ -4285,6 +4276,30 @@ mod tests {
         let rendered = print_block(&vec![Statement::while_(Expression::bool(true), vec![])]);
 
         assert_eq!(rendered, "while (true) {\n  \n};");
+    }
+
+    #[test]
+    fn test_print_if_keeps_blank_lines_for_hidden_branch_statements_like_ocaml() {
+        let hidden = Statement::new(StatementDesc::Block(vec![Statement::exp(Expression::var(
+            Ident::create_local("ignored"),
+        ))]));
+        let stmt = Statement::new(StatementDesc::If(
+            Expression::bool(true),
+            vec![
+                Statement::exp(Expression::call(
+                    Expression::var(Ident::create_local("log")),
+                    vec![],
+                    CallInfo::default(),
+                )),
+                hidden.clone(),
+            ],
+            vec![hidden],
+        ));
+
+        assert_eq!(
+            print_block(&vec![stmt]),
+            "if (true) {\n  log();\n  \n} else {\n  \n}"
+        );
     }
 
     #[test]
