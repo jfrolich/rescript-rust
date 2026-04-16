@@ -20596,14 +20596,25 @@ fn try_comptime_application(
     // Check if it's a registered comptime function
     let comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
 
+    // Fuel limit to prevent infinite recursive inlining
+    static COMPTIME_DEPTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let depth = COMPTIME_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if depth > 50 {
+        COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        return None; // Too deep — fall through to normal call
+    }
+
     // Extract function parameters and body
     let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx);
     let (param_names, inner_body) = extract_function_params_and_body(body_expr, tctx.arena);
 
-    // Type-check arguments and build substitution map
+    // Save comptime bindings so we can restore after inlining
+    // (recursive calls overwrite bindings with the same parameter names)
+    let saved_bindings = tctx.comptime_bindings.clone();
+
+    // Type-check arguments and add parameter bindings
     let mut inline_env = env.clone();
     let ctx = tctx.type_ctx;
-    let mut param_substitutions: Vec<(String, Expression)> = Vec::new();
 
     for (i, (_label, arg_idx)) in args.iter().enumerate() {
         let arg_expr = tctx.arena.get_expr(*arg_idx);
@@ -20627,27 +20638,26 @@ fn try_comptime_application(
                         param_name.clone(),
                         crate::types::comptime::ComptimeValue::TypedExpr(typed_arg.clone()),
                     );
-                    // Save for cleanup
-                    param_substitutions.push((param_name.clone(), typed_arg));
                 }
             }
-            Err(_) => return None,
+            Err(_) => {
+                tctx.comptime_bindings = saved_bindings;
+                return None;
+            }
         }
     }
 
     // Type-check the body in the extended environment
-    match type_expect(tctx, &inline_env, &inner_body, expected_ty, None) {
-        Ok(mut typed_expr) => {
-            // Substitute parameter references with the actual typed arguments.
-            // This replaces Texp_ident("value") with the typed expression for
-            // the argument (e.g., Texp_field(myUser, name) for myUser.name).
-            for (param_name, typed_arg) in &param_substitutions {
-                substitute_ident(&mut typed_expr, param_name, typed_arg);
-            }
-            Some(Ok(typed_expr))
-        }
+    let result = match type_expect(tctx, &inline_env, &inner_body, expected_ty, None) {
+        Ok(typed_expr) => Some(Ok(typed_expr)),
         Err(_) => None,
-    }
+    };
+
+    // Restore comptime bindings and depth
+    tctx.comptime_bindings = saved_bindings;
+    COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+
+    result
 }
 
 /// Substitute all occurrences of a named identifier in a typed expression
