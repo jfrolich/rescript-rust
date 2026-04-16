@@ -502,8 +502,10 @@ pub fn make_bool_expr<'a>(
 // ── ComptimeValue ───────────────────────────────────────────────────────────
 
 /// A value known at compile time.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum ComptimeValue {
+    /// A typed expression to substitute (for @comptime parameter inlining).
+    TypedExpr(typedtree::Expression),
     /// A type (for `comptime T: type` parameters).
     Type(TypeInfo),
     /// An integer literal.

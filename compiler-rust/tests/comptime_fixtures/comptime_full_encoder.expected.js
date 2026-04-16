@@ -39,8 +39,6 @@ count$1 = count$1 + 1 | 0;
 
 count$1 = count$1 + 1 | 0;
 
-let v = value.name;
-
 let myUser_address = {
   street: "123 Main St",
   city: "NYC",
@@ -82,7 +80,7 @@ let addressIsRecord = "address";
 
 let description = "user";
 
-let firstName = v;
+let firstName = "Alice";
 
 let touched = "done";
 

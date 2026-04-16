@@ -20356,6 +20356,9 @@ fn comptime_value_to_typed_expr<'a>(
     let env_ref = ctx.store_typed_env(env);
 
     match value {
+        ComptimeValue::TypedExpr(expr) => {
+            return Some(expr.clone());
+        }
         ComptimeValue::String(s) => {
             Some(crate::types::comptime::make_string_expr(s, ctx, env, loc))
         }
@@ -20535,18 +20538,18 @@ fn try_comptime_application(
     let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx);
     let (param_names, inner_body) = extract_function_params_and_body(body_expr, tctx.arena);
 
-    // Type-check arguments and build an extended environment
-    // where parameter names are bound to the argument values
+    // Type-check arguments and build substitution map
     let mut inline_env = env.clone();
     let ctx = tctx.type_ctx;
+    let mut param_substitutions: Vec<(String, Expression)> = Vec::new();
 
     for (i, (_label, arg_idx)) in args.iter().enumerate() {
         let arg_expr = tctx.arena.get_expr(*arg_idx);
         let arg_ty = ctx.new_var(None);
         match type_expect(tctx, &inline_env, arg_expr, arg_ty, None) {
             Ok(typed_arg) => {
-                // Bind the parameter name to the argument's type
                 if let Some(param_name) = param_names.get(i) {
+                    // Add to env so body type-checks
                     let id = ctx.create_ident(param_name);
                     let vd = crate::types::decl::ValueDescription {
                         val_type: typed_arg.exp_type,
@@ -20556,6 +20559,14 @@ fn try_comptime_application(
                         val_path: None,
                     };
                     inline_env.add_value(id, vd);
+                    // Add to comptime_bindings so Pexp_ident resolves
+                    // the parameter to the actual argument expression
+                    tctx.comptime_bindings.insert(
+                        param_name.clone(),
+                        crate::types::comptime::ComptimeValue::TypedExpr(typed_arg.clone()),
+                    );
+                    // Save for cleanup
+                    param_substitutions.push((param_name.clone(), typed_arg));
                 }
             }
             Err(_) => return None,
@@ -20564,8 +20575,96 @@ fn try_comptime_application(
 
     // Type-check the body in the extended environment
     match type_expect(tctx, &inline_env, &inner_body, expected_ty, None) {
-        Ok(typed_expr) => Some(Ok(typed_expr)),
+        Ok(mut typed_expr) => {
+            // Substitute parameter references with the actual typed arguments.
+            // This replaces Texp_ident("value") with the typed expression for
+            // the argument (e.g., Texp_field(myUser, name) for myUser.name).
+            for (param_name, typed_arg) in &param_substitutions {
+                substitute_ident(&mut typed_expr, param_name, typed_arg);
+            }
+            Some(Ok(typed_expr))
+        }
         Err(_) => None,
+    }
+}
+
+/// Substitute all occurrences of a named identifier in a typed expression
+/// with a replacement expression. Used to replace @comptime function
+/// parameters with their actual arguments after type-checking.
+fn substitute_ident(
+    expr: &mut Expression,
+    name: &str,
+    replacement: &Expression,
+) {
+    match &mut expr.exp_desc {
+        ExpressionDesc::Texp_ident(path, _, _) => {
+            if path.name() == name {
+                *expr = replacement.clone();
+            }
+        }
+        ExpressionDesc::Texp_let(_, bindings, body) => {
+            for vb in bindings {
+                substitute_ident(&mut vb.vb_expr, name, replacement);
+            }
+            substitute_ident(body, name, replacement);
+        }
+        ExpressionDesc::Texp_apply { funct, args, .. } => {
+            substitute_ident(funct, name, replacement);
+            for arg in args {
+                if let Some(ref mut e) = arg.expression {
+                    substitute_ident(e, name, replacement);
+                }
+            }
+        }
+        ExpressionDesc::Texp_sequence(e1, e2) => {
+            substitute_ident(e1, name, replacement);
+            substitute_ident(e2, name, replacement);
+        }
+        ExpressionDesc::Texp_ifthenelse(cond, then_, else_) => {
+            substitute_ident(cond, name, replacement);
+            substitute_ident(then_, name, replacement);
+            if let Some(e) = else_ {
+                substitute_ident(e, name, replacement);
+            }
+        }
+        ExpressionDesc::Texp_field(base, _, _) => {
+            substitute_ident(base, name, replacement);
+        }
+        ExpressionDesc::Texp_tuple(elems) => {
+            for e in elems {
+                substitute_ident(e, name, replacement);
+            }
+        }
+        ExpressionDesc::Texp_array(elems) => {
+            for e in elems {
+                substitute_ident(e, name, replacement);
+            }
+        }
+        ExpressionDesc::Texp_construct(_, _, args) => {
+            for e in args {
+                substitute_ident(e, name, replacement);
+            }
+        }
+        ExpressionDesc::Texp_record { fields, extended_expression } => {
+            for (_, _, def, _) in fields {
+                if let super::typedtree::RecordLabelDefinition::Overridden(_, e) = def {
+                    substitute_ident(e, name, replacement);
+                }
+            }
+            if let Some(e) = extended_expression {
+                substitute_ident(e, name, replacement);
+            }
+        }
+        ExpressionDesc::Texp_match(scrutinee, cases, exc_cases, _) => {
+            substitute_ident(scrutinee, name, replacement);
+            for case in cases {
+                substitute_ident(&mut case.c_rhs, name, replacement);
+            }
+            for case in exc_cases {
+                substitute_ident(&mut case.c_rhs, name, replacement);
+            }
+        }
+        _ => {}
     }
 }
 
