@@ -2492,6 +2492,11 @@ impl JsPrinter {
                 return;
             }
 
+            if let Some(merged) = try_unit_function_tail_shared_else_positive_guard_merge(stmt) {
+                self.print_function_tail_statement(&merged, return_unit);
+                return;
+            }
+
             if let Some(merged) = try_unit_function_tail_shared_else_guard_merge(stmt) {
                 self.print_function_tail_statement(&merged, return_unit);
                 return;
@@ -2781,6 +2786,69 @@ fn try_unit_function_tail_shared_else_guard_merge(stmt: &Statement) -> Option<St
         stripped_then,
         stripped_else,
     )))
+}
+
+fn try_unit_function_tail_shared_else_positive_guard_merge(stmt: &Statement) -> Option<Statement> {
+    let stmt = unwrap_single_block_stmt(stmt);
+    let StatementDesc::If(outer_cond, then_block, else_block) = &stmt.desc else {
+        return None;
+    };
+    let stripped_else = strip_trailing_return_undefined_block(else_block)?;
+    if stripped_else.is_empty() {
+        return None;
+    }
+
+    let (first_then, remaining_then) = then_block.split_first()?;
+    let StatementDesc::If(inner_cond, inner_then, inner_else) =
+        &unwrap_single_block_stmt(first_then).desc
+    else {
+        return None;
+    };
+    if !inner_else.is_empty() || !ocaml_eq_block(&remaining_then.to_vec(), else_block) {
+        return None;
+    }
+
+    let stripped_then = strip_trailing_return_undefined_block(inner_then)?;
+    if stripped_then.is_empty() {
+        return None;
+    }
+
+    if !positive_guard_merge_outer_cond_is_redundant(outer_cond, inner_cond) {
+        return None;
+    }
+    let combined_cond = Expression::bin(BinOp::And, outer_cond.clone(), inner_cond.clone());
+
+    Some(Statement::new(StatementDesc::If(
+        combined_cond,
+        stripped_then,
+        stripped_else,
+    )))
+}
+
+fn positive_guard_merge_outer_cond_is_redundant(
+    outer_cond: &Expression,
+    inner_cond: &Expression,
+) -> bool {
+    matches!(
+        (&outer_cond.desc, &inner_cond.desc),
+        (
+            ExpressionDesc::Bin(BinOp::NotEqEq, outer_lhs, outer_rhs),
+            ExpressionDesc::Bin(BinOp::EqEqEq, inner_lhs, inner_rhs),
+        ) if matches!(
+            (
+                &outer_lhs.as_ref().desc,
+                &outer_rhs.as_ref().desc,
+                &inner_lhs.as_ref().desc,
+                &inner_rhs.as_ref().desc,
+            ),
+            (
+                ExpressionDesc::Var(VIdent::Id(outer_id)),
+                ExpressionDesc::Undefined { .. },
+                ExpressionDesc::Var(VIdent::Id(inner_id)),
+                ExpressionDesc::Str { .. } | ExpressionDesc::Number(_),
+            ) if outer_id.same(inner_id)
+        )
+    )
 }
 
 fn try_function_tail_negative_guard_chain_merge(stmt: &Statement) -> Option<Statement> {
@@ -5650,6 +5718,73 @@ mod tests {
         assert!(rendered.contains("no();"));
         assert!(!rendered.contains("if (value !== 3)"));
         assert!(!rendered.contains("return;"));
+    }
+
+    #[test]
+    fn test_print_unit_function_tail_merges_shared_else_positive_guard_like_iterator_tests() {
+        let handle = Ident::create_local("handle");
+        let value = Ident::create_local("value");
+        let done = Ident::create_local("done");
+        let next = Ident::create_local("next");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: handle,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![value.clone()],
+                body: vec![Statement::new(StatementDesc::If(
+                    Expression::bin(
+                        BinOp::NotEqEq,
+                        Expression::var(value.clone()),
+                        Expression::undefined(false),
+                    ),
+                    vec![
+                        Statement::new(StatementDesc::If(
+                            Expression::bin(
+                                BinOp::EqEqEq,
+                                Expression::var(value.clone()),
+                                Expression::number(Number::int(3)),
+                            ),
+                            vec![
+                                Statement::exp(Expression::call(
+                                    Expression::var(done),
+                                    vec![],
+                                    CallInfo::default(),
+                                )),
+                                Statement::return_(Expression::undefined(true)),
+                            ],
+                            vec![],
+                        )),
+                        Statement::exp(Expression::call(
+                            Expression::var(next.clone()),
+                            vec![],
+                            CallInfo::default(),
+                        )),
+                        Statement::return_(Expression::undefined(true)),
+                    ],
+                    vec![
+                        Statement::exp(Expression::call(
+                            Expression::var(next),
+                            vec![],
+                            CallInfo::default(),
+                        )),
+                        Statement::return_(Expression::undefined(true)),
+                    ],
+                ))],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (value === 3) {"), "{rendered}");
+        assert!(rendered.contains("done();"), "{rendered}");
+        assert!(rendered.contains("} else {"), "{rendered}");
+        assert!(rendered.contains("next();"), "{rendered}");
+        assert!(!rendered.contains("if (value !== undefined)"), "{rendered}");
+        assert!(!rendered.contains("return;"), "{rendered}");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 582 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 75 output diffs
+**Status:** 583 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 74 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **582 / 657**
+- JS snapshot parity: **583 / 657**
 - Compile errors: **0**
-- Output diffs: **75**
+- Output diffs: **74**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -66,6 +66,59 @@ reproduces a stable no-compile-error baseline in the current dirty worktree:
 - JS snapshot parity: **582 / 657**
 - Compile errors: **0**
 - Output diffs: **75**
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: match the OCaml snapshot shape for unit-return tail printers
+  when a redundant positive inner guard sits under an outer `!== undefined`
+  guard with a shared fallback arm, so iterator-style callbacks collapse back
+  to the explicit `if (value === literal) { ... } else { ... }` form instead
+  of keeping Rust-only nested guard structure
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change stays in `compiler-rust/src/js_ir/printer.rs`
+- OCaml reference:
+  - `compiler/core/js_dump.ml`, especially `function_body` / statement tail
+    printing for unit-return functions
+  - checked-in snapshot
+    `tests/tests/src/stdlib/Stdlib_IteratorTests.mjs`, which keeps the
+    callback tail as one explicit `if/else` without the redundant
+    `value !== undefined` outer guard
+- Rust change:
+  - added `try_unit_function_tail_shared_else_positive_guard_merge(...)` so
+    unit-return tail statements can collapse
+    `if (x !== undefined) { if (x === literal) { A; return } B; return } else { B; return }`
+    into OCaml's `if (x !== undefined && x === literal) { A } else { B }`
+    before final tail printing strips the redundant `return undefined`
+  - constrained that merge with
+    `positive_guard_merge_outer_cond_is_redundant(...)` so it only fires for
+    the verified redundant `ident !== undefined` + `ident === literal` shape,
+    avoiding the earlier regression on nested `typeof`/variant printer cases
+  - added focused regression coverage in
+    `test_print_unit_function_tail_merges_shared_else_positive_guard_like_iterator_tests`
+- Verified focused guards for this slice:
+  - `RUSTFLAGS='-Awarnings' timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release 'js_ir::printer::tests::test_print_unit_function_tail_merges_shared_else_positive_guard_like_iterator_tests' -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh src/stdlib/Stdlib_IteratorTests.res --diff`
+  - `timeout 30 ./scripts/test_js_single.sh VariantPatternMatchingSpreadsWithPayloads --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/stdlib/Stdlib_IteratorTests.res` now matches its
+    checked-in snapshot again; the callback tail no longer keeps the redundant
+    Rust-only outer `value !== undefined` branch
+  - guard file
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` remained an
+    exact snapshot match after the narrowed predicate, so the helper no longer
+    collapses the nested `typeof` / literal-dispatch shape into an incorrect
+    combined `&&`
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained an exact
+    snapshot match after the same printer change
+  - current failure clustering after the authoritative rerun is now
+    `cond-simplify` at **29 files / 104 hunks**, down from **30 files / 105 hunks**
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **582 / 657** -> **583 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **75** -> **74** (**-1**)
 
 Latest iteration on **2026-04-16**:
 
