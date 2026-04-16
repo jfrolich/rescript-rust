@@ -2392,6 +2392,11 @@ impl JsPrinter {
             return;
         }
 
+        if let Some(merged) = try_function_body_negative_guard_chain_merge(stmts) {
+            self.print_function_tail_statement(&merged, return_unit);
+            return;
+        }
+
         if let [stmt, trailing_return] = stmts.as_slice() {
             if return_is_undefined(trailing_return) {
                 if let Some(merged) =
@@ -2426,6 +2431,11 @@ impl JsPrinter {
     }
 
     fn print_function_tail_statement(&mut self, stmt: &Statement, return_unit: bool) {
+        if let Some(merged) = try_function_tail_negative_guard_chain_merge(stmt) {
+            self.print_function_tail_statement(&merged, return_unit);
+            return;
+        }
+
         match &stmt.desc {
             StatementDesc::Block(inner) if inner.len() == 1 => {
                 self.print_function_tail_statement(&inner[0], return_unit);
@@ -2565,6 +2575,80 @@ fn try_function_body_trailing_return_nested_if_merge(
         }
         _ => None,
     }
+}
+
+fn try_function_tail_negative_guard_chain_merge(stmt: &Statement) -> Option<Statement> {
+    let mut guards = Vec::new();
+    let body = collect_function_tail_negative_guard_chain_stmt(stmt, &mut guards)?;
+    if guards.len() < 2 || body.is_empty() {
+        return None;
+    }
+
+    let mut guards = guards.into_iter();
+    let cond = guards.next()?;
+    let cond = guards.fold(cond, |acc, guard| Expression::bin(BinOp::And, acc, guard));
+
+    Some(Statement {
+        desc: StatementDesc::If(cond, body, vec![]),
+        comment: stmt.comment.clone(),
+    })
+}
+
+fn try_function_body_negative_guard_chain_merge(stmts: &Block) -> Option<Statement> {
+    try_function_tail_negative_guard_chain_merge(&Statement::new(StatementDesc::Block(
+        stmts.clone(),
+    )))
+}
+
+fn collect_function_tail_negative_guard_chain_stmt(
+    stmt: &Statement,
+    guards: &mut Vec<Expression>,
+) -> Option<Block> {
+    match &stmt.desc {
+        StatementDesc::Block(inner) => {
+            collect_function_tail_negative_guard_chain_block(inner, guards)
+        }
+        _ if guards.is_empty() => None,
+        _ => Some(vec![stmt.clone()]),
+    }
+}
+
+fn collect_function_tail_negative_guard_chain_block(
+    block: &Block,
+    guards: &mut Vec<Expression>,
+) -> Option<Block> {
+    match block.as_slice() {
+        [] => None,
+        [stmt] => collect_function_tail_negative_guard_chain_stmt(stmt, guards),
+        [first, rest @ ..] => {
+            if let Some(test) = negative_guard_return_undefined_test(first) {
+                guards.push(Expression::not(test.clone()));
+                collect_function_tail_negative_guard_chain_stmt(
+                    &Statement::new(StatementDesc::Block(rest.to_vec())),
+                    guards,
+                )
+            } else if guards.is_empty() {
+                None
+            } else {
+                Some(block.clone())
+            }
+        }
+    }
+}
+
+fn negative_guard_return_undefined_test(stmt: &Statement) -> Option<&Expression> {
+    match &unwrap_single_block_stmt(stmt).desc {
+        StatementDesc::If(test, then_, else_)
+            if block_is_single_wrapped_return_undefined(then_) && else_.is_empty() =>
+        {
+            Some(test)
+        }
+        _ => None,
+    }
+}
+
+fn block_is_single_wrapped_return_undefined(block: &Block) -> bool {
+    matches!(block.as_slice(), [stmt] if return_is_undefined(unwrap_single_block_stmt(stmt)))
 }
 
 fn deps_program_is_empty(program: &DepsProgram) -> bool {
@@ -4590,7 +4674,7 @@ mod tests {
 
     #[test]
     fn test_print_unit_function_body_with_large_literal_dispatch_merges_to_exact_literal_like_ocaml()
-    {
+     {
         let handle_key = Ident::create_local("handleKey");
         let state = Ident::create_local("state");
         let key = Ident::create_local("key");
@@ -4601,8 +4685,7 @@ mod tests {
             Expression::string("space"),
         );
         let rest = [
-            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b",
-            "a",
+            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b", "a",
         ]
         .into_iter()
         .map(|txt| {
@@ -4665,6 +4748,203 @@ mod tests {
         assert!(!rendered.contains("if (key === \"space\")"));
         assert!(!rendered.contains("if (state.active)"));
         assert!(!rendered.contains("else"));
+    }
+
+    #[test]
+    fn test_print_unit_function_body_collapses_nested_negative_guard_chain_like_ocaml() {
+        let handle_key = Ident::create_local("handleKey");
+        let state = Ident::create_local("state");
+        let key = Ident::create_local("key");
+        let do_action = Ident::create_local("doAction");
+        let key_not_space = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::var(key.clone()),
+            Expression::string("space"),
+        );
+        let rest = [
+            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b", "a",
+        ]
+        .into_iter()
+        .map(|txt| {
+            Expression::bin(
+                BinOp::NotEqEq,
+                Expression::var(key.clone()),
+                Expression::string(txt),
+            )
+        })
+        .reduce(|acc, expr| Expression::bin(BinOp::And, acc, expr))
+        .expect("expected a non-empty literal chain");
+        let dispatch = Expression::bin(BinOp::And, key_not_space.clone(), rest);
+        let state_active = Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(Expression::var(state.clone())),
+            "active".to_string(),
+            None,
+        ));
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: handle_key,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![state.clone(), key.clone()],
+                body: vec![Statement::new(StatementDesc::Block(vec![
+                    Statement::new(StatementDesc::If(
+                        dispatch,
+                        vec![Statement::return_(Expression::undefined(true))],
+                        vec![],
+                    )),
+                    Statement::new(StatementDesc::Block(vec![
+                        Statement::new(StatementDesc::If(
+                            key_not_space,
+                            vec![Statement::return_(Expression::undefined(true))],
+                            vec![],
+                        )),
+                        Statement::new(StatementDesc::Block(vec![
+                            Statement::new(StatementDesc::If(
+                                Expression::not(state_active.clone()),
+                                vec![Statement::return_(Expression::undefined(true))],
+                                vec![],
+                            )),
+                            Statement::exp(Expression::call(
+                                Expression::var(do_action),
+                                vec![Expression::var(state)],
+                                CallInfo::default(),
+                            )),
+                            Statement::return_(Expression::undefined(true)),
+                        ])),
+                    ])),
+                ]))],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
+        assert!(rendered.contains("doAction(state);"));
+        assert!(rendered.contains("return;"));
+        assert!(!rendered.contains("key !== \"q\""));
+        assert!(!rendered.contains("if (key !== \"space\")"));
+        assert!(!rendered.contains("if (!state.active)"));
+        assert!(!rendered.contains("else"));
+    }
+
+    #[test]
+    fn test_print_unit_function_body_collapses_flat_negative_guard_chain_like_ocaml() {
+        let handle_key = Ident::create_local("handleKey");
+        let state = Ident::create_local("state");
+        let key = Ident::create_local("key");
+        let do_action = Ident::create_local("doAction");
+        let key_not_space = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::var(key.clone()),
+            Expression::string("space"),
+        );
+        let rest = [
+            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b", "a",
+        ]
+        .into_iter()
+        .map(|txt| {
+            Expression::bin(
+                BinOp::NotEqEq,
+                Expression::var(key.clone()),
+                Expression::string(txt),
+            )
+        })
+        .reduce(|acc, expr| Expression::bin(BinOp::And, acc, expr))
+        .expect("expected a non-empty literal chain");
+        let dispatch = Expression::bin(BinOp::And, key_not_space.clone(), rest);
+        let state_active = Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(Expression::var(state.clone())),
+            "active".to_string(),
+            None,
+        ));
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: handle_key,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![state.clone(), key.clone()],
+                body: vec![
+                    Statement::new(StatementDesc::If(
+                        dispatch,
+                        vec![Statement::return_(Expression::undefined(true))],
+                        vec![],
+                    )),
+                    Statement::new(StatementDesc::If(
+                        key_not_space,
+                        vec![Statement::return_(Expression::undefined(true))],
+                        vec![],
+                    )),
+                    Statement::new(StatementDesc::If(
+                        Expression::not(state_active.clone()),
+                        vec![Statement::return_(Expression::undefined(true))],
+                        vec![],
+                    )),
+                    Statement::exp(Expression::call(
+                        Expression::var(do_action),
+                        vec![Expression::var(state)],
+                        CallInfo::default(),
+                    )),
+                    Statement::return_(Expression::undefined(true)),
+                ],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
+        assert!(rendered.contains("doAction(state);"));
+        assert!(rendered.contains("return;"));
+        assert!(!rendered.contains("key !== \"q\""));
+        assert!(!rendered.contains("if (key !== \"space\")"));
+        assert!(!rendered.contains("if (!state.active)"));
+        assert!(!rendered.contains("else"));
+    }
+
+    #[test]
+    fn test_print_unit_function_body_keeps_single_negative_guard_like_ocaml() {
+        let handle = Ident::create_local("handle");
+        let q = Ident::create_local("q");
+        let do_action = Ident::create_local("doAction");
+        let q_length = Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(Expression::var(q.clone())),
+            "length".to_string(),
+            None,
+        ));
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: handle,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![q],
+                body: vec![
+                    Statement::new(StatementDesc::If(
+                        Expression::bin(BinOp::Le, q_length, Expression::number(Number::int(0))),
+                        vec![Statement::return_(Expression::undefined(true))],
+                        vec![],
+                    )),
+                    Statement::exp(Expression::call(
+                        Expression::var(do_action),
+                        vec![],
+                        CallInfo::default(),
+                    )),
+                ],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (q.length <= 0) {"));
+        assert!(rendered.contains("doAction();"));
+        assert!(!rendered.contains("if (q.length > 0) {"));
     }
 
     #[test]

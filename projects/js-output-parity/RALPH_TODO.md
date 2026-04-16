@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 534 / 657 with 8 unrelated compile errors and 115 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 535 / 657 with 8 unrelated compile errors and 114 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **534 / 657**
+- JS snapshot parity: **535 / 657**
 - Compile errors: **8**
-- Output diffs: **115**
+- Output diffs: **114**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,58 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `534 / 657` unless the
+Do **not** replace the recorded project baseline with `535 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: collapse multi-guard unit-return function bodies in the
+  printer when Rust preserves a nested negative early-return chain for a
+  literal-dispatch tail that OCaml emits as one positive `if (...) { ... }`
+- Active backend focus moved to **Phase 5: Byte-Exact Dumping** from `PLAN.md`
+  for this slice; the change stays in `compiler-rust/src/js_ir/printer.rs`
+- OCaml reference:
+  `compiler/core/js_dump.ml`, especially `function_body` and the surrounding
+  `statement` printing rules for `If` / `Return Undefined`
+- Rust change:
+  - added a function-body-only merge in `compiler-rust/src/js_ir/printer.rs`
+    that recognizes nested multi-guard `if (<neg>) return;` tails and
+    rebuilds them as one positive `if (<guard1> && <guard2> && ...)` before
+    printing
+  - kept that merge deliberately narrow by requiring **multiple** guards, so
+    single early-return bodies like `queue_402` still print in OCaml's
+    original negative-guard form
+  - added focused printer regressions for both shapes: the large literal
+    dispatch collapse and the single-guard preservation case
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_unit_function_body -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/LargeUnboxedVariantOptimization.res -o /tmp/LargeUnboxedVariantOptimization.mjs`
+  - `diff -u tests/tests/src/LargeUnboxedVariantOptimization.mjs /tmp/LargeUnboxedVariantOptimization.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `diff -u tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/queue_402.res -o /tmp/queue_402.mjs`
+  - `diff -u tests/tests/src/queue_402.mjs /tmp/queue_402.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/LargeUnboxedVariantOptimization.res` now matches its
+    checked-in snapshot, removing the Rust-only negative guard chain around the
+    `"space"` branch in `handleKey`
+  - `tests/tests/src/ExternalShadow.res` remained exact as a broader unchanged
+    guard, and `tests/tests/src/queue_402.res` stayed exact after narrowing
+    the merge back to multi-guard bodies only
+  - the current dirty-tree authoritative wrapper improved after the narrowed
+    printer fix, so this is no longer just a file-local cleanup
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **534 / 657** -> **535 / 657** (**+1**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **115** -> **114** (**-1**)
+- Keep this change because the previous Rust printer left a multi-guard
+  function-tail artifact that OCaml's backend does not emit in the checked-in
+  snapshot, while the narrowed version preserves the single negative-guard
+  forms that OCaml still prints elsewhere.
 
 Latest iteration on **2026-04-16**:
 
