@@ -636,7 +636,9 @@ impl LambdaCompiler {
                 self.append_effect_output(first, second)
             }
             Lambda::Lwhile(cond, body) => {
-                let cond_expr = self.compile_expr(cond).expr;
+                let cond_compiled = self.compile_expr(cond);
+                let cond_expr =
+                    block_with_return_expr_iife(cond_compiled.prelude, cond_compiled.expr);
                 let body_block = self.compile_block(body);
                 Compiled {
                     prelude: vec![Statement::while_(cond_expr, body_block)],
@@ -10229,6 +10231,27 @@ fn string_switch_iife(scrutinee: Expression, cases: Vec<(String, Expression)>) -
     )
 }
 
+fn block_with_return_expr_iife(mut block: Block, expr: Expression) -> Expression {
+    if block.is_empty() {
+        return expr;
+    }
+
+    block.push(Statement::return_(expr));
+    Expression::call(
+        Expression::new(ExpressionDesc::Fun {
+            is_method: false,
+            params: vec![],
+            body: block,
+            env: Default::default(),
+            return_unit: false,
+            async_: false,
+            directive: None,
+        }),
+        vec![],
+        CallInfo::default(),
+    )
+}
+
 fn is_type_object_expr(expr: Expression) -> Expression {
     Expression::bin(
         BinOp::EqEqEq,
@@ -19137,6 +19160,45 @@ mod tests {
         assert!(
             !output.contains("let someResult = x.TAG === \"Ok\" ? x._0 : ("),
             "unexpected initialized declaration for LetUnwrap's switch-bound result:\n{output}"
+        );
+    }
+
+    #[test]
+    fn complex_while_loop_keeps_effectful_condition_blocks_inside_iifes() {
+        let output = compile_checked_in_test_file_to_js("complex_while_loop");
+        assert!(
+            output.contains("while ((() => {")
+                && output.contains("let fib = x => {")
+                && output.contains("return fib(n) > 10;"),
+            "expected complex_while_loop to keep the recursive condition binding scoped inside the while predicate IIFE, got:\n{output}"
+        );
+        assert!(
+            output.contains("let b = 9;")
+                && output.contains("return (3 + b | 0) > 10;"),
+            "expected complex_while_loop's second predicate to stay as an IIFE-wrapped block, got:\n{output}"
+        );
+        assert!(
+            !output.contains("while (fib(n) > 10)")
+                && !output.contains("while ((3 + b | 0) > 10)"),
+            "unexpected dropped predicate-prelude scope in complex_while_loop:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_while_side_effect_keeps_local_condition_bindings_in_iifes() {
+        let output = compile_checked_in_test_file_to_js("test_while_side_effect");
+        assert!(
+            output.contains("while ((() => {")
+                && output.contains("let y = 3;")
+                && output.contains("console.log(x.contents.toString());")
+                && output.contains("y = y + 1 | 0;")
+                && output.contains("x.contents = x.contents + 1 | 0;")
+                && output.contains("return (fib(x.contents) + fib(x.contents) | 0) < 20;"),
+            "expected test_while_side_effect to keep the local binding and side effects inside the predicate IIFE, got:\n{output}"
+        );
+        assert!(
+            !output.contains("while (x.contents = x.contents + 1 | 0, (fib(x.contents) + fib(x.contents) | 0) < 20)"),
+            "unexpected flattened predicate sequence lost the local binding scope in test_while_side_effect:\n{output}"
         );
     }
 

@@ -83,6 +83,57 @@ baseline.
 
 Latest iteration on **2026-04-16**:
 
+- Active slice: preserve OCaml's `compile_while` predicate-block lowering by
+  wrapping non-empty while-condition preludes back into a zero-arg function
+  call instead of dropping them from the Rust backend
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in
+  `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially `compile_while`
+  - `compiler/core/js_exp_make.ml`, especially `of_block`
+- Rust change:
+  - added `block_with_return_expr_iife(...)` and wired the `Lambda::Lwhile`
+    lowering through it so a predicate compiled with side-effect/declaration
+    prelude still becomes an OCaml-style expression wrapper before entering the
+    JS `while (...)`
+  - added checked-in fixture regression coverage
+    `complex_while_loop_keeps_effectful_condition_blocks_inside_iifes`
+    and
+    `test_while_side_effect_keeps_local_condition_bindings_in_iifes`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release complex_while_loop_keeps_effectful_condition_blocks_inside_iifes -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release test_while_side_effect_keeps_local_condition_bindings_in_iifes -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh complex_while_loop --diff`
+  - `timeout 30 ./scripts/test_js_single.sh test_while_side_effect --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/complex_while_loop.res` no longer drops the predicate's
+    local recursive/helper bindings; Rust now matches OCaml's backend-stage
+    choice to keep those bindings scoped inside an IIFE-wrapped `while`
+    condition
+  - `tests/tests/src/test_while_side_effect.res` likewise keeps the local
+    `y` binding and preceding condition effects inside the predicate wrapper
+    instead of flattening them away into a broken comma expression
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained an exact
+    snapshot match after the same slice
+  - both focused loop fixtures still differ byte-for-byte only on
+    printer-level indentation / empty-body formatting, so this backend fix does
+    not yet change the wrapper counts
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **551 / 657** -> **551 / 657** (**no change**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **98** -> **98** (**no change**)
+- Keep this change because OCaml's backend does not discard non-empty while
+  predicate blocks. `compile_while` explicitly recompiles the predicate as a
+  value and routes any emitted block back through `Js_exp_make.of_block`; the
+  old Rust path was backend-incorrect even when the final harness count stayed
+  flat.
+
+Latest iteration on **2026-04-16**:
+
 - Active slice: keep OCaml's single-use switch-scrutinee aliases when the
   source identifier is mutated, covering both direct mutated variables and the
   ref-content reads that later collapse to the same `Lvar` shape
