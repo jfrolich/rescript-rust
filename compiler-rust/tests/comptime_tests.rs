@@ -374,6 +374,11 @@ fn comptime_codec() {
 }
 
 #[test]
+fn comptime_decoder() {
+    run_fixture("comptime_decoder");
+}
+
+#[test]
 #[ignore = "requires @comptime.derive system + predefined typeInfo type"]
 fn comptime_derive_keyof() {
     run_fixture("derive_keyof");
