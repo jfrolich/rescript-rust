@@ -364,6 +364,11 @@ fn comptime_encoder() {
 }
 
 #[test]
+fn comptime_full_encoder() {
+    run_fixture("comptime_full_encoder");
+}
+
+#[test]
 #[ignore = "requires @comptime.derive system + predefined typeInfo type"]
 fn comptime_derive_keyof() {
     run_fixture("derive_keyof");
