@@ -12,52 +12,52 @@ Concrete examples showing how comptime replaces every major PPX use case. Each s
 // === Codec.res — reusable library, written in ReScript, not OCaml ===
 
 @comptime
-let rec encodeField = (comptime T: type, value: T): Js.Json.t => {
+let rec encodeField = (comptime T: type, value: T): JSON.t => {
   switch @typeInfo(T) {
-  | String => Js.Json.string(value)
-  | Int => Js.Json.number(Int.toFloat(value))
-  | Float => Js.Json.number(value)
-  | Bool => Js.Json.boolean(value)
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Float => JSON.Encode.float(value)
+  | Bool => JSON.Encode.bool(value)
   | Option({inner}) =>
     switch value {
     | Some(v) => encodeField(inner, v)
-    | None => Js.Json.null
+    | None => JSON.Null
     }
   | Array({element}) =>
-    value->Array.map(v => encodeField(element, v))->Js.Json.array
+    value->Array.map(v => encodeField(element, v))->JSON.Encode.array
   | Record({fields}) =>
-    let obj = Js.Dict.empty()
+    let obj = Dict.make()
     inline for field in fields {
       let key = @getAttr(field, "json.key")->Option.getOr(field.jsName)
       if field.optional {
         switch @field(value, field.name) {
-        | Some(v) => Js.Dict.set(obj, key, encodeField(field.typ, v))
+        | Some(v) => Dict.set(obj, key, encodeField(field.typ, v))
         | None => ()
         }
       } else {
-        Js.Dict.set(obj, key, encodeField(field.typ, @field(value, field.name)))
+        Dict.set(obj, key, encodeField(field.typ, @field(value, field.name)))
       }
     }
-    Js.Json.object_(obj)
+    JSON.Encode.object(obj)
   | Variant({constructors, tag}) =>
     let tagKey = tag->Option.getOr("TAG")
     inline for ctor in constructors {
       switch value {
       | @variant(ctor.name) =>
-        let obj = Js.Dict.empty()
-        Js.Dict.set(obj, tagKey, Js.Json.string(ctor.name))
+        let obj = Dict.make()
+        Dict.set(obj, tagKey, JSON.Encode.string(ctor.name))
         switch ctor.args {
         | NoArgs => ()
         | InlineRecord(fields) =>
           inline for f in fields {
-            Js.Dict.set(obj, f.name, encodeField(f.typ, @ctorField(value, ctor.name, f.name)))
+            Dict.set(obj, f.name, encodeField(f.typ, @ctorField(value, ctor.name, f.name)))
           }
         | TupleArgs(args) =>
           inline for (i, arg) in Array.withIndex(args) {
-            Js.Dict.set(obj, `_${Int.toString(i)}`, encodeField(arg, @ctorArg(value, ctor.name, i)))
+            Dict.set(obj, `_${Int.toString(i)}`, encodeField(arg, @ctorArg(value, ctor.name, i)))
           }
         }
-        Js.Json.object_(obj)
+        JSON.Encode.object(obj)
       }
     }
   | Recursive(_) => @callEncoder(T, value)
@@ -67,12 +67,12 @@ let rec encodeField = (comptime T: type, value: T): Js.Json.t => {
 
 @comptime.derive("encoder")
 let encoder = (comptime T: type) => {
-  (value: T): Js.Json.t => encodeField(T, value)
+  (value: T): JSON.t => encodeField(T, value)
 }
 
 @comptime.derive("decoder")
 let decoder = (comptime T: type) => {
-  (json: Js.Json.t): result<T, string> => decodeField(T, json, "$")
+  (json: JSON.t): result<T, string> => decodeField(T, json, "$")
 }
 ```
 
@@ -127,13 +127,13 @@ type rec treeNode = {
 }
 
 // Compiler sees Recursive({name: "treeNode"}) and generates self-referencing call:
-let rec encode_treeNode = (value: treeNode): Js.Json.t => {
-  let obj = Js.Dict.empty()
-  Js.Dict.set(obj, "value", Js.Json.string(value.value))
-  Js.Dict.set(obj, "children",
-    value.children->Array.map(v => encode_treeNode(v))->Js.Json.array
+let rec encode_treeNode = (value: treeNode): JSON.t => {
+  let obj = Dict.make()
+  Dict.set(obj, "value", JSON.Encode.string(value.value))
+  Dict.set(obj, "children",
+    value.children->Array.map(v => encode_treeNode(v))->JSON.Encode.array
   )
-  Js.Json.object_(obj)
+  JSON.Encode.object(obj)
 }
 ```
 
@@ -147,23 +147,23 @@ type shape =
   | Point
 
 // Generated:
-let encode_shape = (value: shape): Js.Json.t => {
+let encode_shape = (value: shape): JSON.t => {
   switch value {
   | Circle({radius}) =>
-    let obj = Js.Dict.empty()
-    Js.Dict.set(obj, "TAG", Js.Json.string("Circle"))
-    Js.Dict.set(obj, "radius", Js.Json.number(radius))
-    Js.Json.object_(obj)
+    let obj = Dict.make()
+    Dict.set(obj, "TAG", JSON.Encode.string("Circle"))
+    Dict.set(obj, "radius", JSON.Encode.float(radius))
+    JSON.Encode.object(obj)
   | Rectangle({width, height}) =>
-    let obj = Js.Dict.empty()
-    Js.Dict.set(obj, "TAG", Js.Json.string("Rectangle"))
-    Js.Dict.set(obj, "width", Js.Json.number(width))
-    Js.Dict.set(obj, "height", Js.Json.number(height))
-    Js.Json.object_(obj)
+    let obj = Dict.make()
+    Dict.set(obj, "TAG", JSON.Encode.string("Rectangle"))
+    Dict.set(obj, "width", JSON.Encode.float(width))
+    Dict.set(obj, "height", JSON.Encode.float(height))
+    JSON.Encode.object(obj)
   | Point =>
-    let obj = Js.Dict.empty()
-    Js.Dict.set(obj, "TAG", Js.Json.string("Point"))
-    Js.Json.object_(obj)
+    let obj = Dict.make()
+    Dict.set(obj, "TAG", JSON.Encode.string("Point"))
+    JSON.Encode.object(obj)
   }
 }
 ```
@@ -197,7 +197,7 @@ let graphql = (comptime query: string, comptime schema: Schema.t) => {
     },
 
     // Response type derived from schema + selection set
-    parseResponse: (json: Js.Json.t) => {
+    parseResponse: (json: JSON.t) => {
       inline for field in operation.selectionSet {
         let schemaField = Schema.lookupField(schema, operation.rootType, field.name)
         @record(

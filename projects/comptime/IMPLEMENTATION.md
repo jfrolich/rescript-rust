@@ -33,7 +33,7 @@ type user = { name: string, age: int, address: address, tags: array<string>, ema
 let rec encode = (value) => {
   switch @typeInfo(value) {
   | String => Json.string(value)
-  | Int => Json.number(Int.toFloat(value))
+  | Int => JSON.Encode.int((value))
   | Record({fields}) =>
     let obj = Dict.empty()
     inline for field in fields {
@@ -70,7 +70,7 @@ let json = encode(myUser)
 - Emit: `Dict.set(obj, "name", Json.string(myUser.name))`
 
 **Iteration: "age" (Int)**
-- `encode(myUser.age)` → Int → `Json.number(Int.toFloat(myUser.age))`
+- `encode(myUser.age)` → Int → `JSON.Encode.int((myUser.age))`
 
 **Iteration: "address" (Record)**
 - `encode(myUser.address)` → Record(address) → nested `inline for` over street, city
@@ -94,7 +94,7 @@ let json = encode(myUser)
 ```javascript
 let obj = Dict.empty();
 Dict.set(obj, "name", Json.string(myUser.name));
-Dict.set(obj, "age", Json.number(Int.toFloat(myUser.age)));
+Dict.set(obj, "age", JSON.Encode.int((myUser.age)));
 let obj$1 = Dict.empty();
 Dict.set(obj$1, "street", Json.string(myUser.address.street));
 Dict.set(obj$1, "city", Json.string(myUser.address.city));

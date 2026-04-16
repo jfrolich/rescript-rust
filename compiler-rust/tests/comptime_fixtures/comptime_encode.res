@@ -3,20 +3,23 @@ type user = {
   age: int,
 }
 
+// NOTE: This uses the old `comptime T: type` parameter syntax which
+// is not yet fully implemented. See comptime_codec.res for the working
+// polymorphic pattern using @comptime + @typeInfo(value).
 @comptime
-let encode = (comptime T: type, value: T): Js.Json.t => {
-  switch @typeInfo(T) {
-  | String => Js.Json.string(value)
-  | Int => Js.Json.number(Int.toFloat(value))
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
   | Record({fields}) =>
-    let obj = Js.Dict.empty()
+    let dict = Dict.make()
     inline for field in fields {
-      Js.Dict.set(obj, field.name, encode(field.typ, @field(value, field.name)))
+      Dict.set(dict, field.name, encode(@field(value, field.name)))
     }
-    Js.Json.object_(obj)
-  | _ => @compileError(`Cannot encode`)
+    JSON.Encode.object(dict)
+  | _ => @compileError("unsupported type")
   }
 }
 
 let myUser: user = {name: "Alice", age: 30}
-let json = encode(user, myUser)
+let json = encode(myUser)
