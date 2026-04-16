@@ -729,6 +729,19 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             {
                 body = substitute_alias_use(&body, id, &value);
             }
+            if !preserve_exported_eta_alias
+                && !preserve_local_module_field_eta_alias
+                && !env.preserved_export_bindings.contains(id)
+            {
+                let use_info = alias_use_info(id, &body);
+                if use_info.times == 1 && use_info.captured {
+                    if let Some(inlined_component_wrapper) =
+                        inline_recursive_component_internal_wrapper(id, &value, &body)
+                    {
+                        return inlined_component_wrapper;
+                    }
+                }
+            }
             if kind == LetKind::Alias
                 && !preserve_exported_eta_alias
                 && !preserve_local_module_field_eta_alias
@@ -2608,8 +2621,9 @@ fn js_function_arity(func: &LFunction) -> usize {
 }
 
 fn make_like_binding_name(name: &str) -> bool {
-    name == "make"
-        || name
+    let base = name.strip_suffix("$Internal").unwrap_or(name);
+    base == "make"
+        || base
             .strip_prefix("make$")
             .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
 }
@@ -2625,6 +2639,58 @@ fn eta_wrapped_args_match_params(params: &[Ident], args: &[Lambda]) -> bool {
             }) => matches!(inner_args.as_slice(), [Lambda::Lvar(id)] if id.same(param)),
             _ => false,
         })
+}
+
+fn inline_recursive_component_internal_wrapper(
+    id: &Ident,
+    value: &Lambda,
+    body: &Lambda,
+) -> Option<Lambda> {
+    if !id.name().ends_with("$Internal") || !make_like_binding_name(id.name()) {
+        return None;
+    }
+
+    let internal = inlineable_local_function(value)?;
+    if internal.attr.async_ || internal.attr.directive.is_some() || internal.attr.one_unit_arg {
+        return None;
+    }
+
+    let wrapper = inlineable_local_function(body)?;
+    if wrapper.attr.async_ || wrapper.attr.directive.is_some() || wrapper.attr.one_unit_arg {
+        return None;
+    }
+    if !matches!(wrapper.params.as_slice(), [param] if param.name() == "props") {
+        return None;
+    }
+
+    let apply = match wrapper.body.as_ref() {
+        Lambda::Lapply(apply) => apply,
+        Lambda::Lsequence(first, second)
+            if matches!(
+                second.as_ref(),
+                Lambda::Lconst(Constant::JsUndefined { .. })
+            ) =>
+        {
+            let Lambda::Lapply(apply) = first.as_ref() else {
+                return None;
+            };
+            apply
+        }
+        _ => return None,
+    };
+
+    if !matches!(apply.ap_func.as_ref(), Lambda::Lvar(target) if target.same(id))
+        || !eta_wrapped_args_match_params(&wrapper.params, &apply.ap_args)
+    {
+        return None;
+    }
+
+    Some(Lambda::function_(
+        wrapper.arity,
+        wrapper.params.clone(),
+        beta_reduce::propagate_beta_reduce(&internal.params, &internal.body, &apply.ap_args),
+        wrapper.attr.clone(),
+    ))
 }
 
 fn eta_reduce_function_value(func: &LFunction, env: &SimplifyEnv) -> Option<Lambda> {
@@ -7880,6 +7946,67 @@ mod tests {
                 args,
                 ..
             }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&component))
+        ));
+    }
+
+    #[test]
+    fn keeps_recursive_component_internal_props_wrappers_materialized_for_js_backend() {
+        let make = Ident::create_local("make");
+        let make_internal = Ident::create_local("make$Internal");
+        let param = Ident::create_local("param");
+        let props = Ident::create_local("props");
+
+        let simplified = simplify_for_js_backend(&Lambda::letrec(
+            vec![(
+                make.clone(),
+                Lambda::let_(
+                    LetKind::Strict,
+                    make_internal.clone(),
+                    Lambda::function_(
+                        1,
+                        vec![param],
+                        Lambda::var(make.clone()),
+                        FunctionAttribute::default(),
+                    ),
+                    Lambda::let_(
+                        LetKind::Strict,
+                        make.clone(),
+                        Lambda::function_(
+                            1,
+                            vec![props.clone()],
+                            Lambda::Lapply(Apply {
+                                ap_func: Box::new(Lambda::var(make_internal.clone())),
+                                ap_args: vec![Lambda::var(props.clone())],
+                                ap_info: ApInfo {
+                                    loc: Location::none(),
+                                    inlined: InlineAttribute::Default,
+                                    status: ApplyStatus::Uncurry,
+                                },
+                                ap_transformed_jsx: false,
+                            }),
+                            FunctionAttribute::default(),
+                        ),
+                        Lambda::var(make.clone()),
+                    ),
+                ),
+            )],
+            Lambda::var(make.clone()),
+        ));
+
+        let Lambda::Lletrec(bindings, body) = &simplified else {
+            panic!("expected recursive component wrapper binding to stay in letrec: {simplified:?}");
+        };
+        assert!(
+            matches!(body.as_ref(), Lambda::Lvar(id) if id.same(&make)),
+            "expected the wrapper binding to remain the letrec result: {simplified:?}"
+        );
+        let Some((_, make_value)) = bindings.iter().find(|(id, _)| id.same(&make)) else {
+            panic!("expected recursive wrapper binding for make: {simplified:?}");
+        };
+        assert!(matches!(
+            make_value,
+            Lambda::Lfunction(crate::lambda::LFunction { params, .. })
+                if matches!(params.as_slice(), [wrapped] if wrapped.same(&props))
         ));
     }
 

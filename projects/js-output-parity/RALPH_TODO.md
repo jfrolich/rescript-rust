@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 537 / 657 with 8 unrelated compile errors and 112 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 539 / 657 with 8 unrelated compile errors and 110 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **537 / 657**
+- JS snapshot parity: **539 / 657**
 - Compile errors: **8**
-- Output diffs: **112**
+- Output diffs: **110**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -80,6 +80,63 @@ Do **not** replace the recorded project baseline with `537 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: preserve declaration-context lowering for recursive singleton
+  wrapper bindings so recursive React component wrappers stop falling back to
+  `let make; make = ...`
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this slice stays in `compiler-rust/src/lambda/simplify.rs` and
+  `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially `compile_recursive_let`'s
+    generic `compile_lambda ~continuation:(Declare (Alias, id))` path for
+    non-bare recursive bindings
+  - actual optimized lambda for `recursive_react_component.res`, which both
+    compilers print as a recursive nested-`let` wrapper around
+    `make$Internal`
+- Rust change:
+  - extended `make_like_binding_name(...)` in
+    `compiler-rust/src/lambda/simplify.rs` to recognize `make$Internal`
+    bindings
+  - added `inline_recursive_component_internal_wrapper(...)` so the JS-backend
+    simplifier preserves sync recursive component wrappers with a real `props`
+    parameter instead of collapsing them back to a generic `param`
+  - added a recursive-binding compile fallback in
+    `compiler-rust/src/lambda/compile.rs` that reuses `compile_let_binding`
+    for singleton nested-`let` recursive RHSs only when that path produces an
+    initialized declaration for the recursive binding, matching OCaml's
+    declaration-context lowering rather than Rust's old placeholder-assignment
+    fallback
+  - added focused regressions in both files for the recursive component
+    wrapper simplification and the recursive singleton nested-`let` lowering
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release keeps_recursive_component_internal_props_wrappers_materialized_for_js_backend -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release recursive_singleton_nested_let_function_bindings_avoid_placeholder_assignments -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release recursive_function_bindings_lower_directly_without_placeholder_assignments -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh recursive_react_component --diff`
+  - `timeout 30 ./scripts/test_js_single.sh async_jsx --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh recursive_module_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/recursive_react_component.res` now matches its checked-in
+    snapshot again; Rust emits `function make(props)` instead of the previous
+    `let make; make = props => ...` fallback
+  - unchanged guards `tests/tests/src/async_jsx.res` and
+    `tests/tests/src/ExternalShadow.res` remained exact
+  - `tests/tests/src/recursive_module_test.res` still differs, but only in the
+    separate recursive-module alias naming shape (`fact$1` / `M.fact`), so
+    this slice is localized
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **537 / 657** -> **539 / 657** (**+2**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **112** -> **110** (**-2**)
+- Keep this change because the old Rust path was not OCaml-aligned: the
+  optimized lambda is a recursive nested-`let` wrapper, and OCaml lowers that
+  wrapper through declaration context rather than a placeholder assignment.
 
 Latest iteration on **2026-04-16**:
 

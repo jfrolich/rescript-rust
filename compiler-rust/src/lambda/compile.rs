@@ -815,6 +815,13 @@ impl LambdaCompiler {
             }
         }
 
+        if group.len() == 1 {
+            if let Some(block) = self.try_compile_recursive_singleton_binding_without_placeholder(id, expr)
+            {
+                return (vec![], block);
+            }
+        }
+
         match expr {
             Lambda::Lprim(info)
                 if matches!(info.primitive, Primitive::Pmakeblock(_, _, _))
@@ -885,6 +892,23 @@ impl LambdaCompiler {
                     effects,
                 )
             }
+        }
+    }
+
+    fn try_compile_recursive_singleton_binding_without_placeholder(
+        &mut self,
+        id: &Ident,
+        expr: &Lambda,
+    ) -> Option<Block> {
+        if !matches!(expr, Lambda::Llet(..)) {
+            return None;
+        }
+
+        let block = self.compile_let_binding(LetKind::Alias, id, expr);
+        if block_declares_initialized_ident(&block, id) {
+            Some(block)
+        } else {
+            None
         }
     }
 
@@ -8478,6 +8502,15 @@ fn collect_declared_idents(block: &Block, declared: &mut HashSet<Ident>) {
             _ => {}
         }
     }
+}
+
+fn block_declares_initialized_ident(block: &Block, target: &Ident) -> bool {
+    block.iter().find_map(|stmt| match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) if ident.same(target) => {
+            Some(value.is_some())
+        }
+        _ => None,
+    }) == Some(true)
 }
 
 fn collect_export_aliases(block: &Block, aliases: &mut HashMap<Ident, Ident>) {
@@ -26172,6 +26205,86 @@ let fib3 = n => {
         assert!(
             !rendered.contains("let even;") && !rendered.contains("let odd;"),
             "unexpected recursive placeholders remained:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn recursive_singleton_nested_let_function_bindings_avoid_placeholder_assignments() {
+        let mut compiler = LambdaCompiler::new();
+        let make = Ident::create_local("make");
+        let make_internal = Ident::create_local("make$Internal");
+        let make_alias = Ident::create_local("make$1");
+        let component = Ident::create_local("Recursive_react_component");
+        let param = Ident::create_local("param");
+        let props = Ident::create_local("props");
+        let lam = Lambda::letrec(
+            vec![(
+                make.clone(),
+                Lambda::let_(
+                    LetKind::Strict,
+                    make_internal.clone(),
+                    Lambda::prim(
+                        Primitive::PjsFnMake(1),
+                        vec![Lambda::function_(
+                            1,
+                            vec![param],
+                            Lambda::var(make.clone()),
+                            FunctionAttribute::default(),
+                        )],
+                        Location::none(),
+                    ),
+                    Lambda::let_(
+                        LetKind::Strict,
+                        make_alias.clone(),
+                        Lambda::let_(
+                            LetKind::Strict,
+                            component.clone(),
+                            Lambda::prim(
+                                Primitive::PjsFnMake(1),
+                                vec![Lambda::function_(
+                                    1,
+                                    vec![props.clone()],
+                                    Lambda::apply(
+                                        Lambda::var(make_internal.clone()),
+                                        vec![Lambda::var(props)],
+                                        ApInfo {
+                                            loc: Location::none(),
+                                            inlined: InlineAttribute::Default,
+                                            status: ApplyStatus::Na,
+                                        },
+                                        false,
+                                    ),
+                                    FunctionAttribute::default(),
+                                )],
+                                Location::none(),
+                            ),
+                            Lambda::var(component),
+                        ),
+                        Lambda::var(make_alias),
+                    ),
+                ),
+            )],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+        let make_decl = compiled.prelude.iter().find_map(|stmt| match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, value, .. })
+                if ident.same(&make) =>
+            {
+                Some(value)
+            }
+            _ => None,
+        });
+
+        assert!(
+            matches!(make_decl, Some(Some(_))),
+            "expected the recursive wrapper binding to produce an initialized declaration:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("let make;"),
+            "unexpected recursive placeholder declaration remained:\n{rendered}"
         );
     }
 
