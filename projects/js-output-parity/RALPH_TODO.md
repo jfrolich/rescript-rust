@@ -83,6 +83,57 @@ baseline.
 
 Latest iteration on **2026-04-16**:
 
+- Active slice: stop substituting projections out of single-field immutable
+  `Caml_block`s in the Rust `js_pass_flatten_and_mark_dead` port; OCaml only
+  records those substitutions for blocks with at least two fields
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this slice stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  `compiler/core/js_pass_flatten_and_mark_dead.ml`, especially the
+  `Variable ... Caml_block ((_ :: _ :: _ as ls), Immutable, ...)` case and the
+  comment immediately above it that limits substitution to blocks larger than
+  one element
+- Rust change:
+  - narrowed `flatten_and_mark_dead_statement(...)` in
+    `compiler-rust/src/lambda/compile.rs` so the substitution map is no longer
+    populated for single-field immutable `Caml_block`s
+  - kept recursive flattening of the single-field block contents themselves, so
+    this slice only removes the Rust-only projection substitution and does not
+    skip the normal child rewrites
+  - replaced the earlier Rust-only unit expectations with OCaml-aligned JS-pass
+    regressions for single-field module reads and single-field component
+    `.make` reads
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release js_flatten_and_mark_dead_keeps_single_field_module_reads_materialized_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release js_flatten_and_mark_dead_keeps_single_field_component_make_reads_without_jsx_preserve_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh recursive_module --diff`
+  - `timeout 30 ./scripts/test_js_single.sh recursive_react_component --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh async_jsx --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/recursive_module.res` now matches its checked-in snapshot
+    again; the Rust JS pass no longer rewrites `Stdlib_Lazy.get(Intb.a)` to
+    `Stdlib_Lazy.get(a)` by substituting through a one-field module block
+  - `tests/tests/src/recursive_react_component.res` remains a separate drift in
+    the recursive-module family; its current mismatch is the parameter name
+    (`props` vs `param`), not the fixed single-field projection substitution
+  - `tests/tests/src/ExternalShadow.res` and `tests/tests/src/async_jsx.res`
+    remained exact as unchanged guard files after the same pass change
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **537 / 657** -> **537 / 657** (**no change**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **112** -> **112** (**no change**)
+- Keep this change because the removed substitution was Rust-only. OCaml's
+  `js_pass_flatten_and_mark_dead` explicitly refuses to build projection
+  substitutions for single-field immutable blocks, so the Rust pass now matches
+  that stage boundary even though the current dirty-tree wrapper totals stay
+  flat.
+
+Latest iteration on **2026-04-16**:
+
 - Active slice: port the OCaml `Js_exp_make.bin` `Length` comparison rewrites
   so Rust folds pure `x.length >= 0` guards to `true` and canonicalizes
   `x.length > 0` to `x.length !== 0`

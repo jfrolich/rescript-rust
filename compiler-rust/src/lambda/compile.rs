@@ -10301,18 +10301,35 @@ fn flatten_and_mark_dead_statement(
                         };
                     }
 
+                    // OCaml's js_pass_flatten_and_mark_dead only records block
+                    // substitutions for immutable Caml blocks with at least two
+                    // fields. Single-field module blocks stay materialized.
                     return Statement {
                         desc: {
                             let rewritten_value = Expression {
                                 desc: ExpressionDesc::CamlBlock(
-                                    items,
-                                    MutableFlag::Immutable,
-                                    tag,
-                                    tag_info,
-                                ),
+                                    items
+                                        .into_iter()
+                                        .map(|item| {
+                                            flatten_and_mark_dead_expression(
+                                                item,
+                                                id_gen,
+                                                substitution,
+                                                jsx_preserve,
+                                            )
+                                        })
+                                        .collect(),
+                                        MutableFlag::Immutable,
+                                        Box::new(flatten_and_mark_dead_expression(
+                                            *tag,
+                                            id_gen,
+                                            substitution,
+                                            jsx_preserve,
+                                        )),
+                                        tag_info,
+                                    ),
                                 comment: value_comment,
                             };
-                            substitution.insert(decl.ident.clone(), rewritten_value.clone());
                             StatementDesc::Variable(VariableDeclaration {
                                 ident: decl.ident,
                                 value: Some(rewritten_value),
@@ -22469,7 +22486,7 @@ mod tests {
     }
 
     #[test]
-    fn js_flatten_and_mark_dead_substitutes_single_field_module_reads() {
+    fn js_flatten_and_mark_dead_keeps_single_field_module_reads_materialized_like_ocaml() {
         let module = Ident::create_local("M");
         let eq = Ident::create_local("Eq");
         let projected = Ident::create_local("EQ");
@@ -22537,13 +22554,16 @@ mod tests {
             StatementDesc::Variable(VariableDeclaration {
                 value:
                     Some(Expression {
-                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        desc: ExpressionDesc::StaticIndex(target, field, Some(index)),
                         ..
                     }),
                 ..
-            }) if id.same(&eq) => {}
+            }) if matches!(
+                &target.as_ref().desc,
+                ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) if id.same(&module)
+            ) && field == "Eq" && *index == 0 => {}
             other => panic!(
-                "expected the single-field module projection to inline to the field value, got {other:?}"
+                "expected the single-field module projection to stay materialized, got {other:?}"
             ),
         }
     }
@@ -22627,7 +22647,8 @@ mod tests {
     }
 
     #[test]
-    fn js_flatten_and_mark_dead_does_not_preserve_component_make_reads_without_jsx_preserve() {
+    fn js_flatten_and_mark_dead_keeps_single_field_component_make_reads_without_jsx_preserve_like_ocaml()
+    {
         let module = Ident::create_local("Foo");
         let component = Ident::create_local("Async_jsx$Foo");
         let rendered = print_deps_program(
@@ -22692,12 +22713,12 @@ mod tests {
         );
 
         assert!(
-            rendered.contains("JsxRuntime.jsx(Async_jsx$Foo, {})"),
-            "without jsx preserve the single-field module projection should inline:\n{rendered}"
+            rendered.contains("JsxRuntime.jsx(Foo.make, {})"),
+            "without jsx preserve the single-field module projection should stay materialized:\n{rendered}"
         );
         assert!(
-            !rendered.contains("Foo.make"),
-            "component .make read should not survive when jsx preserve is disabled:\n{rendered}"
+            !rendered.contains("JsxRuntime.jsx(Async_jsx$Foo, {})"),
+            "single-field component .make reads should not inline in this pass:\n{rendered}"
         );
     }
 
