@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 527 / 657 with 8 unrelated compile errors and 122 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 528 / 657 with 8 unrelated compile errors and 121 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **527 / 657**
+- JS snapshot parity: **528 / 657**
 - Compile errors: **8**
-- Output diffs: **122**
+- Output diffs: **121**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,59 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `525 / 657` unless the
+Do **not** replace the recorded project baseline with `528 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: use the OCaml single-handler tail-return staticcatch path for
+  bound unit-return handlers whose shared handler has no static raises, instead
+  of always forcing a local `exit` temp in that case
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_staticcatch`'s
+  single-handler tail-return branch guarded by
+  `Lam_compile_context.no_static_raise_in_handler`, which appends the shared
+  handler after the body instead of materializing `let exit = 0`
+- Rust change:
+  - extracted `compile_fallthrough_staticcatch_return_block(...)` so the
+    shared-tail lowering is reusable outside the existing switch-specific
+    fallthrough cases
+  - added `uses_pseudo_fallthrough_staticcatch_return(...)` for the
+    OCaml-aligned subset: unit-return staticcatchs with bindings, no active
+    fallthrough handler, at least one matching static raise in the body, and a
+    handler with no static raises
+  - added focused regression coverage to keep bound unit-return handlers on
+    the shared-tail path without reintroducing exit sentinels
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml unit_return_staticcatch_bindings_without_handler_exits_share_fallthrough_tail -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_gpr_3609 -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_staticcatch_binding_handlers_that_raise_outward_avoid_exit_temps -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh test_static_catch_ident`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_3609_test`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_static_catch_ident.res` now matches its checked-in
+    snapshot again; the simple exception-pattern staticcatch no longer lowers
+    to a Rust-only `let exit = 0; ... if (exit === 1)` wrapper around the
+    shared loop tail
+  - `tests/tests/src/gpr_3609_test.res` remained exact as a guard, so the
+    earlier outward-forwarding nested staticcatch fix stayed intact
+  - the current dirty-tree wrapper improved by one exact JS snapshot while
+    keeping the unrelated compile-error set unchanged
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **527 / 657** -> **528 / 657** (**+1**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **122** -> **121** (**-1**)
+- Keep this change because the previous Rust path was overmatching the
+  bound-unit-handler fallback and always materializing a local exit sentinel,
+  while OCaml keeps these single-handler/no-exit cases on the shared tail
+  path. Reusing the fallthrough return lowering restores that backend shape
+  without regressing the guarded nested-staticcatch cases.
 
 Latest iteration on **2026-04-16**:
 

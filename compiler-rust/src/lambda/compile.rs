@@ -1239,25 +1239,14 @@ impl LambdaCompiler {
             Lambda::LstaticCatch(body, (label, bindings), handler)
                 if self.uses_fallthrough_staticcatch_return(body, *label, bindings, handler) =>
             {
-                let mut block: Block = bindings
-                    .iter()
-                    .map(|binding| {
-                        Statement::variable(VariableDeclaration {
-                            ident: binding.clone(),
-                            value: None,
-                            property: LetKind::Variable,
-                            ident_info: IdentInfo::default(),
-                        })
-                    })
-                    .collect();
-                let body_block = self.with_fallthrough_return_handler(*label, bindings, |this| {
-                    this.compile_return_block(body)
-                });
-                block.extend(body_block);
-                if !block_terminates(&block) {
-                    block.extend(self.compile_return_block(handler));
-                }
-                block
+                self.compile_fallthrough_staticcatch_return_block(*label, bindings, body, handler)
+            }
+            Lambda::LstaticCatch(body, (label, bindings), handler)
+                if self.uses_pseudo_fallthrough_staticcatch_return(
+                    body, *label, bindings, handler,
+                ) =>
+            {
+                self.compile_fallthrough_staticcatch_return_block(*label, bindings, body, handler)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 if (self.return_unit_stack.last().copied() == Some(true) && !bindings.is_empty())
@@ -1358,6 +1347,34 @@ impl LambdaCompiler {
         Some(block)
     }
 
+    fn compile_fallthrough_staticcatch_return_block(
+        &mut self,
+        label: i32,
+        bindings: &[Ident],
+        body: &Lambda,
+        handler: &Lambda,
+    ) -> Block {
+        let mut block: Block = bindings
+            .iter()
+            .map(|binding| {
+                Statement::variable(VariableDeclaration {
+                    ident: binding.clone(),
+                    value: None,
+                    property: LetKind::Variable,
+                    ident_info: IdentInfo::default(),
+                })
+            })
+            .collect();
+        let body_block = self.with_fallthrough_return_handler(label, bindings, |this| {
+            this.compile_return_block(body)
+        });
+        block.extend(body_block);
+        if !block_terminates(&block) {
+            block.extend(self.compile_return_block(handler));
+        }
+        block
+    }
+
     fn uses_fallthrough_staticcatch_return(
         &self,
         body: &Lambda,
@@ -1453,6 +1470,21 @@ impl LambdaCompiler {
             },
             _ => false,
         }
+    }
+
+    fn uses_pseudo_fallthrough_staticcatch_return(
+        &self,
+        body: &Lambda,
+        label: i32,
+        bindings: &[Ident],
+        handler: &Lambda,
+    ) -> bool {
+        self.return_unit_stack.last().copied() == Some(true)
+            && !bindings.is_empty()
+            && self.fallthrough_return_handlers.is_empty()
+            && !matches!(body, Lambda::Lswitch(_, _) | Lambda::LstringSwitch(_, _, _))
+            && lambda_contains_static_raise_to_label(body, label, bindings.len())
+            && !lambda_contains_static_raise(handler)
     }
 
     fn active_fallthrough_return_handler(&self) -> Option<&FallthroughReturnHandler> {
@@ -16988,6 +17020,57 @@ mod tests {
         assert!(
             !rendered.contains("if (exit ==="),
             "gpr_3609-style nested switch forwarding still guards the shared tail behind an exit sentinel:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn unit_return_staticcatch_bindings_without_handler_exits_share_fallthrough_tail() {
+        let mut compiler = LambdaCompiler::new();
+        let cond1 = Ident::create_local("cond1");
+        let cond2 = Ident::create_local("cond2");
+        let first = Ident::create_local("first");
+        let second = Ident::create_local("second");
+        let carried = Ident::create_local("carried");
+        let seen = Ident::create_local("seen");
+        let block = compiler.with_return_unit_context(true, |compiler| {
+            compiler.compile_return_block(&Lambda::LstaticCatch(
+                Box::new(Lambda::if_(
+                    Lambda::var(cond1.clone()),
+                    Lambda::static_raise(1, vec![Lambda::var(first.clone())]),
+                    Lambda::LifThenElse(
+                        Box::new(Lambda::var(cond2.clone())),
+                        Box::new(Lambda::static_raise(1, vec![Lambda::var(second.clone())])),
+                        Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
+                    ),
+                )),
+                (1, vec![carried.clone()]),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lassign(
+                        seen.clone(),
+                        Box::new(Lambda::var(carried.clone())),
+                    )),
+                    Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
+                )),
+            ))
+        });
+
+        let rendered = print_block(&block);
+        assert!(
+            !rendered.contains("let exit ="),
+            "single-handler unit-return staticcatch bindings reintroduced an exit temp:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("let carried;"),
+            "expected the carried binding to stay declared ahead of the shared tail:\n{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("seen = carried;").count(),
+            1,
+            "expected the handler tail to stay shared exactly once:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("return;"),
+            "expected the non-matching branch to keep its early return:\n{rendered}"
         );
     }
 
