@@ -507,14 +507,18 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Borrow a cached qualified module-components view.
+    /// Clones the components before calling `f` to avoid holding the borrow
+    /// across the callback (which may re-enter and register new components).
     pub(crate) fn with_qualified_module_components<R>(
         &self,
         key: &QualifiedModuleComponentsCacheKey,
         f: impl FnOnce(&super::env_lazy::QualifiedModuleComponents) -> R,
     ) -> Option<R> {
-        let cache = self.qualified_module_components_cache.borrow();
-        let components = cache.get(key)?;
-        Some(f(components))
+        let components = {
+            let cache = self.qualified_module_components_cache.borrow();
+            cache.get(key)?.clone()
+        };
+        Some(f(&components))
     }
 
     /// Look up a module alias target from the qualified module components cache.

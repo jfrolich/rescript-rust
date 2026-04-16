@@ -215,18 +215,31 @@ fn get_primitive_arity_from_type(
     env: &Env,
     ty: TypeExprRef,
 ) -> Option<i32> {
+    get_primitive_arity_from_type_depth(ctx, env, ty, 0)
+}
+
+fn get_primitive_arity_from_type_depth(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+    depth: u32,
+) -> Option<i32> {
+    if depth > 100 {
+        return None;
+    }
     let repr = ctx.repr(ty);
     match &*ctx.get_desc(repr) {
         crate::types::TypeDesc::Tarrow { arity, .. } => *arity,
         crate::types::TypeDesc::Tlink(next) | crate::types::TypeDesc::Tsubst(next) => {
-            get_primitive_arity_from_type(ctx, env, *next)
+            get_primitive_arity_from_type_depth(ctx, env, *next, depth + 1)
         }
         crate::types::TypeDesc::Tconstr { .. } => {
-            let expanded = crate::types::ctype::expand_head(ctx, env, ty);
-            if expanded == ty {
+            let expanded = crate::types::ctype::expand_head(ctx, env, repr);
+            let expanded_repr = ctx.repr(expanded);
+            if expanded_repr == repr {
                 None
             } else {
-                get_primitive_arity_from_type(ctx, env, expanded)
+                get_primitive_arity_from_type_depth(ctx, env, expanded_repr, depth + 1)
             }
         }
         _ => None,

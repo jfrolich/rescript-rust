@@ -717,11 +717,13 @@ impl PersistentEnv {
     /// Load a module from a .cmi file, or fall back to the source path embedded
     /// in a sibling `.ast` when the module is implementation-only.
     fn load_module<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<PersStruct> {
-        // In in-process mode, the registry/source fallback is authoritative.
-        // Never touch `.cmi` files on disk, even if stale artifacts happen to
-        // exist on the load path.
+        // In in-process mode, try source fallback first, then fall back to CMI
+        // loading for runtime modules that weren't pre-compiled into the registry.
         if self.in_process_mode {
-            return self.load_module_from_source_path_fallback(name, ctx);
+            if let Some(ps) = self.load_module_from_source_path_fallback(name, ctx) {
+                return Some(ps);
+            }
+            // Fall through to CMI loading below
         }
 
         let cmi_filename = format!("{}.cmi", name);

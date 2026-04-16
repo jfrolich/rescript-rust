@@ -131,21 +131,12 @@ pub fn compile(
     // so the namespace signature must be available in the PersistentEnv first.
     if build_state.build_mode().is_in_process() {
         register_namespace_signatures(build_state);
-        // Register source paths for ALL modules so the pre-compilation can
-        // type-check implicit dependencies (e.g., via `-open Pervasives`).
-        register_source_fallback_paths(build_state);
-        // Pre-compile @rescript/runtime modules into the registry so the
-        // main parallel loop doesn't need source-fallback (which overflows
-        // worker thread stacks due to deep recursion).
-        // Spawn on a Rayon worker thread (64MB stack) because the main thread
-        // only has 8MB, which is insufficient for deep source-fallback
-        // type-checking chains during runtime pre-compilation.
-        rayon::scope(|s| {
-            s.spawn(|_| {
-                pre_compile_runtime_modules(build_state);
-            });
-        });
-        // Clear source-fallback paths after pre-compilation. The main compile
+        // Runtime modules (Pervasives, Stdlib, Js, Belt, etc.) are loaded
+        // on-demand from their CMI files via the include_paths mechanism.
+        // No source pre-compilation needed — the CMI files have fully
+        // resolved module aliases and signatures.
+
+        // Clear source-fallback paths — the main compile
         // loop must NOT use source-fallback (it causes stack overflow on Rayon
         // workers). Modules not pre-compiled into the registry will fail to
         // load, producing type errors instead of crashes.
@@ -877,6 +868,13 @@ fn build_compiler_options(
 
     // Add dev dependency paths if the module is type:dev
     // (omitted for simplicity in first cut; can be added later)
+
+    // Add the runtime lib/ocaml directory so modules can resolve
+    // Pervasives, Stdlib, Js, Belt, etc. from CMI when not yet in the registry.
+    let runtime_ocaml = build_state.compiler_info.runtime_path.join("lib").join("ocaml");
+    if !include_paths.contains(&runtime_ocaml) {
+        include_paths.push(runtime_ocaml);
+    }
 
     // Extract JSX version from root config
     let jsx_version = root_config
