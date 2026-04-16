@@ -8566,12 +8566,75 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_value(inner) => {
             let (ref rec_flag, ref bindings) = **inner;
-            // Value binding: let P = E
-            let (typed_bindings, new_env) = type_value_bindings(tctx, env, *rec_flag, bindings)?;
 
-            // Register @comptime functions
-            for vb in &typed_bindings {
-                register_comptime_binding(tctx, arena, vb);
+            // Check for @comptime bindings BEFORE type-checking.
+            // Comptime function bodies contain comptime-only expressions
+            // (@typeInfo, inline for, etc.) that can't be type-checked
+            // without concrete type arguments. Store them for later
+            // specialization at call sites.
+            let mut has_comptime = false;
+            for vb in bindings {
+                let is_comptime = vb.pvb_attributes.iter().any(|(name, _)| {
+                    arena.get_string(name.txt) == "comptime"
+                });
+                if is_comptime {
+                    has_comptime = true;
+                    // Extract function name and store the parse tree body
+                    let pat = arena.get_pat(vb.pvb_pat);
+                    if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) = &*pat.ppat_desc {
+                        let name = arena.get_string(name_loc.txt).to_string();
+                        let comptime_fn = crate::types::comptime::ComptimeFunction {
+                            body_expr_idx: vb.pvb_expr,
+                            params: Vec::new(),
+                            name: name.clone(),
+                        };
+                        tctx.comptime_functions.insert(name.clone(), comptime_fn);
+                    }
+                }
+            }
+
+            // Skip comptime-only bindings in normal type checking
+            let bindings_to_check: Vec<_> = if has_comptime {
+                bindings.iter().filter(|vb| {
+                    !vb.pvb_attributes.iter().any(|(name, _)| {
+                        arena.get_string(name.txt) == "comptime"
+                    })
+                }).cloned().collect()
+            } else {
+                bindings.to_vec()
+            };
+
+            // Value binding: let P = E
+            let (typed_bindings, mut new_env) = if bindings_to_check.is_empty() {
+                // All bindings are comptime — no normal type checking needed
+                (vec![], env.clone())
+            } else {
+                type_value_bindings(tctx, env, *rec_flag, &bindings_to_check)?
+            };
+
+            // Add comptime functions to the environment so call sites can find them
+            if has_comptime {
+                for vb in bindings {
+                    let is_comptime = vb.pvb_attributes.iter().any(|(name, _)| {
+                        arena.get_string(name.txt) == "comptime"
+                    });
+                    if is_comptime {
+                        let pat = arena.get_pat(vb.pvb_pat);
+                        if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) = &*pat.ppat_desc {
+                            let name = arena.get_string(name_loc.txt).to_string();
+                            let fn_id = tctx.type_ctx.create_ident(&name);
+                            let fn_ty = tctx.type_ctx.new_var(None);
+                            let vd = crate::types::decl::ValueDescription {
+                                val_type: fn_ty,
+                                val_kind: crate::types::decl::ValueKind::ValReg,
+                                val_loc: arena.to_location(vb.pvb_loc),
+                                val_attributes: vec![],
+                                val_path: None,
+                            };
+                            new_env.add_value(fn_id, vd);
+                        }
+                    }
+                }
             }
 
             let mut sig_items = Vec::new();
@@ -12199,37 +12262,5 @@ fn compile_generated_source<'a>(
     Ok(results)
 }
 
-/// Check if a value binding has `@comptime` attribute and register
-/// its typed body in the comptime function registry.
-fn register_comptime_binding(
-    tctx: &mut crate::types::typecore::TypeCheckContext<'_>,
-    arena: &crate::parse_arena::ParseArena,
-    vb: &crate::types::typedtree::ValueBinding,
-) {
-    // Check for @comptime attribute
-    let has_comptime = vb.vb_attributes.iter().any(|(name, _)| {
-        arena.get_string(name.txt) == "comptime"
-    });
-
-    if !has_comptime {
-        return;
-    }
-
-    // Extract function name from pattern
-    let name = match &vb.vb_pat.pat_desc {
-        crate::types::typedtree::PatternDesc::Tpat_var(id, _) => id.name().to_string(),
-        _ => return, // Only register named function bindings
-    };
-
-    // Extract function body — should be a Texp_function
-    let body = vb.vb_expr.clone();
-
-    // For now, register with empty params — parameter analysis is done at call site
-    let comptime_fn = crate::types::comptime::ComptimeFunction {
-        body,
-        params: Vec::new(),
-        name: name.clone(),
-    };
-
-    tctx.comptime_functions.insert(name, comptime_fn);
-}
+// Comptime function registration is now done inline in the Pstr_value
+// handler above, before type-checking the body.

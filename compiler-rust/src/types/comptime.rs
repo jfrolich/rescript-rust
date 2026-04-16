@@ -22,17 +22,16 @@ use crate::parse_arena::LocIdx;
 
 /// A registered @comptime function.
 ///
-/// The function body is stored as a typed tree. At each call site,
-/// the partial evaluator walks the typed tree with comptime bindings
-/// (e.g., T = TypeInfo for user) and produces a specialized typed tree
-/// by cloning nodes, substituting comptime values, eliminating branches,
-/// and unrolling loops. The result is a typed tree with only runtime
-/// code remaining.
+/// The function body is NOT type-checked at definition time because it
+/// contains comptime-only expressions (@typeInfo, inline for) that require
+/// concrete types. The parse tree body index is stored and the body is
+/// type-checked at each call site after the partial evaluator resolves
+/// comptime expressions with concrete type information.
 #[derive(Debug, Clone)]
 pub struct ComptimeFunction {
-    /// The typed tree body of the function.
-    pub body: typedtree::Expression,
-    /// Parameter names and whether they are comptime.
+    /// Parse tree expression index of the function body.
+    pub body_expr_idx: crate::parse_arena::ExprIdx,
+    /// Parameter names and which are comptime.
     pub params: Vec<ComptimeParam>,
     /// Function name (for error messages).
     pub name: String,

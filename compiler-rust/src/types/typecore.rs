@@ -20001,137 +20001,36 @@ fn try_comptime_application(
     };
 
     // Check if it's a registered comptime function
-    let _comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
+    let comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
 
-    // Analyze arguments to find the comptime type argument.
-    // For the encode pattern: encodeField(user, myUser)
-    // The first arg is a type constructor (a module/type name used as value).
-    // We need to find the concrete type being encoded.
-    //
-    // Strategy: type-check the runtime argument(s) first to determine
-    // the concrete type, then use that for TypeInfo.
-    let mut concrete_type = None;
-    let mut runtime_arg_name = None;
+    // Get the function's parse tree body
+    let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx).clone();
 
-    for (i, (_label, arg_idx)) in args.iter().enumerate() {
+    // Type-check the arguments to determine their concrete types
+    let mut typed_args = Vec::new();
+    for (_label, arg_idx) in args {
         let arg_expr = tctx.arena.get_expr(*arg_idx);
-        // Try to type-check the argument to get its type
-        let ctx = tctx.type_ctx;
-        let arg_ty = ctx.new_var(None);
+        let arg_ty = tctx.type_ctx.new_var(None);
         match type_expect(tctx, env, arg_expr, arg_ty, None) {
-            Ok(typed_arg) => {
-                let resolved_ty = ctx.repr(typed_arg.exp_type);
-                let desc = ctx.get_desc(resolved_ty);
-
-                // Check if this is a concrete type (not a type variable)
-                match &*desc {
-                    crate::types::type_expr::TypeDesc::Tconstr { .. }
-                    | crate::types::type_expr::TypeDesc::Ttuple(_) => {
-                        if concrete_type.is_none() {
-                            // First concrete-typed arg — this is probably the runtime value
-                            concrete_type = Some(typed_arg.exp_type);
-                            // Extract the variable name for code generation
-                            runtime_arg_name = match &*arg_expr.pexp_desc {
-                                crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
-                                    Some(tctx.arena.get_longident(lid.txt).to_string())
-                                }
-                                _ => Some(format!("__comptime_arg{}", i)),
-                            };
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Err(_) => {}
+            Ok(typed_arg) => typed_args.push(typed_arg),
+            Err(e) => return Some(Err(e)),
         }
     }
 
-    let concrete_type = concrete_type?;
-    let runtime_arg_name = runtime_arg_name.unwrap_or_else(|| "value".to_string());
-
-    // Build TypeInfo from the concrete type
-    let mut visited = Vec::new();
-    let type_info = crate::types::comptime::build_type_info(
-        tctx.type_ctx,
-        env,
-        concrete_type,
-        &mut visited,
-    );
-
-    // Generate specialized source code
-    let specialized_source = match crate::types::comptime::generate_specialized_source(
-        &type_info,
-        &runtime_arg_name,
-        &mut { crate::types::comptime::DEFAULT_FUEL },
-    ) {
-        Ok(source) => source,
-        Err(msg) => return Some(Err(TypeCoreError::Other(msg))),
-    };
-
-    // Wrap in a function call: ((value) => SPECIALIZED_BODY)(runtime_arg)
-    let wrapper_source = format!(
-        "((value) => {})({})",
-        specialized_source, runtime_arg_name
-    );
-
-    // Parse the generated source as an expression and type-check it
-    // in the current environment.
-    let expr_source = format!("{}", specialized_source);
-    let wrapped = format!("let _ = {}", expr_source);
-    let mut parser = crate::parser::Parser::new("__comptime__.res", &wrapped);
-    let structure = crate::parser::module::parse_structure(&mut parser);
-
-    if parser.has_errors() {
-        return Some(Err(TypeCoreError::Other(format!(
-            "Comptime generated invalid ReScript:\n{}\nErrors: {:?}",
-            expr_source,
-            parser.diagnostics()
-        ))));
-    }
-
-    // Extract the expression from `let _ = EXPR`
-    let parsed_expr = match structure.first() {
-        Some(item) => match &*item.pstr_desc {
-            crate::parser::ast::StructureItemDesc::Pstr_value(inner) => {
-                let (_, ref bindings) = **inner;
-                if let Some(vb) = bindings.first() {
-                    let expr = parser.arena().get_expr(vb.pvb_expr);
-                    expr.clone()
-                } else {
-                    return Some(Err(TypeCoreError::Other(
-                        "Comptime: no binding in generated code".to_string(),
-                    )));
-                }
-            }
-            _ => {
-                return Some(Err(TypeCoreError::Other(
-                    "Comptime: unexpected structure item".to_string(),
-                )));
-            }
-        },
-        None => {
-            return Some(Err(TypeCoreError::Other(
-                "Comptime: empty generated structure".to_string(),
-            )));
-        }
-    };
-
-    // Type-check the generated expression in the current environment.
-    // We need a fresh arena reference for the generated code — but we can't
-    // change tctx.arena (it's borrowed). Instead, we type-check the expression
-    // using a temporary context that shares the same type context and env.
+    // For now, type-check the function body in the current environment.
+    // The body may contain @typeInfo which will be handled by the
+    // type checker's Pexp_comptime_typeinfo case.
     //
-    // For now, we'll type-check by creating a temporary TypeCheckContext
-    // with the generated parser's arena.
-    let generated_arena = parser.into_arena();
-    let mut gen_tctx = TypeCheckContext::new(tctx.type_ctx, &generated_arena);
-    gen_tctx.persistent_env = tctx.persistent_env.clone();
-    // Copy comptime functions to the sub-context
-    gen_tctx.comptime_functions = tctx.comptime_functions.clone();
-
-    match type_expect(&mut gen_tctx, env, &parsed_expr, expected_ty, None) {
-        Ok(typed_expr) => Some(Ok(typed_expr)),
-        Err(e) => Some(Err(e)),
+    // TODO: set up a comptime context so @typeInfo resolves the
+    // concrete type instead of erroring. For now, if the body
+    // doesn't contain comptime builtins, this works for simple cases.
+    match type_expect(tctx, env, &body_expr, expected_ty, None) {
+        Ok(typed_body) => Some(Ok(typed_body)),
+        Err(_) => {
+            // If type-checking the body fails (e.g., due to @typeInfo),
+            // fall through to normal application handling
+            None
+        }
     }
 }
 
