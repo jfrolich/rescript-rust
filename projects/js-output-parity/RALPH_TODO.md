@@ -69,6 +69,56 @@ reproduces a stable no-compile-error baseline in the current dirty worktree:
 
 Latest iteration on **2026-04-16**:
 
+- Active slice: restore the missing body-level shared-tail nested-`if` printer
+  merge from the earlier JS parity history so unit-return function bodies can
+  re-materialize an explicit shared `else` arm before final dump when the tail
+  shape is `[if (...) { if (...) ... } ; fallback ; return]`
+- Active backend focus for this slice is **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change stays in `compiler-rust/src/js_ir/printer.rs`
+- OCaml reference:
+  - `compiler/core/js_dump.ml`, especially `function_body`'s tail-statement
+    handling after unit-return elision
+  - local recovered parity history in commit `c0f200e14`
+    (`js-output: print shared unit-function tails like ocaml`), which added
+    the missing body-level shared-tail merge that had been lost from the
+    current tree after the branch reset
+- Rust change:
+  - restored `try_function_body_shared_tail_nested_if_merge(...)` in
+    `compiler-rust/src/js_ir/printer.rs`
+  - re-wired `print_function_body(...)` to consult that helper before the
+    narrower trailing-`return undefined` nested-`if` merge
+  - restored regression coverage in
+    `test_print_unit_function_body_merges_shared_tail_into_nested_if_else`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_unit_function_body_merges_shared_tail_into_nested_if_else -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_unit_function_tail_merges_shared_else_guard_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 20 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_1891_test.res -o /tmp/gpr_1891_test.mjs`
+  - `diff -u tests/tests/src/gpr_1891_test.mjs /tmp/gpr_1891_test.mjs`
+  - `timeout 20 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `diff -u tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - the restored printer helper and both focused unit tests now pass again in
+    the current tree
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained an exact
+    snapshot match
+  - live snapshot diffs `tests/tests/src/gpr_1891_test.res` and
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` remained
+    unchanged, which shows the current `579 / 657` frontier is blocked by a
+    different shared-tail / branch-shape slice than the one this recovered
+    helper covers
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **579 / 657** -> **579 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **78** -> **78** (**no change**)
+- Keep this change because it restores a previously verified OCaml-aligned
+  printer guardrail that had fallen out of the tree after the branch reset.
+  Even though the current live failing set did not move, the helper is now
+  covered again and does not regress the authoritative harness.
+
+Latest iteration on **2026-04-16**:
+
 - Active slice: keep complete named-variant return switches with plain
   non-raising nested `staticcatch` handlers inline in the switch instead of
   peeling one handler out as a trailing fallthrough tail

@@ -2399,6 +2399,17 @@ impl JsPrinter {
             return;
         }
 
+        if let [stmt, trailing_stmt, trailing_return] = stmts.as_slice() {
+            if return_is_undefined(trailing_return) {
+                if let Some(merged) =
+                    try_function_body_shared_tail_nested_if_merge(stmt, trailing_stmt, trailing_return)
+                {
+                    self.print_function_tail_statement(&merged, return_unit);
+                    return;
+                }
+            }
+        }
+
         if let [stmt, trailing_return] = stmts.as_slice() {
             if return_is_undefined(trailing_return) {
                 if let Some(merged) =
@@ -2584,6 +2595,48 @@ fn try_function_body_trailing_return_nested_if_merge(
         }
         _ => None,
     }
+}
+
+fn try_function_body_shared_tail_nested_if_merge(
+    stmt: &Statement,
+    trailing_stmt: &Statement,
+    trailing_return: &Statement,
+) -> Option<Statement> {
+    let stmt = unwrap_single_block_stmt(stmt);
+    let StatementDesc::If(cond, then_, else_) = &stmt.desc else {
+        return None;
+    };
+    if !else_.is_empty() {
+        return None;
+    }
+
+    let [nested_stmt] = then_.as_slice() else {
+        return None;
+    };
+    let nested_stmt = unwrap_single_block_stmt(nested_stmt);
+    let StatementDesc::If(inner_cond, inner_then, inner_else) = &nested_stmt.desc else {
+        return None;
+    };
+    if !inner_else.is_empty() {
+        return None;
+    }
+
+    Some(Statement {
+        desc: StatementDesc::If(
+            cond.clone(),
+            vec![
+                Statement::new(StatementDesc::If(
+                    inner_cond.clone(),
+                    inner_then.clone(),
+                    vec![],
+                )),
+                trailing_stmt.clone(),
+                trailing_return.clone(),
+            ],
+            vec![trailing_stmt.clone(), trailing_return.clone()],
+        ),
+        comment: stmt.comment.clone(),
+    })
 }
 
 fn try_unit_function_tail_shared_else_guard_merge(stmt: &Statement) -> Option<Statement> {
@@ -5314,6 +5367,79 @@ mod tests {
         assert!(rendered.contains("return;"));
         assert!(!rendered.contains("if (state.active)"));
         assert!(!rendered.contains("else"));
+    }
+
+    #[test]
+    fn test_print_unit_function_body_merges_shared_tail_into_nested_if_else() {
+        let do_with_b = Ident::create_local("doWithB");
+        let console_log = Expression::qualified(
+            ModuleId {
+                id: Ident::create_local("console"),
+                kind: Kind::External {
+                    name: "console".to_string(),
+                    default: false,
+                    import_attributes: None,
+                },
+                dynamic_import: false,
+            },
+            Some("log".to_string()),
+        );
+        let b = Ident::create_local("b");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: do_with_b,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![b.clone()],
+                body: vec![
+                    Statement::new(StatementDesc::If(
+                        Expression::bin(
+                            BinOp::NotEqEq,
+                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
+                                b.clone(),
+                            )))),
+                            Expression::string("object"),
+                        ),
+                        vec![Statement::new(StatementDesc::If(
+                            Expression::bin(
+                                BinOp::EqEqEq,
+                                Expression::var(b),
+                                Expression::string("One"),
+                            ),
+                            vec![
+                                Statement::exp(Expression::call(
+                                    console_log.clone(),
+                                    vec![Expression::string("aaa")],
+                                    CallInfo::default(),
+                                )),
+                                Statement::return_(Expression::undefined(true)),
+                            ],
+                            vec![],
+                        ))],
+                        vec![],
+                    )),
+                    Statement::exp(Expression::call(
+                        console_log,
+                        vec![Expression::string("twwwoooo")],
+                        CallInfo::default(),
+                    )),
+                    Statement::return_(Expression::undefined(true)),
+                ],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (typeof b !== \"object\") {"), "{rendered}");
+        assert!(rendered.contains("if (b === \"One\") {"), "{rendered}");
+        assert!(rendered.contains("console.log(\"aaa\");"), "{rendered}");
+        assert!(rendered.contains("} else {"), "{rendered}");
+        assert!(rendered.contains("console.log(\"twwwoooo\");"), "{rendered}");
+        assert!(rendered.contains("return;"), "{rendered}");
+        assert!(!rendered.contains("&&"), "{rendered}");
     }
 
     #[test]
