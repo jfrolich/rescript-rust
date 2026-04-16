@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 570 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 87 output diffs
+**Status:** 573 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 84 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **570 / 657**
+- JS snapshot parity: **573 / 657**
 - Compile errors: **0**
-- Output diffs: **87**
+- Output diffs: **84**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,66 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **570 / 657**
+- JS snapshot parity: **573 / 657**
 - Compile errors: **0**
-- Output diffs: **87**
+- Output diffs: **84**
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: port OCaml's `Js_exp_make.typeof` folding for supported
+  literal expressions and keep the resulting strict `typeof` comparisons
+  materialized instead of letting Rust fold them past the OCaml JS shape
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; the OCaml behavior lives in `compiler/core/js_exp_make.ml`
+  and `compiler/core/lam_compile_primitive.ml`, and the Rust change stays in
+  `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile_primitive.ml`, especially the `Ptypeof` branch
+  - `compiler/core/js_exp_make.ml`, especially `typeof`, `triple_equal`, and
+    `bin`
+- Rust change:
+  - added `ocaml_typeof_expr(...)` to mirror OCaml's `typeof` helper exactly:
+    fold `Number` / `Length` to `"number"`, `Str` to `"string"`, `Array` to
+    `"object"`, and `Bool` to `"boolean"`, while leaving all other operands as
+    raw `typeof ...`
+  - added `raw_typeof_comparison(...)` and rewired the untagged block tests,
+    variant object tests, and helper predicates to emit raw strict-comparison
+    bins around the folded `typeof` result, preserving OCaml's
+    `"number" !== "number"` shape instead of collapsing to `false`
+  - rewired `Ptypeof` lowering and the `typeof`-driven named string-switch
+    discriminants through the same OCaml helper so literal inputs fold before
+    later backend stages exactly where OCaml folds them
+  - added regression coverage in
+    `typeof_folding_matches_ocaml_js_exp_make_for_supported_literals` and
+    `typeof_literal_comparisons_stay_materialized_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release typeof_folding_matches_ocaml_js_exp_make_for_supported_literals -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release typeof_literal_comparisons_stay_materialized_like_ocaml -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release lowers_pisint_to_typeof_number_check -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh src/stdlib/Stdlib_TempTests.res`
+  - `timeout 30 ./scripts/test_js_single.sh src/obj_magic_test.res`
+  - `timeout 30 ./scripts/test_js_single.sh src/typeof_test.res --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/stdlib/Stdlib_TempTests.res` now matches its checked-in
+    snapshot again; the `%typeof` call over the literal `1` now lowers to
+    OCaml's `"number"` string literal instead of staying as `typeof 1`
+  - `tests/tests/src/obj_magic_test.res` now matches its checked-in snapshot
+    again; literal-backed `typeof ... !== "number"` guards now print as
+    OCaml's materialized string comparisons rather than Rust's unfused raw
+    `typeof` expressions
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained exact after
+    the same backend-lowering change
+  - `tests/tests/src/typeof_test.res` still differs on the separate
+    `if (...) { return false; } switch (...)` control-flow normalization
+    cluster, which confirms this slice stayed scoped to `typeof` expression
+    construction rather than broader statement cleanup
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **571 / 657** -> **573 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **86** -> **84** (**-2**)
 
 Latest iteration on **2026-04-16**:
 

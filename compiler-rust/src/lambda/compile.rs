@@ -2714,14 +2714,7 @@ impl LambdaCompiler {
         let overlap_literal_disjunction =
             || ocaml_literal_fold_right_or(self, &expr, &literal_cases);
         let typeof_neq = |type_name: &str| {
-            (
-                Expression::bin(
-                    BinOp::NotEqEq,
-                    Expression::new(ExpressionDesc::Typeof(Box::new(expr.clone()))),
-                    Expression::string(type_name),
-                ),
-                4usize,
-            )
+            (raw_typeof_comparison(expr.clone(), BinOp::NotEqEq, type_name), 4usize)
         };
 
         let is_not_block_case = |block_type: &SwitchBlockType| -> (Expression, usize) {
@@ -2867,11 +2860,7 @@ impl LambdaCompiler {
     }
 
     fn builtin_untagged_typeof_test(&self, expr: Expression, type_name: &str) -> Expression {
-        Expression::bin(
-            BinOp::EqEqEq,
-            Expression::new(ExpressionDesc::Typeof(Box::new(expr))),
-            Expression::string(type_name),
-        )
+        raw_typeof_comparison(expr, BinOp::EqEqEq, type_name)
     }
 
     fn builtin_untagged_instance_test(
@@ -3132,7 +3121,7 @@ impl LambdaCompiler {
         } else {
             self.compile_named_string_switch_assignment_with_strategy(
                 result,
-                Expression::new(ExpressionDesc::Typeof(Box::new(scrut_expr.clone()))),
+                ocaml_typeof_expr(scrut_expr.clone()),
                 &typeof_cases,
                 self.block_switch_default(switch),
                 self.block_switch_complete(switch),
@@ -3265,7 +3254,7 @@ impl LambdaCompiler {
                 .unwrap_or_default()
         } else {
             self.compile_named_string_switch_return_with_strategy(
-                Expression::new(ExpressionDesc::Typeof(Box::new(scrut_expr.clone()))),
+                ocaml_typeof_expr(scrut_expr.clone()),
                 &typeof_cases,
                 self.block_switch_default(switch),
                 self.block_switch_complete(switch),
@@ -3397,7 +3386,7 @@ impl LambdaCompiler {
                 .unwrap_or_default()
         } else {
             self.compile_named_string_switch_effect_with_strategy(
-                Expression::new(ExpressionDesc::Typeof(Box::new(scrut_expr.clone()))),
+                ocaml_typeof_expr(scrut_expr.clone()),
                 &typeof_cases,
                 self.block_switch_default(switch),
                 self.block_switch_complete(switch),
@@ -3750,19 +3739,11 @@ impl LambdaCompiler {
     }
 
     fn variant_object_test(&self, expr: Expression) -> Expression {
-        Expression::bin(
-            BinOp::EqEqEq,
-            Expression::new(ExpressionDesc::Typeof(Box::new(expr))),
-            Expression::string("object"),
-        )
+        raw_typeof_comparison(expr, BinOp::EqEqEq, "object")
     }
 
     fn variant_non_object_test(&self, expr: Expression) -> Expression {
-        Expression::bin(
-            BinOp::NotEqEq,
-            Expression::new(ExpressionDesc::Typeof(Box::new(expr))),
-            Expression::string("object"),
-        )
+        raw_typeof_comparison(expr, BinOp::NotEqEq, "object")
     }
 
     fn dispatch_named_variant_branches(
@@ -5700,7 +5681,7 @@ impl LambdaCompiler {
                 ),
                 Box::new(Expression::undefined(true)),
             )),
-            Ptypeof => Expression::new(ExpressionDesc::Typeof(Box::new(compiled_args[0].clone()))),
+            Ptypeof => ocaml_typeof_expr(compiled_args[0].clone()),
             Pintoffloat => to_int32(compiled_args[0].clone()),
             Pfloatofint => compiled_args
                 .first()
@@ -10305,12 +10286,27 @@ fn int32_offset(expr: Expression, offset: i32) -> Expression {
     }
 }
 
+fn ocaml_typeof_expr(expr: Expression) -> Expression {
+    let Expression { desc, comment } = expr;
+    match desc {
+        ExpressionDesc::Number(_) | ExpressionDesc::Length(_, _) => Expression::string("number"),
+        ExpressionDesc::Str { .. } => Expression::string("string"),
+        ExpressionDesc::Array(_, _) => Expression::string("object"),
+        ExpressionDesc::Bool(_) => Expression::string("boolean"),
+        desc => Expression::new(ExpressionDesc::Typeof(Box::new(Expression { desc, comment }))),
+    }
+}
+
+fn raw_typeof_comparison(expr: Expression, op: BinOp, type_name: &str) -> Expression {
+    Expression::new(ExpressionDesc::Bin(
+        op,
+        Box::new(ocaml_typeof_expr(expr)),
+        Box::new(Expression::string(type_name)),
+    ))
+}
+
 fn is_type_number_expr(expr: Expression) -> Expression {
-    Expression::bin(
-        BinOp::EqEqEq,
-        Expression::new(ExpressionDesc::Typeof(Box::new(expr))),
-        Expression::string("number"),
-    )
+    raw_typeof_comparison(expr, BinOp::EqEqEq, "number")
 }
 
 fn pure_indexed_block_item(target: &Expression, idx: i32) -> Option<Expression> {
@@ -10440,11 +10436,7 @@ fn block_with_return_expr_iife(mut block: Block, expr: Expression) -> Expression
 }
 
 fn is_type_object_expr(expr: Expression) -> Expression {
-    Expression::bin(
-        BinOp::EqEqEq,
-        Expression::new(ExpressionDesc::Typeof(Box::new(expr))),
-        Expression::string("object"),
-    )
+    raw_typeof_comparison(expr, BinOp::EqEqEq, "object")
 }
 
 fn strict_eq_int(expr: Expression, value: i32) -> Expression {
@@ -27179,6 +27171,41 @@ let fib3 = n => {
             print_expression(&compiled.expr) == "typeof value === \"number\"",
             "rendered expression was:\n{}",
             print_expression(&compiled.expr)
+        );
+    }
+
+    #[test]
+    fn typeof_folding_matches_ocaml_js_exp_make_for_supported_literals() {
+        assert_eq!(
+            print_expression(&ocaml_typeof_expr(Expression::number(Number::int(3)))),
+            "\"number\""
+        );
+        assert_eq!(
+            print_expression(&ocaml_typeof_expr(Expression::string("x"))),
+            "\"string\""
+        );
+        assert_eq!(
+            print_expression(&ocaml_typeof_expr(Expression::bool(true))),
+            "\"boolean\""
+        );
+        assert_eq!(
+            print_expression(&ocaml_typeof_expr(Expression::array(
+                vec![],
+                MutableFlag::Immutable,
+            ))),
+            "\"object\""
+        );
+    }
+
+    #[test]
+    fn typeof_literal_comparisons_stay_materialized_like_ocaml() {
+        assert_eq!(
+            print_expression(&raw_typeof_comparison(
+                Expression::number(Number::int(3)),
+                BinOp::NotEqEq,
+                "number",
+            )),
+            "\"number\" !== \"number\""
         );
     }
 
