@@ -92,6 +92,77 @@ let y = identity(int, 5)
 }
 
 #[test]
+fn comptime_option_inner_destructuring() {
+    // Test that `Option({inner})` binds inner as a comptime type and
+    // passes to a recursive call via `describe(inner, ...)`.
+    let source = r#"
+type maybeInt = option<int>
+
+@comptime
+let rec describe = (type t, _x: int) => {
+  switch @typeInfo(t) {
+  | Int => "int"
+  | String => "str"
+  | Option({inner}) =>
+    let _ = describe(inner, 0)
+    "option"
+  | _ => "other"
+  }
+}
+
+let y = describe(maybeInt, 0)
+"#;
+    let result = compile_with_stdlib(source, "option_destruct.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== OPTION DESTRUCT JS ===\n{}\n=== END ===", output);
+            // Should have describe$option_int AND describe$int (recursive)
+            assert!(output.contains("describe$option_int") || output.contains("option"),
+                "Expected option specialization:\n{output}");
+        }
+        Err(e) => panic!("option destructuring should compile: {e}"),
+    }
+}
+
+#[test]
+fn comptime_field_type_access() {
+    // Test that `field.typ` (type access) works inside inline for,
+    // and can be passed to a recursive @comptime call.
+    // (`field.type` doesn't parse because `type` is a keyword)
+    let source = r#"
+type point = { x: int, y: int }
+
+@comptime
+let rec describe = (type t, _x: int) => {
+  switch @typeInfo(t) {
+  | Int => "int"
+  | String => "str"
+  | Record({fields}) =>
+    inline for field in fields {
+      let _ = describe(field.typ, 0)
+    }
+    "record"
+  | _ => "other"
+  }
+}
+
+let y = describe(point, 0)
+"#;
+    let result = compile_with_stdlib(source, "field_type.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== FIELD TYPE JS ===\n{}\n=== END ===", output);
+            // Should have describe$point AND describe$int (recursive via field.type)
+            assert!(output.contains("describe$point") || output.contains("record"),
+                "Expected point specialization:\n{output}");
+            assert!(output.contains("describe$int") || output.contains("\"int\""),
+                "Expected int specialization from field.type:\n{output}");
+        }
+        Err(e) => panic!("field.type should compile: {e}"),
+    }
+}
+
+#[test]
 fn comptime_type_param_decoder_pattern() {
     // Minimal test: type param + value param + @typeInfo(t)
     let source = r#"

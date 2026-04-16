@@ -20807,6 +20807,7 @@ fn bind_comptime_record_fields(
                 let field_values: Vec<_> = fields.iter().map(|f| {
                     crate::types::comptime::ComptimeValue::Record(vec![
                         ("name".to_string(), crate::types::comptime::ComptimeValue::String(f.name.clone())),
+                        ("type".to_string(), crate::types::comptime::ComptimeValue::Type(f.typ.clone())),
                         ("typ".to_string(), crate::types::comptime::ComptimeValue::Type(f.typ.clone())),
                         ("optional".to_string(), crate::types::comptime::ComptimeValue::Bool(f.optional)),
                         ("mutable_".to_string(), crate::types::comptime::ComptimeValue::Bool(f.mutable)),
@@ -21096,37 +21097,74 @@ fn try_comptime_application_inline(
 }
 
 /// Resolve a call-site argument as a comptime type.
-/// For `decode(user, json)`, resolves `user` as a type name.
+/// Handles:
+///   - `decode(user, json)` — resolves `user` as a type name
+///   - `decode(t, json)` — resolves `t` as a comptime type binding
+///   - `decode(field.type, json)` — resolves a record field access on a
+///     comptime Record binding (from `inline for field in fields { ... }`)
 fn resolve_comptime_type_arg(
     tctx: &TypeCheckContext<'_>,
     env: &Env,
     arg_expr: &ParsedExpression,
 ) -> Option<crate::types::comptime::TypeInfo> {
-    if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &*arg_expr.pexp_desc {
-        let longident = tctx.arena.get_longident(lid.txt);
-        let name = tctx.arena.get_string(longident.last_idx());
-        // Try as a type in the environment
-        if let Ok((id, _decl)) = env.find_type_with_id(name) {
-            let ty = tctx.type_ctx.new_constr(
-                crate::types::Path::Pident(id.clone()),
-                vec![],
-            );
-            return Some(crate::types::comptime::build_type_info(
-                tctx.type_ctx, env, ty, &mut vec![],
-            ));
+    use crate::parser::ast::ExpressionDesc;
+    use crate::types::comptime::{ComptimeValue, TypeInfo};
+
+    match &*arg_expr.pexp_desc {
+        ExpressionDesc::Pexp_ident(lid) => {
+            let longident = tctx.arena.get_longident(lid.txt);
+            let name = tctx.arena.get_string(longident.last_idx());
+
+            // Check comptime type bindings first (for `t` where t is a comptime type param)
+            if let Some(ComptimeValue::Type(ti)) = tctx.comptime_bindings.get(name) {
+                return Some(ti.clone());
+            }
+
+            // Try as a type in the environment
+            if let Ok((id, _decl)) = env.find_type_with_id(name) {
+                let ty = tctx.type_ctx.new_constr(
+                    crate::types::Path::Pident(id.clone()),
+                    vec![],
+                );
+                return Some(crate::types::comptime::build_type_info(
+                    tctx.type_ctx, env, ty, &mut vec![],
+                ));
+            }
+            // Try as a primitive type name
+            match name {
+                "string" => Some(TypeInfo::String),
+                "int" => Some(TypeInfo::Int),
+                "float" => Some(TypeInfo::Float),
+                "bool" => Some(TypeInfo::Bool),
+                "unit" => Some(TypeInfo::Unit),
+                "char" => Some(TypeInfo::Char),
+                _ => None,
+            }
         }
-        // Try as a primitive type name
-        match name {
-            "string" => return Some(crate::types::comptime::TypeInfo::String),
-            "int" => return Some(crate::types::comptime::TypeInfo::Int),
-            "float" => return Some(crate::types::comptime::TypeInfo::Float),
-            "bool" => return Some(crate::types::comptime::TypeInfo::Bool),
-            "unit" => return Some(crate::types::comptime::TypeInfo::Unit),
-            "char" => return Some(crate::types::comptime::TypeInfo::Char),
-            _ => {}
+        ExpressionDesc::Pexp_field(record_expr_idx, field_lid) => {
+            // field.type — look up the record in comptime_bindings, find the "type" entry
+            let record_expr = tctx.arena.get_expr(*record_expr_idx);
+            if let ExpressionDesc::Pexp_ident(rec_lid) = &*record_expr.pexp_desc {
+                let rec_longident = tctx.arena.get_longident(rec_lid.txt);
+                if rec_longident.is_simple() {
+                    let rec_name = tctx.arena.get_string(rec_longident.last_idx());
+                    if let Some(ComptimeValue::Record(entries)) = tctx.comptime_bindings.get(rec_name) {
+                        let field_name = {
+                            let fl = tctx.arena.get_longident(field_lid.txt);
+                            tctx.arena.get_string(fl.last_idx()).to_string()
+                        };
+                        if let Some((_, ComptimeValue::Type(ti))) =
+                            entries.iter().find(|(k, _)| k == &field_name)
+                        {
+                            return Some(ti.clone());
+                        }
+                    }
+                }
+            }
+            None
         }
+        _ => None,
     }
-    None
 }
 
 /// Build a Texp_apply calling a generated monomorphized function.
