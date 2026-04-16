@@ -1415,7 +1415,15 @@ impl LambdaCompiler {
             return None;
         }
 
+        let then_is_trivial_unit = self.lambda_is_trivial_unit_undefined(then_);
         let else_is_trivial_unit = self.lambda_is_trivial_unit_undefined(else_);
+        if then_is_trivial_unit && else_is_trivial_unit {
+            let cond_compiled = self.compile_expr(cond);
+            let mut block = cond_compiled.prelude;
+            push_effect_expression(&mut block, cond_compiled.expr);
+            return Some(block);
+        }
+
         if !else_is_trivial_unit {
             return None;
         }
@@ -18576,6 +18584,64 @@ mod tests {
     }
 
     #[test]
+    fn unit_return_function_with_trivial_if_branches_keeps_condition_effect_only() {
+        let mut compiler = LambdaCompiler::new();
+        let effect = Ident::create_local("effect");
+        let body = Lambda::LifThenElse(
+            Box::new(Lambda::apply(
+                Lambda::var(effect.clone()),
+                vec![],
+                ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                false,
+            )),
+            Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
+            Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
+        );
+        let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+            arity: 1,
+            params: vec![effect.clone()],
+            body: Box::new(body),
+            attr: crate::lambda::FunctionAttribute {
+                return_unit: true,
+                ..Default::default()
+            },
+        }));
+
+        let Expression {
+            desc: ExpressionDesc::Fun { body, .. },
+            ..
+        } = compiled.expr
+        else {
+            panic!("expected a function expression");
+        };
+
+        let [stmt] = body.as_slice() else {
+            panic!("expected a single expression statement in the function body");
+        };
+        assert!(matches!(
+            stmt,
+            Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Call(
+                        func,
+                        args,
+                        _
+                    ),
+                    ..
+                }),
+                ..
+            } if matches!(
+                &func.as_ref().desc,
+                ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) if id.same(&effect)
+            ) && args.is_empty()
+        ));
+    }
+
+    #[test]
     fn unit_return_function_keeps_positive_effect_guard_through_js_pipeline() {
         let mut compiler = LambdaCompiler::new();
         let run = Ident::create_local("run");
@@ -18649,6 +18715,19 @@ mod tests {
         assert!(
             !output.contains("if (x.length < 10) {"),
             "unexpected negative early-return guard in checked-in fixture output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn gpr_1728_unit_if_tail_stays_as_condition_effect() {
+        let output = compile_checked_in_test_file_to_js("gpr_1728_test");
+        assert!(
+            output.contains("Number.parseInt(x) !== 3;"),
+            "expected the checked-in fixture to keep the condition as an effect statement, got:\n{output}"
+        );
+        assert!(
+            !output.contains("if (Number.parseInt(x) !== 3) {"),
+            "unexpected unit-return guard for the checked-in fixture:\n{output}"
         );
     }
 

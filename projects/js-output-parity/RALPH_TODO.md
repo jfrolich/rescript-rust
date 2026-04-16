@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 541 / 657 with 8 unrelated compile errors and 108 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 542 / 657 with 8 unrelated compile errors and 107 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -80,6 +80,51 @@ Do **not** replace the recorded project baseline with `537 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: keep OCaml's effect-only lowering for unit-return `if` tails
+  when both branches are trivial unit, instead of synthesizing a Rust-only
+  `if (cond) { return; }`
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially `compile_ifthenelse` under
+    `EffectCall Not_tail` where both branch results become pure unit and
+    `remove_pure_sub_exp` falls through to `Js_output.make ... (S.exp e)`
+- Rust change:
+  - narrowed `compile_if_unit_return_tail_block(...)` so it now detects when
+    both branches are trivial unit tails and emits the condition as an effect
+    statement instead of forcing the positive guard fast path
+  - kept the existing positive-guard path for effectful taken branches with a
+    trivial unit fallback, so `array_subtle_test` and the earlier unit-tail
+    guard work remain intact
+  - added focused unit coverage for the effectful-condition / trivial-unit
+    case and a checked-in `gpr_1728_test` fixture assertion
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release unit_return_function_with_trivial_if_branches_keeps_condition_effect_only -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_1728_unit_if_tail_stays_as_condition_effect -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release array_subtle_tail_guard_keeps_positive_if_shape -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_1728_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh array_subtle_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1728_test.res` now matches its checked-in snapshot
+    again on the real harness path; Rust emits the bare
+    `Number.parseInt(x) !== 3;` effect statement like OCaml instead of the
+    drifting `if (Number.parseInt(x) !== 3) { return; }`
+  - unchanged guards `tests/tests/src/array_subtle_test.res` and
+    `tests/tests/src/ExternalShadow.res` remained exact after the same slice
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **541 / 657** -> **542 / 657** (**+1**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **108** -> **107** (**-1**)
+- Keep this change because OCaml does not turn a unit-return tail with two
+  trivial unit branches into an early-return guard. Once both branches erase
+  to pure unit, `lam_compile.ml` keeps only the condition effect; the Rust
+  backend now preserves that same backend-stage choice.
 
 Latest iteration on **2026-04-16**:
 
