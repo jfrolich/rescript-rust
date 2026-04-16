@@ -2384,7 +2384,7 @@ impl LambdaCompiler {
         if then_prelude_empty && then_expr_pure {
             block.push(Statement::if_(
                 Expression::not(cond_expr),
-                self.compiled_to_effect_block(else_compiled),
+                self.compile_effect_block(else_),
                 vec![],
             ));
             return block;
@@ -2393,7 +2393,7 @@ impl LambdaCompiler {
         if else_prelude_empty && else_expr_pure {
             block.push(Statement::if_(
                 cond_expr,
-                self.compiled_to_effect_block(then_compiled),
+                self.compile_effect_block(then_),
                 vec![],
             ));
             return block;
@@ -2401,8 +2401,8 @@ impl LambdaCompiler {
 
         block.push(Statement::if_(
             cond_expr,
-            self.compiled_to_effect_block(then_compiled),
-            self.compiled_to_effect_block(else_compiled),
+            self.compile_effect_block(then_),
+            self.compile_effect_block(else_),
         ));
         block
     }
@@ -20620,6 +20620,52 @@ mod tests {
                 ) if lhs_id.same(&slot)
             )
         ));
+    }
+
+    #[test]
+    fn effect_blocks_keep_nested_effect_ifs_out_of_value_temps() {
+        let mut compiler = LambdaCompiler::new();
+        let outer = Ident::create_local("outer");
+        let inner = Ident::create_local("inner");
+        let lhs = Ident::create_local("lhs");
+        let rhs = Ident::create_local("rhs");
+        let fallback = Ident::create_local("fallback");
+        let block = compiler.compile_effect_block(&Lambda::LifThenElse(
+            Box::new(Lambda::var(outer.clone())),
+            Box::new(Lambda::Lassign(
+                lhs.clone(),
+                Box::new(Lambda::const_(Constant::int(1))),
+            )),
+            Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::var(inner.clone())),
+                Box::new(Lambda::Lassign(
+                    rhs.clone(),
+                    Box::new(Lambda::const_(Constant::int(2))),
+                )),
+                Box::new(Lambda::Lassign(
+                    fallback.clone(),
+                    Box::new(Lambda::const_(Constant::int(3))),
+                )),
+            )),
+        ));
+
+        let rendered = print_block(&block);
+        assert!(
+            !rendered.contains("let tmp"),
+            "nested effect-position ifs reintroduced a value temp:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("lhs = 1"),
+            "expected the outer branch assignment to remain visible:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("rhs = 2"),
+            "expected the inner branch assignment to remain visible:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("fallback = 3"),
+            "expected the inner fallback assignment to remain visible:\n{rendered}"
+        );
     }
 
     #[test]

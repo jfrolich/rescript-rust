@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 576 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 81 output diffs
+**Status:** 577 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 80 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **576 / 657**
+- JS snapshot parity: **577 / 657**
 - Compile errors: **0**
-- Output diffs: **81**
+- Output diffs: **80**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,51 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **576 / 657**
+- JS snapshot parity: **577 / 657**
 - Compile errors: **0**
-- Output diffs: **81**
+- Output diffs: **80**
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: port OCaml's effect-position `compile_ifthenelse` fallback so
+  nontrivial branches are recompiled in effect context instead of being
+  forced through `compile_expr` result temps like `let tmp; ... tmp = undefined`
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; the OCaml behavior lives in `compiler/core/lam_compile.ml`,
+  and the Rust change stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially the `EffectCall Not_tail`
+    branch of `compile_ifthenelse`
+  - the OCaml fallback there recompiles `t_branch` / `f_branch` with the
+    original effect continuation before calling `S.if_`, instead of reusing
+    `NeedValue` outputs outside the narrow inspection cases
+- Rust change:
+  - in `LambdaCompiler::compile_if_effect_block`, kept the existing
+    `compile_expr` inspection for the small pure/value cases, but changed the
+    effect fallback and one-sided pure-branch paths to use
+    `compile_effect_block(then_)` / `compile_effect_block(else_)`
+  - added regression coverage in
+    `effect_blocks_keep_nested_effect_ifs_out_of_value_temps`
+- Verified focused guards for this slice:
+  - `timeout 120 env RUSTFLAGS='-Awarnings' cargo test --manifest-path compiler-rust/Cargo.toml --release lambda::compile::tests::effect_blocks_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh bs_stack_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh test_seq --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bs_stack_test.res` now matches its checked-in snapshot
+    again; the nested `else if` loop branch no longer lowers through a Rust-only
+    `tmp = undefined` value path
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained exact after
+    the same backend-lowering change
+  - `tests/tests/src/test_seq.res` still differs on the separate
+    `if (...) { ...; continue; } throw` placement cluster, which confirms this
+    slice stayed scoped to effect-position nested-if lowering
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **576 / 657** -> **577 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **81** -> **80** (**-1**)
 
 Latest iteration on **2026-04-16**:
 
