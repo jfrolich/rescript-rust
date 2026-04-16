@@ -610,7 +610,7 @@ impl LambdaCompiler {
                         ),
                     }
                 } else {
-                    let tmp = self.fresh_ident("ifres");
+                    let tmp = self.fresh_tmp_ident();
                     let then_block = self.compile_assign_to_target_block(&tmp, then_);
                     let else_block = self.compile_assign_to_target_block(&tmp, else_);
                     prelude.extend(self.compile_declared_if_block(
@@ -18975,6 +18975,92 @@ mod tests {
                 (
                     ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
                     ExpressionDesc::Number(Number::Int { i: 4, .. })
+                ) if lhs_id.same(&result)
+            )
+        ));
+        assert!(matches!(
+            compiled.expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&result)
+        ));
+    }
+
+    #[test]
+    fn if_expression_result_temp_uses_tmp_name_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let alias = Ident::create_local("alias");
+        let compiled = compiler.compile_expr(&Lambda::LifThenElse(
+            Box::new(Lambda::var(cond)),
+            Box::new(Lambda::Llet(
+                LetKind::Strict,
+                alias.clone(),
+                Box::new(Lambda::const_(Constant::int(1))),
+                Box::new(Lambda::var(alias.clone())),
+            )),
+            Box::new(Lambda::const_(Constant::int(0))),
+        ));
+
+        let [result_decl, if_stmt] = compiled.prelude.as_slice() else {
+            panic!("expected a result declaration followed by the lowered if");
+        };
+        let result = match &result_decl.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident, value: None, ..
+            }) => ident.clone(),
+            _ => panic!("expected an uninitialized result temp"),
+        };
+        assert_eq!(result.name(), "tmp");
+
+        let StatementDesc::If(_, then_block, else_block) = &if_stmt.desc else {
+            panic!("expected an if statement assigning into the result temp");
+        };
+        assert!(matches!(
+            then_block.as_slice(),
+            [
+                Statement {
+                    desc: StatementDesc::Variable(VariableDeclaration { ident, .. }),
+                    ..
+                },
+                Statement {
+                    desc: StatementDesc::Exp(Expression {
+                        desc: ExpressionDesc::Bin(
+                            BinOp::Eq,
+                            lhs,
+                            rhs
+                        ),
+                        ..
+                    }),
+                    ..
+                }
+            ] if ident.same(&alias)
+                && matches!(
+                    (&lhs.desc, &rhs.desc),
+                    (
+                        ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                        ExpressionDesc::Var(crate::js_ir::VIdent::Id(rhs_id))
+                    ) if lhs_id.same(&result) && rhs_id.same(&alias)
+                )
+        ));
+        assert!(matches!(
+            else_block.as_slice(),
+            [Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Bin(
+                        BinOp::Eq,
+                        lhs,
+                        rhs
+                    ),
+                    ..
+                }),
+                ..
+            }] if matches!(
+                (&lhs.desc, &rhs.desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                    ExpressionDesc::Number(Number::Int { i: 0, .. })
                 ) if lhs_id.same(&result)
             )
         ));

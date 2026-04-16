@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 539 / 657 with 8 unrelated compile errors and 110 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 540 / 657 with 8 unrelated compile errors and 109 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **539 / 657**
+- JS snapshot parity: **540 / 657**
 - Compile errors: **8**
-- Output diffs: **110**
+- Output diffs: **109**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -80,6 +80,43 @@ Do **not** replace the recorded project baseline with `537 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: use OCaml's generic temporary naming for `NeedValue`
+  `if-then-else` lowering instead of Rust's special `ifres` result temp
+- Active backend focus moved back to **Phase 3: Port JS IR Lowering And
+  Metadata** from `PLAN.md`; this slice stays in
+  `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_ifthenelse`'s
+  `NeedValue _` branch where non-expression branches allocate the shared
+  result slot with `Ext_ident.create_tmp ()`
+- Rust change:
+  - changed the `Lambda::LifThenElse` `NeedValue` lowering in
+    `compiler-rust/src/lambda/compile.rs` to call `fresh_tmp_ident()`
+    instead of `fresh_ident("ifres")`
+  - added the focused regression
+    `if_expression_result_temp_uses_tmp_name_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release if_expression_result_temp_uses_tmp_name_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release if_value_branches_keep_assignment_continuation_through_let_bindings -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh arity_infer --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/arity_infer.res` now matches its checked-in snapshot
+    again; Rust emits `let tmp;` / `tmp(...)` like OCaml instead of the
+    Rust-only `ifres` binding
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained exact
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **539 / 657** -> **540 / 657** (**+1**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **110** -> **109** (**-1**)
+- Keep this change because the old `ifres` name did not come from the OCaml
+  backend. `compile_ifthenelse` uses `Ext_ident.create_tmp ()` for this shared
+  result slot, so the Rust backend now matches that lowering rule.
 
 Latest iteration on **2026-04-16**:
 
