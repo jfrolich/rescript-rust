@@ -1079,7 +1079,7 @@ fn structure_needs_jsx_rewrite(
 }
 
 /// Compiler options that can be passed to the driver.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct CompilerOptions {
     /// Print the Lambda IR to stderr (like OCaml's -drawlambda)
     pub dump_lambda: bool,
@@ -1110,6 +1110,29 @@ pub struct CompilerOptions {
     pub jsx_preserve: bool,
     /// Enable debug-mode JS emission (like OCaml's -bs-g / Js_config.debug).
     pub debug: bool,
+    /// Mirror `Js_config.check_div_by_zero` for checked integer/bigint lowering.
+    pub check_div_by_zero: bool,
+}
+
+impl Default for CompilerOptions {
+    fn default() -> Self {
+        Self {
+            dump_lambda: false,
+            dump_typed_sexp: false,
+            dump_typed_sexp_locs: false,
+            dump_lambda_sexp: false,
+            dump_lambda_sexp_locs: false,
+            include_paths: Vec::new(),
+            runtime_path: None,
+            open_modules: Vec::new(),
+            source_filename: None,
+            output_path: None,
+            jsx_version: None,
+            jsx_preserve: false,
+            debug: false,
+            check_div_by_zero: true,
+        }
+    }
 }
 
 pub(crate) fn jsx_version_for_structure(
@@ -1351,9 +1374,10 @@ pub fn compile_source_to_js_with_options(
             }
         }
     }
-    let mut compiler = LambdaCompiler::with_module_path_resolver_and_jsx_preserve(
+    let mut compiler = LambdaCompiler::with_module_path_resolver_and_options(
         Some(module_path_resolver.clone()),
         jsx_preserve,
+        options.check_div_by_zero,
     );
     let program = compiler.compile_deps_program_with_possible_required_modules(
         &lowered_lambda,

@@ -183,6 +183,7 @@ pub struct LambdaCompiler {
     id_gen: IdGenerator,
     module_path_resolver: Option<ModulePathResolver>,
     jsx_preserve: bool,
+    check_div_by_zero: bool,
     cmj_constant_cache: HashMap<String, Option<HashMap<String, CmjExportConstant>>>,
     external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
     static_handlers: Vec<StaticHandler>,
@@ -252,6 +253,7 @@ impl LambdaCompiler {
             id_gen: IdGenerator::new(),
             module_path_resolver: None,
             jsx_preserve: false,
+            check_div_by_zero: true,
             cmj_constant_cache: HashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
@@ -271,10 +273,20 @@ impl LambdaCompiler {
         module_path_resolver: Option<ModulePathResolver>,
         jsx_preserve: bool,
     ) -> Self {
+        Self::with_module_path_resolver_and_options(module_path_resolver, jsx_preserve, true)
+    }
+
+    /// Create a compiler with the JS-backend options that affect lowering.
+    pub fn with_module_path_resolver_and_options(
+        module_path_resolver: Option<ModulePathResolver>,
+        jsx_preserve: bool,
+        check_div_by_zero: bool,
+    ) -> Self {
         Self {
             id_gen: IdGenerator::new(),
             module_path_resolver,
             jsx_preserve,
+            check_div_by_zero,
             cmj_constant_cache: HashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
@@ -5333,28 +5345,20 @@ impl LambdaCompiler {
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
-            Pdivint => int32_div(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pdivint => self.int32_div_expr(compiled_args[0].clone(), compiled_args[1].clone()),
             Pdivfloat => Expression::bin(
                 BinOp::Div,
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
-            Pdivbigint => Expression::bin(
-                BinOp::Div,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
-            ),
-            Pmodint => int32_mod(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pdivbigint => self.bigint_div_expr(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pmodint => self.int32_mod_expr(compiled_args[0].clone(), compiled_args[1].clone()),
             Pmodfloat => Expression::bin(
                 BinOp::Mod,
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
-            Pmodbigint => Expression::bin(
-                BinOp::Mod,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
-            ),
+            Pmodbigint => self.bigint_mod_expr(compiled_args[0].clone(), compiled_args[1].clone()),
             Ppowint => int32_pow(compiled_args[0].clone(), compiled_args[1].clone()),
             Ppowfloat => Expression::bin(
                 BinOp::Pow,
@@ -6080,6 +6084,48 @@ impl LambdaCompiler {
             args,
             CallInfo::default(),
         )
+    }
+
+    fn int32_div_expr(&self, left: Expression, right: Expression) -> Expression {
+        match (&left.desc, int_literal(&right)) {
+            (ExpressionDesc::Length(_, _), Some(2)) => {
+                Expression::bin(BinOp::Asr, left, int_expr(1))
+            }
+            (_, Some(rhs)) if rhs != 0 => match int_literal(&left) {
+                Some(lhs) => int_expr(lhs.wrapping_div(rhs)),
+                None => to_int32(Expression::bin(BinOp::Div, left, right)),
+            },
+            _ if self.check_div_by_zero => {
+                self.runtime_call_expr("Primitive_int", "div", vec![left, right])
+            }
+            _ => to_int32(Expression::bin(BinOp::Div, left, right)),
+        }
+    }
+
+    fn int32_mod_expr(&self, left: Expression, right: Expression) -> Expression {
+        match int_literal(&right) {
+            Some(rhs) if rhs != 0 => Expression::bin(BinOp::Mod, left, right),
+            _ if self.check_div_by_zero => {
+                self.runtime_call_expr("Primitive_int", "mod_", vec![left, right])
+            }
+            _ => Expression::bin(BinOp::Mod, left, right),
+        }
+    }
+
+    fn bigint_div_expr(&self, left: Expression, right: Expression) -> Expression {
+        if self.check_div_by_zero {
+            self.runtime_call_expr("Primitive_bigint", "div", vec![left, right])
+        } else {
+            Expression::bin(BinOp::Div, left, right)
+        }
+    }
+
+    fn bigint_mod_expr(&self, left: Expression, right: Expression) -> Expression {
+        if self.check_div_by_zero {
+            self.runtime_call_expr("Primitive_bigint", "mod_", vec![left, right])
+        } else {
+            Expression::bin(BinOp::Mod, left, right)
+        }
     }
 
     fn external_optional_to_undefined_expr(&self, arg: Expression) -> Expression {
@@ -10174,14 +10220,6 @@ fn int32_pow(left: Expression, right: Expression) -> Expression {
         (Some(lhs), Some(rhs)) => int_expr(ocaml_int32_pow(lhs, rhs)),
         _ => to_int32(Expression::bin(BinOp::Pow, left, right)),
     }
-}
-
-fn int32_div(left: Expression, right: Expression) -> Expression {
-    to_int32(Expression::bin(BinOp::Div, left, right))
-}
-
-fn int32_mod(left: Expression, right: Expression) -> Expression {
-    Expression::bin(BinOp::Mod, left, right)
 }
 
 fn int32_lsl(left: Expression, right: Expression) -> Expression {
@@ -14439,6 +14477,32 @@ mod tests {
             .unwrap_or_else(|err| panic!("failed to compile {module_name}.res: {err:#}"))
     }
 
+    #[test]
+    fn gpr_1760_test_keeps_checked_division_and_mod_effects_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("gpr_1760_test");
+        assert!(
+            output.contains("Primitive_int.div(0, 0);"),
+            "expected the checked fixture to keep Primitive_int.div(0, 0), got:\n{output}"
+        );
+        assert!(
+            output.contains("Primitive_int.mod_(0, 0);"),
+            "expected the checked fixture to keep Primitive_int.mod_(0, 0), got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn div_by_zero_test_keeps_checked_throw_helpers_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("div_by_zero_test");
+        assert!(
+            output.contains("Primitive_int.div(3, 0);"),
+            "expected the checked fixture to call Primitive_int.div(3, 0), got:\n{output}"
+        );
+        assert!(
+            output.contains("Primitive_int.mod_(3, 0);"),
+            "expected the checked fixture to call Primitive_int.mod_(3, 0), got:\n{output}"
+        );
+    }
+
     fn external_module(bundle: &str) -> ExternalModuleName {
         ExternalModuleName {
             bundle: bundle.to_string(),
@@ -15012,6 +15076,80 @@ mod tests {
         assert_eq!(
             print_expression(&compiled.expr),
             "Primitive_int.compare(left, right)"
+        );
+    }
+
+    #[test]
+    fn compile_checked_int_div_uses_primitive_int_runtime_call_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("left");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pdivint,
+            vec![Lambda::var(left), Lambda::const_(Constant::int(0))],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_int.div(left, 0)"
+        );
+    }
+
+    #[test]
+    fn compile_checked_int_mod_uses_primitive_int_runtime_call_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("left");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pmodint,
+            vec![Lambda::var(left), Lambda::const_(Constant::int(0))],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_int.mod_(left, 0)"
+        );
+    }
+
+    #[test]
+    fn compile_checked_bigint_div_uses_primitive_bigint_runtime_call_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("left");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pdivbigint,
+            vec![
+                Lambda::var(left),
+                Lambda::const_(Constant::bigint(false, "0")),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_bigint.div(left, 0n)"
+        );
+    }
+
+    #[test]
+    fn compile_checked_bigint_mod_uses_primitive_bigint_runtime_call_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let left = Ident::create_local("left");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pmodbigint,
+            vec![
+                Lambda::var(left),
+                Lambda::const_(Constant::bigint(false, "0")),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(
+            print_expression(&compiled.expr),
+            "Primitive_bigint.mod_(left, 0n)"
         );
     }
 

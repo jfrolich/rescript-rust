@@ -243,6 +243,7 @@ fn run() -> Result<()> {
         jsx_version: opts.jsx_version,
         jsx_preserve: opts.jsx_preserve,
         debug: opts.debug,
+        check_div_by_zero: true,
     };
 
     if is_interface {

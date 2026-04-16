@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 565 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 92 output diffs
+**Status:** 568 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 89 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **565 / 657**
+- JS snapshot parity: **568 / 657**
 - Compile errors: **0**
-- Output diffs: **92**
+- Output diffs: **89**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,12 +63,73 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **565 / 657**
+- JS snapshot parity: **568 / 657**
 - Compile errors: **0**
-- Output diffs: **92**
+- Output diffs: **89**
 
 This current worktree measurement now supersedes the earlier stale warning
 about the temporary `RefCell already borrowed` compile failures.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: thread OCaml's checked integer/bigint division and modulo
+  lowering through the Rust JS backend so zero-divisor cases emit the
+  `Primitive_int` / `Primitive_bigint` runtime helpers instead of raw JS
+  binops that later get treated as removable pure expressions
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; the fix spans `compiler/core/lam_compile_primitive.ml` /
+  `compiler/core/js_exp_make.ml` on the OCaml side and
+  `compiler-rust/src/driver.rs` plus `compiler-rust/src/lambda/compile.rs` on
+  the Rust side
+- OCaml reference:
+  - `compiler/core/lam_compile_primitive.ml`, especially the `Pdivint`,
+    `Pmodint`, `Pdivbigint`, and `Pmodbigint` branches
+  - `compiler/core/js_exp_make.ml`, especially `int32_div`, `int32_mod`,
+    `bigint_div`, and `bigint_mod`
+- Rust change:
+  - added `check_div_by_zero` to `driver::CompilerOptions` and threaded it
+    into `LambdaCompiler`, with the CLI JS path keeping the OCaml-default
+    checked behavior enabled
+  - in `compiler-rust/src/lambda/compile.rs`, replaced the unconditional raw
+    JS lowering for `Pdivint`, `Pmodint`, `Pdivbigint`, and `Pmodbigint` with
+    OCaml-aligned runtime calls when the divisor is not statically known to be
+    non-zero
+  - kept OCaml's integer fast paths in the same helper port, including the
+    `Length / 2 -> >> 1` case and the non-zero constant divisor direct-binop
+    cases
+  - added regression coverage in
+    `compile_checked_int_div_uses_primitive_int_runtime_call_like_ocaml`,
+    `compile_checked_int_mod_uses_primitive_int_runtime_call_like_ocaml`,
+    `compile_checked_bigint_div_uses_primitive_bigint_runtime_call_like_ocaml`,
+    `compile_checked_bigint_mod_uses_primitive_bigint_runtime_call_like_ocaml`,
+    `gpr_1760_test_keeps_checked_division_and_mod_effects_like_ocaml`, and
+    `div_by_zero_test_keeps_checked_throw_helpers_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_checked_ -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_1760_test_keeps_checked_division_and_mod_effects_like_ocaml -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release div_by_zero_test_keeps_checked_throw_helpers_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_1760_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh div_by_zero_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1760_test.res` now matches its checked-in snapshot
+    exactly; the `try` bodies keep OCaml's checked `Primitive_int.div(0, 0)`
+    and `Primitive_int.mod_(0, 0)` calls so the exception handlers still fire
+  - `tests/tests/src/div_by_zero_test.res` now matches its checked-in snapshot
+    exactly; the `throws` callbacks no longer collapse to empty lambdas
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained exact after
+    the same backend-lowering change
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **565 / 657** -> **568 / 657** (**+3**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **92** -> **89** (**-3**)
+- Keep this change because it is a direct OCaml backend port:
+  `lam_compile_primitive.ml` threads `Js_config.check_div_by_zero` into the
+  checked integer/bigint helpers, and `js_exp_make.ml` only falls back to raw
+  JS division/modulo when the divisor is statically safe or checked lowering is
+  disabled. The old Rust path skipped that gate entirely.
 
 Latest iteration on **2026-04-16**:
 
