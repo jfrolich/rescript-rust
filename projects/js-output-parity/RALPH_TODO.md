@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 573 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 84 output diffs
+**Status:** 576 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 81 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **573 / 657**
+- JS snapshot parity: **576 / 657**
 - Compile errors: **0**
-- Output diffs: **84**
+- Output diffs: **81**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,53 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **573 / 657**
+- JS snapshot parity: **576 / 657**
 - Compile errors: **0**
-- Output diffs: **84**
+- Output diffs: **81**
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: port OCaml's `compile_if` NeedValue fallback so temporary
+  value-position `if` results stay as `let tmp; tmp = cond ? ...;` instead of
+  collapsing into initialized declarations that OCaml never emits in this
+  continuation path
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; the OCaml behavior lives in `compiler/core/lam_compile.ml`
+  and `compiler/core/js_stmt_make.ml`, and the Rust change stays in
+  `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially the `compile_if` `NeedValue`
+    branch that declares a temp first and then lowers the non-expression case
+    through `S.if_` without passing a declaration
+  - `compiler/core/js_stmt_make.ml`, especially `if_` and its declaration-only
+    merge rules
+- Rust change:
+  - in `LambdaCompiler::compile_expr`, rewired the non-expression
+    `LifThenElse` NeedValue path to emit an explicit uninitialized temp plus
+    `Statement::if_(...)`, instead of routing through
+    `compile_declared_if_block(...)`
+  - added checked-in regression coverage in
+    `json_decorders_keeps_needvalue_if_temp_declared_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release json_decorders_keeps_needvalue_if_temp_declared_like_ocaml -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release let_unwrap_keeps_declared_switch_binding_shape_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh json_decorders --diff`
+  - `timeout 30 ./scripts/test_js_single.sh src/stdlib/Stdlib_PromiseTest.res --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/json_decorders.res` now matches its checked-in snapshot
+    again; the optional-email refinement keeps OCaml's declared temp shape
+  - `tests/tests/src/stdlib/Stdlib_PromiseTest.res` now matches its checked-in
+    snapshot again; the Promise rejection classification keeps the same
+    declared temp shape instead of collapsing to `let tmp = ...`
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained exact after
+    the same backend-lowering change
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **574 / 657** -> **576 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **83** -> **81** (**-2**)
 
 Latest iteration on **2026-04-16**:
 

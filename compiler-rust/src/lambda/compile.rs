@@ -629,13 +629,13 @@ impl LambdaCompiler {
                     let tmp = self.fresh_tmp_ident();
                     let then_block = self.compile_assign_to_target_block(&tmp, then_);
                     let else_block = self.compile_assign_to_target_block(&tmp, else_);
-                    prelude.extend(self.compile_declared_if_block(
-                        LetKind::Strict,
-                        &tmp,
-                        cond_compiled.expr,
-                        then_block,
-                        else_block,
-                    ));
+                    prelude.push(Statement::variable(VariableDeclaration {
+                        ident: tmp.clone(),
+                        value: None,
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }));
+                    prelude.push(Statement::if_(cond_compiled.expr, then_block, else_block));
                     Compiled {
                         prelude,
                         expr: Expression::var(tmp),
@@ -20018,6 +20018,19 @@ mod tests {
         assert!(
             !output.contains("let someResult = x.TAG === \"Ok\" ? x._0 : ("),
             "unexpected initialized declaration for LetUnwrap's switch-bound result:\n{output}"
+        );
+    }
+
+    #[test]
+    fn json_decorders_keeps_needvalue_if_temp_declared_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("json_decorders");
+        assert!(
+            output.contains("let tmp;\n  tmp = typeof email === \"string\" ? email : undefined;"),
+            "expected json_decorders to keep the declared conditional temp before assignment, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let tmp = typeof email === \"string\" ? email : undefined;"),
+            "unexpected initialized conditional temp in json_decorders:\n{output}"
         );
     }
 
