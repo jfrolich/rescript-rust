@@ -592,7 +592,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         let is_comptime_builtin = p.lookahead(|p| {
             p.next(); // skip @
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record"),
                 _ => false,
             }
         });
@@ -4224,7 +4224,7 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
         let is_comptime_builtin = p.lookahead(|p| {
             p.next();
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record"),
                 _ => false,
             }
         });
@@ -6094,6 +6094,26 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             p.expect(Token::Rparen);
             let m_idx = p.arena_mut().push_expr(msg_expr);
             ExpressionDesc::Pexp_comptime_compile_error(m_idx)
+        }
+        "record" => {
+            // @record(TypeName, "field1", value1, "field2", value2, ...)
+            let core_type = super::typ::parse_typ_expr(p);
+            let ct_idx = p.arena_mut().push_core_type(core_type);
+            let mut field_pairs = Vec::new();
+            while p.token == Token::Comma {
+                p.next(); // skip comma
+                if p.token == Token::Rparen {
+                    break;
+                }
+                let field_name_expr = parse_expr(p);
+                p.expect(Token::Comma);
+                let field_value_expr = parse_expr(p);
+                let name_idx = p.arena_mut().push_expr(field_name_expr);
+                let value_idx = p.arena_mut().push_expr(field_value_expr);
+                field_pairs.push((name_idx, value_idx));
+            }
+            p.expect(Token::Rparen);
+            ExpressionDesc::Pexp_comptime_record(Box::new((ct_idx, field_pairs)))
         }
         _ => {
             p.err(super::diagnostics::DiagnosticCategory::Message(

@@ -5382,9 +5382,99 @@ pub fn type_expect<'a>(
                 "comptime builtin @typeName can only be used inside @comptime functions".to_string(),
             ))
         }
-        ED::Pexp_comptime_record(_) => {
-            Err(super::TypeCoreError::Other(
-                "comptime builtin @record can only be used inside @comptime functions".to_string(),
+        ED::Pexp_comptime_record(inner) => {
+            let (ref ct_idx, ref field_pairs) = **inner;
+
+            // Resolve the target record type
+            let core_type = tctx.arena.get_core_type(*ct_idx);
+            let ctx = tctx.type_ctx;
+            ctx.begin_def();
+            let resolved_ty = match transl_type(tctx, env, core_type) {
+                Ok((_, ty)) => { ctx.end_def(); ty }
+                Err(e) => { ctx.end_def(); return Err(e); }
+            };
+
+            // Look up the type declaration to get label descriptions
+            let type_name = match &*core_type.ptyp_desc {
+                crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) => {
+                    let (ref lid, _) = **inner;
+                    let longident = tctx.arena.get_longident(lid.txt);
+                    tctx.arena.get_string(longident.last_idx()).to_string()
+                }
+                _ => return Err(super::TypeCoreError::Other("@record requires a type name".to_string())),
+            };
+
+            // Build record fields: for each (name_expr, value_expr) pair,
+            // resolve the field name (must be comptime-known string),
+            // type-check the value, and produce a record field definition
+            let mut typed_fields = Vec::new();
+            for (name_idx, value_idx) in field_pairs {
+                let name_expr = tctx.arena.get_expr(*name_idx);
+                let value_expr = tctx.arena.get_expr(*value_idx);
+
+                // Resolve field name (comptime-known string)
+                let field_name = match &*name_expr.pexp_desc {
+                    crate::parser::ast::ExpressionDesc::Pexp_constant(c) => {
+                        match &**c {
+                            crate::parser::ast::Constant::String(s, _) => s.to_string(),
+                            _ => return Err(super::TypeCoreError::Other("@record field name must be a string".to_string())),
+                        }
+                    }
+                    crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
+                        let longident = tctx.arena.get_longident(lid.txt);
+                        if longident.is_simple() {
+                            let vname = tctx.arena.get_string(longident.last_idx());
+                            match tctx.comptime_bindings.get(vname) {
+                                Some(crate::types::comptime::ComptimeValue::String(s)) => s.clone(),
+                                _ => return Err(super::TypeCoreError::Other("@record field name must be comptime-known".to_string())),
+                            }
+                        } else {
+                            return Err(super::TypeCoreError::Other("@record field name must be simple".to_string()));
+                        }
+                    }
+                    _ => return Err(super::TypeCoreError::Other("@record field name must be a string".to_string())),
+                };
+
+                // Look up the label description for this field
+                let label_desc = env.find_label(&field_name).map_err(|_| {
+                    super::TypeCoreError::Other(format!("@record: field '{}' not found on type '{}'", field_name, type_name))
+                })?.clone();
+
+                // Type-check the value against the field's expected type
+                let field_ty = crate::types::instance(ctx, label_desc.lbl_arg);
+                let typed_value = type_expect(tctx, env, value_expr, field_ty, None)?;
+
+                let lid_loc = crate::parse_arena::Located {
+                    txt: crate::parse_arena::LidentIdx(0),
+                    loc: crate::parse_arena::LocIdx::none(),
+                };
+                typed_fields.push((
+                    lid_loc,
+                    label_desc,
+                    super::typedtree::RecordLabelDefinition::Overridden(
+                        crate::parse_arena::Located {
+                            txt: crate::parse_arena::LidentIdx(0),
+                            loc: crate::parse_arena::LocIdx::none(),
+                        },
+                        typed_value,
+                    ),
+                    false, // not optional
+                ));
+            }
+
+            // Unify the record type with expected type
+            crate::types::ctype::unify(ctx, &mut tctx.unify_state, resolved_ty, expected_ty)
+                .map_err(|e| super::TypeCoreError::Other(format!("@record type mismatch: {:?}", e)))?;
+
+            Ok(Expression::new(
+                ExpressionDesc::Texp_record {
+                    fields: typed_fields,
+                    extended_expression: None,
+                },
+                loc,
+                resolved_ty,
+                ctx.store_typed_env(env),
+                crate::parser::ast::Attributes::new(),
             ))
         }
     }
