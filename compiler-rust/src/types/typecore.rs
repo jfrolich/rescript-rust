@@ -5237,10 +5237,86 @@ pub fn type_expect<'a>(
                 )),
             }
         }
-        ED::Pexp_comptime_field(_) => {
-            Err(super::TypeCoreError::Other(
-                "comptime builtin @field can only be used inside @comptime functions".to_string(),
-            ))
+        ED::Pexp_comptime_field(inner) => {
+            let (ref value_idx, ref name_idx) = **inner;
+            let value_expr = tctx.arena.get_expr(*value_idx);
+            let name_expr = tctx.arena.get_expr(*name_idx);
+
+            // The name must be a comptime-known string
+            let field_name = match &*name_expr.pexp_desc {
+                // Direct string literal
+                crate::parser::ast::ExpressionDesc::Pexp_constant(c) => {
+                    match &**c {
+                        crate::parser::ast::Constant::String(s, _) => Some(s.to_string()),
+                        _ => None,
+                    }
+                }
+                // Comptime-known variable (e.g., field.name from inline for)
+                crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
+                    let longident = tctx.arena.get_longident(lid.txt);
+                    if longident.is_simple() {
+                        let var_name = tctx.arena.get_string(longident.last_idx());
+                        match tctx.comptime_bindings.get(var_name) {
+                            Some(crate::types::comptime::ComptimeValue::String(s)) => Some(s.clone()),
+                            _ => None,
+                        }
+                    } else { None }
+                }
+                // Comptime field access (e.g., field.name)
+                crate::parser::ast::ExpressionDesc::Pexp_field(rec_idx, field_lid) => {
+                    let rec_expr = tctx.arena.get_expr(*rec_idx);
+                    if let crate::parser::ast::ExpressionDesc::Pexp_ident(rec_lid) = &*rec_expr.pexp_desc {
+                        let longident = tctx.arena.get_longident(rec_lid.txt);
+                        if longident.is_simple() {
+                            let var_name = tctx.arena.get_string(longident.last_idx());
+                            if let Some(crate::types::comptime::ComptimeValue::Record(entries)) = tctx.comptime_bindings.get(var_name) {
+                                let fl = tctx.arena.get_longident(field_lid.txt);
+                                let fname = tctx.arena.get_string(fl.last_idx()).to_string();
+                                entries.iter().find(|(k, _)| k == &fname).and_then(|(_, v)| {
+                                    match v { crate::types::comptime::ComptimeValue::String(s) => Some(s.clone()), _ => None }
+                                })
+                            } else { None }
+                        } else { None }
+                    } else { None }
+                }
+                _ => None,
+            };
+
+            let field_name = match field_name {
+                Some(name) => name,
+                None => return Err(super::TypeCoreError::Other(
+                    "@field requires a comptime-known string as the field name".to_string(),
+                )),
+            };
+
+            // Type-check the value expression to get its type
+            let value_ty = ctx.new_var(None);
+            let typed_value = type_expect(tctx, env, value_expr, value_ty, None)?;
+            let value_type = ctx.repr(typed_value.exp_type);
+
+            // Look up the field on the value's type
+            match env.find_label(&field_name) {
+                Ok(label_desc) => {
+                    let field_ty = crate::types::instance(ctx, label_desc.lbl_arg);
+                    crate::types::ctype::unify(ctx, &mut tctx.unify_state, field_ty, expected_ty)
+                        .map_err(|e| super::TypeCoreError::Other(format!("@field type mismatch: {:?}", e)))?;
+
+                    let lid_loc = crate::parse_arena::Located {
+                        txt: crate::parse_arena::LidentIdx(0),
+                        loc: crate::parse_arena::LocIdx::none(),
+                    };
+                    Ok(Expression::new(
+                        ExpressionDesc::Texp_field(Box::new(typed_value), lid_loc, label_desc.clone()),
+                        loc,
+                        field_ty,
+                        ctx.store_typed_env(env),
+                        crate::parser::ast::Attributes::new(),
+                    ))
+                }
+                Err(_) => Err(super::TypeCoreError::Other(
+                    format!("@field: field '{}' not found on the value's type", field_name),
+                )),
+            }
         }
         ED::Pexp_comptime_compile_error(_) => {
             Err(super::TypeCoreError::Other(
