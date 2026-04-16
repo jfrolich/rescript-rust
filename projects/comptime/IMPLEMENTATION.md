@@ -163,7 +163,17 @@ let capitalize = (s: string): string => {
 // capitalize("name") → compiled to JS → Boa evaluates → "Name" → inlined as literal
 ```
 
-The type checker verifies all arguments are comptime-known. If any argument is runtime, it's a compile error.
+The type checker verifies all arguments are comptime-known. If any argument is runtime, it's a compile error:
+
+```rescript
+@comptime.inline
+let capitalize = (s: string): string => { ... }
+
+let name = readFromStdin()
+let x = capitalize(name)
+// ❌ Error: 'capitalize' is @comptime.inline but argument 'name' is not comptime-known.
+//    Only literal values, @typeInfo results, and other comptime results can be passed.
+```
 
 **Comptime-known values:**
 - Literal constants (strings, ints, bools, arrays of literals)
