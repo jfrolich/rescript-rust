@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 556 / 657 with 8 unrelated compile errors and 93 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 558 / 657 with 4 unrelated compile errors and 95 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,22 +64,83 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **556 / 657**
-- Compile errors: **8**
-- Output diffs: **93**
+- JS snapshot parity: **558 / 657**
+- Compile errors: **4**
+- Output diffs: **95**
 
-Those 8 compile failures are not in the JS backend slice and include unrelated
-typechecker/runtime regressions such as:
+Those 4 compile failures are not in the JS backend slice and are currently the
+same unrelated typechecker/runtime panic:
 
-- `functor_ffi.res`: `CoreError(ExprTypeClash ...)`
-- `defunctor_make_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
+- `submodule.res`: `RefCell already borrowed` panic in `src/types/context.rs`
+- `submodule_call.res`: `RefCell already borrowed` panic in `src/types/context.rs`
+- `stdlib/Stdlib_IntTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
-- `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `555 / 657` unless the
+Do **not** replace the recorded project baseline with `558 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: port OCaml's pure literal projection collapse for
+  record/cons/extension/variant accesses and preserve that collapse through the
+  flatten-and-mark-dead JS pass, so direct projections from immutable literal
+  blocks/objects inline to the payload value instead of emitting temporary
+  field reads
+- Active backend focus moves to **Phase 4: Port JS Passes** from `PLAN.md` for
+  this slice; the observable mismatch was in the `Js_pass_flatten_and_mark_dead`
+  cleanup path, though the supporting access lowering stays in
+  `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/js_exp_make.ml`, especially `record_access`,
+    `inline_record_access`, `variant_access`, `cons_access`, and
+    `extension_access`
+  - `compiler/core/js_pass_flatten_and_mark_dead.ml`, especially the
+    substitution rewrite for `Static_index` / `Array_index` over immutable
+    `Caml_block` values
+- Rust change:
+  - added `pure_indexed_block_item(...)` and rewired `compile_field_access(...)`
+    so pure `Array` / `CamlBlock` accesses collapse immediately for
+    module/record/inline-record/record-extension/extension/cons/variant-tag/
+    variant/fallback indexed accesses, matching `js_exp_make.ml`
+  - added `direct_projection_from_pure_literal(...)` and taught
+    `flatten_and_mark_dead_expression(...)` to collapse `StaticIndex` and
+    `ArrayIndex` over pure literal arrays/blocks/objects after recursive
+    rewriting, matching the OCaml flatten-and-mark-dead substitution path
+  - added regression coverage in
+    `derive_projector_test_collapses_pure_record_projection_like_ocaml`,
+    `js_flatten_and_mark_dead_collapses_direct_object_property_reads_like_ocaml`,
+    `lowers_record_pfield_from_pure_caml_block_directly_like_ocaml`,
+    `lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml`, and
+    `lowers_extension_pfield_from_pure_caml_block_directly_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release pure_caml_block_directly_like_ocaml -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release derive_projector_test_collapses_pure_record_projection_like_ocaml -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_flatten_and_mark_dead_collapses_direct_object_property_reads_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh derive_projector_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/derive_projector_test.res` matches again under the parity
+    harness; Rust no longer leaves the pure literal projection materialized
+    after flattening
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained exact after
+    the same change
+  - the dirty-worktree wrapper now reports only the four unrelated
+    `src/types/context.rs` borrow panics above; that compile-error movement is
+    recorded but not attributed to this JS backend slice
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **556 / 657** -> **558 / 657** (**+2**)
+  - Compile errors: **8** -> **4** (**-4**)
+  - Output diffs: **93** -> **95** (**+2**)
+- Keep this change because it is direct OCaml backend alignment: `js_exp_make`
+  collapses projections from no-side-effect literal blocks immediately, and
+  `js_pass_flatten_and_mark_dead` keeps collapsing those projections again
+  after substitution. The earlier Rust path only handled a narrower subset of
+  module/polyvariant cases, which is why pure record and object projections
+  were surviving into the emitted JS.
 
 Latest iteration on **2026-04-16**:
 

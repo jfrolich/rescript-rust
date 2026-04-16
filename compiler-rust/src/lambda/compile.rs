@@ -5888,59 +5888,65 @@ impl LambdaCompiler {
                     }
                     Expression::qualified(module.clone(), Some(name.clone()))
                 }
-                ExpressionDesc::CamlBlock(items, _, _, _) if js_expr_no_side_effects(target) => {
-                    items.get(idx as usize).cloned().unwrap_or_else(|| {
-                        Expression::new(ExpressionDesc::StaticIndex(
-                            Box::new(target.clone()),
-                            convert_ident_name(name),
-                            Some(idx),
-                        ))
-                    })
-                }
-                _ => Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(target.clone()),
-                    convert_ident_name(name),
-                    Some(idx),
-                )),
+                _ => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
+                    Expression::new(ExpressionDesc::StaticIndex(
+                        Box::new(target.clone()),
+                        convert_ident_name(name),
+                        Some(idx),
+                    ))
+                }),
             },
             FieldDbgInfo::Record { name, .. }
             | FieldDbgInfo::RecordInline { name }
-            | FieldDbgInfo::RecordExtension { name } => Expression::new(
-                ExpressionDesc::StaticIndex(Box::new(target.clone()), name.clone(), None),
-            ),
-            FieldDbgInfo::Extension => Expression::new(ExpressionDesc::StaticIndex(
-                Box::new(target.clone()),
-                format!("_{}", idx),
-                Some(idx),
-            )),
-            FieldDbgInfo::Cons => Expression::new(ExpressionDesc::StaticIndex(
-                Box::new(target.clone()),
-                match idx {
-                    0 => "hd".to_string(),
-                    1 => "tl".to_string(),
-                    _ => format!("_{}", idx),
-                },
-                None,
-            )),
+            | FieldDbgInfo::RecordExtension { name } => pure_indexed_block_item(target, idx)
+                .unwrap_or_else(|| {
+                    Expression::new(ExpressionDesc::StaticIndex(
+                        Box::new(target.clone()),
+                        name.clone(),
+                        None,
+                    ))
+                }),
+            FieldDbgInfo::Extension => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
+                Expression::new(ExpressionDesc::StaticIndex(
+                    Box::new(target.clone()),
+                    format!("_{}", idx),
+                    Some(idx),
+                ))
+            }),
+            FieldDbgInfo::Cons => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
+                Expression::new(ExpressionDesc::StaticIndex(
+                    Box::new(target.clone()),
+                    match idx {
+                        0 => "hd".to_string(),
+                        1 => "tl".to_string(),
+                        _ => format!("_{}", idx),
+                    },
+                    None,
+                ))
+            }),
             FieldDbgInfo::PolyVarTag => poly_var_tag_access(target),
             FieldDbgInfo::PolyVarContent => poly_var_value_access(target),
-            FieldDbgInfo::VariantTag => Expression::new(ExpressionDesc::StaticIndex(
-                Box::new(target.clone()),
-                "TAG".to_string(),
-                None,
-            )),
-            FieldDbgInfo::Variant => {
+            FieldDbgInfo::VariantTag => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
+                Expression::new(ExpressionDesc::StaticIndex(
+                    Box::new(target.clone()),
+                    "TAG".to_string(),
+                    None,
+                ))
+            }),
+            FieldDbgInfo::Variant => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
                 // Variant fields are accessed as _0, _1, _2, ...
                 Expression::new(ExpressionDesc::StaticIndex(
                     Box::new(target.clone()),
                     format!("_{}", idx),
                     None,
                 ))
-            }
-            _ => Expression::new(ExpressionDesc::ArrayIndex(
-                Box::new(target.clone()),
-                Box::new(Expression::number(Number::int(idx))),
-            )),
+            }),
+            _ => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
+                Expression::new(ExpressionDesc::ArrayIndex(
+                    Box::new(target.clone()),
+                    Box::new(Expression::number(Number::int(idx))),
+                ))
+            }),
         }
     }
 
@@ -10208,6 +10214,45 @@ fn is_type_number_expr(expr: Expression) -> Expression {
     )
 }
 
+fn pure_indexed_block_item(target: &Expression, idx: i32) -> Option<Expression> {
+    if !js_expr_no_side_effects(target) {
+        return None;
+    }
+
+    let index = usize::try_from(idx).ok()?;
+    match &target.desc {
+        ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _, _) => {
+            items.get(index).cloned()
+        }
+        _ => None,
+    }
+}
+
+fn direct_projection_from_pure_literal(
+    target: &Expression,
+    field: Option<&str>,
+    index: Option<i32>,
+) -> Option<Expression> {
+    if !js_expr_no_side_effects(target) {
+        return None;
+    }
+
+    match &target.desc {
+        ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _, _) => {
+            let index = usize::try_from(index?).ok()?;
+            items.get(index).cloned()
+        }
+        ExpressionDesc::Object(None, props) => {
+            let field = field?;
+            props.iter().find_map(|(name, value)| match name {
+                PropertyName::Lit(name) if name == field => Some(value.clone()),
+                _ => None,
+            })
+        }
+        _ => None,
+    }
+}
+
 fn poly_var_tag_access(target: &Expression) -> Expression {
     match &target.desc {
         ExpressionDesc::CamlBlock(items, _, _, _) if js_expr_no_side_effects(target) => items
@@ -11108,20 +11153,17 @@ fn flatten_and_mark_dead_expression(
                 jsx_preserve,
             )),
         ),
-        ExpressionDesc::ArrayIndex(left, right) => ExpressionDesc::ArrayIndex(
-            Box::new(flatten_and_mark_dead_expression(
-                *left,
-                id_gen,
-                substitution,
-                jsx_preserve,
-            )),
-            Box::new(flatten_and_mark_dead_expression(
-                *right,
-                id_gen,
-                substitution,
-                jsx_preserve,
-            )),
-        ),
+        ExpressionDesc::ArrayIndex(left, right) => {
+            let left = flatten_and_mark_dead_expression(*left, id_gen, substitution, jsx_preserve);
+            let right =
+                flatten_and_mark_dead_expression(*right, id_gen, substitution, jsx_preserve);
+            if let Some(rewritten) =
+                direct_projection_from_pure_literal(&left, None, int_literal(&right))
+            {
+                return rewritten;
+            }
+            ExpressionDesc::ArrayIndex(Box::new(left), Box::new(right))
+        }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
             Box::new(flatten_and_mark_dead_expression(
                 *tag,
@@ -11142,16 +11184,16 @@ fn flatten_and_mark_dead_expression(
                 })
                 .collect(),
         ),
-        ExpressionDesc::StaticIndex(target, field, pos) => ExpressionDesc::StaticIndex(
-            Box::new(flatten_and_mark_dead_expression(
-                *target,
-                id_gen,
-                substitution,
-                jsx_preserve,
-            )),
-            field,
-            pos,
-        ),
+        ExpressionDesc::StaticIndex(target, field, pos) => {
+            let target =
+                flatten_and_mark_dead_expression(*target, id_gen, substitution, jsx_preserve);
+            if let Some(rewritten) =
+                direct_projection_from_pure_literal(&target, Some(&field), pos)
+            {
+                return rewritten;
+            }
+            ExpressionDesc::StaticIndex(Box::new(target), field, pos)
+        }
         ExpressionDesc::New(target, args) => ExpressionDesc::New(
             Box::new(flatten_and_mark_dead_expression(
                 *target,
@@ -19283,6 +19325,19 @@ mod tests {
     }
 
     #[test]
+    fn derive_projector_test_collapses_pure_record_projection_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("derive_projector_test");
+        assert!(
+            output.contains("let v = {\n  TAG: \"D_int\",\n  _0: 3\n};"),
+            "expected the checked-in fixture to collapse the pure record projection to the payload value, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let v = ({") && !output.contains("}).d;"),
+            "unexpected materialized fresh-record projection remained in checked-in fixture output:\n{output}"
+        );
+    }
+
+    #[test]
     fn complex_while_loop_keeps_effectful_condition_blocks_inside_iifes() {
         let output = compile_checked_in_test_file_to_js("complex_while_loop");
         assert!(
@@ -23742,6 +23797,51 @@ mod tests {
     }
 
     #[test]
+    fn js_flatten_and_mark_dead_collapses_direct_object_property_reads_like_ocaml() {
+        let value = Ident::create_local("value");
+        let deps = apply_js_flatten_and_mark_dead_pass(
+            DepsProgram {
+                program: Program::new(
+                    vec![Statement::variable(VariableDeclaration {
+                        ident: Ident::create_local("projected"),
+                        value: Some(Expression::new(ExpressionDesc::StaticIndex(
+                            Box::new(Expression::new(ExpressionDesc::Object(
+                                None,
+                                vec![(PropertyName::lit("d"), Expression::var(value.clone()))],
+                            ))),
+                            "d".to_string(),
+                            None,
+                        ))),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    })],
+                    vec![],
+                ),
+                modules: vec![],
+                side_effect: None,
+            },
+            false,
+        );
+
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!("expected one projected binding");
+        };
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    }),
+                ..
+            }) if id.same(&value) => {}
+            other => panic!(
+                "expected the direct object property projection to inline to the field value, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
     fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
         let list = Ident::create_local("list");
         let deps = apply_js_flatten_and_mark_dead_pass(
@@ -27064,6 +27164,114 @@ let fib3 = n => {
             } if id.same(&eq)
         ));
         assert_eq!(print_expression(&expr), "Eq");
+    }
+
+    #[test]
+    fn lowers_record_pfield_from_pure_caml_block_directly_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let expr = compiler.compile_field_access(
+            0,
+            &FieldDbgInfo::Record {
+                name: "d".to_string(),
+                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+            },
+            &Expression::new(ExpressionDesc::CamlBlock(
+                vec![Expression::var(value.clone())],
+                MutableFlag::Immutable,
+                Box::new(Expression::number(Number::int(0))),
+                TagInfo::Record {
+                    fields: vec![("d".to_string(), false)],
+                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                },
+            )),
+        );
+
+        assert!(matches!(
+            &expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&value)
+        ));
+        assert_eq!(print_expression(&expr), "value");
+    }
+
+    #[test]
+    fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let head = Ident::create_local("head");
+        let tail = Ident::create_local("tail");
+        let head_expr = compiler.compile_field_access(
+            0,
+            &FieldDbgInfo::Cons,
+            &Expression::new(ExpressionDesc::CamlBlock(
+                vec![Expression::var(head.clone()), Expression::var(tail.clone())],
+                MutableFlag::Immutable,
+                Box::new(Expression::number(Number::int(0))),
+                TagInfo::Constructor {
+                    name: "::".to_string(),
+                    num_nonconst: 1,
+                    tag: 0,
+                    attrs: vec![],
+                },
+            )),
+        );
+        let tail_expr = compiler.compile_field_access(
+            1,
+            &FieldDbgInfo::Cons,
+            &Expression::new(ExpressionDesc::CamlBlock(
+                vec![Expression::var(head.clone()), Expression::var(tail.clone())],
+                MutableFlag::Immutable,
+                Box::new(Expression::number(Number::int(0))),
+                TagInfo::Constructor {
+                    name: "::".to_string(),
+                    num_nonconst: 1,
+                    tag: 0,
+                    attrs: vec![],
+                },
+            )),
+        );
+
+        assert!(matches!(
+            &head_expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&head)
+        ));
+        assert!(matches!(
+            &tail_expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&tail)
+        ));
+    }
+
+    #[test]
+    fn lowers_extension_pfield_from_pure_caml_block_directly_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let payload = Ident::create_local("payload");
+        let expr = compiler.compile_field_access(
+            1,
+            &FieldDbgInfo::Extension,
+            &Expression::new(ExpressionDesc::CamlBlock(
+                vec![Expression::string("Exn".to_string()), Expression::var(payload.clone())],
+                MutableFlag::Immutable,
+                Box::new(Expression::number(Number::int(0))),
+                TagInfo::Extension,
+            )),
+        );
+
+        assert!(matches!(
+            &expr,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&payload)
+        ));
+        assert_eq!(print_expression(&expr), "payload");
     }
 
     #[test]
