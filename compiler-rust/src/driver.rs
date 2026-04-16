@@ -1826,19 +1826,19 @@ pub fn compile_source_in_process(
 
     // Register the module's published interface in the internal PersistentEnv
     // and extract the finalized PersStruct for the caller's registry.
+    // Always register regardless of has_interface, because the interface was
+    // typechecked in a separate PersistentEnv and THIS env doesn't have it.
     let mut internal_env = tctx
         .persistent_env
         .take()
         .unwrap_or_else(PersistentEnv::new);
 
-    if !has_interface {
-        internal_env.register_in_memory_signature(
-            module_name,
-            published_signature.clone(),
-            filename,
-            &type_ctx,
-        );
-    }
+    internal_env.register_in_memory_signature(
+        module_name,
+        published_signature.clone(),
+        filename,
+        &type_ctx,
+    );
 
     let (pers_struct, new_alias_rewrites) =
         internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);
@@ -2025,14 +2025,12 @@ pub fn typecheck_implementation_in_process(
         .take()
         .unwrap_or_else(PersistentEnv::new);
 
-    if !has_interface {
-        internal_env.register_in_memory_signature(
-            module_name,
-            published_signature.clone(),
-            filename,
-            &type_ctx,
-        );
-    }
+    internal_env.register_in_memory_signature(
+        module_name,
+        published_signature.clone(),
+        filename,
+        &type_ctx,
+    );
 
     let (pers_struct, new_alias_rewrites) =
         internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);
