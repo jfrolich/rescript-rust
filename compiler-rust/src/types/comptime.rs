@@ -10,6 +10,8 @@
 //! - build_type_info: constructs TypeInfo from the compiler's type context
 //! - ComptimeFunction: registration of @comptime functions
 
+use std::collections::HashMap;
+
 use super::context::TypeContext;
 use super::ctype;
 use super::decl::{ConstructorArguments, TypeKind};
@@ -17,6 +19,7 @@ use super::env::Env;
 use super::path::Path;
 use super::predef;
 use super::type_expr::{TypeDesc, TypeExprRef};
+use super::typedtree;
 
 // ── Comptime Function Registration ─────────────────────────────────────────
 
@@ -317,5 +320,528 @@ fn build_type_info_from_constr<'a>(
         }
     } else {
         TypeInfo::External { name: type_name }
+    }
+}
+// ── ComptimeValue ───────────────────────────────────────────────────────────
+
+/// A value known at compile time.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ComptimeValue {
+    /// A type (for `comptime T: type` parameters).
+    Type(TypeInfo),
+    /// An integer literal.
+    Int(i64),
+    /// A float literal.
+    Float(f64),
+    /// A string literal.
+    String(std::string::String),
+    /// A boolean.
+    Bool(bool),
+    /// Unit value.
+    Unit,
+    /// An array of comptime values (for inline for).
+    Array(Vec<ComptimeValue>),
+    /// A record of comptime values.
+    Record(Vec<(std::string::String, ComptimeValue)>),
+    /// A variant constructor.
+    Variant(std::string::String, Option<Box<ComptimeValue>>),
+}
+
+// ── build_type_info ─────────────────────────────────────────────────────────
+
+/// Build a TypeInfo from a compiler type expression.
+///
+/// Resolves aliases, identifies primitives, and inspects user-defined types
+
+// ── Comptime Pattern Matching ───────────────────────────────────────────────
+
+/// Try to match a ComptimeValue against a TypeInfo variant pattern.
+/// Returns bindings if matched.
+pub fn match_typeinfo_pattern(
+    value: &TypeInfo,
+    pattern_name: &str,
+) -> Option<HashMap<std::string::String, ComptimeValue>> {
+    let mut bindings = HashMap::new();
+    match (pattern_name, value) {
+        ("Int", TypeInfo::Int) => Some(bindings),
+        ("Float", TypeInfo::Float) => Some(bindings),
+        ("String", TypeInfo::String) => Some(bindings),
+        ("Bool", TypeInfo::Bool) => Some(bindings),
+        ("Unit", TypeInfo::Unit) => Some(bindings),
+        ("Char", TypeInfo::Char) => Some(bindings),
+        ("Bigint", TypeInfo::Bigint) => Some(bindings),
+        ("Array", TypeInfo::Array { element }) => {
+            bindings.insert(
+                "element".to_string(),
+                ComptimeValue::Type(*element.clone()),
+            );
+            Some(bindings)
+        }
+        ("Option", TypeInfo::Option { inner }) => {
+            bindings.insert("inner".to_string(), ComptimeValue::Type(*inner.clone()));
+            Some(bindings)
+        }
+        ("Record", TypeInfo::Record { name, fields, unboxed }) => {
+            let field_values: Vec<ComptimeValue> = fields
+                .iter()
+                .map(|f| {
+                    ComptimeValue::Record(vec![
+                        ("name".to_string(), ComptimeValue::String(f.name.clone())),
+                        ("typ".to_string(), ComptimeValue::Type(f.typ.clone())),
+                        (
+                            "mutable".to_string(),
+                            ComptimeValue::Bool(f.mutable),
+                        ),
+                        (
+                            "optional".to_string(),
+                            ComptimeValue::Bool(f.optional),
+                        ),
+                    ])
+                })
+                .collect();
+            bindings.insert("fields".to_string(), ComptimeValue::Array(field_values));
+            bindings.insert("name".to_string(), ComptimeValue::String(name.clone()));
+            bindings.insert("unboxed".to_string(), ComptimeValue::Bool(*unboxed));
+            Some(bindings)
+        }
+        ("Variant", TypeInfo::Variant { name, constructors, unboxed }) => {
+            let ctor_values: Vec<ComptimeValue> = constructors
+                .iter()
+                .map(|c| {
+                    let arg_types: Vec<ComptimeValue> = c
+                        .args
+                        .iter()
+                        .map(|t| ComptimeValue::Type(t.clone()))
+                        .collect();
+                    ComptimeValue::Record(vec![
+                        ("name".to_string(), ComptimeValue::String(c.name.clone())),
+                        ("args".to_string(), ComptimeValue::Array(arg_types)),
+                    ])
+                })
+                .collect();
+            bindings.insert(
+                "constructors".to_string(),
+                ComptimeValue::Array(ctor_values),
+            );
+            bindings.insert("name".to_string(), ComptimeValue::String(name.clone()));
+            bindings.insert("unboxed".to_string(), ComptimeValue::Bool(*unboxed));
+            Some(bindings)
+        }
+        ("Function", TypeInfo::Function { args, return_type }) => {
+            let arg_values: Vec<ComptimeValue> = args
+                .iter()
+                .map(|t| ComptimeValue::Type(t.clone()))
+                .collect();
+            bindings.insert("args".to_string(), ComptimeValue::Array(arg_values));
+            bindings.insert(
+                "return_type".to_string(),
+                ComptimeValue::Type(*return_type.clone()),
+            );
+            Some(bindings)
+        }
+        _ => None,
+    }
+}
+
+/// Environment for comptime specialization.
+pub struct SpecEnv {
+    /// Comptime bindings: name → value.
+    pub bindings: HashMap<String, ComptimeValue>,
+    /// Fuel remaining (decremented per step to prevent infinite loops).
+    pub fuel: usize,
+}
+
+impl SpecEnv {
+    pub fn new(bindings: HashMap<String, ComptimeValue>) -> Self {
+        Self {
+            bindings,
+            fuel: DEFAULT_FUEL,
+        }
+    }
+
+    fn step(&mut self) -> Result<(), String> {
+        if self.fuel == 0 {
+            return Err("Comptime evaluation exceeded fuel limit (possible infinite loop)".to_string());
+        }
+        self.fuel -= 1;
+        Ok(())
+    }
+}
+
+/// Specialize a typed tree expression with comptime bindings.
+///
+/// This is the core partial evaluator. It walks the typed tree and:
+/// - Substitutes comptime-known variables with their values
+/// - Eliminates switch branches based on comptime match results
+/// - Unrolls inline for over comptime arrays
+/// - Recursively specializes comptime function calls
+///
+/// Returns a specialized typed tree expression, or an error.
+pub fn specialize_expression(
+    expr: &typedtree::Expression,
+    env: &mut SpecEnv,
+    ctx: &TypeContext<'_>,
+    type_env: &Env,
+) -> Result<typedtree::Expression, String> {
+    env.step()?;
+
+    let specialized_desc = match &expr.exp_desc {
+        // Variable reference — check if it's a comptime binding
+        typedtree::ExpressionDesc::Texp_ident(path, lid, vd) => {
+            let name = path.name();
+            if let Some(value) = env.bindings.get(&name) {
+                // Substitute with comptime value as a constant
+                match comptime_value_to_constant(value) {
+                    Some(constant) => typedtree::ExpressionDesc::Texp_constant(constant),
+                    None => {
+                        // Can't convert to constant — leave as is
+                        typedtree::ExpressionDesc::Texp_ident(
+                            path.clone(),
+                            lid.clone(),
+                            vd.clone(),
+                        )
+                    }
+                }
+            } else {
+                // Not a comptime binding — leave as is
+                expr.exp_desc.clone()
+            }
+        }
+
+        // Constant — pass through
+        typedtree::ExpressionDesc::Texp_constant(_) => expr.exp_desc.clone(),
+
+        // Let binding — specialize the value and body
+        typedtree::ExpressionDesc::Texp_let(rec_flag, bindings, body) => {
+            let spec_bindings: Vec<_> = bindings
+                .iter()
+                .map(|vb| {
+                    let spec_expr = specialize_expression(&vb.vb_expr, env, ctx, type_env)?;
+                    Ok(typedtree::ValueBinding {
+                        vb_expr: spec_expr,
+                        ..vb.clone()
+                    })
+                })
+                .collect::<Result<_, String>>()?;
+            let spec_body = specialize_expression(body, env, ctx, type_env)?;
+            typedtree::ExpressionDesc::Texp_let(
+                *rec_flag,
+                spec_bindings,
+                Box::new(spec_body),
+            )
+        }
+
+        // Application — specialize function and arguments
+        typedtree::ExpressionDesc::Texp_apply {
+            funct,
+            args,
+            partial,
+            transformed_jsx,
+        } => {
+            let spec_funct = specialize_expression(funct, env, ctx, type_env)?;
+            let spec_args: Vec<_> = args
+                .iter()
+                .map(|arg| {
+                    let spec_expression = match &arg.expression {
+                        Some(e) => Some(specialize_expression(e, env, ctx, type_env)?),
+                        None => None,
+                    };
+                    Ok(typedtree::ApplyArg {
+                        label: arg.label.clone(),
+                        expression: spec_expression,
+                    })
+                })
+                .collect::<Result<_, String>>()?;
+            typedtree::ExpressionDesc::Texp_apply {
+                funct: Box::new(spec_funct),
+                args: spec_args,
+                partial: *partial,
+                transformed_jsx: *transformed_jsx,
+            }
+        }
+
+        // Match/switch — check if the scrutinee is comptime-known
+        typedtree::ExpressionDesc::Texp_match(scrutinee, cases, exception_cases, partial) => {
+            let spec_scrutinee = specialize_expression(scrutinee, env, ctx, type_env)?;
+
+            // Try to evaluate scrutinee to a comptime value
+            if let Some(cv) = try_eval_to_comptime(&spec_scrutinee, env) {
+                // Try to match against case patterns
+                for case in cases {
+                    if let Some(new_bindings) =
+                        match_case_pattern(&case.c_lhs, &cv)
+                    {
+                        let mut branch_env = SpecEnv {
+                            bindings: env.bindings.clone(),
+                            fuel: env.fuel,
+                        };
+                        branch_env.bindings.extend(new_bindings);
+                        let result = specialize_expression(
+                            &case.c_rhs,
+                            &mut branch_env,
+                            ctx,
+                            type_env,
+                        );
+                        env.fuel = branch_env.fuel;
+                        if let Ok(specialized) = result {
+                            return Ok(specialized);
+                        }
+                    }
+                }
+                // No match found — leave as is
+                typedtree::ExpressionDesc::Texp_match(
+                    Box::new(spec_scrutinee),
+                    cases.clone(),
+                    exception_cases.clone(),
+                    *partial,
+                )
+            } else {
+                // Scrutinee not comptime — specialize each branch
+                let spec_cases: Vec<_> = cases
+                    .iter()
+                    .map(|case| {
+                        let spec_rhs = specialize_expression(&case.c_rhs, env, ctx, type_env)?;
+                        Ok(typedtree::Case {
+                            c_rhs: spec_rhs,
+                            ..case.clone()
+                        })
+                    })
+                    .collect::<Result<_, String>>()?;
+                typedtree::ExpressionDesc::Texp_match(
+                    Box::new(spec_scrutinee),
+                    spec_cases,
+                    exception_cases.clone(),
+                    *partial,
+                )
+            }
+        }
+
+        // Sequence — specialize both sides
+        typedtree::ExpressionDesc::Texp_sequence(e1, e2) => {
+            let s1 = specialize_expression(e1, env, ctx, type_env)?;
+            let s2 = specialize_expression(e2, env, ctx, type_env)?;
+            typedtree::ExpressionDesc::Texp_sequence(Box::new(s1), Box::new(s2))
+        }
+
+        // If-then-else — specialize condition and branches
+        typedtree::ExpressionDesc::Texp_ifthenelse(cond, then_branch, else_branch) => {
+            let spec_cond = specialize_expression(cond, env, ctx, type_env)?;
+            let spec_then = specialize_expression(then_branch, env, ctx, type_env)?;
+            let spec_else = else_branch
+                .as_ref()
+                .map(|e| specialize_expression(e, env, ctx, type_env))
+                .transpose()?;
+            typedtree::ExpressionDesc::Texp_ifthenelse(
+                Box::new(spec_cond),
+                Box::new(spec_then),
+                spec_else.map(Box::new),
+            )
+        }
+
+        // Tuple — specialize all elements
+        typedtree::ExpressionDesc::Texp_tuple(elements) => {
+            let spec_elements: Vec<_> = elements
+                .iter()
+                .map(|e| specialize_expression(e, env, ctx, type_env))
+                .collect::<Result<_, _>>()?;
+            typedtree::ExpressionDesc::Texp_tuple(spec_elements)
+        }
+
+        // Record — specialize field values
+        typedtree::ExpressionDesc::Texp_record { fields, extended_expression } => {
+            // Clone and specialize each field expression
+            let spec_fields: Vec<_> = fields
+                .iter()
+                .map(|(lid, desc, def, opt)| {
+                    let spec_def = match def {
+                        typedtree::RecordLabelDefinition::Kept(_) => def.clone(),
+                        typedtree::RecordLabelDefinition::Overridden(lid2, field_expr) => {
+                            match specialize_expression(field_expr, env, ctx, type_env) {
+                                Ok(spec) => typedtree::RecordLabelDefinition::Overridden(
+                                    lid2.clone(),
+                                    spec,
+                                ),
+                                Err(_) => def.clone(),
+                            }
+                        }
+                    };
+                    (lid.clone(), desc.clone(), spec_def, *opt)
+                })
+                .collect();
+            let spec_ext = extended_expression
+                .as_ref()
+                .map(|e| specialize_expression(e, env, ctx, type_env))
+                .transpose()?;
+            typedtree::ExpressionDesc::Texp_record {
+                fields: spec_fields,
+                extended_expression: spec_ext.map(Box::new),
+            }
+        }
+
+        // Field access — pass through (with specialized base)
+        typedtree::ExpressionDesc::Texp_field(base, lid, desc) => {
+            let spec_base = specialize_expression(base, env, ctx, type_env)?;
+            typedtree::ExpressionDesc::Texp_field(Box::new(spec_base), lid.clone(), desc.clone())
+        }
+
+        // Constructor — specialize arguments
+        typedtree::ExpressionDesc::Texp_construct(lid, desc, args) => {
+            let spec_args: Vec<_> = args
+                .iter()
+                .map(|e| specialize_expression(e, env, ctx, type_env))
+                .collect::<Result<_, _>>()?;
+            typedtree::ExpressionDesc::Texp_construct(lid.clone(), desc.clone(), spec_args)
+        }
+
+        // Everything else — clone as is
+        _ => expr.exp_desc.clone(),
+    };
+
+    Ok(typedtree::Expression {
+        exp_desc: specialized_desc,
+        exp_loc: expr.exp_loc,
+        exp_extra: expr.exp_extra.clone(),
+        exp_type: expr.exp_type,
+        exp_env: expr.exp_env.clone(),
+        exp_attributes: expr.exp_attributes.clone(),
+    })
+}
+
+/// Try to evaluate a typed expression to a ComptimeValue.
+fn try_eval_to_comptime(
+    expr: &typedtree::Expression,
+    env: &SpecEnv,
+) -> Option<ComptimeValue> {
+    match &expr.exp_desc {
+        typedtree::ExpressionDesc::Texp_constant(c) => {
+            match c {
+                typedtree::Constant::Int(n) => Some(ComptimeValue::Int(*n)),
+                typedtree::Constant::String(s, _) => Some(ComptimeValue::String(s.clone())),
+                typedtree::Constant::Float(s) => s.parse::<f64>().ok().map(ComptimeValue::Float),
+                typedtree::Constant::Char(c) => Some(ComptimeValue::Int(*c as i64)),
+                _ => None,
+            }
+        }
+        typedtree::ExpressionDesc::Texp_construct(_, cstr_desc, args) if args.is_empty() => {
+            // Boolean-like constructors
+            let name = cstr_desc.cstr_name.clone();
+            match name.as_str() {
+                "true" => Some(ComptimeValue::Bool(true)),
+                "false" => Some(ComptimeValue::Bool(false)),
+                _ => Some(ComptimeValue::Variant(name, None)),
+            }
+        }
+        typedtree::ExpressionDesc::Texp_ident(path, _, _) => {
+            // Check comptime bindings
+            env.bindings.get(&path.name()).cloned()
+        }
+        _ => None,
+    }
+}
+
+/// Try to match a typed tree pattern against a ComptimeValue.
+/// Returns variable bindings if matched.
+fn match_case_pattern(
+    pattern: &typedtree::Pattern,
+    value: &ComptimeValue,
+) -> Option<HashMap<String, ComptimeValue>> {
+    match &pattern.pat_desc {
+        // Wildcard matches everything
+        typedtree::PatternDesc::Tpat_any => Some(HashMap::new()),
+
+        // Variable binding
+        typedtree::PatternDesc::Tpat_var(id, _) => {
+            let mut bindings = HashMap::new();
+            bindings.insert(id.name().to_string(), value.clone());
+            Some(bindings)
+        }
+
+        // Constructor pattern — match variant name
+        typedtree::PatternDesc::Tpat_construct(_, cstr_desc, args) => {
+            if let ComptimeValue::Type(type_info) = value {
+                // Match TypeInfo variant names (Int, Float, String, Record, etc.)
+                let pattern_name = &cstr_desc.cstr_name;
+                if let Some(mut bindings) = match_typeinfo_pattern(type_info, pattern_name) {
+                    // Bind the constructor arguments if present
+                    if args.len() == 1 {
+                        // Single argument — match against the record of bindings
+                        if let typedtree::PatternDesc::Tpat_record(fields, _) = &args[0].pat_desc {
+                            for (_field_lid, lbl_desc, field_pat, _optional) in fields {
+                                let field_name = &lbl_desc.lbl_name;
+                                if let Some(field_value) = bindings.remove(field_name.as_str()) {
+                                    if let typedtree::PatternDesc::Tpat_var(id, _) = &field_pat.pat_desc {
+                                        bindings.insert(id.name().to_string(), field_value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some(bindings)
+                } else {
+                    None
+                }
+            } else if let ComptimeValue::Variant(name, payload) = value {
+                let pattern_name = &cstr_desc.cstr_name;
+                if pattern_name == name {
+                    let mut bindings = HashMap::new();
+                    if let (Some(payload), Some(arg_pat)) = (payload, args.first()) {
+                        if let Some(sub_bindings) = match_case_pattern(arg_pat, payload) {
+                            bindings.extend(sub_bindings);
+                        }
+                    }
+                    Some(bindings)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+
+        // Record pattern — destructure comptime record
+        typedtree::PatternDesc::Tpat_record(fields, _) => {
+            if let ComptimeValue::Record(entries) = value {
+                let mut bindings = HashMap::new();
+                for (_field_lid, lbl_desc, field_pat, _optional) in fields {
+                    let field_name = &lbl_desc.lbl_name;
+                    if let Some((_, fv)) = entries.iter().find(|(n, _)| n == field_name) {
+                        if let Some(sub_bindings) = match_case_pattern(field_pat, fv) {
+                            bindings.extend(sub_bindings);
+                        } else {
+                            return None;
+                        }
+                    }
+                }
+                Some(bindings)
+            } else {
+                None
+            }
+        }
+
+        // Alias pattern — match and bind
+        typedtree::PatternDesc::Tpat_alias(inner, id, _) => {
+            let mut bindings = match_case_pattern(inner, value)?;
+            bindings.insert(id.name().to_string(), value.clone());
+            Some(bindings)
+        }
+
+        // Or pattern — try left then right
+        typedtree::PatternDesc::Tpat_or(left, right, _) => {
+            match_case_pattern(left, value).or_else(|| match_case_pattern(right, value))
+        }
+
+        _ => None,
+    }
+}
+
+/// Convert a ComptimeValue to a typed tree Constant.
+fn comptime_value_to_constant(value: &ComptimeValue) -> Option<typedtree::Constant> {
+    match value {
+        ComptimeValue::Int(n) => Some(typedtree::Constant::Int(*n)),
+        ComptimeValue::Float(f) => Some(typedtree::Constant::Float(f.to_string())),
+        ComptimeValue::String(s) => Some(typedtree::Constant::String(s.clone(), None)),
+        ComptimeValue::Bool(_) => None, // Booleans are constructors, not constants
+        ComptimeValue::Unit => None,
+        _ => None,
     }
 }
