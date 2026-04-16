@@ -6655,6 +6655,24 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             let rw_body = rewrite_expression_generic(&body_expr, arena);
             ExpressionDesc::Pexp_inline_for(Box::new((*pat, arena.push_expr(rw_collection), arena.push_expr(rw_body))))
         }
+        ExpressionDesc::Pexp_comptime_typeinfo(_)
+        | ExpressionDesc::Pexp_comptime_typename(_) => {
+            // Pass through as-is (no sub-expressions to rewrite)
+            (*expr.pexp_desc).clone()
+        }
+        ExpressionDesc::Pexp_comptime_field(inner) => {
+            let (ref value, ref field) = **inner;
+            let val_expr = arena.get_expr(*value).clone();
+            let field_expr = arena.get_expr(*field).clone();
+            let rw_value = rewrite_expression_generic(&val_expr, arena);
+            let rw_field = rewrite_expression_generic(&field_expr, arena);
+            ExpressionDesc::Pexp_comptime_field(Box::new((arena.push_expr(rw_value), arena.push_expr(rw_field))))
+        }
+        ExpressionDesc::Pexp_comptime_compile_error(expr_idx) => {
+            let inner_expr = arena.get_expr(*expr_idx).clone();
+            let rw = rewrite_expression_generic(&inner_expr, arena);
+            ExpressionDesc::Pexp_comptime_compile_error(arena.push_expr(rw))
+        }
     };
 
     Expression {

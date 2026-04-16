@@ -4394,6 +4394,18 @@ impl<'a> LocCloner<'a> {
                 self.expression_idx(collection);
                 self.expression_idx(body);
             }
+            ExpressionDesc::Pexp_comptime_typeinfo(_)
+            | ExpressionDesc::Pexp_comptime_typename(_) => {
+                // No sub-expressions to walk
+            }
+            ExpressionDesc::Pexp_comptime_field(inner) => {
+                let (ref mut value, ref mut field) = **inner;
+                self.expression_idx(value);
+                self.expression_idx(field);
+            }
+            ExpressionDesc::Pexp_comptime_compile_error(expr) => {
+                self.expression_idx(expr);
+            }
         }
     }
 

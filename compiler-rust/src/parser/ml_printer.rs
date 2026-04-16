@@ -2207,6 +2207,18 @@ fn print_expression_inner<W: Write>(
             print_expression_inner(f, arena, arena.get_expr(*body), false, PrintCtx::reset());
             f.string(" }");
         }
+        ExpressionDesc::Pexp_comptime_typeinfo(_) => {
+            f.string("(* @typeInfo(...) *)");
+        }
+        ExpressionDesc::Pexp_comptime_field(_) => {
+            f.string("(* @field(...) *)");
+        }
+        ExpressionDesc::Pexp_comptime_compile_error(_) => {
+            f.string("(* @compileError(...) *)");
+        }
+        ExpressionDesc::Pexp_comptime_typename(_) => {
+            f.string("(* @typeName(...) *)");
+        }
     }
 }
 

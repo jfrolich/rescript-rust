@@ -2476,6 +2476,29 @@ fn walk_expression(
             walk_expression(&coll_expr, t, before_body, arena);
             walk_expression(&body_expr, t, rest, arena);
         }
+        ExpressionDesc::Pexp_comptime_typeinfo(_)
+        | ExpressionDesc::Pexp_comptime_typename(_) => {
+            // No sub-expressions with comments to attach
+            let (leading, trailing) = partition_leading_trailing(comments, expr.pexp_loc, arena);
+            t.attach_leading(expr.pexp_loc, leading, arena);
+            t.attach_trailing(expr.pexp_loc, trailing, arena);
+        }
+        ExpressionDesc::Pexp_comptime_field(inner) => {
+            let (ref value, ref field) = **inner;
+            let (leading, trailing) = partition_leading_trailing(comments, expr.pexp_loc, arena);
+            t.attach_leading(expr.pexp_loc, leading, arena);
+            let val_expr = arena.get_expr(*value).clone();
+            let field_expr = arena.get_expr(*field).clone();
+            let (before_field, rest) = partition_leading_trailing(trailing, val_expr.pexp_loc, arena);
+            walk_expression(&val_expr, t, before_field, arena);
+            walk_expression(&field_expr, t, rest, arena);
+        }
+        ExpressionDesc::Pexp_comptime_compile_error(expr_idx) => {
+            let (leading, trailing) = partition_leading_trailing(comments, expr.pexp_loc, arena);
+            t.attach_leading(expr.pexp_loc, leading, arena);
+            let inner_expr = arena.get_expr(*expr_idx).clone();
+            walk_expression(&inner_expr, t, trailing, arena);
+        }
     }
 }
 

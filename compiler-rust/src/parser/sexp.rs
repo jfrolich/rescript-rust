@@ -975,6 +975,32 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
                 expression(arena, arena.get_expr(*body)),
             ])
         }
+        ExpressionDesc::Pexp_comptime_typeinfo(ct) => {
+            Sexp::list(vec![
+                Sexp::atom("Pexp_comptime_typeinfo"),
+                core_type(arena, arena.get_core_type(*ct)),
+            ])
+        }
+        ExpressionDesc::Pexp_comptime_field(inner) => {
+            let (ref value, ref field) = **inner;
+            Sexp::list(vec![
+                Sexp::atom("Pexp_comptime_field"),
+                expression(arena, arena.get_expr(*value)),
+                expression(arena, arena.get_expr(*field)),
+            ])
+        }
+        ExpressionDesc::Pexp_comptime_compile_error(e) => {
+            Sexp::list(vec![
+                Sexp::atom("Pexp_comptime_compile_error"),
+                expression(arena, arena.get_expr(*e)),
+            ])
+        }
+        ExpressionDesc::Pexp_comptime_typename(ct) => {
+            Sexp::list(vec![
+                Sexp::atom("Pexp_comptime_typename"),
+                core_type(arena, arena.get_core_type(*ct)),
+            ])
+        }
     };
     Sexp::list(vec![Sexp::atom("expression"), desc])
 }

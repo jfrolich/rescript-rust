@@ -472,6 +472,20 @@ fn rewrite_expression(
             let new_body = rewrite_expr_idx(*body, arena, let_unwrap_enabled)?;
             ExpressionDesc::Pexp_inline_for(Box::new((*pat, new_collection, new_body)))
         }
+        ExpressionDesc::Pexp_comptime_typeinfo(_)
+        | ExpressionDesc::Pexp_comptime_typename(_) => {
+            (*expr.pexp_desc).clone()
+        }
+        ExpressionDesc::Pexp_comptime_field(inner) => {
+            let (ref value, ref field) = **inner;
+            let new_value = rewrite_expr_idx(*value, arena, let_unwrap_enabled)?;
+            let new_field = rewrite_expr_idx(*field, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_comptime_field(Box::new((new_value, new_field)))
+        }
+        ExpressionDesc::Pexp_comptime_compile_error(expr_idx) => {
+            let new_expr = rewrite_expr_idx(*expr_idx, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_comptime_compile_error(new_expr)
+        }
     };
 
     Ok(Expression {

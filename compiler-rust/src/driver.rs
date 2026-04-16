@@ -870,7 +870,13 @@ fn expression_has_string_literal(
             let (_, payload) = &**inner;
             payload_has_string_literal(payload, value, arena)
         }
-        ED::Pexp_ident(_) | ED::Pexp_jsx_element(_) | ED::Pexp_inline_for(_) => false,
+        ED::Pexp_ident(_)
+        | ED::Pexp_jsx_element(_)
+        | ED::Pexp_inline_for(_)
+        | ED::Pexp_comptime_typeinfo(_)
+        | ED::Pexp_comptime_field(_)
+        | ED::Pexp_comptime_compile_error(_)
+        | ED::Pexp_comptime_typename(_) => false,
     }
 }
 

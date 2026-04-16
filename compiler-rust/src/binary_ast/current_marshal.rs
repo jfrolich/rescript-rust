@@ -1610,8 +1610,12 @@ impl Marshal for ExpressionDesc {
                 w.write_block_header(29, 1);
                 jsx.marshal(w);
             }
-            ExpressionDesc::Pexp_inline_for(_) => {
-                unreachable!("Pexp_inline_for should be eliminated before serialization")
+            ExpressionDesc::Pexp_inline_for(_)
+            | ExpressionDesc::Pexp_comptime_typeinfo(_)
+            | ExpressionDesc::Pexp_comptime_field(_)
+            | ExpressionDesc::Pexp_comptime_compile_error(_)
+            | ExpressionDesc::Pexp_comptime_typename(_) => {
+                unreachable!("comptime builtins eliminated before serialization")
             }
         }
     }

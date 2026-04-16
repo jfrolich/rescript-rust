@@ -5046,6 +5046,26 @@ pub fn type_expect<'a>(
                 "inline for can only be used inside @comptime functions".to_string(),
             ))
         }
+        ED::Pexp_comptime_typeinfo(_) => {
+            Err(super::TypeCoreError::Other(
+                "comptime builtin @typeInfo can only be used inside @comptime functions".to_string(),
+            ))
+        }
+        ED::Pexp_comptime_field(_) => {
+            Err(super::TypeCoreError::Other(
+                "comptime builtin @field can only be used inside @comptime functions".to_string(),
+            ))
+        }
+        ED::Pexp_comptime_compile_error(_) => {
+            Err(super::TypeCoreError::Other(
+                "comptime builtin @compileError can only be used inside @comptime functions".to_string(),
+            ))
+        }
+        ED::Pexp_comptime_typename(_) => {
+            Err(super::TypeCoreError::Other(
+                "comptime builtin @typeName can only be used inside @comptime functions".to_string(),
+            ))
+        }
     }
 }
 
@@ -9535,6 +9555,18 @@ fn collect_lident_idents_in_expression(
             let (ref _pat, ref collection, ref body) = **inner;
             collect_lident_idents_in_expression(arena, arena.get_expr(*collection), out);
             collect_lident_idents_in_expression(arena, arena.get_expr(*body), out);
+        }
+        ED::Pexp_comptime_typeinfo(_)
+        | ED::Pexp_comptime_typename(_) => {
+            // No expression sub-terms to collect idents from
+        }
+        ED::Pexp_comptime_field(inner) => {
+            let (ref value, ref field) = **inner;
+            collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
+            collect_lident_idents_in_expression(arena, arena.get_expr(*field), out);
+        }
+        ED::Pexp_comptime_compile_error(expr) => {
+            collect_lident_idents_in_expression(arena, arena.get_expr(*expr), out);
         }
     }
 }

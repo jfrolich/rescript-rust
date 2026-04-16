@@ -1782,6 +1782,29 @@ pub fn print_expression(
                 Doc::text("}"),
             ])
         }
+        ExpressionDesc::Pexp_comptime_typeinfo(_) => {
+            Doc::text("@typeInfo(...)")
+        }
+        ExpressionDesc::Pexp_comptime_field(inner) => {
+            let (ref value, ref field) = **inner;
+            Doc::concat(vec![
+                Doc::text("@field("),
+                print_expression_with_comments(state, arena.get_expr(*value), cmt_tbl, arena),
+                Doc::text(", "),
+                print_expression_with_comments(state, arena.get_expr(*field), cmt_tbl, arena),
+                Doc::text(")"),
+            ])
+        }
+        ExpressionDesc::Pexp_comptime_compile_error(expr_idx) => {
+            Doc::concat(vec![
+                Doc::text("@compileError("),
+                print_expression_with_comments(state, arena.get_expr(*expr_idx), cmt_tbl, arena),
+                Doc::text(")"),
+            ])
+        }
+        ExpressionDesc::Pexp_comptime_typename(_) => {
+            Doc::text("@typeName(...)")
+        }
         // Send (method call): expr#method -> expr["method"]
         ExpressionDesc::Pexp_send(inner) => {
             let (ref parent_expr_idx, ref label) = **inner;

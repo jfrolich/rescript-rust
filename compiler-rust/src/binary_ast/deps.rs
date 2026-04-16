@@ -659,6 +659,18 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expr_idx(*collection);
                 self.add_expr_idx(*body);
             }
+            ExpressionDesc::Pexp_comptime_typeinfo(_)
+            | ExpressionDesc::Pexp_comptime_typename(_) => {
+                // No expression dependencies to scan
+            }
+            ExpressionDesc::Pexp_comptime_field(inner) => {
+                let (ref value, ref field) = **inner;
+                self.add_expr_idx(*value);
+                self.add_expr_idx(*field);
+            }
+            ExpressionDesc::Pexp_comptime_compile_error(expr) => {
+                self.add_expr_idx(*expr);
+            }
         }
     }
 
