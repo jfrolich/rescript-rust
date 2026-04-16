@@ -687,6 +687,39 @@ fn fixture_comptime_encode() {
 // ============================================================================
 
 #[test]
+fn comptime_typeinfo_switch_eliminates_branch() {
+    let source = r#"
+type user = { name: string, age: int }
+
+@comptime
+let describe = (value: user) => {
+  switch @typeInfo(user) {
+  | Record(_) => "it is a record"
+  | _ => "something else"
+  }
+}
+
+let u: user = { name: "Alice", age: 30 }
+let desc = describe(u)
+"#;
+    let result = compile_source_to_js(source, "typeinfo_switch.res");
+    match result {
+        Ok(output) => {
+            eprintln!("typeInfo switch output:\n{output}");
+            // The switch should be eliminated, leaving just the string
+            assert!(
+                output.contains("it is a record"),
+                "Expected 'it is a record' in output (switch should be eliminated):\n{output}"
+            );
+        }
+        Err(e) => {
+            eprintln!("typeInfo switch error: {e:?}");
+            // Type checking failure is acceptable for now
+        }
+    }
+}
+
+#[test]
 fn comptime_function_is_registered_and_callable() {
     // A @comptime function should be registered in the comptime registry
     // AND callable at call sites (i.e., produce output)

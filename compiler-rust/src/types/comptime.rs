@@ -602,7 +602,8 @@ fn comptime_pattern_matches(info: &TypeInfo, pat: &crate::parser::ast::Pattern, 
 
         // Constructor pattern — match variant name against TypeInfo kind
         crate::parser::ast::PatternDesc::Ppat_construct(lid, _) => {
-            let ctor_name = arena.get_longident(lid.txt).to_string();
+            let longident = arena.get_longident(lid.txt);
+            let ctor_name = arena.get_string(longident.last_idx()).to_string();
             matches!(
                 (ctor_name.as_str(), info),
                 ("Int", TypeInfo::Int)

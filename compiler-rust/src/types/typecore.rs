@@ -20002,6 +20002,9 @@ fn try_comptime_application(
     };
 
     // Check if it's a registered comptime function
+    let _ = std::fs::write("/tmp/comptime_lookup.txt", format!(
+        "lookup '{}' in {:?}\n", func_name, tctx.comptime_functions.keys().collect::<Vec<_>>()
+    ));
     let comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
 
     // Type-check the arguments to determine their concrete types
@@ -20039,36 +20042,18 @@ fn try_comptime_application(
         env,
     );
 
-    // Type-check the function body itself (not the application).
-    // First type-check it as a function, then construct the application.
-    let fn_ty = tctx.type_ctx.new_var(None);
-    match type_expect(tctx, env, &body_expr, fn_ty, None) {
-        Ok(typed_fn) => {
-            // Build a typed apply expression
-            let apply_args: Vec<_> = typed_args
-                .into_iter()
-                .map(|ta| crate::types::typedtree::ApplyArg {
-                    label: crate::types::asttypes::ArgLabel::Nolabel,
-                    expression: Some(ta),
-                })
-                .collect();
-
-            let result = Expression {
-                exp_desc: crate::types::typedtree::ExpressionDesc::Texp_apply {
-                    funct: Box::new(typed_fn),
-                    args: apply_args,
-                    partial: false,
-                    transformed_jsx: false,
-                },
-                exp_loc: loc,
-                exp_extra: vec![],
-                exp_type: expected_ty,
-                exp_env: tctx.type_ctx.store_typed_env(env),
-                exp_attributes: crate::parser::ast::Attributes::new(),
-            };
-            Some(Ok(result))
+    // Type-check the specialized body directly.
+    // The partial evaluator has already resolved @typeInfo, picked switch
+    // branches, etc. The result is plain ReScript ready for type checking.
+    let _ = std::fs::write("/tmp/comptime_spec.txt", format!(
+        "specialized body desc: {:?}\n", std::mem::discriminant(&*specialized_body.pexp_desc)
+    ));
+    match type_expect(tctx, env, &specialized_body, expected_ty, None) {
+        Ok(typed_expr) => Some(Ok(typed_expr)),
+        Err(e) => {
+            let _ = std::fs::write("/tmp/comptime_err.txt", format!("{:?}\n", e));
+            None
         }
-        Err(_) => None,
     }
 }
 
