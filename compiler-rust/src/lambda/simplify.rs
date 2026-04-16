@@ -17,7 +17,7 @@ use crate::lambda::{
 };
 use crate::location::Location;
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct SimplifyEnv {
     blocks: HashMap<Ident, ImmutableBlockInfo>,
     call_substitutions: HashMap<Ident, Lambda>,
@@ -30,6 +30,28 @@ struct SimplifyEnv {
     allow_direct_function_beta_reduce: bool,
     preserve_direct_wrapper_values: bool,
     substitutions: HashMap<Ident, Lambda>,
+}
+
+#[derive(Default)]
+struct SavedEnvEntry {
+    block: Option<ImmutableBlockInfo>,
+    call_substitution: Option<Lambda>,
+    function: Option<LFunction>,
+    known_function: Option<LFunction>,
+    optional_block: Option<OptionalBlockInfo>,
+    plain_string: Option<String>,
+    substitution: Option<Lambda>,
+}
+
+fn restore_field<V>(map: &mut HashMap<Ident, V>, id: &Ident, saved: Option<V>) {
+    match saved {
+        Some(v) => {
+            map.insert(id.clone(), v);
+        }
+        None => {
+            map.remove(id);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -70,40 +92,74 @@ enum FlattenGroup {
 }
 
 impl SimplifyEnv {
-    fn without_ident(&self, id: &Ident) -> Self {
-        let mut next = self.clone();
-        next.blocks.remove(id);
-        next.call_substitutions.remove(id);
-        next.functions.remove(id);
-        next.known_functions.remove(id);
-        next.optional_blocks.remove(id);
-        next.plain_strings.remove(id);
-        next.substitutions.remove(id);
-        next
-    }
-
-    fn without_idents<'a>(&self, ids: impl IntoIterator<Item = &'a Ident>) -> Self {
-        let mut next = self.clone();
-        for id in ids {
-            next.blocks.remove(id);
-            next.call_substitutions.remove(id);
-            next.functions.remove(id);
-            next.known_functions.remove(id);
-            next.optional_blocks.remove(id);
-            next.plain_strings.remove(id);
-            next.substitutions.remove(id);
+    fn shadow_ident(&mut self, id: &Ident) -> SavedEnvEntry {
+        SavedEnvEntry {
+            block: self.blocks.remove(id),
+            call_substitution: self.call_substitutions.remove(id),
+            function: self.functions.remove(id),
+            known_function: self.known_functions.remove(id),
+            optional_block: self.optional_blocks.remove(id),
+            plain_string: self.plain_strings.remove(id),
+            substitution: self.substitutions.remove(id),
         }
-        next
     }
 
-    fn across_capture_boundary(&self) -> Self {
-        let mut next = self.clone();
-        next.call_substitutions
-            .retain(|_, value| captured_substitution_allowed(value));
-        next.substitutions
-            .retain(|_, value| captured_substitution_allowed(value));
-        next
+    fn restore_ident(&mut self, id: &Ident, saved: SavedEnvEntry) {
+        restore_field(&mut self.blocks, id, saved.block);
+        restore_field(&mut self.call_substitutions, id, saved.call_substitution);
+        restore_field(&mut self.functions, id, saved.function);
+        restore_field(&mut self.known_functions, id, saved.known_function);
+        restore_field(&mut self.optional_blocks, id, saved.optional_block);
+        restore_field(&mut self.plain_strings, id, saved.plain_string);
+        restore_field(&mut self.substitutions, id, saved.substitution);
     }
+
+    fn shadow_idents<'a>(&mut self, ids: impl IntoIterator<Item = &'a Ident>) -> Vec<(Ident, SavedEnvEntry)> {
+        ids.into_iter()
+            .map(|id| (id.clone(), self.shadow_ident(id)))
+            .collect()
+    }
+
+    fn restore_idents(&mut self, saved: Vec<(Ident, SavedEnvEntry)>) {
+        for (id, entry) in saved.into_iter().rev() {
+            self.restore_ident(&id, entry);
+        }
+    }
+
+    fn enter_capture_boundary(&mut self) -> CapturedBoundaryState {
+        let removed_call_subs: HashMap<_, _> = self
+            .call_substitutions
+            .iter()
+            .filter(|(_, v)| !captured_substitution_allowed(v))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for k in removed_call_subs.keys() {
+            self.call_substitutions.remove(k);
+        }
+        let removed_subs: HashMap<_, _> = self
+            .substitutions
+            .iter()
+            .filter(|(_, v)| !captured_substitution_allowed(v))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for k in removed_subs.keys() {
+            self.substitutions.remove(k);
+        }
+        CapturedBoundaryState {
+            removed_call_subs,
+            removed_subs,
+        }
+    }
+
+    fn leave_capture_boundary(&mut self, state: CapturedBoundaryState) {
+        self.call_substitutions.extend(state.removed_call_subs);
+        self.substitutions.extend(state.removed_subs);
+    }
+}
+
+struct CapturedBoundaryState {
+    removed_call_subs: HashMap<Ident, Lambda>,
+    removed_subs: HashMap<Ident, Lambda>,
 }
 
 /// Simplify lowered lambda before JS IR lowering.
@@ -142,7 +198,7 @@ fn simplify_for_js_backend_once(
 ) -> Lambda {
     let flattened = deep_flatten_for_js_backend(lam);
     let exports = collect_exported_idents(&flattened);
-    let env = SimplifyEnv {
+    let mut env = SimplifyEnv {
         functions: collect_inlineable_functions(&flattened),
         known_functions: collect_known_functions(&flattened),
         preserved_export_bindings: preserved_export_bindings.clone(),
@@ -151,7 +207,7 @@ fn simplify_for_js_backend_once(
         allow_direct_function_beta_reduce,
         ..SimplifyEnv::default()
     };
-    simplify_with_env(&flattened, &env, &exports)
+    simplify_with_env(&flattened, &mut env, &exports)
 }
 
 fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
@@ -633,32 +689,34 @@ fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
     }
 }
 
-fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) -> Lambda {
+fn simplify_with_env(lam: &Lambda, env: &mut SimplifyEnv, exports: &HashSet<Ident>) -> Lambda {
     match lam {
         Lambda::Lvar(id) => resolve_transitive_substitution(id, env).unwrap_or_else(|| lam.clone()),
         Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
         Lambda::Lapply(apply) => simplify_apply(apply, env, exports),
         Lambda::Lfunction(func) => {
-            let body_env = env
-                .across_capture_boundary()
-                .without_idents(func.params.iter());
+            let capture_state = env.enter_capture_boundary();
+            let saved = env.shadow_idents(func.params.iter());
             let simplified = Lambda::function_(
                 func.arity,
                 func.params.clone(),
-                simplify_with_env(&func.body, &body_env, exports),
+                simplify_with_env(&func.body, env, exports),
                 func.attr.clone(),
             );
-            if let Lambda::Lfunction(func) = &simplified {
-                eta_reduce_function_value(func, &body_env).unwrap_or(simplified)
+            let result = if let Lambda::Lfunction(func) = &simplified {
+                eta_reduce_function_value(func, env).unwrap_or(simplified)
             } else {
                 simplified
-            }
+            };
+            env.restore_idents(saved);
+            env.leave_capture_boundary(capture_state);
+            result
         }
         Lambda::Llet(kind, id, value, body) => {
             let original_value = value.as_ref();
             let mut kind = *kind;
             let mut value = simplify_with_env(value, env, exports);
-            let mut body_env = env.without_ident(id);
+            let saved = env.shadow_ident(id);
             let binding_is_exported = lambda_exports_ident(body, id);
             let mut body_exports = None;
             let preserve_exported_eta_alias =
@@ -667,10 +725,10 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 .preserved_local_module_eta_alias_bindings
                 .contains(id);
             if let Some(block_info) = immutable_block_elements(&value) {
-                body_env.blocks.insert(id.clone(), block_info);
+                env.blocks.insert(id.clone(), block_info);
             }
             if let Some(optional_info) = optional_block_info(&value) {
-                body_env.optional_blocks.insert(id.clone(), optional_info);
+                env.optional_blocks.insert(id.clone(), optional_info);
             }
             if matches!(kind, LetKind::Strict | LetKind::StrictOpt) && is_safe_to_alias(&value) {
                 kind = LetKind::Alias;
@@ -682,7 +740,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 }
             }
             if let Some(string_value) = plain_string_constant(&value) {
-                body_env.plain_strings.insert(id.clone(), string_value);
+                env.plain_strings.insert(id.clone(), string_value);
             }
             if let Some(substitution) = substitution_candidate(kind, original_value, &value) {
                 if !preserve_local_module_field_eta_alias
@@ -696,25 +754,26 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                     }
                     if preserve_exported_eta_alias {
                         if eta_reducible_module_field_read(&substitution) {
-                            body_env
+                            env
                                 .call_substitutions
                                 .insert(id.clone(), substitution.clone());
                         }
                     } else if !env.preserved_export_bindings.contains(id) {
-                        body_env.substitutions.insert(id.clone(), substitution);
+                        env.substitutions.insert(id.clone(), substitution);
                     }
                 }
             }
             if kind != LetKind::Variable {
                 if let Some(func) = inlineable_local_function(&value) {
-                    body_env.known_functions.insert(id.clone(), func.clone());
+                    env.known_functions.insert(id.clone(), func.clone());
                     if analysis::lfunction_can_be_inlined(&func) {
-                        body_env.functions.insert(id.clone(), func);
+                        env.functions.insert(id.clone(), func);
                     }
                 }
             }
             let mut body =
-                simplify_with_env(body, &body_env, body_exports.as_ref().unwrap_or(exports));
+                simplify_with_env(body, env, body_exports.as_ref().unwrap_or(exports));
+            env.restore_ident(id, saved);
             if matches!(kind, LetKind::Strict | LetKind::StrictOpt) {
                 if let Some(init) = mutable_ref_init(&value) {
                     if let Ok(eliminated_body) = eliminate_non_escaping_ref_binding(id, &body) {
@@ -756,22 +815,24 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             }
         }
         Lambda::Lletrec(bindings, body) => {
-            let bound_ids = bindings.iter().map(|(id, _)| id);
-            let scoped_env = env.without_idents(bound_ids);
-            let mut recursive_env = scoped_env.clone();
+            let bound_ids: Vec<_> = bindings.iter().map(|(id, _)| id).collect();
+            let saved = env.shadow_idents(bound_ids.iter().copied());
             for (id, expr) in bindings {
                 if let Some(func) = inlineable_local_function(expr) {
-                    recursive_env.known_functions.insert(id.clone(), func);
+                    env.known_functions.insert(id.clone(), func);
                 }
             }
             let bindings = bindings
                 .iter()
                 .map(|(id, expr)| {
-                    let expr_env = recursive_env.without_ident(id);
-                    (id.clone(), simplify_with_env(expr, &expr_env, exports))
+                    let expr_saved = env.shadow_ident(id);
+                    let result = (id.clone(), simplify_with_env(expr, env, exports));
+                    env.restore_ident(id, expr_saved);
+                    result
                 })
                 .collect();
-            let body = simplify_with_env(body, &recursive_env, exports);
+            let body = simplify_with_env(body, env, exports);
+            env.restore_idents(saved);
             Lambda::letrec(bindings, body)
         }
         Lambda::Lprim(info) => simplify_primitive(info, env, exports),
@@ -814,19 +875,25 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 .collect(),
         ),
         Lambda::LstaticCatch(body, (id, vars), handler) => {
-            let scoped_env = env.without_idents(vars.iter());
+            let body = Box::new(simplify_with_env(body, env, exports));
+            let saved = env.shadow_idents(vars.iter());
+            let handler = Box::new(simplify_with_env(handler, env, exports));
+            env.restore_idents(saved);
             Lambda::LstaticCatch(
-                Box::new(simplify_with_env(body, env, exports)),
+                body,
                 (*id, vars.clone()),
-                Box::new(simplify_with_env(handler, &scoped_env, exports)),
+                handler,
             )
         }
         Lambda::LtryWith(body, exn, handler) => {
-            let scoped_env = env.without_ident(exn);
+            let body = Box::new(simplify_with_env(body, env, exports));
+            let saved = env.shadow_ident(exn);
+            let handler = Box::new(simplify_with_env(handler, env, exports));
+            env.restore_ident(exn, saved);
             Lambda::LtryWith(
-                Box::new(simplify_with_env(body, env, exports)),
+                body,
                 exn.clone(),
-                Box::new(simplify_with_env(handler, &scoped_env, exports)),
+                handler,
             )
         }
         Lambda::LifThenElse(cond, then_, else_) => {
@@ -859,26 +926,27 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 Lambda::seq(first, second)
             }
         }
-        Lambda::Lwhile(cond, body) => Lambda::Lwhile(
-            Box::new(simplify_with_env(
-                cond,
-                &env.across_capture_boundary(),
-                exports,
-            )),
-            Box::new(simplify_with_env(
-                body,
-                &env.across_capture_boundary(),
-                exports,
-            )),
-        ),
+        Lambda::Lwhile(cond, body) => {
+            let capture_state = env.enter_capture_boundary();
+            let cond = Box::new(simplify_with_env(cond, env, exports));
+            let body = Box::new(simplify_with_env(body, env, exports));
+            env.leave_capture_boundary(capture_state);
+            Lambda::Lwhile(cond, body)
+        }
         Lambda::Lfor(id, from, to, direction, body) => {
-            let scoped_env = env.across_capture_boundary().without_ident(id);
+            let from = Box::new(simplify_with_env(from, env, exports));
+            let to = Box::new(simplify_with_env(to, env, exports));
+            let capture_state = env.enter_capture_boundary();
+            let saved = env.shadow_ident(id);
+            let body = Box::new(simplify_with_env(body, env, exports));
+            env.restore_ident(id, saved);
+            env.leave_capture_boundary(capture_state);
             Lambda::Lfor(
                 id.clone(),
-                Box::new(simplify_with_env(from, env, exports)),
-                Box::new(simplify_with_env(to, env, exports)),
+                from,
+                to,
                 *direction,
-                Box::new(simplify_with_env(body, &scoped_env, exports)),
+                body,
             )
         }
         Lambda::Lassign(id, value) => {
@@ -1657,7 +1725,7 @@ fn is_safe_to_alias(lam: &Lambda) -> bool {
 
 fn simplify_primitive(
     info: &crate::lambda::PrimInfo,
-    env: &SimplifyEnv,
+    env: &mut SimplifyEnv,
     exports: &HashSet<Ident>,
 ) -> Lambda {
     if let Primitive::Pmakeblock(_, TagInfo::ModuleExport(export_ids), _) = &info.primitive {
@@ -2482,7 +2550,7 @@ fn block_field<'a>(
     }
 }
 
-fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) -> Lambda {
+fn simplify_apply(apply: &Apply, env: &mut SimplifyEnv, exports: &HashSet<Ident>) -> Lambda {
     if env.allow_direct_function_beta_reduce {
         if let Lambda::Lfunction(inline_func) = apply.ap_func.as_ref() {
             if should_inline_direct_function(inline_func, &apply.ap_args) {
@@ -2498,12 +2566,14 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
         if let Some(reduced) =
             reduce_direct_wrapper_application_once(&apply.ap_func, &apply.ap_args)
         {
-            let followup_env = SimplifyEnv {
-                allow_direct_function_beta_reduce: false,
-                preserve_direct_wrapper_values: true,
-                ..env.clone()
-            };
-            return simplify_with_env(&reduced, &followup_env, exports);
+            let old_allow = env.allow_direct_function_beta_reduce;
+            let old_preserve = env.preserve_direct_wrapper_values;
+            env.allow_direct_function_beta_reduce = false;
+            env.preserve_direct_wrapper_values = true;
+            let result = simplify_with_env(&reduced, env, exports);
+            env.allow_direct_function_beta_reduce = old_allow;
+            env.preserve_direct_wrapper_values = old_preserve;
+            return result;
         }
     }
 
@@ -2518,8 +2588,8 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
             .iter()
             .any(|arg| lambda_hits_variable_through_env(id, arg, env))
         {
-            if let Some(func) = env.functions.get(id) {
-                if let Some(reduced) = reduce_named_function_application(id, func, &args, exports) {
+            if let Some(func) = env.functions.get(id).cloned() {
+                if let Some(reduced) = reduce_named_function_application(id, &func, &args, exports) {
                     return simplify_with_env(&reduced, env, exports);
                 }
             }
