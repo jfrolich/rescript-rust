@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 551 / 657 with 8 unrelated compile errors and 98 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 554 / 657 with 8 unrelated compile errors and 95 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **551 / 657**
+- JS snapshot parity: **554 / 657**
 - Compile errors: **8**
-- Output diffs: **98**
+- Output diffs: **95**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,63 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `551 / 657` unless the
+Do **not** replace the recorded project baseline with `554 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: match OCaml's `while` dump shape on the printer path by
+  keeping multiline `while (...)` conditions under the dumper's hanging-indent
+  paren group and by printing empty statement blocks with the same blank
+  interior line OCaml emits instead of Rust's compact `{}` shortcut
+- Active backend focus moves to **Phase 5: Byte-Exact Dumping** from `PLAN.md`
+  for this slice; the lowering was already fixed in `compiler-rust/src/lambda/compile.rs`,
+  and the remaining drift stayed in `compiler-rust/src/js_ir/printer.rs`
+- OCaml reference:
+  - `compiler/core/js_dump.ml`, especially the `While` branch's
+    `P.paren_group f 1 (...)` condition printing
+  - `compiler/core/js_dump.ml`, especially `brace_block` using
+    `P.brace_vgroup f 1 (...)` for statement blocks
+- Rust change:
+  - `StatementDesc::While` now prints its condition under an extra indent scope
+    so multiline IIFE conditions keep OCaml's hanging indent instead of
+    flattening their internal lines back to the surrounding statement column
+  - `print_brace_block(...)` now prints empty statement blocks with a blank
+    interior line and the outer closing-brace indent, matching OCaml's dumper
+    instead of emitting compact `{}`
+  - added printer regression coverage in
+    `test_print_empty_while_body_keeps_blank_line_like_ocaml` and
+    `test_print_while_multiline_condition_keeps_hanging_indent_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_while -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh complex_while_loop --diff`
+  - `timeout 30 ./scripts/test_js_single.sh test_while_side_effect --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/complex_while_loop.res` now matches its checked-in
+    snapshot exactly; the remaining drift from the earlier `compile_while`
+    lowering fix was only the dumper's while-condition indentation and empty
+    block shape
+  - `tests/tests/src/test_while_side_effect.res` also matches its checked-in
+    snapshot exactly; the effectful comma-condition loop keeps OCaml's blank
+    empty body and the IIFE predicate keeps OCaml's hanging indent
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained an exact
+    snapshot match throughout the printer slice
+  - the generalized empty-statement-block printer rule also removes one
+    additional dirty-tree output diff elsewhere in the harness beyond the two
+    focused `while` fixtures
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **551 / 657** -> **554 / 657** (**+3**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **98** -> **95** (**-3**)
+- Keep this change because OCaml's dumper really does route `while`
+  conditions through a hanging-indent paren group and statement blocks through
+  `brace_vgroup`; the compact Rust-only `{}` path and flattened multiline
+  condition indentation were last-mile printer drift, not backend behavior.
 
 Latest iteration on **2026-04-16**:
 

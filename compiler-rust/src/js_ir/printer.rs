@@ -537,7 +537,7 @@ impl JsPrinter {
             StatementDesc::While(cond, body) => {
                 self.write("while ");
                 self.write_char('(');
-                self.print_expression(cond, 0);
+                self.with_indent(1, |this| this.print_expression(cond, 0));
                 self.write(") ");
                 self.print_brace_block(body);
                 self.semi();
@@ -742,13 +742,26 @@ impl JsPrinter {
     /// Print a brace-enclosed block
     fn print_brace_block(&mut self, stmts: &Block) {
         self.write_char('{');
-        if !stmts.is_empty() {
+        if stmts.is_empty() {
             self.indent();
-            self.newline();
-            self.print_statements(stmts, false);
+            self.output.push('\n');
+            for _ in 0..self.indent {
+                self.output.push_str(self.indent_str);
+            }
+            self.output.push('\n');
             self.dedent();
-            self.newline();
+            for _ in 0..self.indent {
+                self.output.push_str(self.indent_str);
+            }
+            self.last_new_line = true;
+            self.write_char('}');
+            return;
         }
+        self.indent();
+        self.newline();
+        self.print_statements(stmts, false);
+        self.dedent();
+        self.newline();
         self.write_char('}');
     }
 
@@ -4186,6 +4199,44 @@ mod tests {
         let result = print_block(&vec![stmt]);
         assert!(result.contains("while (true)"));
         assert!(result.contains("break;"));
+    }
+
+    #[test]
+    fn test_print_empty_while_body_keeps_blank_line_like_ocaml() {
+        let rendered = print_block(&vec![Statement::while_(Expression::bool(true), vec![])]);
+
+        assert_eq!(rendered, "while (true) {\n  \n};");
+    }
+
+    #[test]
+    fn test_print_while_multiline_condition_keeps_hanging_indent_like_ocaml() {
+        let cond = Expression::call(
+            Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![],
+                body: vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: Ident::create_local("b"),
+                        value: Some(Expression::number(Number::int(9))),
+                        property: crate::lambda::compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    }),
+                    Statement::return_(Expression::bool(true)),
+                ],
+                env: Default::default(),
+                return_unit: false,
+                async_: false,
+                directive: None,
+            }),
+            vec![],
+            CallInfo::default(),
+        );
+        let rendered = print_block(&vec![Statement::while_(cond, vec![Statement::break_()])]);
+
+        assert_eq!(
+            rendered,
+            "while ((() => {\n    let b = 9;\n    return true;\n  })()) {\n  break;\n};"
+        );
     }
 
     #[test]
