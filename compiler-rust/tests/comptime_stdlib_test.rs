@@ -1,4 +1,15 @@
-//! Comptime encoder test with stdlib (Js.Json, Js.Dict)
+//! Comptime encoder test with stdlib (JSON, Dict — ReScript 12 API)
+//!
+//! These tests verify that the @comptime encoder pattern works with real
+//! ReScript 12 stdlib types (JSON.t, Dict). The encoder pattern uses:
+//! - JSON.Encode.string/int/float/bool/object (all %identity — zero-cost)
+//! - Dict.make() + Dict.set()
+//!
+//! NOTE: External resolution from source-loaded modules currently emits
+//! `undefined` for some primitives (@set_index, %identity from submodules).
+//! This is a known JS codegen issue, not a comptime issue. The comptime
+//! specialization (branch elimination, inline for unrolling, recursive
+//! inlining) works correctly — only the final JS extern calls are wrong.
 
 use rescript_compiler::driver::{compile_source_in_process, CompilerOptions};
 use rescript_compiler::cmi::persistent_env::ModuleRegistry;
@@ -43,8 +54,24 @@ fn compile_with_stdlib(source: &str, filename: &str) -> Result<String, String> {
     }
 }
 
+/// The north star: a generic JSON encoder using @comptime + ReScript 12 API.
+///
+/// This is what users would write. Since JSON.Encode.* are all %identity externals,
+/// the compiled output should be zero-overhead — just Dict operations and raw values.
+///
+/// Expected output (once external resolution is fixed):
+/// ```js
+/// let dict = {};
+/// dict["name"] = myUser.name;
+/// dict["age"] = myUser.age;
+/// let dict$1 = {};
+/// dict$1["street"] = myUser.address.street;
+/// dict$1["city"] = myUser.address.city;
+/// dict["address"] = dict$1;
+/// let json = dict;
+/// ```
 #[test]
-fn comptime_encoder_with_js_json() {
+fn comptime_encoder_north_star() {
     let source = r#"
 type address = { street: string, city: string }
 type user = { name: string, age: int, address: address }
@@ -52,15 +79,16 @@ type user = { name: string, age: int, address: address }
 @comptime
 let rec encode = (value) => {
   switch @typeInfo(value) {
-  | String => Js.Json.string(value)
-  | Int => Js.Json.number(Js.Int.toFloat(value))
-  | Bool => Js.Json.boolean(value)
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Float => JSON.Encode.float(value)
+  | Bool => JSON.Encode.bool(value)
   | Record({fields}) =>
-    let dict = Js.Dict.empty()
+    let dict = Dict.make()
     inline for field in fields {
-      Js.Dict.set(dict, field.name, encode(@field(value, field.name)))
+      Dict.set(dict, field.name, encode(@field(value, field.name)))
     }
-    Js.Json.object_(dict)
+    JSON.Encode.object(dict)
   | _ => @compileError("unsupported type")
   }
 }
@@ -77,17 +105,57 @@ let json = encode(myUser)
     let result = compile_with_stdlib(source, "encode_test.res");
     match result {
         Ok(output) => {
-            eprintln!("=== ENCODER JS OUTPUT ===\n{}\n=== END ===", output);
-            // Should contain Dict.set calls for each field
-            assert!(output.contains("name"), "Expected 'name' field in output:\n{output}");
-            assert!(output.contains("age"), "Expected 'age' field in output:\n{output}");
-            assert!(output.contains("street"), "Expected nested 'street' in output:\n{output}");
-            // Should NOT contain @typeInfo or switch on type
+            eprintln!("=== NORTH STAR ENCODER JS ===\n{}\n=== END ===", output);
+            // Verify comptime specialization worked:
+            // - No typeInfo/switch at runtime
             assert!(!output.contains("typeInfo"), "Should not have runtime typeInfo:\n{output}");
+            // - Field names present (from inline for unrolling)
+            assert!(output.contains("name"), "Expected 'name' field:\n{output}");
+            assert!(output.contains("age"), "Expected 'age' field:\n{output}");
+            assert!(output.contains("street"), "Expected nested 'street':\n{output}");
         }
         Err(e) => {
-            eprintln!("Encoder compilation error: {e}");
-            // Expected for now if stdlib loading has issues
+            eprintln!("North star encoder compilation error: {e}");
+            // Don't panic — this may fail until extern resolution is fixed
+        }
+    }
+}
+
+#[test]
+fn simple_stdlib_dict() {
+    let source = r#"
+let d = Dict.make()
+Dict.set(d, "hello", "world")
+"#;
+
+    let result = compile_with_stdlib(source, "dict_test.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== DICT JS ===\n{}\n=== END ===", output);
+            // Dict.make compiles correctly (it's @obj external)
+            assert!(output.contains("hello"), "Expected 'hello':\n{output}");
+        }
+        Err(e) => {
+            panic!("Dict test should compile: {e}");
+        }
+    }
+}
+
+#[test]
+fn simple_stdlib_json_encode() {
+    let source = r#"
+let x: JSON.t = JSON.Encode.string("hello")
+let y: JSON.t = JSON.Encode.int(42)
+"#;
+
+    let result = compile_with_stdlib(source, "json_test.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== JSON ENCODE JS ===\n{}\n=== END ===", output);
+            assert!(output.contains("hello"), "Expected 'hello':\n{output}");
+        }
+        Err(e) => {
+            panic!("JSON encode test should compile: {e}");
         }
     }
 }
