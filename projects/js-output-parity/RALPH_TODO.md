@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 528 / 657 with 8 unrelated compile errors and 121 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 534 / 657 with 8 unrelated compile errors and 115 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **528 / 657**
+- JS snapshot parity: **534 / 657**
 - Compile errors: **8**
-- Output diffs: **121**
+- Output diffs: **115**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,62 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `528 / 657` unless the
+Do **not** replace the recorded project baseline with `534 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: lower `PinitMod` / `PupdateMod` on the Phase-3 primitive path
+  so recursive-module JS emission keeps OCaml's `Primitive_module.init/update`
+  runtime calls instead of dropping module initialization metadata entirely
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  `compiler/core/lam_compile_primitive.ml`, specifically the
+  `translate` arms for `Pinit_mod` and `Pupdate_mod`
+- Rust change:
+  - added the missing `PinitMod` / `PupdateMod` match arms in
+    `compiler-rust/src/lambda/compile.rs` so Rust now lowers them to
+    `Primitive_module.init(...)` and `Primitive_module.update(...)`
+    like OCaml
+  - added focused unit coverage for both the runtime call shape and the
+    required `Primitive_module` runtime import in the deps-program printer path
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_module_primitives_lower_to_primitive_module_runtime_calls_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_module_primitives_require_primitive_module_runtime_import -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `./scripts/test_js_single.sh gpr_1539_test --diff`
+  - `./scripts/test_js_single.sh ExternalShadow --diff`
+  - `./scripts/test_js_single.sh gpr_3931_test --diff`
+  - `./scripts/test_js_single.sh rec_module_test --diff`
+  - `./scripts/test_js_single.sh rec_module_opt --diff`
+  - `./scripts/test_js_single.sh recmodule --diff`
+  - `./scripts/test_js_single.sh recursive_unbound_module_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1539_test.res` now matches its checked-in snapshot
+    again, restoring the missing `Primitive_module.init/update` wrappers that
+    OCaml emits for recursive module setup
+  - the same primitive-lowering fix also cleared a small module-shaped guard
+    set in the tests tree: `gpr_3931_test`, `rec_module_test`,
+    `rec_module_opt`, `recmodule`, and `recursive_unbound_module_test` all
+    produced no diff output after the rebuild
+  - `tests/tests/src/ExternalShadow.res` stayed exact as a broader unchanged
+    guard
+  - the remaining recursive-module drift in the current diff cache lives
+    further downstream under `src/recursive_module*` and
+    `src/recursive_react_component`, so the next slice should stay in the
+    recursive-module backend path rather than the primitive match itself
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **528 / 657** -> **534 / 657** (**+6**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **121** -> **115** (**-6**)
+- Keep this change because the previous Rust backend was simply not OCaml-
+  aligned here: it carried `PinitMod` / `PupdateMod` through lambda but never
+  lowered them in the JS backend, which erased recursive-module runtime
+  initialization and update calls from emitted JavaScript.
 
 Latest iteration on **2026-04-16**:
 

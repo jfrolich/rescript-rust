@@ -5221,6 +5221,8 @@ impl LambdaCompiler {
             Pstringadd => {
                 Expression::string_append(compiled_args[0].clone(), compiled_args[1].clone())
             }
+            PinitMod => self.runtime_call_expr("Primitive_module", "init", compiled_args),
+            PupdateMod => self.runtime_call_expr("Primitive_module", "update", compiled_args),
             PnullToOpt => self.null_to_opt_expr(compiled_args[0].clone()),
             PnullUndefinedToOpt => self.null_undefined_to_opt_expr(compiled_args[0].clone()),
             PisNotNone => self.is_not_none_expr(compiled_args[0].clone()),
@@ -14316,6 +14318,85 @@ mod tests {
                 ..
             }] if id.same(&exn)
         ));
+    }
+
+    #[test]
+    fn compile_module_primitives_lower_to_primitive_module_runtime_calls_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let loc = Location::none();
+        let init = compiler.compile_expr(&Lambda::prim(
+            Primitive::PinitMod,
+            vec![
+                Lambda::const_(Constant::int(1)),
+                Lambda::var(Ident::create_local("shape")),
+            ],
+            loc.clone(),
+        ));
+        assert!(init.prelude.is_empty());
+        assert_eq!(print_expression(&init.expr), "Primitive_module.init(1, shape)");
+
+        let update = compiler.compile_expr(&Lambda::prim(
+            Primitive::PupdateMod,
+            vec![
+                Lambda::var(Ident::create_local("shape")),
+                Lambda::var(Ident::create_local("point")),
+                Lambda::var(Ident::create_local("value")),
+            ],
+            loc,
+        ));
+        assert!(update.prelude.is_empty());
+        assert_eq!(
+            print_expression(&update.expr),
+            "Primitive_module.update(shape, point, value)"
+        );
+    }
+
+    #[test]
+    fn compile_module_primitives_require_primitive_module_runtime_import() {
+        let mut compiler = LambdaCompiler::new();
+        let module_slot = Ident::create_local("point");
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            module_slot.clone(),
+            Lambda::prim(
+                Primitive::PinitMod,
+                vec![
+                    Lambda::const_(Constant::int(1)),
+                    Lambda::const_(Constant::string("shape")),
+                ],
+                Location::none(),
+            ),
+            Lambda::seq(
+                Lambda::unit(),
+                Lambda::prim(
+                    Primitive::PupdateMod,
+                    vec![
+                        Lambda::const_(Constant::string("shape")),
+                        Lambda::var(module_slot),
+                        Lambda::const_(Constant::string("value")),
+                    ],
+                    Location::none(),
+                ),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+        assert!(deps.modules.iter().any(|module| {
+            module.kind == Kind::Runtime && module.id.name() == "Primitive_module"
+        }));
+
+        let resolver = ModulePathResolver::from_compile_options(
+            None,
+            Some(std::path::Path::new("/tmp/module_primitive.mjs")),
+            None,
+            None,
+        );
+        let rendered = print_deps_program(&deps, Some(&resolver));
+        assert!(rendered.contains(
+            "import * as Primitive_module from \"@rescript/runtime/lib/es6/Primitive_module.js\";"
+        ));
+        assert!(rendered.contains("let point = Primitive_module.init(1, \"shape\");"));
+        assert!(rendered.contains("Primitive_module.update(\"shape\", point, \"value\");"));
     }
 
     #[test]
