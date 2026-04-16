@@ -8409,9 +8409,25 @@ pub fn type_structure<'a>(
         typed_items.push(typed_item);
         current_env = new_env;
 
-        // TODO: @comptime.derive system — when @typeInfo is a predefined type,
-        // derive handlers will be @comptime functions that produce type declarations.
-        // For now, derive attributes on types are ignored.
+        // Check for @comptime.derive attributes on type declarations.
+        // When a registered derive handler exists for an attribute, it will be
+        // called with the typeInfo value for the type. For now, derive handlers
+        // are registered but not yet invoked (waiting for predefined typeInfo type).
+        if let ParsedStructureItemDesc::Pstr_type(inner) = &*item.pstr_desc {
+            let (_, ref decls) = **inner;
+            for decl in decls {
+                for (attr_name_loc, _payload) in decl.ptype_attributes.iter() {
+                    let attr_name = arena.get_string(attr_name_loc.txt);
+                    if tctx.comptime_functions.contains_key(attr_name) {
+                        // TODO: invoke the derive handler with @typeInfo for this type.
+                        // Once typeInfo is a predefined type, this will:
+                        // 1. Build typeInfo value for the type
+                        // 2. Call the registered handler with it
+                        // 3. Splice the result after the type declaration
+                    }
+                }
+            }
+        }
     }
 
     let structure = Structure {
@@ -8564,20 +8580,51 @@ fn type_structure_item<'a>(
             let mut has_comptime = false;
             for vb in bindings {
                 let is_comptime = vb.pvb_attributes.iter().any(|(name, _)| {
-                    arena.get_string(name.txt) == "comptime"
+                    let attr_name = arena.get_string(name.txt);
+                    attr_name == "comptime" || attr_name == "comptime.derive"
                 });
                 if is_comptime {
                     has_comptime = true;
-                    // Extract function name and store the parse tree body
                     let pat = arena.get_pat(vb.pvb_pat);
                     if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) = &*pat.ppat_desc {
                         let name = arena.get_string(name_loc.txt).to_string();
+
+                        // Check if this is a @comptime.derive("deriveName") registration.
+                        // If so, register under the derive name (from the payload) so
+                        // @deriveName on a type triggers this handler.
+                        let derive_name = vb.pvb_attributes.iter().find_map(|(attr_name, payload)| {
+                            if arena.get_string(attr_name.txt) == "comptime.derive" {
+                                // Extract the derive name from the string payload
+                                if let crate::parser::ast::Payload::PStr(items) = payload {
+                                    if let Some(item) = items.first() {
+                                        if let crate::parser::ast::StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc {
+                                            let (expr_idx, _) = &**inner;
+                                            let expr = arena.get_expr(*expr_idx);
+                                            if let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
+                                                if let crate::parser::ast::Constant::String(s, _) = &**c {
+                                                    return Some(s.to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            None
+                        });
+
                         let comptime_fn = crate::types::comptime::ComptimeFunction {
                             body_expr_idx: vb.pvb_expr,
                             params: Vec::new(),
                             name: name.clone(),
                         };
-                        tctx.comptime_functions.insert(name.clone(), comptime_fn);
+
+                        // Register under the function name (for @comptime calls)
+                        tctx.comptime_functions.insert(name.clone(), comptime_fn.clone());
+
+                        // Also register under the derive name if it's a @comptime.derive
+                        if let Some(derive_name) = derive_name {
+                            tctx.comptime_functions.insert(derive_name, comptime_fn);
+                        }
                     }
                 }
             }

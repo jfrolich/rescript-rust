@@ -352,10 +352,15 @@ fn comptime_encode_full_example() {
 }
 
 #[test]
-#[ignore = "requires @comptime.derive system"]
+#[ignore = "requires @comptime.derive system + predefined typeInfo type"]
 fn comptime_derive_keyof() {
-    // @keyOf type user = { name: string, age: int }
-    // → generates type user_key = Name | Age
+    run_fixture("derive_keyof");
+}
+
+#[test]
+#[ignore = "requires @comptime.derive system + predefined typeInfo type"]
+fn comptime_derive_partial() {
+    run_fixture("derive_partial");
 }
 
 #[test]
