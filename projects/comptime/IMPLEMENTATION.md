@@ -1,234 +1,175 @@
 # Comptime Implementation Notes
 
-## Architecture Decision: Let the Optimizer Do the Work
+## Core Insight: Inlining + Builtins + Existing Optimization
 
-The comptime system relies on the ReScript compiler's existing optimization passes rather than building a separate interpreter. The key insight: if `@typeInfo(T)` expands to a **literal value** of a known type, the compiler's existing constant folding, dead branch elimination, and beta reduction handle the specialization automatically.
+The comptime system is simpler than it first appears. There is no special "comptime mode" or separate partial evaluator. It's three things:
 
-### How It Works
+1. **`@comptime` functions are inlined at call sites** — so the type checker sees concrete types
+2. **`@typeInfo(value)` is a builtin** that returns a `typeInfo` value based on the static type — works anywhere, not just in comptime
+3. **The existing compiler optimizer** handles switch folding, constant propagation, and dead branch elimination
 
-1. `@typeInfo(T)` is a compiler intrinsic that expands to a literal value (a variant constructor with payload)
-2. The expanded value flows through the normal compilation pipeline
-3. The optimizer folds switches on known values, eliminates dead branches, and propagates constants
-4. The output is specialized code with no comptime residue
+That's it. No comptime/runtime tracking, no special evaluation passes. The type checker just type-checks the inlined body with concrete types, and the optimizer cleans up.
 
-### Example
+## How It Works: Nested Encoder Example
 
 ```rescript
+type address = { street: string, city: string }
+type user = { name: string, age: int, address: address }
+
 @comptime
-let encode = (comptime T: type, value: T): Json.t => {
-  switch @typeInfo(T) {
+let rec encode = (value) => {
+  switch @typeInfo(value) {
+  | String => Json.string(value)
+  | Int => Json.number(Int.toFloat(value))
   | Record({fields}) =>
     let obj = Dict.empty()
     inline for field in fields {
-      Dict.set(obj, field.name, encode(field.typ, @field(value, field.name)))
+      Dict.set(obj, field.name, encode(@field(value, field.name)))
     }
     Json.object_(obj)
-  | String => Json.string(value)
-  | Int => Json.number(Int.toFloat(value))
-  | _ => @compileError(`Cannot encode ${@typeName(T)}`)
   }
 }
+
+let json = encode(myUser)
 ```
 
-When called as `encode(user, myUser)`, the compiler:
+### Step-by-step compilation of `encode(myUser)`
 
-1. Expands `@typeInfo(user)` → `Record({name: "user", fields: [{name: "name", typ: String, ...}, {name: "age", typ: Int, ...}], unboxed: false})`
-2. The switch scrutinee is now a known variant value
-3. The optimizer picks the `Record` branch, eliminates all others
-4. `inline for` unrolls over the known fields array
-5. Each `field.name` folds to a string constant (`"name"`, `"age"`)
-6. Recursive `encode(field.typ, ...)` calls specialize further (T=String picks the String branch, etc.)
-7. `@field(value, field.name)` becomes `value.name` (a direct field access)
-8. Result: flat, specialized code with no type dispatch
+**1. Inline the body.** `encode` is `@comptime`, so the compiler inlines its body at the call site with `value = myUser` (type: `user`).
 
-## Required Compiler Changes
+**2. Type-check `@typeInfo(value)`.** The type checker sees `Pexp_comptime_typeinfo`. It looks at `value`'s type → `user`. It calls `build_type_info(user)` → returns `Record({name: "user", fields: [...]})`. This becomes a literal `typeInfo` value in the typed tree. Type: `typeInfo`.
 
-### 1. Lambda Switch Constant Folding (MISSING)
+**3. Switch on known value.** The scrutinee is a known variant `Record({fields: [...]})`. The type checker matches it against the case patterns:
+- `String` — doesn't match, **skip this branch entirely** (never type-checked)
+- `Int` — doesn't match, **skip**
+- `Record({fields})` — matches! Type-check only this branch. Bind `fields` to the comptime-known array.
 
-**Current behavior:** `switch Red { | Red => "red" | Green => "green" }` does NOT fold. The lambda IR creates `let tmp = Const_int(0); Lswitch(tmp, ...)` and the switch is preserved at runtime.
+Skipping non-matching branches is critical — `Json.string(value)` where `value: user` would fail type checking. The type checker never sees it.
 
-**Required behavior:** When `Lswitch` scrutinee is a known `Lconst(Const_int(tag, _))`, look up `tag` in `sw_consts` and return the matching body directly. Same for `Const_block` in `sw_blocks`.
+**4. `let obj = Dict.empty()`.** Normal runtime expression. Type-checked as usual. Emitted to typed tree.
 
-**Evidence that this is feasible:**
-- String switches already fold: `switch "a" { | "a" => "yes" | _ => "no" }` → `"yes"` ✅
-- Bool switches fold: `switch true { | true => "yes" | false => "no" }` → `"yes"` ✅
-- Single-constructor variants with payloads fold: `switch B(42) { | B(n) => n }` → `42` ✅ (because pattern matching compiles to direct `Pfield` extraction, not `Lswitch`)
-- Multi-way variant switches do NOT fold: `switch Red { | Red => "r" | Green => "g" }` → runtime switch ❌
+**5. `inline for field in fields { body }`.** The type checker sees `Pexp_inline_for`. The collection `fields` is a comptime-known array with 3 elements. The type checker **unrolls**: it type-checks `body` three separate times with `field` bound to each element.
 
-**Fix location:** `compiler-rust/src/lambda/simplify.rs` in `simplify_with_env` for the `Lswitch` case. ~15 lines of code.
+**6. Iteration 1: `field = {name: "name", typ: String}`**
 
-**Fix description:** When the scrutinee resolves to a known constant:
-- `Lconst(Const_int(tag, _))` → look up `tag` in `sw_consts`, return matching body
-- `Lconst(Const_block(tag, _, fields))` → look up `tag` in `sw_blocks`, substitute field accesses with known values
+- `field.name` — `field` is comptime-known → evaluates to `"name"` → `Texp_constant("name")`
+- `@field(value, field.name)` → `@field(myUser, "name")` → validate "name" is a field of `user` (yes, type `string`) → produces `Texp_field(myUser, name)` with type `string`
+- `encode(@field(value, field.name))` → recursive `@comptime` call! Inline `encode` with `value = myUser.name` (type: `string`)
+  - `@typeInfo(value)` → type is `string` → produces `String` variant
+  - Switch picks `String` branch → `Json.string(value)` → `Json.string(myUser.name)`
+- `Dict.set(obj, "name", Json.string(myUser.name))` → emitted to typed tree
 
-This is a general optimization that benefits ALL ReScript code, not just comptime.
+**7. Iteration 2: `field = {name: "age", typ: Int}`**
 
-### 2. `typeInfo` as a Predefined Type
+- `@field(myUser, "age")` → `Texp_field(myUser, age)` type `int`
+- `encode(myUser.age)` → inline → `@typeInfo` → `Int` → picks Int branch → `Json.number(Int.toFloat(myUser.age))`
+- Emit: `Dict.set(obj, "age", Json.number(Int.toFloat(myUser.age)))`
 
-Define `typeInfo`, `fieldInfo`, `constructorInfo` as predefined types (like `bool`, `option`) in `predef.rs` and `env.rs`. These types are available without imports and the compiler knows how to construct literal values of these types.
+**8. Iteration 3: `field = {name: "address", typ: Record(address)}`**
 
-```rescript
-// Predefined — no import needed
-type rec typeInfo =
-  | Int
-  | Float
-  | String
-  | Bool
-  | Unit
-  | Char
-  | Record({name: string, fields: array<fieldInfo>, unboxed: bool})
-  | Variant({name: string, constructors: array<constructorInfo>, unboxed: bool})
-  | Array({element: typeInfo})
-  | Option({inner: typeInfo})
-  | Function({args: array<typeInfo>, returnType: typeInfo})
-  | Unknown
-and fieldInfo = {
-  name: string,
-  typ: typeInfo,
-  optional: bool,
-  mutable_: bool,
-}
-and constructorInfo = {
-  name: string,
-  args: array<typeInfo>,
-}
+- `@field(myUser, "address")` → `Texp_field(myUser, address)` type `address`
+- `encode(myUser.address)` → inline → `@typeInfo` → `Record({fields: [street, city]})` → picks Record branch
+  - `let obj$1 = Dict.empty()` → emitted
+  - `inline for` over address fields → 2 iterations:
+    - `Dict.set(obj$1, "street", Json.string(myUser.address.street))`
+    - `Dict.set(obj$1, "city", Json.string(myUser.address.city))`
+  - `Json.object_(obj$1)` → emitted
+- Emit: `Dict.set(obj, "address", Json.object_(obj$1))`
+
+**9. `Json.object_(obj)` → emitted.**
+
+### Final typed tree (and resulting JS)
+
+```javascript
+let obj = Dict.empty();
+Dict.set(obj, "name", Json.string(myUser.name));
+Dict.set(obj, "age", Json.number(Int.toFloat(myUser.age)));
+let obj$1 = Dict.empty();
+Dict.set(obj$1, "street", Json.string(myUser.address.street));
+Dict.set(obj$1, "city", Json.string(myUser.address.city));
+Dict.set(obj, "address", Json.object_(obj$1));
+let json = Json.object_(obj);
 ```
 
-### 3. `@typeInfo(T)` Compiler Intrinsic
+No type dispatch at runtime. Fully specialized. Nested records handled by recursive inlining.
 
-When the type checker encounters `Pexp_comptime_typeinfo(core_type)`:
-1. Resolve `core_type` to a concrete type using the type context
-2. Construct a literal value of type `typeInfo` (a typed tree `Texp_construct` node)
-3. Return the literal expression
+## What `type_expect` Does Differently
 
-The literal is a real value that flows through the normal pipeline. The optimizer handles the rest.
+These are NOT special comptime behaviors — they're general type checker capabilities that work everywhere:
 
-### 4. `inline for` Unrolling
+| Expression | What the type checker does |
+|---|---|
+| `@typeInfo(value)` | Look up value's static type, build TypeInfo, return literal `typeInfo` value |
+| `switch <known variant> { cases }` | Match the known value, type-check ONLY the matching branch, skip others |
+| `inline for x in <known array> { body }` | Unroll: type-check body N times, once per element, with x bound |
+| `@field(value, <known string>)` | Validate field exists on value's type, produce `Texp_field` with correct type |
+| `f(arg)` where f is `@comptime` | Inline f's body, type-check with arg's concrete type |
 
-`inline for field in fields { body }` where `fields` is a known array literal:
-1. Evaluate `fields` to get the array elements
-2. For each element, clone `body` and substitute `field` with the element
-3. Sequence the results with `Texp_sequence`
-
-This requires the optimizer to propagate known array values and unroll the loop. If the array literal is known at compile time (which it is — it comes from `@typeInfo`), the compiler can unroll it during lambda simplification.
-
-### 5. `@field(value, name)` Intrinsic
-
-When `name` is a known string constant (from comptime evaluation):
-1. Look up the field `name` in the type of `value`
-2. Generate a `Texp_field` node (direct field access)
-
-### 6. Recursive Comptime Calls
-
-When `encode(field.typ, @field(value, field.name))` is encountered:
-- `field.typ` is a known `typeInfo` value (e.g., `String`)
-- The compiler inlines the `encode` body with `T = String`
-- `@typeInfo(String)` expands to `String` (the variant)
-- The switch picks the `String` branch
-- Result: `Json.string(value.name)`
-
-This is just the same mechanism applied recursively. Fuel limits prevent infinite recursion.
+The `@comptime` attribute's only job: **inline the function body at the call site** so the type checker sees concrete types instead of polymorphic parameters.
 
 ## Two Comptime Mechanisms
 
-### `@comptime` — Partial Evaluation (No JS Engine)
+### `@comptime` — Specialization via Inlining
 
-The function body mixes comptime and runtime expressions. The compiler substitutes `@typeInfo(T)` with literal values and the optimizer specializes the code. Runtime expressions (anything touching non-comptime parameters) pass through as code.
+The function body is inlined at each call site. The type checker type-checks it with concrete types. `@typeInfo`, `@field`, `inline for` are builtins that the type checker handles. The optimizer folds switches on known values.
 
-```rescript
-@comptime
-let encode = (comptime T: type, value: T): Json.t => {
-  switch @typeInfo(T) {
-  | String => Json.string(value)      // value is runtime — emitted as code
-  | Record({fields}) =>
-    let obj = Dict.empty()             // runtime — emitted
-    inline for field in fields {       // fields is comptime — unrolled
-      Dict.set(obj, field.name, ...)   // field.name is comptime — folded to "name"
-    }
-  }
-}
-```
+No JS engine. No special evaluation. Just inlining + builtins + optimization.
 
 ### `@comptime.inline` — Full Evaluation in JS Engine (Boa)
 
-The ENTIRE function executes at compile time. All arguments must be comptime-known (literals, @typeInfo values, results of other comptime.inline calls). The function is compiled to JS, executed in Boa, and the result is inlined as a constant.
+The ENTIRE function executes at compile time in Boa. All arguments must be comptime-known. The function is compiled to JS, executed, and the result is inlined as a constant.
 
 ```rescript
 @comptime.inline
 let capitalize = (s: string): string => {
   String.charAt(s, 0)->String.toUpperCase ++ String.sliceToEnd(s, ~start=1)
 }
-
-// In a comptime context:
-// capitalize("name") → compiled to JS → Boa evaluates → "Name" → inlined as literal
 ```
 
-The type checker verifies all arguments are comptime-known. If any argument is runtime, it's a compile error:
+When called with a comptime-known argument (like `capitalize("name")` inside an `inline for`), Boa evaluates it to `"Name"` and the result is inlined as a constant.
 
-```rescript
-@comptime.inline
-let capitalize = (s: string): string => { ... }
+If called with a runtime argument, the compiler emits an error.
 
-let name = readFromStdin()
-let x = capitalize(name)
-// ❌ Error: 'capitalize' is @comptime.inline but argument 'name' is not comptime-known.
-//    Only literal values, @typeInfo results, and other comptime results can be passed.
-```
-
-**Comptime-known values:**
-- Literal constants (strings, ints, bools, arrays of literals)
-- Values constructed from `@typeInfo(T)` (always comptime — built by the compiler)
-- Results of `@comptime.inline` function calls (transitively comptime)
-- Destructured parts of comptime values (`field.name`, `field.typ`, etc.)
-
-**How `@comptime` and `@comptime.inline` compose:**
+### How they compose
 
 ```rescript
 @comptime.inline
 let capitalize = (s: string): string => { ... }
 
 @comptime
-let encode = (comptime T: type, value: T): Json.t => {
-  switch @typeInfo(T) {
+let rec encode = (value) => {
+  switch @typeInfo(value) {
   | Record({fields}) =>
+    let obj = Dict.empty()
     inline for field in fields {
-      // capitalize(field.name) → field.name is comptime-known → Boa evaluates
-      // value is runtime → stays as code
-      Dict.set(obj, capitalize(field.name), encode(field.typ, @field(value, field.name)))
+      Dict.set(obj, capitalize(field.name), encode(@field(value, field.name)))
+      //            ^^^^^^^^^^^^^^^^^^^^^^
+      //            field.name is comptime-known ("name") → Boa evaluates
+      //            capitalize("name") → "Name" → inlined as constant
     }
+    Json.object_(obj)
   }
 }
 ```
 
-`capitalize(field.name)` is a `@comptime.inline` call where the argument `field.name` is comptime-known (it came from `@typeInfo`). Boa evaluates it to `"Name"`. The result is used as a constant in the runtime code.
+## Lambda Switch Constant Folding ✅ DONE
 
-## What Does NOT Need a JS Interpreter
+When `Lswitch` scrutinee is a known constant, pick the matching branch directly:
+- `Const_int(tag)` → look up in `sw_consts`
+- `Const_block(tag)` → look up in `sw_blocks`
 
-The entire encode/decode pattern works without Boa:
-- Type resolution → Rust (reads from TypeContext)
-- Switch elimination → compiler optimizer (constant folding on variants)
-- Loop unrolling → compiler (inline for on known arrays)
-- Field access → Rust (constructs Texp_field)
-- Recursive specialization → compiler (re-applies the same mechanism)
-- Runtime expressions → pass through unchanged
-
-## What DOES Need a JS Interpreter (Future)
-
-- Complex string manipulation: `capitalize(field.name)`, `String.concat(...)`
-- User-written comptime helper functions: `parseGraphQL(query)`
-- Array operations in comptime context: `fields->Array.filter(f => ...)`
-- Any comptime expression that can't be constant-folded by the compiler
-
-These are Phase 2. The core encode/decode/keyOf patterns work with just compiler optimizations.
+This was ~15 lines in `simplify.rs`. Now `switch Red { | Red => "red" | Green => "green" }` compiles to just `"red"`.
 
 ## Implementation Order
 
-1. **Lambda switch constant folding** — ~15 lines in simplify.rs, enables all variant-based comptime
-2. **`typeInfo` as predefined type** — add to predef.rs/env.rs, define constructors
-3. **`@typeInfo(T)` expansion** — construct literal typeInfo values in type checker
-4. **Verify switches fold** — with typeInfo as a real value, switches should fold automatically
-5. **`inline for` unrolling** — unroll loops over known array literals
-6. **`@field(value, name)` expansion** — generate field access nodes
-7. **Recursive specialization** — inline comptime function bodies at call sites
+1. ✅ **Lambda switch constant folding** — done
+2. **`typeInfo` as predefined type** — add to predef.rs/env.rs
+3. **`@typeInfo(value)` in type checker** — look up value's type, construct literal typeInfo value
+4. **Switch on known typeInfo** — type checker skips non-matching branches
+5. **`inline for` unrolling** — type checker unrolls over known array
+6. **`@field(value, name)` validation + generation** — validate field exists, produce Texp_field
+7. **`@comptime` function inlining** — inline body at call site with concrete types
+8. **Recursive specialization** — re-enter for nested types (fuel-limited)
+9. **`@comptime.inline` + Boa** — for full compile-time evaluation of helper functions
 
-Steps 1-4 are the critical path. Once variant switch folding works and `@typeInfo` produces real values, the optimizer does most of the work.
+Steps 2-8 are the core. Step 9 adds support for user-written comptime helpers.
