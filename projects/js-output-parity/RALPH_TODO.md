@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 525 / 657 with 8 unrelated compile errors and 124 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 527 / 657 with 8 unrelated compile errors and 122 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **525 / 657**
+- JS snapshot parity: **527 / 657**
 - Compile errors: **8**
-- Output diffs: **124**
+- Output diffs: **122**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -80,6 +80,56 @@ Do **not** replace the recorded project baseline with `525 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: avoid synthesizing explicit `exit` temps for nested
+  `Lstaticcatch` return handlers when the shared handler is only forwarding to
+  an already-active outer static-raise target with side-effect-free payload
+  plumbing
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, specifically the nested `Lstaticcatch`
+  return-lowering path where outward handler forwarding can stay on the direct
+  return path instead of materializing a local exit sentinel
+- Rust change:
+  - narrowed `return_staticcatch_requires_explicit_jump(...)` so the
+    multi-raise/shared-handler fallback no longer forces an `exit` temp when
+    the handler is just a side-effect-free outward static raise forwarder
+  - added `handler_is_pure_outward_static_raise_forwarder(...)` to recognize
+    the OCaml-aligned handler shapes that only alias/bind values and re-raise
+    to an already-active outer staticcatch label
+  - added focused regression coverage for a `gpr_3609`-style nested
+    switch/staticcatch shape and kept the earlier outward-binding staticcatch
+    regression test green
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_gpr_3609 -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_staticcatch_binding_handlers_that_raise_outward_avoid_exit_temps -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_3609_test.res -o /tmp/gpr_3609_test.mjs`
+  - `diff -u tests/tests/src/gpr_3609_test.mjs /tmp/gpr_3609_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_static_catch_ident.res -o /tmp/test_static_catch_ident.mjs`
+  - `diff -u tests/tests/src/test_static_catch_ident.mjs /tmp/test_static_catch_ident.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_3609_test.res` now matches its checked-in snapshot
+    again; the nested staticcatch return path no longer introduces the Rust-
+    only `let exit = 0; ... if (exit === 1)` sentinel around the shared tail
+  - `tests/tests/src/test_static_catch_ident.res` still differs and keeps its
+    own exception/staticcatch exit-temp drift, so that broader handler-sharing
+    cluster remains open
+  - the current dirty-tree wrapper improved without changing the unrelated
+    compile-error set
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **525 / 657** -> **527 / 657** (**+2**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **124** -> **122** (**-2**)
+- Keep this change because the previous multi-raise fallback was overmatching
+  OCaml and forcing an explicit local jump temp even when the nested handler
+  only forwarded directly to an enclosing staticcatch. The narrowed predicate
+  restores the OCaml-aligned direct return path for that handler shape without
+  reopening the broader non-trivial shared-handler cases.
 
 Latest iteration on **2026-04-16**:
 

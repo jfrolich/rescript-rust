@@ -7008,7 +7008,31 @@ impl LambdaCompiler {
     ) -> bool {
         self.lambda_requires_explicit_staticcatch_jump(handler)
             || (lambda_has_multiple_static_raises_to_label(body, label, bindings.len())
-                && lambda_contains_static_raise_to_other_label(handler, label))
+                && lambda_contains_static_raise_to_other_label(handler, label)
+                && !self.handler_is_pure_outward_static_raise_forwarder(handler))
+    }
+
+    fn handler_is_pure_outward_static_raise_forwarder(&self, lam: &Lambda) -> bool {
+        match lam {
+            Lambda::LstaticRaise(label, args) => {
+                self.active_static_raise_target_exists(*label, args.len())
+                    && args.iter().all(analysis::no_side_effects)
+            }
+            Lambda::Llet(kind, _, value, body)
+                if matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt)
+                    && analysis::no_side_effects(value)
+                    && !self.lambda_requires_explicit_staticcatch_jump(value) =>
+            {
+                self.handler_is_pure_outward_static_raise_forwarder(body)
+            }
+            Lambda::Lsequence(first, second)
+                if analysis::no_side_effects(first)
+                    && !self.lambda_requires_explicit_staticcatch_jump(first) =>
+            {
+                self.handler_is_pure_outward_static_raise_forwarder(second)
+            }
+            _ => false,
+        }
     }
 
     fn active_static_raise_target_exists(&self, label: i32, arity: usize) -> bool {
@@ -16881,6 +16905,89 @@ mod tests {
                     && rendered.contains("return 0;")
                     && rendered.contains("return 1;")),
             "expected the outward handler raise to lower directly instead of through an exit temp:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_gpr_3609() {
+        let mut compiler = LambdaCompiler::new();
+        let state = Ident::create_local("state");
+        let int_value = Ident::create_local("intValue");
+        let int_func = Ident::create_local("intFunc");
+        let int_param = Ident::create_local("intParam");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::LstaticCatch(
+                Box::new(Lambda::Lswitch(
+                    Box::new(Lambda::var(state.clone())),
+                    LambdaSwitch {
+                        sw_consts_full: true,
+                        sw_consts: vec![(0, Lambda::const_(Constant::int(0)))],
+                        sw_blocks_full: true,
+                        sw_blocks: vec![
+                            (0, Lambda::static_raise(2, Vec::new())),
+                            (1, Lambda::static_raise(2, Vec::new())),
+                        ],
+                        sw_failaction: None,
+                        sw_names: Some(SwitchNames {
+                            consts: vec![crate::lambda::SwitchTag::named("Empty")],
+                            blocks: vec![
+                                crate::lambda::SwitchBlock::named("Int1"),
+                                crate::lambda::SwitchBlock::named("Int2"),
+                            ],
+                        }),
+                    },
+                )),
+                (2, vec![]),
+                Box::new(Lambda::let_(
+                    LetKind::Alias,
+                    int_value.clone(),
+                    Lambda::prim(
+                        Primitive::Pfield(0, FieldDbgInfo::Variant),
+                        vec![Lambda::var(state.clone())],
+                        Location::none(),
+                    ),
+                    Lambda::static_raise(1, vec![Lambda::var(int_value.clone())]),
+                )),
+            )),
+            (1, vec![int_value.clone()]),
+            Box::new(Lambda::let_(
+                LetKind::Strict,
+                int_func.clone(),
+                Lambda::prim(
+                    Primitive::PjsFnMake(1),
+                    vec![Lambda::function_(
+                        1,
+                        vec![int_param.clone()],
+                        Lambda::prim(
+                            Primitive::Paddint,
+                            vec![Lambda::var(int_param), Lambda::var(int_value.clone())],
+                            Location::none(),
+                        ),
+                        FunctionAttribute::default(),
+                    )],
+                    Location::none(),
+                ),
+                Lambda::apply(
+                    Lambda::var(int_func),
+                    vec![Lambda::const_(Constant::int(0))],
+                    ApInfo {
+                        loc: Location::none(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Uncurry,
+                    },
+                    false,
+                ),
+            )),
+        ));
+
+        let rendered = print_block(&block);
+        assert!(
+            !rendered.contains("let exit ="),
+            "gpr_3609-style nested switch forwarding reintroduced an exit temp:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("if (exit ==="),
+            "gpr_3609-style nested switch forwarding still guards the shared tail behind an exit sentinel:\n{rendered}"
         );
     }
 
