@@ -5043,10 +5043,43 @@ pub fn type_expect<'a>(
                 "inline for can only be used inside @comptime functions".to_string(),
             ))
         }
-        ED::Pexp_comptime_typeinfo(_) => {
-            Err(super::TypeCoreError::Other(
-                "comptime builtin @typeInfo can only be used inside @comptime functions".to_string(),
-            ))
+        ED::Pexp_comptime_typeinfo(ct_idx) => {
+            // Resolve the core type to a concrete type
+            let core_type = tctx.arena.get_core_type(*ct_idx);
+            let ctx = tctx.type_ctx;
+            ctx.begin_def();
+            let (_, resolved_ty) = match crate::types::typecore::transl_type(tctx, env, core_type) {
+                Ok(result) => result,
+                Err(e) => return Err(e),
+            };
+            ctx.end_def();
+
+            // Check that the type is concrete (no unresolved type variables)
+            let repr_ty = ctx.repr(resolved_ty);
+            let desc = ctx.get_desc(repr_ty);
+            if matches!(&*desc, crate::types::type_expr::TypeDesc::Tvar(_)) {
+                return Err(super::TypeCoreError::Other(
+                    "@typeInfo requires a concrete type, got a type variable".to_string(),
+                ));
+            }
+
+            // Build TypeInfo from the resolved type
+            let mut visited = Vec::new();
+            let type_info = crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited);
+
+            // Construct a literal typeInfo value
+            match crate::types::comptime::type_info_to_typed_expr(&type_info, ctx, env, loc) {
+                Some(typed_expr) => {
+                    // Unify the typeInfo type with expected type
+                    let type_info_ty = typed_expr.exp_type;
+                    crate::types::ctype::unify(ctx, &mut tctx.unify_state, type_info_ty, expected_ty)
+                        .map_err(|e| super::TypeCoreError::Other(format!("typeInfo type mismatch: {:?}", e)))?;
+                    Ok(typed_expr)
+                }
+                None => Err(super::TypeCoreError::Other(
+                    "Failed to construct typeInfo value".to_string(),
+                )),
+            }
         }
         ED::Pexp_comptime_field(_) => {
             Err(super::TypeCoreError::Other(

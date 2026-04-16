@@ -322,6 +322,75 @@ fn build_type_info_from_constr<'a>(
         TypeInfo::External { name: type_name }
     }
 }
+// ── TypeInfo → Typed Tree Expression ─────────────────────────────────────────
+
+/// Construct a typed tree Expression representing a `typeInfo` literal value.
+/// This is called when `@typeInfo(expr)` is encountered during type checking.
+/// It looks up the typeInfo constructors in the environment and builds
+/// the appropriate Texp_construct nodes.
+pub fn type_info_to_typed_expr<'a>(
+    info: &TypeInfo,
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    loc: crate::parse_arena::LocIdx,
+) -> Option<typedtree::Expression> {
+    let type_info_ty = ctx.new_constr(predef::path_type_info(), vec![]);
+    let env_ref = ctx.store_typed_env(env);
+
+    // Map TypeInfo variant to constructor name
+    let ctor_name = match info {
+        TypeInfo::Int => "Int",
+        TypeInfo::Float => "Float",
+        TypeInfo::String => "String",
+        TypeInfo::Bool => "Bool",
+        TypeInfo::Unit => "Unit",
+        TypeInfo::Char => "Char",
+        TypeInfo::Bigint => "Bigint",
+        TypeInfo::Record { .. } => "Record",
+        TypeInfo::Variant { .. } => "Variant",
+        TypeInfo::Array { .. } => "Array",
+        TypeInfo::Option { .. } => "Option",
+        TypeInfo::Function { .. } => "Function",
+        TypeInfo::External { .. } => "External",
+        TypeInfo::Opaque { .. } => "Opaque",
+        TypeInfo::Tuple { .. } => "TiUnknown", // Tuples map to TiUnknown for now
+        TypeInfo::Unknown { .. } => "TiUnknown",
+    };
+
+    // Look up the constructor in the environment
+    let cstr_desc = env.find_constructor(ctor_name).ok()?.clone();
+
+    // For simple constructors (no args), just construct the value
+    let lid_loc = crate::parse_arena::Located {
+        txt: crate::parse_arena::LidentIdx(0), // placeholder
+        loc: crate::parse_arena::LocIdx::none(),
+    };
+
+    // Build constructor arguments for constructors with payloads
+    let args = match info {
+        // No-arg constructors
+        TypeInfo::Int | TypeInfo::Float | TypeInfo::String | TypeInfo::Bool
+        | TypeInfo::Unit | TypeInfo::Char | TypeInfo::Bigint | TypeInfo::Unknown { .. } => {
+            vec![]
+        }
+        // Constructors with record payloads would need more complex construction
+        // For now, return the simple constructor for no-arg cases
+        _ => {
+            // TODO: construct record payloads for Record, Variant, Array, etc.
+            // For now, skip complex constructors
+            vec![]
+        }
+    };
+
+    Some(typedtree::Expression::new(
+        typedtree::ExpressionDesc::Texp_construct(lid_loc, cstr_desc, args),
+        loc,
+        type_info_ty,
+        env_ref,
+        crate::parser::ast::Attributes::new(),
+    ))
+}
+
 // ── ComptimeValue ───────────────────────────────────────────────────────────
 
 /// A value known at compile time.

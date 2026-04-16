@@ -315,7 +315,6 @@ fn compile_with_stdlib_basic() {
 // ============================================================================
 
 #[test]
-#[ignore = "requires predefined typeInfo type — @typeInfo(T) must expand to a literal variant value"]
 fn comptime_typeinfo_switch_eliminates_branch() {
     let source = r#"
 type user = { name: string, age: int }
