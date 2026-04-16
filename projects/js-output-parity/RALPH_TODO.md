@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 540 / 657 with 8 unrelated compile errors and 109 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 541 / 657 with 8 unrelated compile errors and 108 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **540 / 657**
+- JS snapshot parity: **541 / 657**
 - Compile errors: **8**
-- Output diffs: **109**
+- Output diffs: **108**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -80,6 +80,74 @@ Do **not** replace the recorded project baseline with `537 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: preserve OCaml's positive success-guard shape for simple
+  unit-return `if` tails in the lambda compiler, while keeping loop /
+  recursive / declaration-heavy tails on the existing negative-guard path
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially the unit-return function path
+    lowered under `EffectCall (Maybe_tail_is_return ...)`
+  - `compiler/core/js_dump.ml`, especially `function_body`'s narrow
+    single-statement `If (_, then_, [Return Undefined])` case, which only
+    elides `else return;` after the backend has already chosen a success-first
+    `If`
+- Rust change:
+  - added `compile_if_unit_return_tail_block(...)`,
+    `lambda_is_trivial_unit_undefined(...)`, and
+    `js_block_is_simple_unit_return_tail(...)` in
+    `compiler-rust/src/lambda/compile.rs`
+  - wired the return-unit `LifThenElse` lowering to keep a direct positive
+    `If` only when the fallback branch is trivial unit and the taken branch
+    compiles to a straight-line expression tail ending in `return undefined`
+  - kept loop / recursive / declaration-heavy tails on the old
+    `compile_if_return_block(...)` path, so the earlier false regressions in
+    `queue_402` and `ext_array_test` stay on OCaml's negative-guard shape
+  - added focused unit coverage for both the positive simple-effect tail and
+    the negative loop-tail guard cases, plus a checked-in
+    `array_subtle_test` fixture assertion
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release unit_return_function_body_keeps_positive_effect_guard_before_js_passes -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release unit_return_function_keeps_positive_effect_guard_through_js_pipeline -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release array_subtle_tail_guard_keeps_positive_if_shape -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release unit_return_function_with_for_loop_tail_keeps_negative_guard -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release unit_return_function_with_else_for_loop_tail_keeps_negative_guard -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release unit_return_function_with_local_while_tail_keeps_negative_guard -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh array_subtle_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh LargeUnboxedVariantOptimization --diff`
+  - `timeout 30 ./scripts/test_js_single.sh queue_402 --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ext_array_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh untagged_variants_heuristic --diff`
+  - `timeout 30 ./scripts/test_js_single.sh inline_record_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_4491_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/array_subtle_test.res` now matches its checked-in
+    snapshot again on the real harness path; Rust keeps the OCaml-style
+    positive `if (x.length >= 10) { ... return; }` tail instead of rewriting
+    it into an early-return guard
+  - unchanged guards `tests/tests/src/LargeUnboxedVariantOptimization.res`,
+    `tests/tests/src/queue_402.res`, `tests/tests/src/ext_array_test.res`,
+    `tests/tests/src/ExternalShadow.res`, and
+    `tests/tests/src/untagged_variants_heuristic.res` all remained exact
+  - nearby remaining diffs in this guard-shape cluster are
+    `tests/tests/src/inline_record_test.res` and
+    `tests/tests/src/gpr_4491_test.res`
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **540 / 657** -> **541 / 657** (**+1**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **109** -> **108** (**-1**)
+- Keep this change because OCaml already commits to the positive success-guard
+  shape before `js_dump.ml`; the dumper only elides `else return;` for that
+  single-statement tail and does not synthesize it from loop / recursive
+  guard-fallthrough bodies. The Rust backend now preserves that same narrow
+  pre-printer shape instead of forcing every unit-return tail through the
+  generic negative-guard lowering.
 
 Latest iteration on **2026-04-16**:
 

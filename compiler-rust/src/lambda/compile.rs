@@ -1268,9 +1268,9 @@ impl LambdaCompiler {
                 block.push(Statement::return_(compiled.expr));
                 block
             }
-            Lambda::LifThenElse(cond, then_, else_) => {
-                self.compile_if_return_block(cond, then_, else_)
-            }
+            Lambda::LifThenElse(cond, then_, else_) => self
+                .compile_if_unit_return_tail_block(cond, then_, else_)
+                .unwrap_or_else(|| self.compile_if_return_block(cond, then_, else_)),
             Lambda::Lprim(info) => {
                 if let Some((op, lhs, rhs)) = short_circuit_primitive(&info.primitive, &info.args) {
                     return self.compile_short_circuit_return_block(op, lhs, rhs);
@@ -1376,6 +1376,79 @@ impl LambdaCompiler {
         let result = f(self);
         self.return_unit_stack.pop();
         result
+    }
+
+    fn lambda_is_trivial_unit_undefined(&self, lam: &Lambda) -> bool {
+        match lam {
+            Lambda::Lconst(Constant::JsUndefined { is_unit: true }) => true,
+            Lambda::Lsequence(first, second) => {
+                analysis::no_side_effects(first) && self.lambda_is_trivial_unit_undefined(second)
+            }
+            Lambda::Llet(_, _, value, body) => {
+                analysis::no_side_effects(value) && self.lambda_is_trivial_unit_undefined(body)
+            }
+            Lambda::Lletrec(bindings, body) => {
+                bindings
+                    .iter()
+                    .all(|(_, value)| analysis::no_side_effects(value))
+                    && self.lambda_is_trivial_unit_undefined(body)
+            }
+            Lambda::LstaticCatch(body, (_, bindings), handler) if bindings.is_empty() => {
+                self.lambda_is_trivial_unit_undefined(body)
+                    && self.lambda_is_trivial_unit_undefined(handler)
+            }
+            Lambda::LtryWith(body, _, handler) => {
+                self.lambda_is_trivial_unit_undefined(body)
+                    && self.lambda_is_trivial_unit_undefined(handler)
+            }
+            _ => false,
+        }
+    }
+
+    fn compile_if_unit_return_tail_block(
+        &mut self,
+        cond: &Lambda,
+        then_: &Lambda,
+        else_: &Lambda,
+    ) -> Option<Block> {
+        if self.return_unit_stack.last().copied() != Some(true) {
+            return None;
+        }
+
+        let else_is_trivial_unit = self.lambda_is_trivial_unit_undefined(else_);
+        if !else_is_trivial_unit {
+            return None;
+        }
+
+        let then_block = self.compile_return_block(then_);
+        if !self.js_block_is_simple_unit_return_tail(&then_block) {
+            return None;
+        }
+
+        let cond_compiled = self.compile_expr(cond);
+        let mut block = cond_compiled.prelude;
+        block.push(Statement::new(StatementDesc::If(
+            cond_compiled.expr,
+            then_block,
+            vec![],
+        )));
+        Some(block)
+    }
+
+    fn js_block_is_simple_unit_return_tail(&self, block: &Block) -> bool {
+        let Some((last, prefix)) = block.split_last() else {
+            return false;
+        };
+        matches!(
+            last,
+            Statement {
+                desc: StatementDesc::Return(Expression {
+                    desc: ExpressionDesc::Undefined { .. },
+                    ..
+                }),
+                ..
+            }
+        ) && prefix.iter().all(|stmt| matches!(stmt.desc, StatementDesc::Exp(_)))
     }
 
     fn handler_returns_unit_undefined(&self, bindings: &[Ident], handler: &Lambda) -> bool {
@@ -13895,6 +13968,44 @@ mod tests {
         fs::write(ast_path, bytes).expect("failed to write ast source stub");
     }
 
+    fn compile_checked_in_test_file_to_js(module_name: &str) -> String {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .to_path_buf();
+        let source_path = repo_root
+            .join("tests")
+            .join("tests")
+            .join("src")
+            .join(format!("{module_name}.res"));
+        let output_path = repo_root
+            .join("tests")
+            .join("tests")
+            .join("src")
+            .join(format!("{module_name}.mjs"));
+        let options = crate::driver::CompilerOptions {
+            include_paths: vec![
+                repo_root
+                    .join("tests")
+                    .join("tests")
+                    .join("lib")
+                    .join("ocaml"),
+            ],
+            runtime_path: Some(
+                repo_root
+                    .join("node_modules")
+                    .join("@rescript")
+                    .join("runtime"),
+            ),
+            source_filename: Some(source_path.to_string_lossy().into_owned()),
+            output_path: Some(output_path),
+            ..crate::driver::CompilerOptions::default()
+        };
+
+        crate::driver::compile_file_to_js_with_options(&source_path, &options)
+            .unwrap_or_else(|err| panic!("failed to compile {module_name}.res: {err:#}"))
+    }
+
     fn external_module(bundle: &str) -> ExternalModuleName {
         ExternalModuleName {
             bundle: bundle.to_string(),
@@ -18406,6 +18517,314 @@ mod tests {
     }
 
     #[test]
+    fn unit_return_function_body_keeps_positive_effect_guard_before_js_passes() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let seen = Ident::create_local("seen");
+        let body = Lambda::LifThenElse(
+            Box::new(Lambda::var(cond.clone())),
+            Box::new(Lambda::Lassign(
+                seen.clone(),
+                Box::new(Lambda::const_(Constant::int(1))),
+            )),
+            Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
+        );
+        let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+            arity: 2,
+            params: vec![cond.clone(), seen.clone()],
+            body: Box::new(body),
+            attr: crate::lambda::FunctionAttribute {
+                return_unit: true,
+                ..Default::default()
+            },
+        }));
+
+        let Expression {
+            desc: ExpressionDesc::Fun { body, .. },
+            ..
+        } = compiled.expr
+        else {
+            panic!("expected a function expression");
+        };
+
+        let [if_stmt] = body.as_slice() else {
+            panic!("expected a single if statement in the function body");
+        };
+        let StatementDesc::If(_, then_block, else_block) = &if_stmt.desc else {
+            panic!("expected a direct positive guard, got {if_stmt:#?}");
+        };
+        assert!(matches!(
+            then_block.as_slice(),
+            [
+                Statement {
+                    desc: StatementDesc::Exp(Expression {
+                        desc: ExpressionDesc::Bin(BinOp::Eq, _, _),
+                        ..
+                    }),
+                    ..
+                },
+                Statement {
+                    desc: StatementDesc::Return(Expression {
+                        desc: ExpressionDesc::Undefined { .. },
+                        ..
+                    }),
+                    ..
+                }
+            ]
+        ));
+        assert!(else_block.is_empty());
+    }
+
+    #[test]
+    fn unit_return_function_keeps_positive_effect_guard_through_js_pipeline() {
+        let mut compiler = LambdaCompiler::new();
+        let run = Ident::create_local("run");
+        let cond = Ident::create_local("cond");
+        let seen = Ident::create_local("seen");
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            run.clone(),
+            Lambda::function_(
+                2,
+                vec![cond.clone(), seen.clone()],
+                Lambda::LifThenElse(
+                    Box::new(Lambda::var(cond.clone())),
+                    Box::new(Lambda::Lassign(
+                        seen.clone(),
+                        Box::new(Lambda::const_(Constant::int(1))),
+                    )),
+                    Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
+                ),
+                crate::lambda::FunctionAttribute {
+                    return_unit: true,
+                    ..Default::default()
+                },
+            ),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::ModuleExport(vec![run.clone()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::var(run.clone())],
+                Location::none(),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+        let rendered = print_deps_program(&deps, None);
+        assert!(
+            rendered.contains("if (cond) {"),
+            "expected the unit-return function to keep a positive guard, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("seen = 1;"),
+            "expected the effectful branch to stay inside the positive guard, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("return;"),
+            "expected the unit-return branch to keep its tail return, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("if (!cond) {"),
+            "unexpected negative guard in final JS pipeline output:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn array_subtle_tail_guard_keeps_positive_if_shape() {
+        let output = compile_checked_in_test_file_to_js("array_subtle_test");
+        assert!(
+            output.contains("if (x.length >= 10) {"),
+            "expected the checked-in fixture to keep the positive array-length guard, got:\n{output}"
+        );
+        assert!(
+            output.contains("console.log(\"hi\");"),
+            "expected the guarded effect to stay inside the positive branch, got:\n{output}"
+        );
+        assert!(
+            output.contains("return;"),
+            "expected the positive tail branch to keep its explicit return, got:\n{output}"
+        );
+        assert!(
+            !output.contains("if (x.length < 10) {"),
+            "unexpected negative early-return guard in checked-in fixture output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn unit_return_function_with_for_loop_tail_keeps_negative_guard() {
+        let mut compiler = LambdaCompiler::new();
+        let run = Ident::create_local("run");
+        let cond = Ident::create_local("cond");
+        let seen = Ident::create_local("seen");
+        let index = Ident::create_local("i");
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            run.clone(),
+            Lambda::function_(
+                2,
+                vec![cond.clone(), seen.clone()],
+                Lambda::LifThenElse(
+                    Box::new(Lambda::var(cond.clone())),
+                    Box::new(Lambda::for_(
+                        index,
+                        Lambda::const_(Constant::int(0)),
+                        Lambda::const_(Constant::int(1)),
+                        crate::lambda::DirectionFlag::Upto,
+                        Lambda::Lassign(
+                            seen.clone(),
+                            Box::new(Lambda::const_(Constant::int(1))),
+                        ),
+                    )),
+                    Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
+                ),
+                crate::lambda::FunctionAttribute {
+                    return_unit: true,
+                    ..Default::default()
+                },
+            ),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::ModuleExport(vec![run.clone()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::var(run.clone())],
+                Location::none(),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+        let rendered = print_deps_program(&deps, None);
+        assert!(
+            rendered.contains("if (!cond) {"),
+            "expected the loop tail to stay as a negative guard, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("if (cond) {"),
+            "unexpected positive guard for loop-shaped unit tail:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn unit_return_function_with_else_for_loop_tail_keeps_negative_guard() {
+        let mut compiler = LambdaCompiler::new();
+        let run = Ident::create_local("run");
+        let cond = Ident::create_local("cond");
+        let seen = Ident::create_local("seen");
+        let index = Ident::create_local("i");
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            run.clone(),
+            Lambda::function_(
+                2,
+                vec![cond.clone(), seen.clone()],
+                Lambda::LifThenElse(
+                    Box::new(Lambda::var(cond.clone())),
+                    Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
+                    Box::new(Lambda::for_(
+                        index,
+                        Lambda::const_(Constant::int(0)),
+                        Lambda::const_(Constant::int(1)),
+                        crate::lambda::DirectionFlag::Upto,
+                        Lambda::Lassign(
+                            seen.clone(),
+                            Box::new(Lambda::const_(Constant::int(1))),
+                        ),
+                    )),
+                ),
+                crate::lambda::FunctionAttribute {
+                    return_unit: true,
+                    ..Default::default()
+                },
+            ),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::ModuleExport(vec![run.clone()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::var(run.clone())],
+                Location::none(),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+        let rendered = print_deps_program(&deps, None);
+        assert!(
+            rendered.contains("if (cond) {"),
+            "expected the unit branch to stay as the explicit negative-guard source, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("return;"),
+            "expected the unit branch to keep its explicit early return, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("if (!cond) {"),
+            "unexpected inverted positive guard for else-loop unit tail:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn unit_return_function_with_local_while_tail_keeps_negative_guard() {
+        let mut compiler = LambdaCompiler::new();
+        let run = Ident::create_local("run");
+        let cond = Ident::create_local("cond");
+        let seen = Ident::create_local("seen");
+        let loop_cond = Ident::create_local("loopCond");
+        let cell = Ident::create_local("cell");
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            run.clone(),
+            Lambda::function_(
+                3,
+                vec![cond.clone(), seen.clone(), loop_cond.clone()],
+                Lambda::LifThenElse(
+                    Box::new(Lambda::var(cond.clone())),
+                    Box::new(Lambda::let_(
+                        LetKind::Strict,
+                        cell,
+                        Lambda::const_(Constant::int(0)),
+                        Lambda::while_(
+                            Lambda::var(loop_cond.clone()),
+                            Lambda::Lassign(
+                                seen.clone(),
+                                Box::new(Lambda::const_(Constant::int(1))),
+                            ),
+                        ),
+                    )),
+                    Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
+                ),
+                crate::lambda::FunctionAttribute {
+                    return_unit: true,
+                    ..Default::default()
+                },
+            ),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::ModuleExport(vec![run.clone()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::var(run.clone())],
+                Location::none(),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+        let rendered = print_deps_program(&deps, None);
+        assert!(
+            rendered.contains("if (!cond) {"),
+            "expected the local/while tail to stay as a negative guard, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("if (cond) {"),
+            "unexpected positive guard for local/while unit tail:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn function_return_blocks_lower_effectful_sequands_without_a_result_temp() {
         let mut compiler = LambdaCompiler::new();
         let cond = Ident::create_local("cond");
@@ -19889,15 +20308,9 @@ mod tests {
             Expression::var(value.clone()),
             &LambdaSwitch {
                 sw_consts_full: true,
-                sw_consts: vec![
-                    (0, mark(&string_seen, 1)),
-                    (1, mark(&int_seen, 2)),
-                ],
+                sw_consts: vec![(0, mark(&string_seen, 1)), (1, mark(&int_seen, 2))],
                 sw_blocks_full: true,
-                sw_blocks: vec![
-                    (0, mark(&array_seen, 3)),
-                    (1, mark(&object_seen, 4)),
-                ],
+                sw_blocks: vec![(0, mark(&array_seen, 3)), (1, mark(&object_seen, 4))],
                 sw_failaction: None,
                 sw_names: Some(SwitchNames {
                     consts: vec![
