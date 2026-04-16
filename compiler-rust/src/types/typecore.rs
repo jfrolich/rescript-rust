@@ -20886,50 +20886,62 @@ fn try_comptime_application(
         }
     }
 
-    // Use the first type key part as the primary key (most comptime functions
-    // have one type-bearing parameter). For multiple, combine them.
+    // Build the type key from all type-bearing params
     let type_key = if type_key_parts.len() == 1 {
         type_key_parts[0].clone()
     } else if type_key_parts.is_empty() {
-        // No type-bearing args — fall back to old inline behavior
-        tctx.comptime_bindings = saved_bindings;
-        COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        return try_comptime_application_inline(tctx, env, &func_name, &comptime_fn, args, expected_ty, &params, &inner_body);
+        // No type-bearing args — use Unit as a degenerate key
+        crate::types::comptime::TypeInfo::Unit
     } else {
-        // Multiple type args — use a Tuple TypeInfo as composite key
         crate::types::comptime::TypeInfo::Tuple { elements: type_key_parts }
     };
 
+    let gen_name = crate::types::comptime::make_monomorph_name(&func_name, &type_key);
+
+    // Collect the runtime args (non-type args) for the call site
+    let runtime_args: Vec<_> = typed_args.iter()
+        .filter(|(_, _, is_type)| !is_type)
+        .map(|(_, arg, _)| arg.clone())
+        .collect();
+
     // ── Phase 2: Check monomorphization cache ──
 
-    // Recursive: in-progress for the same type? Break the cycle.
-    if tctx.monomorph_cache.is_in_progress(&func_name, &type_key) {
+    // Already completed? Just emit a call.
+    if tctx.monomorph_cache.lookup(&func_name, &type_key).is_some() {
         tctx.comptime_bindings = saved_bindings;
         COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        // Emit a forward-reference call to the monomorphized function name.
-        // The function definition will be emitted later.
-        let gen_name = crate::types::comptime::make_monomorph_name(&func_name, &type_key);
-        let runtime_args: Vec<_> = typed_args.iter()
-            .filter(|(_, _, is_type)| !is_type)
-            .map(|(_, arg, _)| arg.clone())
-            .collect();
         return Some(Ok(make_comptime_call(tctx, &gen_name, &runtime_args, expected_ty)));
     }
 
-    // ── Phase 3: Specialize — inline the body (with cycle detection) ──
+    // Recursive: in-progress for the same type? Emit forward reference.
+    if tctx.monomorph_cache.is_in_progress(&func_name, &type_key) {
+        tctx.comptime_bindings = saved_bindings;
+        COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        return Some(Ok(make_comptime_call(tctx, &gen_name, &runtime_args, expected_ty)));
+    }
 
-    // Mark this specialization as in-progress (for cycle detection)
-    let _gen_name = tctx.monomorph_cache.begin(&func_name, &type_key);
+    // ── Phase 3: Specialize — produce a named monomorphized function ──
+
+    tctx.monomorph_cache.begin(&func_name, &type_key);
 
     // Set up environment with argument bindings
-    let mut inline_env = env.clone();
+    let mut spec_env = env.clone();
+    let mut runtime_param_name = "value".to_string();
+    let mut runtime_param_type = ctx.new_var(None);
+    let mut runtime_param_ident: Option<crate::ident::Ident> = None;
 
     for (name, typed_arg, is_type) in &typed_args {
         if *is_type {
             // Type params already bound as ComptimeValue::Type above
         } else {
-            // Add parameter to env with its type
+            runtime_param_name = name.clone();
+            runtime_param_type = typed_arg.exp_type;
+            // Add parameter to env so body type-checks with the right type.
+            // Do NOT add to comptime_bindings — the parameter should remain
+            // as a variable reference in the generated function body, not be
+            // substituted with the call-site argument value.
             let id = ctx.create_ident(name);
+            runtime_param_ident = Some(id.clone());
             let vd = crate::types::decl::ValueDescription {
                 val_type: typed_arg.exp_type,
                 val_kind: crate::types::decl::ValueKind::ValReg,
@@ -20937,44 +20949,41 @@ fn try_comptime_application(
                 val_attributes: vec![],
                 val_path: None,
             };
-            inline_env.add_value(id, vd);
-            // Bind as TypedExpr so Pexp_ident resolves the parameter
-            tctx.comptime_bindings.insert(
-                name.clone(),
-                crate::types::comptime::ComptimeValue::TypedExpr(typed_arg.clone()),
-            );
+            spec_env.add_value(id, vd);
         }
     }
 
-    // Type-check the body (may trigger recursive try_comptime_application
-    // calls that hit the cycle detection above)
-    let body_result = type_expect(tctx, &inline_env, &inner_body, expected_ty, None);
+    // Type-check the body (may trigger recursive calls that hit the cache)
+    let body_result = type_expect(tctx, &spec_env, &inner_body, expected_ty, None);
 
-    // Mark complete and restore bindings
-    // Use a dummy GeneratedFunction for now (body emitted inline)
-    let gen_name_final = crate::types::comptime::make_monomorph_name(&func_name, &type_key);
-    tctx.monomorph_cache.complete(
-        &func_name,
-        &type_key,
-        gen_name_final,
-        crate::types::comptime::GeneratedFunction {
-            name: String::new(),
-            ident: ctx.create_ident("__dummy"),
-            body: Expression::new(
-                ExpressionDesc::Texp_constant(Constant::Int(0)),
-                LocIdx(0), ctx.new_var(None), EnvRef(0), Attributes::new(),
-            ),
-            param_name: String::new(),
-            param_type: ctx.new_var(None),
-            return_type: ctx.new_var(None),
-            recursive: false,
-        },
-    );
     tctx.comptime_bindings = saved_bindings;
     COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
     match body_result {
-        Ok(typed_body) => Some(Ok(typed_body)),
+        Ok(typed_body) => {
+            let return_type = typed_body.exp_type;
+            let recursive = contains_ident_reference(&typed_body, &gen_name);
+            let gen_ident = ctx.create_ident(&gen_name);
+
+            let param_ident = runtime_param_ident.unwrap_or_else(|| ctx.create_ident(&runtime_param_name));
+            tctx.monomorph_cache.complete(
+                &func_name,
+                &type_key,
+                gen_name.clone(),
+                crate::types::comptime::GeneratedFunction {
+                    name: gen_name.clone(),
+                    ident: gen_ident,
+                    body: typed_body,
+                    param_name: runtime_param_name,
+                    param_ident,
+                    param_type: runtime_param_type,
+                    return_type,
+                    recursive,
+                },
+            );
+
+            Some(Ok(make_comptime_call(tctx, &gen_name, &runtime_args, expected_ty)))
+        }
         Err(_) => None,
     }
 }

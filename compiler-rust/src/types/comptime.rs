@@ -80,6 +80,8 @@ pub struct GeneratedFunction {
     pub body: typedtree::Expression,
     /// Parameter name for the runtime argument.
     pub param_name: String,
+    /// Identifier for the runtime parameter (must match body's references).
+    pub param_ident: Ident,
     /// Type of the runtime parameter.
     pub param_type: TypeExprRef,
     /// Return type of the function.

@@ -8451,8 +8451,8 @@ pub fn type_structure<'a>(
             pat_attributes: crate::parser::ast::Attributes::new(),
         };
 
-        // Function parameter
-        let param_ident = ctx.create_ident(&gen_fn.param_name);
+        // Use the same param ident that was used during body type-checking
+        let param_ident = gen_fn.param_ident.clone();
         let param_pat = crate::types::typedtree::Pattern {
             pat_desc: crate::types::typedtree::PatternDesc::Tpat_var(
                 param_ident.clone(),
