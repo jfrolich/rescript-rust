@@ -306,7 +306,11 @@ impl LambdaCompiler {
         self.external_module_ids.clear();
         let mut possible_required_modules = collect_possible_required_modules(lam);
         possible_required_modules.extend(extra_possible_required_modules.iter().cloned());
-        let simplified = crate::lambda::simplify::simplify_for_js_backend(lam);
+        let simplified =
+            crate::lambda::simplify::simplify_for_js_backend_with_jsx_preserve(
+                lam,
+                self.jsx_preserve,
+            );
         let compiled = self.compile_expr(&simplified);
         let mut block = compiled.prelude;
         let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block)

@@ -83,6 +83,60 @@ baseline.
 
 Latest iteration on **2026-04-16**:
 
+- Active slice: thread the real `Js_config.jsx_preserve` gate through the Rust
+  JS-backend lambda simplifier instead of preserving transformed JSX `.make`
+  field reads unconditionally
+- Active backend focus moved back to **Phase 2: Port Post-Lowering Lambda
+  Backend Stages** from `PLAN.md`; this slice stays in
+  `compiler-rust/src/lambda/simplify.rs` with the compile entrypoint update in
+  `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  `compiler/core/lam_pass_remove_alias.ml`, especially the
+  `Pjs_call {prim_name = "jsx" | "jsxs"}` + `Pfield` guard that only preserves
+  the transformed JSX component field read when `!Js_config.jsx_preserve`
+- Rust change:
+  - added `simplify_for_js_backend_with_jsx_preserve(...)` so the JS-backend
+    simplifier can receive the actual JSX-preserve flag instead of hard-coding
+    preserve behavior for every transformed JSX call
+  - threaded `self.jsx_preserve` from
+    `LambdaCompiler::compile_deps_program_with_possible_required_modules(...)`
+    into that simplifier entrypoint
+  - narrowed the transformed-`jsx/jsxs` field-read preservation in
+    `simplify_primitive(...)` to `env.jsx_preserve`, matching OCaml's
+    `lam_pass_remove_alias` gate
+  - added the focused regression
+    `preserves_transformed_jsx_component_field_reads_during_alias_simplification_in_jsx_preserve_mode`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release preserves_transformed_jsx_component_field_reads_during_alias_simplification_in_jsx_preserve_mode -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh jsx_optional_props_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh jsx_preserve_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh async_jsx --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/jsx_optional_props_test.res` matches its checked-in
+    snapshot in the current dirty worktree again; Rust emits the direct
+    component function in `JsxRuntime.jsx(...)` instead of the drifting
+    `ComponentWithOptionalProps.make` tag
+  - unchanged guards `tests/tests/src/jsx_preserve_test.res`,
+    `tests/tests/src/ExternalShadow.res`, and `tests/tests/src/async_jsx.res`
+    remained exact after the same slice
+  - the preserve-only simplifier regression stays covered directly, while the
+    non-preserve JSX tag collapse continues to be validated at the emitted-JS
+    level because the relevant exported-component shape spans later backend
+    stages beyond the synthetic unit test shape
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **540 / 657** -> **540 / 657** (**no change**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **109** -> **109** (**no change**)
+- Keep this change because the old Rust simplifier was not OCaml-aligned:
+  `lam_pass_remove_alias` only preserves transformed JSX `.make` reads when
+  JSX preserve mode is actually enabled, and the Rust backend now threads that
+  same stage boundary explicitly.
+
+Latest iteration on **2026-04-16**:
+
 - Active slice: use OCaml's generic temporary naming for `NeedValue`
   `if-then-else` lowering instead of Rust's special `ifres` result temp
 - Active backend focus moved back to **Phase 3: Port JS IR Lowering And

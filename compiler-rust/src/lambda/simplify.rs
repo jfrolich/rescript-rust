@@ -29,6 +29,7 @@ struct SimplifyEnv {
     preserved_local_module_eta_alias_bindings: HashSet<Ident>,
     allow_direct_function_beta_reduce: bool,
     preserve_direct_wrapper_values: bool,
+    jsx_preserve: bool,
     substitutions: HashMap<Ident, Lambda>,
 }
 
@@ -108,6 +109,10 @@ impl SimplifyEnv {
 
 /// Simplify lowered lambda before JS IR lowering.
 pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
+    simplify_for_js_backend_with_jsx_preserve(lam, false)
+}
+
+pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: bool) -> Lambda {
     let flattened = deep_flatten_for_js_backend(lam);
     let exports = collect_exported_idents(&flattened);
     let preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
@@ -117,12 +122,14 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
         &flattened,
         &preserved_export_bindings,
         &preserved_local_module_eta_alias_bindings,
+        jsx_preserve,
         true,
     );
     let second = simplify_for_js_backend_once(
         &first,
         &preserved_export_bindings,
         &preserved_local_module_eta_alias_bindings,
+        jsx_preserve,
         false,
     );
     let lets_dce_style = simplify_direct_function_applications_like_lets_dce(&second);
@@ -130,6 +137,7 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
         &lets_dce_style,
         &preserved_export_bindings,
         &preserved_local_module_eta_alias_bindings,
+        jsx_preserve,
         false,
     )
 }
@@ -138,6 +146,7 @@ fn simplify_for_js_backend_once(
     lam: &Lambda,
     preserved_export_bindings: &HashSet<Ident>,
     preserved_local_module_eta_alias_bindings: &HashSet<Ident>,
+    jsx_preserve: bool,
     allow_direct_function_beta_reduce: bool,
 ) -> Lambda {
     let flattened = deep_flatten_for_js_backend(lam);
@@ -149,6 +158,7 @@ fn simplify_for_js_backend_once(
         preserved_local_module_eta_alias_bindings: preserved_local_module_eta_alias_bindings
             .clone(),
         allow_direct_function_beta_reduce,
+        jsx_preserve,
         ..SimplifyEnv::default()
     };
     simplify_with_env(&flattened, &env, &exports)
@@ -663,9 +673,8 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             let mut body_exports = None;
             let preserve_exported_eta_alias =
                 binding_is_exported && preserve_exported_eta_alias_binding(original_value, &value);
-            let preserve_local_module_field_eta_alias = env
-                .preserved_local_module_eta_alias_bindings
-                .contains(id);
+            let preserve_local_module_field_eta_alias =
+                env.preserved_local_module_eta_alias_bindings.contains(id);
             if let Some(block_info) = immutable_block_elements(&value) {
                 body_env.blocks.insert(id.clone(), block_info);
             }
@@ -1697,6 +1706,7 @@ fn simplify_primitive(
     ) = (&info.primitive, info.args.as_slice())
     {
         if matches!(prim_name.as_str(), "jsx" | "jsxs")
+            && env.jsx_preserve
             && matches!(
                 field_arg,
                 Lambda::Lprim(crate::lambda::PrimInfo {
@@ -3522,7 +3532,68 @@ mod tests {
     };
     use crate::location::Location;
 
-    use super::{simplify_for_js_backend, substitute_alias_use};
+    use super::{
+        simplify_for_js_backend, simplify_for_js_backend_with_jsx_preserve,
+        substitute_alias_use,
+    };
+
+    fn transformed_jsx_tag_arg<'a>(lam: &'a Lambda) -> Option<&'a Lambda> {
+        match lam {
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive:
+                    Primitive::PjsCall {
+                        prim_name,
+                        transformed_jsx: true,
+                        ..
+                    },
+                args,
+                ..
+            }) if matches!(prim_name.as_str(), "jsx" | "jsxs") => args.first(),
+            Lambda::Llet(_, _, value, body) => {
+                transformed_jsx_tag_arg(value).or_else(|| transformed_jsx_tag_arg(body))
+            }
+            Lambda::Lletrec(bindings, body) => bindings
+                .iter()
+                .find_map(|(_, value)| transformed_jsx_tag_arg(value))
+                .or_else(|| transformed_jsx_tag_arg(body)),
+            Lambda::Lapply(apply) => transformed_jsx_tag_arg(&apply.ap_func)
+                .or_else(|| apply.ap_args.iter().find_map(transformed_jsx_tag_arg)),
+            Lambda::Lfunction(func) => transformed_jsx_tag_arg(&func.body),
+            Lambda::Lswitch(scrutinee, switch) => transformed_jsx_tag_arg(scrutinee)
+                .or_else(|| {
+                    switch
+                        .sw_consts
+                        .iter()
+                        .find_map(|(_, lam)| transformed_jsx_tag_arg(lam))
+                })
+                .or_else(|| {
+                    switch
+                        .sw_blocks
+                        .iter()
+                        .find_map(|(_, lam)| transformed_jsx_tag_arg(lam))
+                })
+                .or_else(|| switch.sw_failaction.as_deref().and_then(transformed_jsx_tag_arg)),
+            Lambda::LstringSwitch(scrutinee, cases, default) => transformed_jsx_tag_arg(scrutinee)
+                .or_else(|| cases.iter().find_map(|(_, lam)| transformed_jsx_tag_arg(lam)))
+                .or_else(|| default.as_deref().and_then(transformed_jsx_tag_arg)),
+            Lambda::LstaticRaise(_, args) => args.iter().find_map(transformed_jsx_tag_arg),
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                transformed_jsx_tag_arg(body).or_else(|| transformed_jsx_tag_arg(handler))
+            }
+            Lambda::LifThenElse(cond, then_, else_) => transformed_jsx_tag_arg(cond)
+                .or_else(|| transformed_jsx_tag_arg(then_))
+                .or_else(|| transformed_jsx_tag_arg(else_)),
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                transformed_jsx_tag_arg(first).or_else(|| transformed_jsx_tag_arg(second))
+            }
+            Lambda::Lfor(_, start, end, _, body) => transformed_jsx_tag_arg(start)
+                .or_else(|| transformed_jsx_tag_arg(end))
+                .or_else(|| transformed_jsx_tag_arg(body)),
+            Lambda::Lassign(_, value) => transformed_jsx_tag_arg(value),
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => None,
+            _ => None,
+        }
+    }
 
     fn find_binding_value<'a>(lam: &'a Lambda, target: &Ident) -> Option<&'a Lambda> {
         match lam {
@@ -7804,7 +7875,8 @@ mod tests {
     }
 
     #[test]
-    fn preserves_transformed_jsx_component_field_reads_during_alias_simplification() {
+    fn preserves_transformed_jsx_component_field_reads_during_alias_simplification_in_jsx_preserve_mode(
+    ) {
         let props = Ident::create_local("props");
         let field_arg = Lambda::prim(
             Primitive::Pfield(
@@ -7830,28 +7902,28 @@ mod tests {
             Location::none(),
         );
 
-        let simplified = simplify_for_js_backend(&Lambda::prim(
-            Primitive::PjsCall {
-                prim_name: "jsx".to_string(),
-                arg_types: vec![],
-                ffi: crate::lambda::primitive::ExternalFfiSpec {
-                    kind: crate::lambda::primitive::ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: None,
-                    return_wrapper: crate::lambda::primitive::ExternalReturnWrapper::Identity,
-                    inline_constant: None,
+        let simplified = simplify_for_js_backend_with_jsx_preserve(
+            &Lambda::prim(
+                Primitive::PjsCall {
+                    prim_name: "jsx".to_string(),
+                    arg_types: vec![],
+                    ffi: crate::lambda::primitive::ExternalFfiSpec {
+                        kind: crate::lambda::primitive::ExternalFfiKind::Default,
+                        spec: None,
+                        obj_params: None,
+                        return_wrapper: crate::lambda::primitive::ExternalReturnWrapper::Identity,
+                        inline_constant: None,
+                    },
+                    dynamic_import: false,
+                    transformed_jsx: true,
                 },
-                dynamic_import: false,
-                transformed_jsx: true,
-            },
-            vec![field_arg, Lambda::unit()],
-            Location::none(),
-        ));
+                vec![field_arg, Lambda::unit()],
+                Location::none(),
+            ),
+            true,
+        );
 
-        let Lambda::Lprim(info) = simplified else {
-            panic!("expected transformed JSX primitive to survive");
-        };
-        let Some(first_arg) = info.args.first() else {
+        let Some(first_arg) = transformed_jsx_tag_arg(&simplified) else {
             panic!("expected preserved component tag argument");
         };
         assert!(matches!(
