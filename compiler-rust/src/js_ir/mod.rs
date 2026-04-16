@@ -1393,6 +1393,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         // flips them into `if (!cond) return; ...` too soon.
         if preserves_positive_return_undefined_tail(&then_, else_ret)
             || preserves_positive_literal_dispatch_return_tail(&cond, &then_, else_ret)
+            || preserves_nullish_success_guard(&cond, &then_, &else_)
         {
             return Statement::new(StatementDesc::If(cond, then_, else_));
         }
@@ -1407,6 +1408,9 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
     }
 
     if block_last_is_terminal(&then_) {
+        if preserves_nullish_success_guard(&cond, &then_, &else_) {
+            return Statement::new(StatementDesc::If(cond, then_, else_));
+        }
         let mut block = Vec::with_capacity(1 + else_.len());
         block.push(Statement::new(StatementDesc::If(cond, then_, vec![])));
         block.extend(else_);
@@ -1626,6 +1630,56 @@ fn preserves_positive_literal_dispatch_return_tail(
     }
 
     saw_inner_literal && saw_other_literal
+}
+
+fn preserves_nullish_success_guard(cond: &Expression, then_: &Block, else_: &Block) -> bool {
+    if !is_nullish_refinement_guard(cond) {
+        return false;
+    }
+
+    let then_nontrivial_terminal = then_.len() > 1 && block_last_is_terminal(then_);
+    let else_nontrivial_terminal = else_.len() > 1 && block_last_is_terminal(else_);
+    let then_simple_fallback = then_.is_empty() || single_return_expr(then_).is_some();
+    let else_simple_fallback = else_.is_empty() || single_return_expr(else_).is_some();
+
+    (then_nontrivial_terminal && else_simple_fallback)
+        || (else_nontrivial_terminal && then_simple_fallback)
+}
+
+fn is_nullish_refinement_guard(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::IsNullOrUndefined(inner) => matches!(
+            inner.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(_),
+                ..
+            }
+        ),
+        ExpressionDesc::JsNot(inner) => matches!(
+            inner.as_ref(),
+            Expression {
+                desc: ExpressionDesc::IsNullOrUndefined(target),
+                ..
+            } if matches!(
+                target.as_ref(),
+                Expression {
+                    desc: ExpressionDesc::Var(_),
+                    ..
+                }
+            )
+        ),
+        _ => matches!(
+            strict_var_literal_comparison(expr),
+            Some((
+                BinOp::EqEqEq | BinOp::NotEqEq,
+                _,
+                Expression {
+                    desc: ExpressionDesc::Null | ExpressionDesc::Undefined { .. },
+                    ..
+                }
+            ))
+        ),
+    }
 }
 
 fn statement_contains_await(stmt: &Statement) -> bool {
@@ -3446,6 +3500,99 @@ mod tests {
         };
         assert!(ocaml_eq_expression(nested_test, &inner_cond));
         assert!(nested_else.is_empty());
+        assert!(ocaml_eq_block(kept_else, &else_block));
+    }
+
+    #[test]
+    fn test_if_statement_keeps_positive_strict_null_success_return_branch() {
+        let elem = Ident::create_local("elem");
+        let cond = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::var(elem.clone()),
+            Expression::null(),
+        );
+        let then_block = vec![
+            Statement::exp(Expression::call(
+                Expression::var(Ident::create_local("seen")),
+                vec![Expression::var(elem.clone())],
+                CallInfo::default(),
+            )),
+            Statement::return_(Expression::number(Number::int(2))),
+        ];
+        let else_block = vec![Statement::return_(Expression::number(Number::int(1)))];
+
+        let stmt = Statement::if_(cond.clone(), then_block.clone(), else_block.clone());
+
+        let StatementDesc::If(test, kept_then, kept_else) = &stmt.desc else {
+            panic!("expected strict null success guard to stay explicit: {stmt:#?}");
+        };
+        assert!(ocaml_eq_expression(test, &cond));
+        assert!(ocaml_eq_block(kept_then, &then_block));
+        assert!(ocaml_eq_block(kept_else, &else_block));
+    }
+
+    #[test]
+    fn test_if_statement_keeps_loose_nullish_else_branch_materialized() {
+        let elem = Ident::create_local("elem");
+        let cond = Expression::is_null_or_undefined(Expression::var(elem.clone()));
+        let then_block = vec![Statement::return_(Expression::number(Number::int(1)))];
+        let else_block = vec![
+            Statement::exp(Expression::call(
+                Expression::var(Ident::create_local("seen")),
+                vec![Expression::var(elem.clone())],
+                CallInfo::default(),
+            )),
+            Statement::return_(Expression::number(Number::int(2))),
+        ];
+
+        let stmt = Statement::if_(cond.clone(), then_block.clone(), else_block.clone());
+
+        let StatementDesc::If(test, kept_then, kept_else) = &stmt.desc else {
+            panic!("expected loose nullish guard to keep its explicit else: {stmt:#?}");
+        };
+        assert!(
+            matches!(
+                &test.desc,
+                ExpressionDesc::IsNullOrUndefined(inner)
+                    if matches!(
+                        inner.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(VIdent::Id(id)),
+                            ..
+                        } if id.same(&elem)
+                    )
+            ),
+            "unexpected loose nullish test shape: {stmt:#?}"
+        );
+        assert!(ocaml_eq_block(kept_then, &then_block));
+        assert!(ocaml_eq_block(kept_else, &else_block));
+    }
+
+    #[test]
+    fn test_if_statement_keeps_positive_strict_undefined_unit_success_tail() {
+        let value = Ident::create_local("value");
+        let cond = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::var(value.clone()),
+            Expression::undefined(true),
+        );
+        let then_block = vec![
+            Statement::exp(Expression::call(
+                Expression::var(Ident::create_local("seen")),
+                vec![Expression::var(value)],
+                CallInfo::default(),
+            )),
+            Statement::return_(Expression::undefined(true)),
+        ];
+        let else_block = vec![Statement::return_(Expression::undefined(true))];
+
+        let stmt = Statement::if_(cond.clone(), then_block.clone(), else_block.clone());
+
+        let StatementDesc::If(test, kept_then, kept_else) = &stmt.desc else {
+            panic!("expected strict undefined success tail to stay positive: {stmt:#?}");
+        };
+        assert!(ocaml_eq_expression(test, &cond));
+        assert!(ocaml_eq_block(kept_then, &then_block));
         assert!(ocaml_eq_block(kept_else, &else_block));
     }
 

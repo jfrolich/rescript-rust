@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 520 / 657 with 8 unrelated compile errors and 129 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 522 / 657 with 8 unrelated compile errors and 127 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **520 / 657**
+- JS snapshot parity: **522 / 657**
 - Compile errors: **8**
-- Output diffs: **129**
+- Output diffs: **127**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,64 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `520 / 657` unless the
+Do **not** replace the recorded project baseline with `522 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: preserve explicit nullish/undefined success guards in
+  `js_ir::simplify_if_statement(...)` when one side is a non-trivial terminal
+  branch and the other side is only the simple fallback return; this keeps the
+  option/nullability lowering shape from collapsing into Rust-only
+  guard-clause form
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/js_ir/mod.rs`
+- OCaml reference:
+  `compiler/core/js_stmt_make.ml`, especially the `if_` helper's explicit
+  branch-shape preservation, together with `compiler/core/lam_compile.ml`
+  option/nullability lowering sites that feed `S.if_` with materialized
+  success/fallback blocks
+- Rust change:
+  - added `preserves_nullish_success_guard(...)` /
+    `is_nullish_refinement_guard(...)` so strict `null`/`undefined` guards and
+    loose `== null` guards keep their explicit `if` structure when one branch
+    is the real success path and the other is just the simple fallback return
+  - used that preservation hook in both guard-clause rewrites inside
+    `simplify_if_statement(...)`: the `else is a single return` inversion and
+    the `then block terminates, append else as fallthrough` rewrite
+  - added focused regression coverage for strict-null success returns, loose
+    nullish explicit `else` blocks, and strict-undefined unit success tails
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh return_check`
+  - `timeout 30 ./scripts/test_js_single.sh js_nullable_test`
+  - `timeout 30 ./scripts/test_js_single.sh undef_regression_test`
+  - `timeout 30 ./scripts/test_js_single.sh unit_undefined_test`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/return_check.res`,
+    `tests/tests/src/js_nullable_test.res`,
+    `tests/tests/src/undef_regression_test.res`, and
+    `tests/tests/src/unit_undefined_test.res` now match their checked-in
+    snapshots again; each had been rewritten into Rust-only nullish
+    guard-clause form before this slice
+  - `tests/tests/src/ExternalShadow.res` and
+    `tests/tests/src/UntaggedVariants.res` remained exact as guards
+  - the current dirty-tree wrapper improved by two exact JS snapshots while
+    keeping the unrelated compile-error set unchanged
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **520 / 657** -> **522 / 657** (**+2**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **129** -> **127** (**-2**)
+- Keep this change because the previous rewrites were Rust-only last-mile
+  guard-clause inversions on nullish success paths. Restoring the explicit
+  branch structure brings the emitted JS back in line with the checked-in
+  OCaml snapshots without reopening the broader sync-tail rewrite.
 
 Latest iteration on **2026-04-16**:
 
