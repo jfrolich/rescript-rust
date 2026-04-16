@@ -8426,10 +8426,96 @@ pub fn type_structure<'a>(
         }
     }
 
-    // TODO: Emit monomorphized comptime functions as structure items.
-    // Currently the monomorph cache is used for cycle detection only —
-    // the body is still inlined at the call site. Named function emission
-    // is pending (requires mutable arena access for Arity creation).
+    // Emit monomorphized comptime functions as structure items.
+    // Each generated function is a specialized version of a @comptime function
+    // for a specific type (e.g., encode$user, encode$address).
+    let generated_fns: Vec<_> = tctx.monomorph_cache.generated.drain(..).collect();
+    for gen_fn in generated_fns {
+        if gen_fn.name.is_empty() {
+            continue; // Skip dummy entries from inline-only specializations
+        }
+
+        let ctx = tctx.type_ctx;
+        let func_type = ctx.new_arrow_simple(gen_fn.param_type, gen_fn.return_type);
+
+        // Pattern: let encode$user = ...
+        let pat = crate::types::typedtree::Pattern {
+            pat_desc: crate::types::typedtree::PatternDesc::Tpat_var(
+                gen_fn.ident.clone(),
+                crate::parse_arena::Located { txt: gen_fn.name.clone(), loc: LocIdx(0) },
+            ),
+            pat_loc: LocIdx(0),
+            pat_extra: vec![],
+            pat_type: func_type,
+            pat_env: crate::types::typedtree::EnvRef(0),
+            pat_attributes: crate::parser::ast::Attributes::new(),
+        };
+
+        // Function parameter
+        let param_ident = ctx.create_ident(&gen_fn.param_name);
+        let param_pat = crate::types::typedtree::Pattern {
+            pat_desc: crate::types::typedtree::PatternDesc::Tpat_var(
+                param_ident.clone(),
+                crate::parse_arena::Located { txt: gen_fn.param_name.clone(), loc: LocIdx(0) },
+            ),
+            pat_loc: LocIdx(0),
+            pat_extra: vec![],
+            pat_type: gen_fn.param_type,
+            pat_env: crate::types::typedtree::EnvRef(0),
+            pat_attributes: crate::parser::ast::Attributes::new(),
+        };
+
+        // Function body: (value) => specialized_body
+        // Use static_arity_1 — no mutable arena needed
+        let body_case = crate::types::typedtree::Case::simple(param_pat, gen_fn.body);
+        let func_expr = crate::types::typedtree::Expression::new(
+            crate::types::typedtree::ExpressionDesc::Texp_function {
+                params: vec![crate::types::typedtree::FunctionParam {
+                    param_id: param_ident,
+                    label: crate::parser::ast::ArgLabel::Nolabel,
+                    default: None,
+                    pat: crate::types::typedtree::FunctionParamPattern::Simple(
+                        body_case.c_lhs.clone(),
+                    ),
+                }],
+                body: vec![body_case],
+                partial: crate::types::typedtree::Partial::Total,
+                arity: arena.static_arity_1(),
+                async_: false,
+            },
+            LocIdx(0),
+            func_type,
+            crate::types::typedtree::EnvRef(0),
+            crate::parser::ast::Attributes::new(),
+        );
+
+        let vb = crate::types::typedtree::ValueBinding {
+            vb_pat: pat,
+            vb_expr: func_expr,
+            vb_attributes: crate::parser::ast::Attributes::new(),
+            vb_loc: LocIdx(0),
+        };
+
+        let rec_flag = if gen_fn.recursive { RecFlag::Recursive } else { RecFlag::Nonrecursive };
+
+        // Add to signature
+        sig_items.push(crate::types::decl::SignatureItem::SigValue(
+            gen_fn.ident.clone(),
+            crate::types::decl::ValueDescription {
+                val_type: func_type,
+                val_kind: crate::types::decl::ValueKind::ValReg,
+                val_loc: crate::location::Location::none(),
+                val_attributes: vec![],
+                val_path: None,
+            },
+        ));
+
+        typed_items.push(StructureItem {
+            str_desc: StructureItemDesc::Tstr_value(rec_flag, vec![vb]),
+            str_loc: LocIdx(0),
+            str_env: crate::types::typedtree::EnvRef(0),
+        });
+    }
 
     let structure = Structure {
         str_items: typed_items,
