@@ -232,24 +232,18 @@ impl LambdaCompiler {
         stable_group_switch_cases(filtered, merge_cases)
     }
 
-    fn grouped_switch_case_refs<'a, T: Clone, F>(
+    fn filtered_switch_case_refs<'a, T: Clone>(
         &self,
         cases: &'a [(T, &'a Lambda)],
         default: Option<&'a Lambda>,
-        merge_cases: F,
-    ) -> Vec<(T, &'a Lambda, bool)>
-    where
-        F: Fn(&T, &T) -> bool,
-    {
-        let filtered: Vec<_> = cases
+    ) -> Vec<(T, &'a Lambda)> {
+        cases
             .iter()
             .filter(|(_, lam)| {
                 default.map_or(true, |default| !super::lambda_eq_approx(lam, default))
             })
             .map(|(tag, lam)| (tag.clone(), *lam))
-            .collect();
-
-        stable_group_switch_cases(filtered, merge_cases)
+            .collect()
     }
 
     /// Create a new compiler.
@@ -3779,11 +3773,12 @@ impl LambdaCompiler {
         complete: bool,
         allow_small: bool,
     ) -> Block {
+        let filtered_cases = self.filtered_switch_case_refs(cases, default);
         if allow_small {
             if let Some(block) = self.compile_small_string_switch_assignment(
                 result,
                 test.clone(),
-                cases,
+                filtered_cases.as_slice(),
                 default,
                 complete,
             ) {
@@ -3791,8 +3786,7 @@ impl LambdaCompiler {
             }
         }
 
-        let clauses = self
-            .grouped_switch_case_refs(cases, default, |_, _| true)
+        let clauses = stable_group_switch_cases(filtered_cases, |_, _| true)
             .into_iter()
             .map(|(tag, body, is_last)| StringClause {
                 tag_type: tag,
@@ -3838,15 +3832,20 @@ impl LambdaCompiler {
         complete: bool,
         allow_small: bool,
     ) -> Block {
+        let filtered_cases = self.filtered_switch_case_refs(cases, default);
         if allow_small {
-            if let Some(block) =
-                self.compile_small_string_switch_return(test.clone(), cases, default, complete)
+            if let Some(block) = self.compile_small_string_switch_return(
+                test.clone(),
+                filtered_cases.as_slice(),
+                default,
+                complete,
+            )
             {
                 return block;
             }
         }
 
-        let grouped_cases = self.grouped_switch_case_refs(cases, default, |_, _| true);
+        let grouped_cases = stable_group_switch_cases(filtered_cases, |_, _| true);
         let mut shared_tail = None;
         let clauses = if default.is_none() && self.active_fallthrough_return_handler().is_none() {
             let mut clauses = Vec::with_capacity(grouped_cases.len());
@@ -3928,16 +3927,20 @@ impl LambdaCompiler {
         complete: bool,
         allow_small: bool,
     ) -> Block {
+        let filtered_cases = self.filtered_switch_case_refs(cases, default);
         if allow_small {
-            if let Some(block) =
-                self.compile_small_string_switch_effect(test.clone(), cases, default, complete)
+            if let Some(block) = self.compile_small_string_switch_effect(
+                test.clone(),
+                filtered_cases.as_slice(),
+                default,
+                complete,
+            )
             {
                 return block;
             }
         }
 
-        let clauses: Vec<_> = self
-            .grouped_switch_case_refs(cases, default, |_, _| true)
+        let clauses: Vec<_> = stable_group_switch_cases(filtered_cases, |_, _| true)
             .into_iter()
             .map(|(tag, body, is_last)| {
                 let clause = if is_last {
@@ -19958,6 +19961,64 @@ mod tests {
                 "value === \"A\" || value === \"D\" || value === \"B\" || value === \"C\""
             ),
             "expected OCaml-style literal dispatch order across overlapping block kinds:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn named_string_effect_switches_filter_default_duplicates_before_small_lowering() {
+        let mut compiler = LambdaCompiler::new();
+        let key = Ident::create_local("key");
+        let seen = Ident::create_local("seen");
+        let literal_tag = |txt: &str| crate::lambda::SwitchTag {
+            name: txt.to_string(),
+            tag_type: Some(crate::lambda::SwitchCaseTag::String(txt.to_string())),
+        };
+        let unit = Lambda::const_(Constant::JsUndefined { is_unit: true });
+        let effect = Lambda::Lassign(seen.clone(), Box::new(Lambda::const_(Constant::int(1))));
+        let cases = vec![
+            (literal_tag("a").tag_type.unwrap(), &unit),
+            (literal_tag("b").tag_type.unwrap(), &unit),
+            (literal_tag("c").tag_type.unwrap(), &unit),
+            (literal_tag("d").tag_type.unwrap(), &unit),
+            (literal_tag("e").tag_type.unwrap(), &unit),
+            (literal_tag("f").tag_type.unwrap(), &unit),
+            (literal_tag("g").tag_type.unwrap(), &unit),
+            (literal_tag("h").tag_type.unwrap(), &unit),
+            (literal_tag("i").tag_type.unwrap(), &unit),
+            (literal_tag("j").tag_type.unwrap(), &unit),
+            (literal_tag("k").tag_type.unwrap(), &unit),
+            (literal_tag("l").tag_type.unwrap(), &unit),
+            (literal_tag("m").tag_type.unwrap(), &unit),
+            (literal_tag("n").tag_type.unwrap(), &unit),
+            (literal_tag("o").tag_type.unwrap(), &unit),
+            (literal_tag("p").tag_type.unwrap(), &unit),
+            (literal_tag("q").tag_type.unwrap(), &unit),
+            (literal_tag("r").tag_type.unwrap(), &unit),
+            (literal_tag("s").tag_type.unwrap(), &unit),
+            (literal_tag("t").tag_type.unwrap(), &unit),
+            (literal_tag("u").tag_type.unwrap(), &unit),
+            (literal_tag("v").tag_type.unwrap(), &unit),
+            (literal_tag("w").tag_type.unwrap(), &unit),
+            (literal_tag("x").tag_type.unwrap(), &unit),
+            (literal_tag("y").tag_type.unwrap(), &unit),
+            (literal_tag("z").tag_type.unwrap(), &unit),
+            (literal_tag("space").tag_type.unwrap(), &effect),
+        ];
+        let block = compiler.compile_named_string_switch_effect_with_strategy(
+            Expression::var(key.clone()),
+            &cases,
+            Some(&unit),
+            false,
+            true,
+        );
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains("if (key === \"space\") {"),
+            "expected default-duplicate string cases to filter before the small lowering:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("key !== \"a\""),
+            "expected the broad literal-membership guard to disappear after filtering:\n{rendered}"
         );
     }
 

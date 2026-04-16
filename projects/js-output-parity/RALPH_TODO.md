@@ -83,6 +83,54 @@ baseline.
 
 Latest iteration on **2026-04-16**:
 
+- Active slice: filter named string-switch cases against the explicit default
+  before choosing the OCaml small-switch lowering, instead of only filtering in
+  the grouped fallback path
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_general_cases`'s
+  `Default lam -> List.filter ...` step that removes default-duplicate cases
+  before matching on `[]`, `[case]`, or `[case1; case2]`
+- Rust change:
+  - added a shared `filtered_switch_case_refs(...)` helper for named string
+    switch lowering
+  - updated the named string assignment/return/effect lowering paths to feed
+    that filtered case list into the small-switch matcher before falling back
+    to grouped switch emission, so Rust no longer misses the OCaml small-case
+    path when default-duplicate arms collapse the switch to one meaningful case
+  - replaced the earlier overbroad synthetic mixed-untagged regression with a
+    focused unit test that exercises the exact OCaml rule now being ported
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml named_string_effect_switches_filter_default_duplicates_before_small_lowering -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml string_switch_effects_group_adjacent_equal_cases_and_drop_default_duplicates -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml int_switch_expressions_group_adjacent_equal_cases_and_drop_default_duplicates -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - the new regression passes and keeps the adjacent default-duplicate grouping
+    guards green, so the named-string lowering now matches OCaml on the
+    filter-before-small-case decision point
+  - `tests/tests/src/UntaggedVariants.res` produced no diff output in the
+    focused spot-check, and `tests/tests/src/ExternalShadow.res` remained an
+    exact snapshot match as a broader guard
+  - the current dirty-tree authoritative wrapper stayed flat, which indicates
+    this correctness fix hardens a backend rule that is not currently exposed
+    by the checked-in dirty-worktree failures
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **528 / 657** -> **528 / 657** (**no change**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **121** -> **121** (**no change**)
+- Keep this change because the previous Rust lowering only applied
+  default-duplicate filtering in the grouped fallback path, while OCaml filters
+  first and then decides whether the switch qualifies for the small `if`-based
+  lowering. Even with flat snapshot totals in the current dirty tree, this is a
+  real Phase-3 backend alignment fix and now has direct regression coverage.
+
+Latest iteration on **2026-04-16**:
+
 - Active slice: port OCaml `compile_for`'s start/finish prelude ordering so
   `Lfor` preserves side effects from loop bounds instead of dropping them when
   Rust lowers directly to `StatementDesc::ForRange`
