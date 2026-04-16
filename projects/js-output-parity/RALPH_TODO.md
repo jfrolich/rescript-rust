@@ -83,6 +83,61 @@ baseline.
 
 Latest iteration on **2026-04-16**:
 
+- Active slice: keep mixed untagged effect switches on the filtered OCaml
+  small-case path once the block side compiles to a real no-op, instead of
+  preserving a redundant literal-vs-block dispatch guard around the const side
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially the mixed untagged
+  `compile_switch` path's reuse of `sw_num_default` / `compile_general_cases`,
+  plus the later OCaml backend simplifications that erase no-op effect guards
+- Rust change:
+  - replaced the Rust-only `const_cases.len() == literal_cases.len()` shortcut
+    in mixed untagged lowering with the actual OCaml-aligned
+    `const_switch_default(...)` / `const_switch_complete(...)` metadata, so the
+    const side keeps the same default information OCaml passes into
+    `compile_general_cases`
+  - narrowed the effect dispatcher so it no longer wraps the const side in a
+    literal-membership gate when the block side compiled to `[]`; in that case
+    the guard is semantically redundant and only preserves Rust-only residue
+  - added `mixed_untagged_string_effect_switches_filter_default_duplicates_before_small_lowering`
+    to cover the exact mixed-string overlap shape that the earlier named-string
+    regression did not reach
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml mixed_untagged_string_effect_switches_filter_default_duplicates_before_small_lowering -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml named_string_effect_switches_filter_default_duplicates_before_small_lowering -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_js_and_simplifies_or_literal_membership_against_same_literal_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_unit_function_body_with_trailing_return_merges_nested_if_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh LargeUnboxedVariantOptimization --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - the new mixed-untagged regression now passes and keeps the existing
+    named-string / JS-IR simplification guards green, so the const side is no
+    longer forced through a Rust-only completeness shortcut in effect context
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as a
+    broader unchanged guard
+  - `tests/tests/src/LargeUnboxedVariantOptimization.res` stayed flat in this
+    dirty worktree, which means the checked-in failing snapshot still carries a
+    later downstream drift on top of the now-covered mixed-effect rule
+  - the current dirty-tree authoritative wrapper stayed flat as well, so this
+    backend fix hardens a real OCaml-aligned effect-lowering rule without yet
+    collapsing one of the currently exposed snapshot files
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **528 / 657** -> **528 / 657** (**no change**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **121** -> **121** (**no change**)
+- Keep this change because the previous Rust lowering mixed two problems:
+  it dropped the OCaml default/completeness metadata on the const side, and it
+  preserved a redundant literal-dispatch wrapper even when the block side had
+  already compiled to a no-op. The current dirty snapshots do not surface a
+  topline delta, but the compiler now has direct regression coverage for the
+  OCaml rule instead of relying on the earlier Rust-only shortcut.
+
+Latest iteration on **2026-04-16**:
+
 - Active slice: filter named string-switch cases against the explicit default
   before choosing the OCaml small-switch lowering, instead of only filtering in
   the grouped fallback path

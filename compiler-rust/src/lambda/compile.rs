@@ -3276,12 +3276,8 @@ impl LambdaCompiler {
         let has_null_case = literal_cases
             .iter()
             .any(|tag| matches!(tag, SwitchCaseTag::Null));
-        let const_cases_are_complete = const_cases.len() == literal_cases.len();
-        let const_default = if const_cases_are_complete {
-            None
-        } else {
-            self.const_switch_default(switch)
-        };
+        let const_complete = self.const_switch_complete(switch);
+        let const_default = self.const_switch_default(switch);
         let const_branch = if const_cases.is_empty() {
             const_default
                 .map(|fallback| self.compile_assign_to_target_block(result, fallback))
@@ -3292,7 +3288,7 @@ impl LambdaCompiler {
                 scrut_expr.clone(),
                 &const_cases,
                 const_default,
-                const_cases_are_complete,
+                const_complete,
             )
         };
         let block_branch = self.compile_untagged_block_switch_assignment_statements(
@@ -3362,12 +3358,8 @@ impl LambdaCompiler {
         let has_null_case = literal_cases
             .iter()
             .any(|tag| matches!(tag, SwitchCaseTag::Null));
-        let const_cases_are_complete = const_cases.len() == literal_cases.len();
-        let const_default = if const_cases_are_complete {
-            None
-        } else {
-            self.const_switch_default(switch)
-        };
+        let const_complete = self.const_switch_complete(switch);
+        let const_default = self.const_switch_default(switch);
         let const_branch = if const_cases.is_empty() {
             const_default
                 .map(|fallback| self.compile_return_block(fallback))
@@ -3377,7 +3369,7 @@ impl LambdaCompiler {
                 scrut_expr.clone(),
                 &const_cases,
                 const_default,
-                const_cases_are_complete,
+                const_complete,
             )
         };
         let block_branch = self.compile_untagged_block_switch_return_statements(
@@ -3446,12 +3438,8 @@ impl LambdaCompiler {
         let has_null_case = literal_cases
             .iter()
             .any(|tag| matches!(tag, SwitchCaseTag::Null));
-        let const_cases_are_complete = const_cases.len() == literal_cases.len();
-        let const_default = if const_cases_are_complete {
-            None
-        } else {
-            self.const_switch_default(switch)
-        };
+        let const_complete = self.const_switch_complete(switch);
+        let const_default = self.const_switch_default(switch);
         let const_branch = if const_cases.is_empty() {
             const_default
                 .map(|fallback| self.compile_effect_block(fallback))
@@ -3461,7 +3449,7 @@ impl LambdaCompiler {
                 scrut_expr.clone(),
                 &const_cases,
                 const_default,
-                const_cases_are_complete,
+                const_complete,
             )
         };
         let block_branch = self.compile_untagged_block_switch_effect_statements(
@@ -3476,9 +3464,9 @@ impl LambdaCompiler {
         };
 
         if const_branch.is_empty() {
-            self.compile_effect_if(Expression::not(dispatch_test), block_branch, vec![])
+            block_branch
         } else if block_branch.is_empty() {
-            self.compile_effect_if(dispatch_test, const_branch, vec![])
+            const_branch
         } else {
             self.compile_effect_if(dispatch_test, const_branch, block_branch)
         }
@@ -20019,6 +20007,62 @@ mod tests {
         assert!(
             !rendered.contains("key !== \"a\""),
             "expected the broad literal-membership guard to disappear after filtering:\n{rendered}"
+        );
+    }
+
+    fn mixed_untagged_string_overlap_switch(
+        space_body: Lambda,
+        default_body: Lambda,
+    ) -> LambdaSwitch {
+        let literal_tag = |txt: &str| crate::lambda::SwitchTag {
+            name: txt.to_string(),
+            tag_type: Some(crate::lambda::SwitchCaseTag::String(txt.to_string())),
+        };
+
+        LambdaSwitch {
+            sw_consts_full: false,
+            sw_consts: vec![
+                (0, default_body.clone()),
+                (1, default_body.clone()),
+                (2, space_body),
+            ],
+            sw_blocks_full: false,
+            sw_blocks: vec![],
+            sw_failaction: Some(Box::new(default_body)),
+            sw_names: Some(SwitchNames {
+                consts: vec![literal_tag("a"), literal_tag("b"), literal_tag("space")],
+                blocks: vec![crate::lambda::SwitchBlock {
+                    tag: crate::lambda::SwitchTag::named("String"),
+                    tag_name: None,
+                    block_type: Some(crate::lambda::SwitchBlockType::String),
+                }],
+            }),
+        }
+    }
+
+    #[test]
+    fn mixed_untagged_string_effect_switches_filter_default_duplicates_before_small_lowering() {
+        let mut compiler = LambdaCompiler::new();
+        let key = Ident::create_local("key");
+        let seen = Ident::create_local("seen");
+        let unit = Lambda::const_(Constant::JsUndefined { is_unit: true });
+        let block = compiler.compile_untagged_variant_switch_effect_statements(
+            Expression::var(key.clone()),
+            &mixed_untagged_string_overlap_switch(
+                Lambda::Lassign(seen.clone(), Box::new(Lambda::const_(Constant::int(1)))),
+                unit,
+            ),
+        );
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains("if (key === \"space\") {"),
+            "expected the mixed untagged const branch to reach the OCaml small-case path:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("key === \"a\" ||")
+                && !rendered.contains("key !== \"a\"")
+                && !rendered.contains("typeof key === \"string\""),
+            "expected the mixed untagged literal-membership residue to disappear:\n{rendered}"
         );
     }
 
