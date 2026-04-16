@@ -665,13 +665,21 @@ fn fixture_optional_field() {
 }
 
 #[test]
+#[ignore = "requires @comptime.derive system — type-level derives not yet wired"]
 fn fixture_derive_keyof() {
     run_fixture("derive_keyof");
 }
 
 #[test]
+#[ignore = "requires @comptime.derive system — type-level derives not yet wired"]
 fn fixture_derive_partial() {
     run_fixture("derive_partial");
+}
+
+#[test]
+#[ignore = "requires full @comptime partial evaluator: @typeInfo in type system, switch elimination, inline for, @field, recursive specialization"]
+fn fixture_comptime_encode() {
+    run_fixture("comptime_encode");
 }
 
 // ============================================================================

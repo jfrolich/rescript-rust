@@ -729,6 +729,8 @@ pub struct TypeCheckContext<'a> {
         HashMap<crate::parse_arena::LocIdx, crate::types::decl::ModuleType>,
     /// Registry of @comptime functions for compile-time specialization.
     pub comptime_functions: HashMap<String, crate::types::comptime::ComptimeFunction>,
+    /// Registry of @comptime.derive handlers: derive_name → comptime function.
+    pub comptime_derive_handlers: HashMap<String, crate::types::comptime::ComptimeFunction>,
 }
 
 /// A diagnostic from type checking.
@@ -758,6 +760,7 @@ impl<'a> TypeCheckContext<'a> {
             generic_constraint_body_ty: None,
             module_expr_semantic_types: HashMap::new(),
             comptime_functions: HashMap::new(),
+            comptime_derive_handlers: HashMap::new(),
         }
     }
 

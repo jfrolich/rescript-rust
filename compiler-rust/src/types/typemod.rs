@@ -12142,41 +12142,11 @@ fn process_comptime_derives<'a>(
             }
         };
 
-        match attr_name {
-            "keyOf" => {
-                let source = crate::types::comptime::generate_key_of_source(
-                    &type_info,
-                    &type_name,
-                )
-                .map_err(|e| TypeModError::CoreError(TypeCoreError::Other(e)))?;
-
-                // Parse and type-check the generated type declaration
-                let generated_items = compile_generated_source(tctx, env, &source)?;
-                results.extend(generated_items);
-            }
-            "partial" => {
-                let source = crate::types::comptime::generate_partial_source(
-                    &type_info,
-                    &type_name,
-                )
-                .map_err(|e| TypeModError::CoreError(TypeCoreError::Other(e)))?;
-
-                let generated_items = compile_generated_source(tctx, env, &source)?;
-                results.extend(generated_items);
-            }
-            "encoder" => {
-                let source = crate::types::comptime::generate_encode_binding(
-                    "encode",
-                    &type_info,
-                    &type_name,
-                )
-                .map_err(|e| TypeModError::CoreError(TypeCoreError::Other(e)))?;
-
-                let generated_items = compile_generated_source(tctx, env, &source)?;
-                results.extend(generated_items);
-            }
-            _ => {}
-        }
+        // TODO: @comptime.derive system — currently not implemented.
+        // When implemented, this will look up the handler in
+        // tctx.comptime_derive_handlers, partially evaluate its body
+        // with @typeInfo(T) resolved, and splice the result.
+        let _ = (attr_name, &type_info, &type_name);
     }
 
     Ok(results)

@@ -56,6 +56,9 @@ oxc_span = "0.49"
 # WASM support
 wasm-bindgen = { version = "0.2", optional = true }
 
+# JavaScript engine for comptime evaluation (future — needed for string parsing etc.)
+# boa_engine = "0.21"
+
 [dev-dependencies]
 proptest = "1.5"
 criterion = { version = "0.5", features = ["html_reports"] }
