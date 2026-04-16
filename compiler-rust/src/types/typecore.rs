@@ -4548,8 +4548,15 @@ pub fn type_expect<'a>(
 
         ED::Pexp_match(inner) => {
             let (ref scrutinee_idx, ref cases) = **inner;
-            // Match expression
             let scrutinee = tctx.arena.get_expr(*scrutinee_idx);
+
+            // Check if the scrutinee is @typeInfo(...) — if so, resolve it
+            // and only type-check the matching branch
+            if let Some(result) = try_comptime_match(tctx, env, loc, scrutinee, cases, expected_ty, &expr.pexp_attributes) {
+                return result;
+            }
+
+            // Normal match expression
             type_match(
                 tctx,
                 env,
@@ -20009,11 +20016,88 @@ fn lookup_type_decl_for_path<'a>(
     None
 }
 
-// ── Comptime Application Detection ─────────────────────────────────────────
+// ── Comptime Evaluation in Type Checker ─────────────────────────────────────
 
-/// Check if a function application is a call to a registered @comptime function.
-/// If so, generate specialized code, parse and type-check it.
-/// Returns None if not a comptime call.
+/// Check if a switch scrutinee is a comptime-known @typeInfo value.
+/// If so, resolve the TypeInfo, match against the case patterns, and
+/// type-check ONLY the matching branch (skipping non-matching branches).
+/// This is critical for comptime: non-matching branches may not type-check
+/// (e.g., Json.string(value) where value: user would fail).
+fn try_comptime_match(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    _loc: LocIdx,
+    scrutinee: &ParsedExpression,
+    cases: &[crate::parser::ast::Case],
+    expected_ty: TypeExprRef,
+    _attributes: &crate::parser::ast::Attributes,
+) -> Option<TypeCoreResult<Expression>> {
+    // Check if scrutinee is @typeInfo(...)
+    let ct_idx = match &*scrutinee.pexp_desc {
+        crate::parser::ast::ExpressionDesc::Pexp_comptime_typeinfo(idx) => *idx,
+        _ => return None,
+    };
+
+    // Resolve the type
+    let core_type = tctx.arena.get_core_type(ct_idx);
+    let ctx = tctx.type_ctx;
+    ctx.begin_def();
+    let resolved_ty = match transl_type(tctx, env, core_type) {
+        Ok((_, ty)) => ty,
+        Err(_) => return None,
+    };
+    ctx.end_def();
+
+    // Build TypeInfo
+    let mut visited = Vec::new();
+    let type_info = crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited);
+
+    // Determine constructor name
+    let ctor_name = match &type_info {
+        crate::types::comptime::TypeInfo::Int => "Int",
+        crate::types::comptime::TypeInfo::Float => "Float",
+        crate::types::comptime::TypeInfo::String => "String",
+        crate::types::comptime::TypeInfo::Bool => "Bool",
+        crate::types::comptime::TypeInfo::Unit => "Unit",
+        crate::types::comptime::TypeInfo::Char => "Char",
+        crate::types::comptime::TypeInfo::Bigint => "Bigint",
+        crate::types::comptime::TypeInfo::Record { .. } => "Record",
+        crate::types::comptime::TypeInfo::Variant { .. } => "Variant",
+        crate::types::comptime::TypeInfo::Array { .. } => "Array",
+        crate::types::comptime::TypeInfo::Option { .. } => "Option",
+        crate::types::comptime::TypeInfo::Function { .. } => "Function",
+        crate::types::comptime::TypeInfo::External { .. } => "External",
+        crate::types::comptime::TypeInfo::Opaque { .. } => "Opaque",
+        _ => return None,
+    };
+
+    // Find the matching case by constructor name
+    for case in cases {
+        let pat = tctx.arena.get_pat(case.pc_lhs);
+        let matches = match &*pat.ppat_desc {
+            crate::parser::ast::PatternDesc::Ppat_construct(lid, _) => {
+                let longident = tctx.arena.get_longident(lid.txt);
+                let name = tctx.arena.get_string(longident.last_idx());
+                name == ctor_name
+            }
+            crate::parser::ast::PatternDesc::Ppat_any => true,
+            crate::parser::ast::PatternDesc::Ppat_var(_) => true,
+            _ => false,
+        };
+
+        if matches {
+            // Type-check ONLY this branch's body
+            let body = tctx.arena.get_expr(case.pc_rhs);
+            match type_expect(tctx, env, body, expected_ty, None) {
+                Ok(typed_body) => return Some(Ok(typed_body)),
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
+
+    None
+}
+
 /// Check if a function application is a call to a registered @comptime function.
 /// If so, inline the function body at the call site. The body will have
 /// @typeInfo(T) expanded to literal values by the type checker, and the
