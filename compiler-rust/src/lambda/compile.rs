@@ -1383,7 +1383,6 @@ impl LambdaCompiler {
                     true
                 }
                 _ if !self.uses_untagged_variant_switch(switch)
-                    && !inside_enclosing_staticcatch_chain
                     && !lambda_contains_static_raise(handler)
                     && !lambda_contains_staticcatch(handler)
                     && switch_cases_contain_static_raise_to_label(

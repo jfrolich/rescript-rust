@@ -83,6 +83,53 @@ baseline.
 
 Latest iteration on **2026-04-16**:
 
+- Active slice: allow plain int-switch return handlers to fall through even
+  under an enclosing plain static handler, matching OCaml's
+  `flatten_nested_catches` behavior instead of keeping the innermost handler
+  forced into the switch default
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this change stays in `compiler-rust/src/lambda/compile.rs`
+  in return-position `LstaticCatch` lowering
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `flat_catches`,
+  `flatten_nested_catches`, and the single-handler `compile_staticcatch`
+  path that does not blanket-block nested plain handlers just because an
+  outer catch is already active
+- Rust change:
+  - removed the `inside_enclosing_staticcatch_chain` guard from the plain
+    non-untagged `Lswitch` fallthrough-return branch in
+    `uses_fallthrough_staticcatch_return(...)`
+  - kept the existing stricter checks for untagged switches and the
+    return-unit/single-case path intact
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_plain_int_return_switches_can_fall_through_like_gpr_1438 -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml staticcatch_wrapped_int_return_switches_omit_empty_default_arms -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_1438`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1438.res` now matches its checked-in snapshot again;
+    the inner plain handler falls through to the trailing `return param => {};`
+    outside the switch instead of being reintroduced as the switch default
+  - the raw lowering regressions
+    `nested_plain_int_return_switches_can_fall_through_like_gpr_1438` and
+    `compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch`
+    both pass again
+  - `tests/tests/src/ExternalShadow.res` remained exact
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **521 / 657** -> **519 / 657** (**-2**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **128** -> **130** (**+2**)
+- Keep this change because the old guard was Rust-only. OCaml's nested
+  staticcatch flattening does allow this inner plain int-switch handler to
+  peel out under an outer plain handler, and the checked-in `gpr_1438`
+  snapshot confirms that behavior even though the current dirty-tree wrapper
+  total moved in the wrong direction.
+
+Latest iteration on **2026-04-16**:
+
 - Active slice: keep OCaml's explicit boolean-false literal-membership guard
   in nested untagged refinements, but narrow the earlier positive
   `return undefined` preservation so only await-bearing tails stay in the
