@@ -775,28 +775,54 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             Lambda::letrec(bindings, body)
         }
         Lambda::Lprim(info) => simplify_primitive(info, env, exports),
-        Lambda::Lswitch(scrutinee, switch) => Lambda::Lswitch(
-            Box::new(simplify_with_env(scrutinee, env, exports)),
-            LambdaSwitch {
-                sw_consts_full: switch.sw_consts_full,
-                sw_consts: switch
-                    .sw_consts
-                    .iter()
-                    .map(|(tag, lam)| (*tag, simplify_with_env(lam, env, exports)))
-                    .collect(),
-                sw_blocks_full: switch.sw_blocks_full,
-                sw_blocks: switch
-                    .sw_blocks
-                    .iter()
-                    .map(|(tag, lam)| (*tag, simplify_with_env(lam, env, exports)))
-                    .collect(),
-                sw_failaction: switch
-                    .sw_failaction
-                    .as_ref()
-                    .map(|lam| Box::new(simplify_with_env(lam, env, exports))),
-                sw_names: switch.sw_names.clone(),
-            },
-        ),
+        Lambda::Lswitch(scrutinee, switch) => {
+            let simplified_scrutinee = simplify_with_env(scrutinee, env, exports);
+            // Constant folding: if the scrutinee is a known constant, pick the matching branch
+            match &simplified_scrutinee {
+                Lambda::Lconst(Constant::Int { i: tag, .. }) => {
+                    // Known integer tag — look up in sw_consts
+                    if let Some((_, body)) = switch.sw_consts.iter().find(|(t, _)| t == tag) {
+                        return simplify_with_env(body, env, exports);
+                    }
+                    if let Some(fallback) = &switch.sw_failaction {
+                        return simplify_with_env(fallback, env, exports);
+                    }
+                }
+                Lambda::Lconst(Constant::Block { tag, .. }) => {
+                    // Known block tag — look up in sw_blocks
+                    if let Some((_, body)) = switch.sw_blocks.iter().find(|(t, _)| t == tag) {
+                        return simplify_with_env(body, env, exports);
+                    }
+                    if let Some(fallback) = &switch.sw_failaction {
+                        return simplify_with_env(fallback, env, exports);
+                    }
+                }
+                _ => {}
+            }
+            // Not a known constant — simplify normally
+            Lambda::Lswitch(
+                Box::new(simplified_scrutinee),
+                LambdaSwitch {
+                    sw_consts_full: switch.sw_consts_full,
+                    sw_consts: switch
+                        .sw_consts
+                        .iter()
+                        .map(|(tag, lam)| (*tag, simplify_with_env(lam, env, exports)))
+                        .collect(),
+                    sw_blocks_full: switch.sw_blocks_full,
+                    sw_blocks: switch
+                        .sw_blocks
+                        .iter()
+                        .map(|(tag, lam)| (*tag, simplify_with_env(lam, env, exports)))
+                        .collect(),
+                    sw_failaction: switch
+                        .sw_failaction
+                        .as_ref()
+                        .map(|lam| Box::new(simplify_with_env(lam, env, exports))),
+                    sw_names: switch.sw_names.clone(),
+                },
+            )
+        }
         Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
             Box::new(simplify_with_env(scrutinee, env, exports)),
             cases
