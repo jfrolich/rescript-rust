@@ -486,6 +486,16 @@ fn rewrite_expression(
             let new_expr = rewrite_expr_idx(*expr_idx, arena, let_unwrap_enabled)?;
             ExpressionDesc::Pexp_comptime_compile_error(new_expr)
         }
+        ExpressionDesc::Pexp_comptime_record(inner) => {
+            let (ref ct, ref fields) = **inner;
+            let mut new_fields = Vec::with_capacity(fields.len());
+            for (key, value) in fields {
+                let new_key = rewrite_expr_idx(*key, arena, let_unwrap_enabled)?;
+                let new_val = rewrite_expr_idx(*value, arena, let_unwrap_enabled)?;
+                new_fields.push((new_key, new_val));
+            }
+            ExpressionDesc::Pexp_comptime_record(Box::new((*ct, new_fields)))
+        }
     };
 
     Ok(Expression {

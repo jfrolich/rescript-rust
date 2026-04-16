@@ -671,6 +671,13 @@ impl<'a> DependencyCollector<'a> {
             ExpressionDesc::Pexp_comptime_compile_error(expr) => {
                 self.add_expr_idx(*expr);
             }
+            ExpressionDesc::Pexp_comptime_record(inner) => {
+                let (ref _ct, ref fields) = **inner;
+                for (key, value) in fields {
+                    self.add_expr_idx(*key);
+                    self.add_expr_idx(*value);
+                }
+            }
         }
     }
 

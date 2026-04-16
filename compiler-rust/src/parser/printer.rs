@@ -1805,6 +1805,9 @@ pub fn print_expression(
         ExpressionDesc::Pexp_comptime_typename(_) => {
             Doc::text("@typeName(...)")
         }
+        ExpressionDesc::Pexp_comptime_record(_) => {
+            Doc::text("@record(...)")
+        }
         // Send (method call): expr#method -> expr["method"]
         ExpressionDesc::Pexp_send(inner) => {
             let (ref parent_expr_idx, ref label) = **inner;

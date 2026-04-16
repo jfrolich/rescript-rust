@@ -6673,6 +6673,18 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             let rw = rewrite_expression_generic(&inner_expr, arena);
             ExpressionDesc::Pexp_comptime_compile_error(arena.push_expr(rw))
         }
+        ExpressionDesc::Pexp_comptime_record(inner) => {
+            let (ref ct, ref fields) = **inner;
+            let mut new_fields = Vec::with_capacity(fields.len());
+            for (key, value) in fields {
+                let key_expr = arena.get_expr(*key).clone();
+                let val_expr = arena.get_expr(*value).clone();
+                let rw_key = rewrite_expression_generic(&key_expr, arena);
+                let rw_val = rewrite_expression_generic(&val_expr, arena);
+                new_fields.push((arena.push_expr(rw_key), arena.push_expr(rw_val)));
+            }
+            ExpressionDesc::Pexp_comptime_record(Box::new((*ct, new_fields)))
+        }
     };
 
     Expression {

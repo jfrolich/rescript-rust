@@ -2499,6 +2499,24 @@ fn walk_expression(
             let inner_expr = arena.get_expr(*expr_idx).clone();
             walk_expression(&inner_expr, t, trailing, arena);
         }
+        ExpressionDesc::Pexp_comptime_record(inner) => {
+            let (ref _ct, ref fields) = **inner;
+            let (leading, trailing) = partition_leading_trailing(comments, expr.pexp_loc, arena);
+            t.attach_leading(expr.pexp_loc, leading, arena);
+            let mut remaining = trailing;
+            for (key, value) in fields {
+                let key_expr = arena.get_expr(*key).clone();
+                let val_expr = arena.get_expr(*value).clone();
+                let (before_val, rest) = partition_leading_trailing(remaining, key_expr.pexp_loc, arena);
+                walk_expression(&key_expr, t, before_val, arena);
+                let (before_next, rest2) = partition_leading_trailing(rest, val_expr.pexp_loc, arena);
+                walk_expression(&val_expr, t, before_next, arena);
+                remaining = rest2;
+            }
+            if !remaining.is_empty() {
+                t.attach_trailing(expr.pexp_loc, remaining, arena);
+            }
+        }
     }
 }
 

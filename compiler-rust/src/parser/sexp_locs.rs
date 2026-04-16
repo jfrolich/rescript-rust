@@ -1009,6 +1009,20 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
                 core_type(arena.get_core_type(*ct), arena),
             ])
         }
+        ExpressionDesc::Pexp_comptime_record(inner) => {
+            let (ref ct, ref fields) = **inner;
+            let mut items = vec![
+                Sexp::atom("Pexp_comptime_record"),
+                core_type(arena.get_core_type(*ct), arena),
+            ];
+            for (key, value) in fields {
+                items.push(Sexp::list(vec![
+                    expression(arena.get_expr(*key), arena),
+                    expression(arena.get_expr(*value), arena),
+                ]));
+            }
+            Sexp::list(items)
+        }
     };
     Sexp::list(vec![
         Sexp::atom("expression"),

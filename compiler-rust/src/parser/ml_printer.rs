@@ -2219,6 +2219,9 @@ fn print_expression_inner<W: Write>(
         ExpressionDesc::Pexp_comptime_typename(_) => {
             f.string("(* @typeName(...) *)");
         }
+        ExpressionDesc::Pexp_comptime_record(_) => {
+            f.string("(* @record(...) *)");
+        }
     }
 }
 

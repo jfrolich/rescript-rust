@@ -876,7 +876,8 @@ fn expression_has_string_literal(
         | ED::Pexp_comptime_typeinfo(_)
         | ED::Pexp_comptime_field(_)
         | ED::Pexp_comptime_compile_error(_)
-        | ED::Pexp_comptime_typename(_) => false,
+        | ED::Pexp_comptime_typename(_)
+        | ED::Pexp_comptime_record(_) => false,
     }
 }
 
