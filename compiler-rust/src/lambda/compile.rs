@@ -19115,6 +19115,19 @@ mod tests {
     }
 
     #[test]
+    fn bal_set_mini_binds_named_variant_switch_scrutinee_once_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("bal_set_mini");
+        assert!(
+            output.contains("let match = v;\n\nif (typeof match === \"object\") {"),
+            "expected bal_set_mini to bind the shared named-variant scrutinee before the final switch dispatch, got:\n{output}"
+        );
+        assert!(
+            !output.contains("if (typeof v === \"object\") {"),
+            "unexpected direct final dispatch on v in bal_set_mini; OCaml binds the shared scrutinee first:\n{output}"
+        );
+    }
+
+    #[test]
     fn let_unwrap_keeps_declared_switch_binding_shape_like_ocaml() {
         let output = compile_checked_in_test_file_to_js("LetUnwrap");
         assert!(

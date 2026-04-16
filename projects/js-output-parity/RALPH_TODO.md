@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 549 / 657 with 8 unrelated compile errors and 100 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 551 / 657 with 8 unrelated compile errors and 98 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **550 / 657**
+- JS snapshot parity: **551 / 657**
 - Compile errors: **8**
-- Output diffs: **99**
+- Output diffs: **98**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,63 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `550 / 657` unless the
+Do **not** replace the recorded project baseline with `551 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: keep OCaml's single-use switch-scrutinee aliases when the
+  source identifier is mutated, covering both direct mutated variables and the
+  ref-content reads that later collapse to the same `Lvar` shape
+- Active backend focus stays on the post-optimized-lambda JS backend path from
+  `PLAN.md`; this concrete correction lives in
+  `compiler-rust/src/lambda/simplify.rs` with the checked-in fixture guard in
+  `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_pass_remove_alias.ml`, especially the `Llet` alias
+    simplification path and when a scrutinee alias must remain materialized
+  - `compiler/core/lam_pass_lets_dce.ml`, especially the single-use
+    simplification rules that still need to leave the mutated-scrutinee case
+    intact for the downstream backend
+- Rust change:
+  - broadened `switch_scrutinee_alias_source_ident(...)` so the
+    mutated-source preservation rule applies to both direct `Lvar` aliases and
+    mutable-field reads, instead of only the field-read form
+  - added focused simplifier regression coverage in
+    `keeps_switch_scrutinee_aliases_from_mutated_plain_variables`
+  - kept the checked-in JS fixture guard
+    `bal_set_mini_binds_named_variant_switch_scrutinee_once_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release switch_scrutinee_aliases -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release bal_set_mini -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh bal_set_mini --diff`
+  - `timeout 30 ./scripts/test_js_single.sh compare_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh pm_opt_fields_regression --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh LetUnwrap --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bal_set_mini.res` matches its checked-in snapshot again;
+    Rust restores the final `let match = v` scrutinee alias that OCaml keeps
+    before the terminal named-variant dispatch
+  - narrowed guard files `tests/tests/src/compare_test.res` and
+    `tests/tests/src/pm_opt_fields_regression.res` stay exact after the same
+    change, so the kept rule is no longer limited to the mutable-ref read
+    variant only
+  - unchanged guards `tests/tests/src/ExternalShadow.res` and
+    `tests/tests/src/LetUnwrap.res` remained exact throughout the slice
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **550 / 657** -> **551 / 657** (**+1**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **99** -> **98** (**-1**)
+- Keep this change because OCaml's post-lowering alias passes do not inline
+  away every single-use switch alias uniformly; the mutated-scrutinee case
+  still needs to survive into final JS lowering. Treating only the mutable
+  field-read form as special was too narrow once the earlier ref elimination
+  had already collapsed that read to a plain variable.
 
 Latest iteration on **2026-04-16**:
 

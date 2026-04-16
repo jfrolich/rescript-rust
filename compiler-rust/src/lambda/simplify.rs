@@ -19,6 +19,7 @@ use crate::location::Location;
 
 #[derive(Clone, Default)]
 struct SimplifyEnv {
+    mutated_idents: HashSet<Ident>,
     blocks: HashMap<Ident, ImmutableBlockInfo>,
     call_substitutions: HashMap<Ident, Lambda>,
     functions: HashMap<Ident, LFunction>,
@@ -107,6 +108,104 @@ impl SimplifyEnv {
     }
 }
 
+fn collect_mutated_idents(lam: &Lambda) -> HashSet<Ident> {
+    fn collect(lam: &Lambda, mutated: &mut HashSet<Ident>) {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
+            Lambda::Lapply(apply) => {
+                collect(&apply.ap_func, mutated);
+                for arg in &apply.ap_args {
+                    collect(arg, mutated);
+                }
+            }
+            Lambda::Lfunction(func) => collect(&func.body, mutated),
+            Lambda::Llet(_, _, value, body) => {
+                collect(value, mutated);
+                collect(body, mutated);
+            }
+            Lambda::Lletrec(bindings, body) => {
+                for (_, binding) in bindings {
+                    collect(binding, mutated);
+                }
+                collect(body, mutated);
+            }
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Psetfield(_, _) | Primitive::Poffsetref(_),
+                args,
+                ..
+            }) => {
+                if let [Lambda::Lvar(id), rest @ ..] = args.as_slice() {
+                    mutated.insert(id.clone());
+                    for arg in rest {
+                        collect(arg, mutated);
+                    }
+                } else {
+                    for arg in args {
+                        collect(arg, mutated);
+                    }
+                }
+            }
+            Lambda::Lprim(info) => {
+                for arg in &info.args {
+                    collect(arg, mutated);
+                }
+            }
+            Lambda::Lswitch(scrutinee, switch) => {
+                collect(scrutinee, mutated);
+                for (_, body) in &switch.sw_consts {
+                    collect(body, mutated);
+                }
+                for (_, body) in &switch.sw_blocks {
+                    collect(body, mutated);
+                }
+                if let Some(failaction) = &switch.sw_failaction {
+                    collect(failaction, mutated);
+                }
+            }
+            Lambda::LstringSwitch(scrutinee, cases, default) => {
+                collect(scrutinee, mutated);
+                for (_, body) in cases {
+                    collect(body, mutated);
+                }
+                if let Some(default) = default {
+                    collect(default, mutated);
+                }
+            }
+            Lambda::LstaticRaise(_, args) => {
+                for arg in args {
+                    collect(arg, mutated);
+                }
+            }
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                collect(body, mutated);
+                collect(handler, mutated);
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                collect(cond, mutated);
+                collect(then_, mutated);
+                collect(else_, mutated);
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                collect(first, mutated);
+                collect(second, mutated);
+            }
+            Lambda::Lfor(_, from, to, _, body) => {
+                collect(from, mutated);
+                collect(to, mutated);
+                collect(body, mutated);
+            }
+            Lambda::Lassign(id, value) => {
+                mutated.insert(id.clone());
+                collect(value, mutated);
+            }
+        }
+    }
+
+    let mut mutated = HashSet::new();
+    collect(lam, &mut mutated);
+    mutated
+}
+
 /// Simplify lowered lambda before JS IR lowering.
 pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     simplify_for_js_backend_with_jsx_preserve(lam, false)
@@ -154,6 +253,7 @@ fn simplify_for_js_backend_once(
     let flattened = deep_flatten_for_js_backend(&exits_simplified);
     let exports = collect_exported_idents(&flattened);
     let env = SimplifyEnv {
+        mutated_idents: collect_mutated_idents(&flattened),
         functions: collect_inlineable_functions(&flattened),
         known_functions: collect_known_functions(&flattened),
         preserved_export_bindings: preserved_export_bindings.clone(),
@@ -1050,8 +1150,11 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             if let Some(string_value) = plain_string_constant(&value) {
                 body_env.plain_strings.insert(id.clone(), string_value);
             }
+            let preserve_single_use_switch_scrutinee_alias =
+                single_use_switch_scrutinee_alias_from_mutated_source(id, &value, body, env);
             if let Some(substitution) = substitution_candidate(kind, original_value, &value) {
                 if !preserve_local_module_field_eta_alias
+                    && !preserve_single_use_switch_scrutinee_alias
                     && !substitution_hits_assigned_free_variable(&substitution, body)
                 {
                     if binding_is_exported {
@@ -1115,6 +1218,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             {
                 let use_info = alias_use_info(id, &body);
                 if use_info.times == 1
+                    && !preserve_single_use_switch_scrutinee_alias
                     && !substitution_hits_assigned_free_variable(&value, &body)
                     && (!use_info.captured || matches!(value, Lambda::Lconst(_) | Lambda::Lvar(_)))
                 {
@@ -1388,6 +1492,112 @@ fn alias_use_info(target: &Ident, lam: &Lambda) -> AliasUseInfo {
     let mut info = AliasUseInfo::default();
     collect(target, lam, &mut info, false);
     info
+}
+
+fn single_use_switch_scrutinee_alias_from_mutated_source(
+    target: &Ident,
+    value: &Lambda,
+    body: &Lambda,
+    env: &SimplifyEnv,
+) -> bool {
+    let Some(source) = switch_scrutinee_alias_source_ident(value) else {
+        return false;
+    };
+
+    env.mutated_idents.contains(source)
+        && alias_use_info(target, body).times == 1
+        && alias_occurs_as_switch_scrutinee(target, body)
+}
+
+fn switch_scrutinee_alias_source_ident(value: &Lambda) -> Option<&Ident> {
+    match value {
+        Lambda::Lvar(id) => Some(id),
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pfield(0, _),
+            args,
+            ..
+        }) => match args.as_slice() {
+            [Lambda::Lvar(id)] => Some(id),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn alias_occurs_as_switch_scrutinee(target: &Ident, lam: &Lambda) -> bool {
+    match lam {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lapply(apply) => {
+            alias_occurs_as_switch_scrutinee(target, &apply.ap_func)
+                || apply
+                    .ap_args
+                    .iter()
+                    .any(|arg| alias_occurs_as_switch_scrutinee(target, arg))
+        }
+        Lambda::Lfunction(func) => alias_occurs_as_switch_scrutinee(target, &func.body),
+        Lambda::Llet(_, _, value, body) => {
+            alias_occurs_as_switch_scrutinee(target, value)
+                || alias_occurs_as_switch_scrutinee(target, body)
+        }
+        Lambda::Lletrec(bindings, body) => {
+            bindings
+                .iter()
+                .any(|(_, binding)| alias_occurs_as_switch_scrutinee(target, binding))
+                || alias_occurs_as_switch_scrutinee(target, body)
+        }
+        Lambda::Lprim(info) => info
+            .args
+            .iter()
+            .any(|arg| alias_occurs_as_switch_scrutinee(target, arg)),
+        Lambda::Lswitch(scrutinee, switch) => {
+            matches!(scrutinee.as_ref(), Lambda::Lvar(id) if id.same(target))
+                || alias_occurs_as_switch_scrutinee(target, scrutinee)
+                || switch
+                    .sw_consts
+                    .iter()
+                    .any(|(_, body)| alias_occurs_as_switch_scrutinee(target, body))
+                || switch
+                    .sw_blocks
+                    .iter()
+                    .any(|(_, body)| alias_occurs_as_switch_scrutinee(target, body))
+                || switch
+                    .sw_failaction
+                    .as_deref()
+                    .is_some_and(|body| alias_occurs_as_switch_scrutinee(target, body))
+        }
+        Lambda::LstringSwitch(scrutinee, cases, default) => {
+            matches!(scrutinee.as_ref(), Lambda::Lvar(id) if id.same(target))
+                || alias_occurs_as_switch_scrutinee(target, scrutinee)
+                || cases
+                    .iter()
+                    .any(|(_, body)| alias_occurs_as_switch_scrutinee(target, body))
+                || default
+                    .as_deref()
+                    .is_some_and(|body| alias_occurs_as_switch_scrutinee(target, body))
+        }
+        Lambda::LstaticRaise(_, args) => args
+            .iter()
+            .any(|arg| alias_occurs_as_switch_scrutinee(target, arg)),
+        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+            alias_occurs_as_switch_scrutinee(target, body)
+                || alias_occurs_as_switch_scrutinee(target, handler)
+        }
+        Lambda::LifThenElse(cond, then_, else_) => {
+            alias_occurs_as_switch_scrutinee(target, cond)
+                || alias_occurs_as_switch_scrutinee(target, then_)
+                || alias_occurs_as_switch_scrutinee(target, else_)
+        }
+        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+            alias_occurs_as_switch_scrutinee(target, first)
+                || alias_occurs_as_switch_scrutinee(target, second)
+        }
+        Lambda::Lfor(_, from, to, _, body) => {
+            alias_occurs_as_switch_scrutinee(target, from)
+                || alias_occurs_as_switch_scrutinee(target, to)
+                || alias_occurs_as_switch_scrutinee(target, body)
+        }
+        Lambda::Lassign(_, value) => alias_occurs_as_switch_scrutinee(target, value),
+    }
 }
 
 fn substitute_alias_use(lam: &Lambda, target: &Ident, replacement: &Lambda) -> Lambda {
@@ -3885,7 +4095,7 @@ mod tests {
     };
     use crate::lambda::{
         ApInfo, Apply, ApplyStatus, DirectionFlag, FunctionAttribute, InlineAttribute, Lambda,
-        TagInfo,
+        LambdaSwitch, TagInfo,
     };
     use crate::location::Location;
 
@@ -4299,6 +4509,152 @@ mod tests {
                 ..
             }) if matches!(args.as_slice(), [Lambda::Lconst(Constant::Int { i: 0, .. })])
         ));
+    }
+
+    #[test]
+    fn plain_variable_switch_scrutinee_aliases_from_immutable_sources_inline() {
+        let source = Ident::create_local("v");
+        let match_id = Ident::create_local("match");
+        let lambda = Lambda::let_(
+            LetKind::Alias,
+            match_id.clone(),
+            Lambda::var(source.clone()),
+            Lambda::Lswitch(
+                Box::new(Lambda::var(match_id)),
+                LambdaSwitch {
+                    sw_consts_full: false,
+                    sw_consts: vec![(0, Lambda::const_(Constant::int(1)))],
+                    sw_blocks_full: true,
+                    sw_blocks: vec![],
+                    sw_failaction: Some(Box::new(Lambda::const_(Constant::int(0)))),
+                    sw_names: None,
+                },
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lswitch(scrutinee, _) = simplified else {
+            panic!("expected the immutable-source alias to inline into the switch");
+        };
+        assert!(matches!(scrutinee.as_ref(), Lambda::Lvar(id) if id.same(&source)));
+    }
+
+    #[test]
+    fn keeps_switch_scrutinee_aliases_from_mutated_ref_reads() {
+        let source = Ident::create_local("cell");
+        let match_id = Ident::create_local("match");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            source.clone(),
+            Lambda::prim(
+                Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Mutable),
+                vec![Lambda::const_(Constant::int(0))],
+                Location::none(),
+            ),
+            Lambda::seq(
+                Lambda::prim(
+                    Primitive::Poffsetref(1),
+                    vec![Lambda::var(source.clone())],
+                    Location::none(),
+                ),
+                Lambda::let_(
+                    LetKind::Alias,
+                    match_id.clone(),
+                    Lambda::prim(
+                        Primitive::Pfield(
+                            0,
+                            FieldDbgInfo::Record {
+                                name: "contents".to_string(),
+                                mutable_flag: crate::parser::ast::MutableFlag::Mutable,
+                            },
+                        ),
+                        vec![Lambda::var(source.clone())],
+                        Location::none(),
+                    ),
+                    Lambda::Lswitch(
+                        Box::new(Lambda::var(match_id.clone())),
+                        LambdaSwitch {
+                            sw_consts_full: false,
+                            sw_consts: vec![(1, Lambda::const_(Constant::int(1)))],
+                            sw_blocks_full: true,
+                            sw_blocks: vec![],
+                            sw_failaction: Some(Box::new(Lambda::const_(Constant::int(0)))),
+                            sw_names: None,
+                        },
+                    ),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(_, kept_source, _, body) = simplified else {
+            panic!("expected the mutable ref binding to remain");
+        };
+        assert_eq!(kept_source, source);
+        let Lambda::Lsequence(_, body) = *body else {
+            panic!("expected the ref mutation to stay sequenced before the switch alias");
+        };
+        let Lambda::Llet(kind, kept_match, kept_value, body) = *body else {
+            panic!("expected the mutated-ref alias to remain materialized");
+        };
+        assert_eq!(kind, LetKind::Alias);
+        assert_eq!(kept_match, match_id);
+        assert!(matches!(kept_value.as_ref(), Lambda::Lvar(id) if id.same(&source)));
+        let Lambda::Lswitch(scrutinee, _) = *body else {
+            panic!("expected the preserved alias to stay in the switch scrutinee");
+        };
+        assert!(matches!(scrutinee.as_ref(), Lambda::Lvar(id) if id.same(&kept_match)));
+    }
+
+    #[test]
+    fn keeps_switch_scrutinee_aliases_from_mutated_plain_variables() {
+        let source = Ident::create_local("v");
+        let match_id = Ident::create_local("match");
+        let lambda = Lambda::let_(
+            LetKind::Variable,
+            source.clone(),
+            Lambda::const_(Constant::int(0)),
+            Lambda::seq(
+                Lambda::assign(source.clone(), Lambda::const_(Constant::int(1))),
+                Lambda::let_(
+                    LetKind::Alias,
+                    match_id.clone(),
+                    Lambda::var(source.clone()),
+                    Lambda::Lswitch(
+                        Box::new(Lambda::var(match_id.clone())),
+                        LambdaSwitch {
+                            sw_consts_full: false,
+                            sw_consts: vec![(1, Lambda::const_(Constant::int(1)))],
+                            sw_blocks_full: true,
+                            sw_blocks: vec![],
+                            sw_failaction: Some(Box::new(Lambda::const_(Constant::int(0)))),
+                            sw_names: None,
+                        },
+                    ),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(kind, kept_source, kept_value, body) = simplified else {
+            panic!("expected the mutated variable binding to remain");
+        };
+        assert_eq!(kind, LetKind::Variable);
+        assert_eq!(kept_source, source);
+        assert!(matches!(kept_value.as_ref(), Lambda::Lconst(Constant::Int { i, .. }) if *i == 0));
+        let Lambda::Lsequence(_, body) = *body else {
+            panic!("expected the mutation to stay sequenced before the switch alias");
+        };
+        let Lambda::Llet(kind, kept_match, kept_value, body) = *body else {
+            panic!("expected the mutated plain-variable alias to remain materialized");
+        };
+        assert_eq!(kind, LetKind::Alias);
+        assert_eq!(kept_match, match_id);
+        assert!(matches!(kept_value.as_ref(), Lambda::Lvar(id) if id.same(&source)));
+        let Lambda::Lswitch(scrutinee, _) = *body else {
+            panic!("expected the preserved alias to stay in the switch scrutinee");
+        };
+        assert!(matches!(scrutinee.as_ref(), Lambda::Lvar(id) if id.same(&kept_match)));
     }
 
     #[test]
