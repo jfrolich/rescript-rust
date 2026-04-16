@@ -83,6 +83,45 @@ baseline.
 
 Latest iteration on **2026-04-16**:
 
+- Active slice: remove Rust's function-body shared-tail nested-`if` printer
+  merge that has no equivalent in OCaml `js_dump.ml`
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`, but this cleanup is in the final JS dumper path:
+  `compiler-rust/src/js_ir/printer.rs`
+- OCaml reference:
+  `compiler/core/js_dump.ml`, especially `function_body`, which only strips a
+  final `return undefined` tail and does not reconstruct
+  `if (...) { ... } else { shared_tail }` from sequential function-body
+  statements
+- Rust change:
+  - removed `try_function_body_shared_tail_nested_if_merge(...)` from
+    `print_function_body(...)`
+  - updated the focused printer regression to expect OCaml's sequential body
+    form instead of the Rust-only nested `else`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_unit_function_body_keeps_shared_tail_sequential_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_unit_function_tail_merges_nested_if_when_outer_else_is_return_undefined -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - the synthetic printer case now matches OCaml's sequential function-body
+    printing instead of reintroducing a Rust-only shared-tail `else`
+  - `tests/tests/src/ExternalShadow.res` remained exact
+  - `tests/tests/src/UntaggedVariants.res` did not move, which confirms its
+    remaining nested `else` chain comes from a different lowering path
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **519 / 657** -> **519 / 657** (**no change**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **130** -> **130** (**no change**)
+- Keep this change because the removed helper was a Rust-only dumper rewrite
+  with no OCaml counterpart. Even though the current 657-file wrapper stayed
+  flat, the printer now preserves OCaml's direct sequential function-body
+  structure for this class of tail.
+
+Latest iteration on **2026-04-16**:
+
 - Active slice: allow plain int-switch return handlers to fall through even
   under an enclosing plain static handler, matching OCaml's
   `flatten_nested_catches` behavior instead of keeping the innermost handler

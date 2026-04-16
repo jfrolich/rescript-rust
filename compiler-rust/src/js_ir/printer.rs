@@ -1632,10 +1632,11 @@ impl JsPrinter {
                 if needs_paren {
                     self.write_char('(');
                 }
-                let extra_group_indent = matches!(
-                    &arr.as_ref().desc,
-                    ExpressionDesc::Object(_, props) if props.len() > 1
-                ) && matches!(self.previous_non_space_char_on_line(), Some('(' | ','));
+                let extra_group_indent =
+                    matches!(
+                        &arr.as_ref().desc,
+                        ExpressionDesc::Object(_, props) if props.len() > 1
+                    ) && matches!(self.previous_non_space_char_on_line(), Some('(' | ','));
                 self.print_member_target_expression(arr, extra_group_indent);
                 self.write_char('[');
                 self.print_expression(idx, 0);
@@ -2391,17 +2392,6 @@ impl JsPrinter {
             return;
         }
 
-        if let [stmt, trailing_stmt, trailing_return] = stmts.as_slice() {
-            if return_is_undefined(trailing_return) {
-                if let Some(merged) =
-                    try_function_body_shared_tail_nested_if_merge(stmt, trailing_stmt, trailing_return)
-                {
-                    self.print_function_tail_statement(&merged, return_unit);
-                    return;
-                }
-            }
-        }
-
         if let [stmt, trailing_return] = stmts.as_slice() {
             if return_is_undefined(trailing_return) {
                 if let Some(merged) =
@@ -2520,8 +2510,7 @@ fn try_tail_nested_if_merge(
     match &stmt.desc {
         StatementDesc::Block(inner) => try_tail_nested_if_merge(inner, allow_empty_else),
         StatementDesc::If(cond, then_, else_)
-            if else_is_single_return_undefined(else_)
-                || (allow_empty_else && else_.is_empty()) =>
+            if else_is_single_return_undefined(else_) || (allow_empty_else && else_.is_empty()) =>
         {
             Some((cond.clone(), then_.clone(), else_.clone()))
         }
@@ -2546,48 +2535,6 @@ fn try_tail_nested_if_merge_with_outer_undefined_else(
             inner_else
         },
     ))
-}
-
-fn try_function_body_shared_tail_nested_if_merge(
-    stmt: &Statement,
-    trailing_stmt: &Statement,
-    trailing_return: &Statement,
-) -> Option<Statement> {
-    let stmt = unwrap_single_block_stmt(stmt);
-    let StatementDesc::If(cond, then_, else_) = &stmt.desc else {
-        return None;
-    };
-    if !else_.is_empty() {
-        return None;
-    }
-
-    let [nested_stmt] = then_.as_slice() else {
-        return None;
-    };
-    let nested_stmt = unwrap_single_block_stmt(nested_stmt);
-    let StatementDesc::If(inner_cond, inner_then, inner_else) = &nested_stmt.desc else {
-        return None;
-    };
-    if !inner_else.is_empty() {
-        return None;
-    }
-
-    Some(Statement {
-        desc: StatementDesc::If(
-            cond.clone(),
-            vec![
-                Statement::new(StatementDesc::If(
-                    inner_cond.clone(),
-                    inner_then.clone(),
-                    vec![],
-                )),
-                trailing_stmt.clone(),
-                trailing_return.clone(),
-            ],
-            vec![trailing_stmt.clone(), trailing_return.clone()],
-        ),
-        comment: stmt.comment.clone(),
-    })
 }
 
 fn try_function_body_trailing_return_nested_if_merge(
@@ -3577,10 +3524,7 @@ mod tests {
         let expr = Expression::array(
             vec![Expression::new(ExpressionDesc::Object(
                 None,
-                vec![(
-                    PropertyName::lit("foo"),
-                    Expression::number(Number::int(1)),
-                )],
+                vec![(PropertyName::lit("foo"), Expression::number(Number::int(1)))],
             ))],
             MutableFlag::Immutable,
         );
@@ -4645,6 +4589,85 @@ mod tests {
     }
 
     #[test]
+    fn test_print_unit_function_body_with_large_literal_dispatch_merges_to_exact_literal_like_ocaml()
+    {
+        let handle_key = Ident::create_local("handleKey");
+        let state = Ident::create_local("state");
+        let key = Ident::create_local("key");
+        let do_action = Ident::create_local("doAction");
+        let key_is_space = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(key.clone()),
+            Expression::string("space"),
+        );
+        let rest = [
+            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b",
+            "a",
+        ]
+        .into_iter()
+        .map(|txt| {
+            Expression::bin(
+                BinOp::EqEqEq,
+                Expression::var(key.clone()),
+                Expression::string(txt),
+            )
+        })
+        .reduce(|acc, expr| Expression::bin(BinOp::Or, acc, expr))
+        .expect("expected a non-empty literal chain");
+        let dispatch = Expression::bin(BinOp::Or, key_is_space.clone(), rest);
+        let state_active = Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(Expression::var(state.clone())),
+            "active".to_string(),
+            None,
+        ));
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: handle_key,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![state.clone(), key.clone()],
+                body: vec![
+                    Statement::new(StatementDesc::If(
+                        dispatch,
+                        vec![Statement::new(StatementDesc::If(
+                            key_is_space,
+                            vec![Statement::new(StatementDesc::If(
+                                state_active,
+                                vec![
+                                    Statement::exp(Expression::call(
+                                        Expression::var(do_action),
+                                        vec![Expression::var(state)],
+                                        CallInfo::default(),
+                                    )),
+                                    Statement::return_(Expression::undefined(true)),
+                                ],
+                                vec![Statement::return_(Expression::undefined(true))],
+                            ))],
+                            vec![],
+                        ))],
+                        vec![],
+                    )),
+                    Statement::return_(Expression::undefined(true)),
+                ],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
+        assert!(rendered.contains("doAction(state);"));
+        assert!(rendered.contains("return;"));
+        assert!(!rendered.contains("key === \"q\""));
+        assert!(!rendered.contains("if (key === \"space\" ||"));
+        assert!(!rendered.contains("if (key === \"space\")"));
+        assert!(!rendered.contains("if (state.active)"));
+        assert!(!rendered.contains("else"));
+    }
+
+    #[test]
     fn test_print_unit_function_body_with_trailing_return_merges_nested_if_without_inner_else() {
         let handle_key = Ident::create_local("handleKey");
         let state = Ident::create_local("state");
@@ -4754,7 +4777,7 @@ mod tests {
     }
 
     #[test]
-    fn test_print_unit_function_body_merges_shared_tail_into_nested_if_else() {
+    fn test_print_unit_function_body_keeps_shared_tail_sequential_like_ocaml() {
         let do_with_b = Ident::create_local("doWithB");
         let console_log = Expression::qualified(
             ModuleId {
@@ -4817,13 +4840,19 @@ mod tests {
             ident_info: Default::default(),
         })]);
 
-        assert!(rendered.contains("if (typeof b !== \"object\") {"), "{rendered}");
+        assert!(
+            rendered.contains("if (typeof b !== \"object\") {"),
+            "{rendered}"
+        );
         assert!(rendered.contains("if (b === \"One\") {"), "{rendered}");
         assert!(rendered.contains("console.log(\"aaa\");"), "{rendered}");
-        assert!(rendered.contains("} else {"), "{rendered}");
-        assert!(rendered.contains("console.log(\"twwwoooo\");"), "{rendered}");
+        assert!(
+            rendered.contains("console.log(\"twwwoooo\");"),
+            "{rendered}"
+        );
         assert!(rendered.contains("return;"), "{rendered}");
         assert!(!rendered.contains("&&"), "{rendered}");
+        assert!(!rendered.contains("} else {"), "{rendered}");
     }
 
     #[test]
@@ -5253,14 +5282,11 @@ mod tests {
 
     #[test]
     fn test_print_parenthesized_object_literal_before_dot_access_preserves_group_indentation_like_ocaml()
-    {
+     {
         let expr = Expression::new(ExpressionDesc::StaticIndex(
             Box::new(Expression::new(ExpressionDesc::Object(
                 None,
-                vec![(
-                    PropertyName::lit("_5"),
-                    Expression::number(Number::int(3)),
-                )],
+                vec![(PropertyName::lit("_5"), Expression::number(Number::int(3)))],
             ))),
             "TAG".to_string(),
             None,
@@ -5280,10 +5306,7 @@ mod tests {
                 )),
                 vec![Expression::new(ExpressionDesc::Object(
                     None,
-                    vec![(
-                        PropertyName::lit("a"),
-                        Expression::number(Number::int(1)),
-                    )],
+                    vec![(PropertyName::lit("a"), Expression::number(Number::int(1)))],
                 ))],
                 CallInfo::default(),
             )),
@@ -5327,15 +5350,11 @@ mod tests {
     }
 
     #[test]
-    fn test_print_parenthesized_object_literal_dot_access_as_call_argument_preserves_base_indent()
-    {
+    fn test_print_parenthesized_object_literal_dot_access_as_call_argument_preserves_base_indent() {
         let arg = Expression::new(ExpressionDesc::StaticIndex(
             Box::new(Expression::new(ExpressionDesc::Object(
                 None,
-                vec![(
-                    PropertyName::lit("_5"),
-                    Expression::number(Number::int(3)),
-                )],
+                vec![(PropertyName::lit("_5"), Expression::number(Number::int(3)))],
             ))),
             "TAG".to_string(),
             None,
