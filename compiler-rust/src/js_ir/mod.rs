@@ -725,6 +725,9 @@ impl Expression {
         if let Some(expr) = rewrite_plus_negative_int_rhs(op, &left, &right) {
             return expr;
         }
+        if let Some(expr) = rewrite_length_bin_comparison(op, &left, &right) {
+            return expr;
+        }
         if let Some(value) = fold_strict_comparison(op, &left, &right) {
             return Expression::bool(value);
         }
@@ -927,6 +930,25 @@ fn fold_strict_comparison(op: BinOp, left: &Expression, right: &Expression) -> O
     }
 
     None
+}
+
+fn rewrite_length_bin_comparison(
+    op: BinOp,
+    left: &Expression,
+    right: &Expression,
+) -> Option<Expression> {
+    let ExpressionDesc::Length(target, _) = &left.desc else {
+        return None;
+    };
+    let ExpressionDesc::Number(Number::Int { i: 0, .. }) = &right.desc else {
+        return None;
+    };
+
+    match op {
+        BinOp::Ge if expression_has_no_side_effects(target) => Some(Expression::bool(true)),
+        BinOp::Gt => Some(raw_bin_expression(BinOp::NotEqEq, left.clone(), right.clone())),
+        _ => None,
+    }
 }
 
 fn fold_strict_equality(left: &Expression, right: &Expression) -> Option<bool> {
@@ -2797,6 +2819,61 @@ mod tests {
             expr.desc,
             ExpressionDesc::Number(Number::Int { i: 3, .. })
         ));
+    }
+
+    #[test]
+    fn test_length_ge_zero_folds_pure_targets_to_true_like_ocaml() {
+        let expr = Expression::bin(
+            BinOp::Ge,
+            Expression::length(Expression::var(Ident::create_local("xs")), LengthObject::Array),
+            Expression::number(Number::int(0)),
+        );
+
+        assert!(matches!(expr.desc, ExpressionDesc::Bool(true)));
+    }
+
+    #[test]
+    fn test_length_ge_zero_keeps_impure_targets_like_ocaml() {
+        let expr = Expression::bin(
+            BinOp::Ge,
+            Expression::length(
+                Expression::call(
+                    Expression::var(Ident::create_local("makeArray")),
+                    vec![],
+                    CallInfo::default(),
+                ),
+                LengthObject::Array,
+            ),
+            Expression::number(Number::int(0)),
+        );
+
+        match expr.desc {
+            ExpressionDesc::Bin(BinOp::Ge, _, _) => {}
+            other => panic!("Expected Bin(Ge, _, _), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_length_gt_zero_rewrites_to_not_eq_zero_like_ocaml() {
+        let expr = Expression::bin(
+            BinOp::Gt,
+            Expression::length(Expression::var(Ident::create_local("xs")), LengthObject::Array),
+            Expression::number(Number::int(0)),
+        );
+
+        match expr.desc {
+            ExpressionDesc::Bin(BinOp::NotEqEq, left, right) => {
+                assert!(matches!(
+                    left.as_ref().desc,
+                    ExpressionDesc::Length(_, LengthObject::Array)
+                ));
+                assert!(matches!(
+                    right.as_ref().desc,
+                    ExpressionDesc::Number(Number::Int { i: 0, .. })
+                ));
+            }
+            other => panic!("Expected Bin(NotEqEq, _, _), got {other:?}"),
+        }
     }
 
     #[test]

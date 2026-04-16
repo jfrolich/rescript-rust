@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 536 / 657 with 8 unrelated compile errors and 113 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 537 / 657 with 8 unrelated compile errors and 112 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **536 / 657**
+- JS snapshot parity: **537 / 657**
 - Compile errors: **8**
-- Output diffs: **113**
+- Output diffs: **112**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,55 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `536 / 657` unless the
+Do **not** replace the recorded project baseline with `537 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: port the OCaml `Js_exp_make.bin` `Length` comparison rewrites
+  so Rust folds pure `x.length >= 0` guards to `true` and canonicalizes
+  `x.length > 0` to `x.length !== 0`
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in `compiler-rust/src/js_ir/mod.rs`
+- OCaml reference:
+  `compiler/core/js_exp_make.ml`, especially `bin`'s `Ge, Length (e, _), 0`
+  and `Gt, Length (_, _), 0` arms
+- Rust change:
+  - added the missing `rewrite_length_bin_comparison(...)` path in
+    `compiler-rust/src/js_ir/mod.rs`
+  - Rust now matches OCaml by folding `Length >= 0` to `true` only when the
+    underlying target expression is side-effect-free
+  - Rust now rewrites `Length > 0` to `Length !== 0`, matching the OCaml
+    canonical JS shape that snapshot files like `test_bool_equal` expect
+  - added focused JS-IR regressions for the pure-target fold, the impure-
+    target non-fold, and the `> 0` rewrite
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_length_ge_zero_ -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_length_gt_zero_rewrites_to_not_eq_zero_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh test_bool_equal --diff`
+  - `timeout 30 ./scripts/test_js_single.sh array_subtle_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_bool_equal.res` now matches its checked-in snapshot
+    again; the `Belt.Array.length` comparison shapes no longer drift in
+    `f7`/`f8`
+  - `tests/tests/src/array_subtle_test.res` collapsed from five hunks to one:
+    only the remaining unit-tail `if` polarity mismatch in `fff2` is still
+    exposed there, while the `length >= 0` and `length > 0` drift is gone
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as a
+    broader unchanged guard
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **535 / 657** -> **537 / 657** (**+2**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **114** -> **112** (**-2**)
+- Keep this change because the previous Rust JS IR builder was simply missing
+  an explicit OCaml backend rule in `js_exp_make.bin`; the new path is a
+  direct port of that logic and materially shrinks the current dirty-tree
+  snapshot frontier.
 
 Latest iteration on **2026-04-16**:
 
