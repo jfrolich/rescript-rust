@@ -1561,11 +1561,26 @@ impl LambdaCompiler {
         // resolved inside the switch/default instead of peeling them out.
         let inside_enclosing_staticcatch_chain =
             !self.static_handlers.is_empty() || !self.static_jump_handlers.is_empty();
+        let arity = bindings.len();
+        let body_has_target_exit = lambda_contains_static_raise_to_label(body, label, arity);
+        // Lam_pass_exits can inline outward handlers away before backend
+        // lowering. OCaml's compile_staticcatch pseudo-jump path still keeps a
+        // shared non-raising handler outside the switch when several direct
+        // exits now target the same label.
+        let shared_multi_exit_fallthrough_like_ocaml = !inside_enclosing_staticcatch_chain
+            && !self.handler_returns_unit_undefined(bindings, handler)
+            && !lambda_contains_static_raise(handler)
+            && body_has_target_exit
+            && lambda_has_multiple_static_raises_to_label(body, label, arity);
         match body {
             Lambda::Lswitch(_, switch) => match handler {
                 Lambda::LstaticRaise(_, args)
-                    if args.len() == bindings.len()
-                        && lambda_contains_static_raise_to_label(body, label, bindings.len()) =>
+                    if args.len() == arity && body_has_target_exit =>
+                {
+                    true
+                }
+                _ if !self.uses_untagged_variant_switch(switch)
+                    && shared_multi_exit_fallthrough_like_ocaml =>
                 {
                     true
                 }
@@ -1576,15 +1591,15 @@ impl LambdaCompiler {
                         &switch.sw_consts,
                         &switch.sw_blocks,
                         label,
-                        bindings.len(),
+                        arity,
                     )
-                    && lambda_contains_static_raise_to_label(body, label, bindings.len())
+                    && body_has_target_exit
                     && (lambda_contains_static_raise_to_other_label(body, label)
                         || switch_cases_contain_nontrivial_static_raise_to_label(
                             &switch.sw_consts,
                             &switch.sw_blocks,
                             label,
-                            bindings.len(),
+                            arity,
                         )) =>
                 {
                     true
@@ -1595,13 +1610,13 @@ impl LambdaCompiler {
                     && !lambda_contains_static_raise(handler) =>
                 {
                     if !bindings.is_empty() {
-                        lambda_contains_static_raise_to_label(body, label, bindings.len())
+                        body_has_target_exit
                     } else {
                         switch.sw_consts.len() + switch.sw_blocks.len() == 1
                             && matches!(
                                 switch.sw_failaction.as_deref(),
                                 Some(Lambda::LstaticRaise(id, args))
-                                    if *id == label && args.len() == bindings.len()
+                                    if *id == label && args.len() == arity
                             )
                     }
                 }
@@ -1609,24 +1624,24 @@ impl LambdaCompiler {
             },
             Lambda::LstringSwitch(_, cases, default) => match handler {
                 Lambda::LstaticRaise(_, args)
-                    if args.len() == bindings.len()
-                        && lambda_contains_static_raise_to_label(body, label, bindings.len()) =>
+                    if args.len() == arity && body_has_target_exit =>
                 {
                     true
                 }
+                _ if shared_multi_exit_fallthrough_like_ocaml => true,
                 _ if !lambda_contains_static_raise(handler)
                     && !lambda_contains_staticcatch(handler)
                     && string_switch_cases_contain_static_raise_to_label(
                         cases,
                         label,
-                        bindings.len(),
+                        arity,
                     )
-                    && lambda_contains_static_raise_to_label(body, label, bindings.len())
+                    && body_has_target_exit
                     && (lambda_contains_static_raise_to_other_label(body, label)
                         || string_switch_cases_contain_nontrivial_static_raise_to_label(
                             cases,
                             label,
-                            bindings.len(),
+                            arity,
                         )) =>
                 {
                     true
@@ -1637,13 +1652,13 @@ impl LambdaCompiler {
                     && !lambda_contains_static_raise(handler) =>
                 {
                     if !bindings.is_empty() {
-                        lambda_contains_static_raise_to_label(body, label, bindings.len())
+                        body_has_target_exit
                     } else {
                         cases.len() == 1
                             && matches!(
                                 default.as_deref(),
                                 Some(Lambda::LstaticRaise(id, args))
-                                    if *id == label && args.len() == bindings.len()
+                                    if *id == label && args.len() == arity
                             )
                     }
                 }
@@ -17490,7 +17505,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_return_switch_cases_keep_plain_handlers_inline_like_variant_spreads() {
+    fn direct_return_switch_cases_with_shared_plain_handlers_fall_through_like_ocaml() {
         let mut compiler = LambdaCompiler::new();
         let action = Ident::create_local("action");
         let block = compiler.compile_return_block(&Lambda::LstaticCatch(
@@ -17513,11 +17528,11 @@ mod tests {
             Box::new(Lambda::const_(Constant::int(30))),
         ));
 
-        let [switch_stmt] = block.as_slice() else {
-            panic!("expected the plain handler to stay inlined inside the switch");
+        let [switch_stmt, handler_return] = block.as_slice() else {
+            panic!("expected the shared plain handler to fall through after the switch");
         };
         let StatementDesc::IntSwitch(test, clauses, None) = &switch_stmt.desc else {
-            panic!("expected a single switch statement");
+            panic!("expected the shared plain handler to leave the switch default empty");
         };
         assert!(matches!(
             test,
@@ -17529,8 +17544,12 @@ mod tests {
         assert_eq!(clauses.len(), 3);
         assert_eq!(
             print_block(&block),
-            "switch (action) {\n  case 1 :\n  case 2 :\n    return 30;\n  case 3 :\n    return 40;\n}"
+            "switch (action) {\n  case 3 :\n    return 40;\n  case 1 :\n  case 2 :\n}\n\nreturn 30;"
         );
+        match &handler_return.desc {
+            StatementDesc::Return(expr) => assert_int_expr(expr, 30),
+            other => panic!("expected the shared plain handler return, got {other:?}"),
+        }
     }
 
     #[test]
@@ -18622,7 +18641,72 @@ mod tests {
             ),
         );
 
-        let deps = compiler.compile_deps_program(&lam);
+        let simplified =
+            crate::lambda::simplify::simplify_for_js_backend_with_jsx_preserve(&lam, false);
+        let mut direct_compiler = LambdaCompiler::new();
+        let direct_body =
+            direct_compiler.compile_return_block(extract_first_function_body(&simplified));
+        assert_fallthrough_return_outside_switch_body(
+            &direct_body,
+            "after simplify + direct compile_return_block",
+        );
+
+        let compiled = compiler.compile_expr(&simplified);
+        let mut block = compiled.prelude;
+        assert_first_function_body_keeps_fallthrough_return_outside_switch(
+            &block,
+            "after compile_expr",
+        );
+
+        let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block) {
+            if block_terminates(&block) {
+                for value in &mut exports.values {
+                    *value = Expression::undefined(false);
+                }
+            }
+            compiler.coerce_toplevel_exports(&mut block, exports)
+        } else {
+            vec![]
+        };
+        let program = Program::new(block, exports);
+        assert_first_function_body_keeps_fallthrough_return_outside_switch(
+            &program.block,
+            "after export extraction",
+        );
+
+        let deps = apply_js_flatten_pass(DepsProgram {
+            program,
+            modules: vec![],
+            side_effect: module_side_effect_reason(&simplified),
+        });
+        assert_first_function_body_keeps_fallthrough_return_outside_switch(
+            &deps.program.block,
+            "after js_flatten",
+        );
+
+        let deps = apply_external_shadow_pass(deps);
+        assert_first_function_body_keeps_fallthrough_return_outside_switch(
+            &deps.program.block,
+            "after external_shadow",
+        );
+
+        let deps = apply_js_tailcall_inline_pass(deps);
+        assert_first_function_body_keeps_fallthrough_return_outside_switch(
+            &deps.program.block,
+            "after tailcall_inline",
+        );
+
+        let deps = apply_js_flatten_and_mark_dead_pass(deps, false);
+        assert_first_function_body_keeps_fallthrough_return_outside_switch(
+            &deps.program.block,
+            "after flatten_and_mark_dead",
+        );
+
+        let deps = apply_js_shake_pass(deps);
+        assert_first_function_body_keeps_fallthrough_return_outside_switch(
+            &deps.program.block,
+            "after js_shake",
+        );
         let rendered = print_deps_program(&deps, None);
         assert_eq!(
             rendered,
@@ -21915,6 +21999,72 @@ mod tests {
                 ..
             }) if *value == expected => {}
             other => panic!("expected a return of {expected}, got {other:?}"),
+        }
+    }
+
+    fn assert_first_function_body_keeps_fallthrough_return_outside_switch(
+        block: &Block,
+        stage: &str,
+    ) {
+        let [function_decl, ..] = block.as_slice() else {
+            panic!("{stage}: expected the compiled program to start with the function binding");
+        };
+        let StatementDesc::Variable(VariableDeclaration {
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::Fun { body, .. },
+                    ..
+                }),
+            ..
+        }) = &function_decl.desc
+        else {
+            panic!("{stage}: expected the first top-level statement to be the function binding");
+        };
+
+        let [switch_stmt, handler_return] = body.as_slice() else {
+            panic!(
+                "{stage}: expected the function body to keep the fallthrough tail after the switch"
+            );
+        };
+        let StatementDesc::IntSwitch(_, _, None) = &switch_stmt.desc else {
+            panic!("{stage}: expected the fallthrough default to stay outside the switch");
+        };
+        assert!(
+            matches!(handler_return.desc, StatementDesc::Return(_)),
+            "{stage}: expected the fallthrough handler to stay as a trailing return"
+        );
+    }
+
+    fn assert_fallthrough_return_outside_switch_body(body: &Block, stage: &str) {
+        let [switch_stmt, handler_return] = body.as_slice() else {
+            panic!("{stage}: expected the function body to keep the fallthrough tail after the switch");
+        };
+        let StatementDesc::IntSwitch(_, _, None) = &switch_stmt.desc else {
+            panic!("{stage}: expected the fallthrough default to stay outside the switch");
+        };
+        assert!(
+            matches!(handler_return.desc, StatementDesc::Return(_)),
+            "{stage}: expected the fallthrough handler to stay as a trailing return"
+        );
+    }
+
+    fn extract_first_function_body(lam: &Lambda) -> &Lambda {
+        let Lambda::Llet(_, _, value, _) = lam else {
+            panic!("expected the top-level lambda to bind the function export");
+        };
+        match value.as_ref() {
+            Lambda::Lfunction(func) => &func.body,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::PjsFnMake(_),
+                args,
+                ..
+            }) => {
+                let [Lambda::Lfunction(func)] = args.as_slice() else {
+                    panic!("expected a single lowered function body in the JS function primitive");
+                };
+                &func.body
+            }
+            other => panic!("expected the top-level binding to stay function-shaped, got {other:?}"),
         }
     }
 

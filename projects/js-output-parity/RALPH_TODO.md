@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 555 / 657 with 8 unrelated compile errors and 94 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 556 / 657 with 8 unrelated compile errors and 93 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **555 / 657**
+- JS snapshot parity: **556 / 657**
 - Compile errors: **8**
-- Output diffs: **94**
+- Output diffs: **93**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -80,6 +80,63 @@ Do **not** replace the recorded project baseline with `555 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: align Rust's shared-handler switch fallthrough with OCaml's
+  `compile_staticcatch` pseudo-jump path after `Lam_pass_exits.simplify_exits`,
+  fixing the `gpr_1438` cluster where simplification removes the outward
+  static raise but multiple direct exits still target the same non-raising
+  handler
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; the fix lands in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially `flatten_nested_caches` and
+    `compile_staticcatch`
+  - `compiler/core/lam_compile_context.ml`, especially
+    `no_static_raise_in_handler`
+  - `compiler/core/lam_pass_exits.ml`, especially `simplify_exits`
+- Rust change:
+  - broadened `uses_fallthrough_staticcatch_return(...)` so a switch or string
+    switch with multiple direct exits to the same label still peels a shared
+    non-raising handler out after the switch, matching the OCaml pseudo-jump
+    path once `Lam_pass_exits` has inlined outward handlers away
+  - kept the existing single-default-arm behavior unchanged, so this slice only
+    affects the shared multi-exit cluster rather than all staticcatch lowering
+  - promoted the regression coverage in
+    `compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch`
+    and updated the older unsimplified unit test to
+    `direct_return_switch_cases_with_shared_plain_handlers_fall_through_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_1438 -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release plain_handlers -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release single_handlers_as_default_arms -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_1438.res -o /tmp/gpr_1438.mjs`
+  - `diff -u tests/tests/src/gpr_1438.mjs /tmp/gpr_1438.mjs`
+  - `timeout 30 ./scripts/test_js_single.sh bal_set_mini --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1438.res` now matches its checked-in snapshot exactly;
+    the trailing `return param => {};` is back outside the switch instead of
+    being emitted as a synthetic `default` arm
+  - broader guards `tests/tests/src/bal_set_mini.res` and
+    `tests/tests/src/ExternalShadow.res` remained exact after the same backend
+    change
+  - the full dirty-worktree wrapper improved by one file with no compile-error
+    movement, which is consistent with this slice targeting one concrete
+    switch/staticcatch lowering cluster
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **555 / 657** -> **556 / 657** (**+1**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **94** -> **93** (**-1**)
+- Keep this change because it is a direct OCaml backend alignment: once
+  `Lam_pass_exits` has simplified away the outward static handler, OCaml still
+  uses the single-handler pseudo-jump path as long as the remaining handler
+  itself has no static raises. The previous Rust predicate incorrectly depended
+  on seeing another-label exits in the switch body, which is exactly why
+  `gpr_1438` regressed after simplification.
 
 Latest iteration on **2026-04-16**:
 
