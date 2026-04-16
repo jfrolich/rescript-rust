@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 554 / 657 with 8 unrelated compile errors and 95 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 553 / 657 with 8 unrelated compile errors and 96 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **554 / 657**
+- JS snapshot parity: **553 / 657**
 - Compile errors: **8**
-- Output diffs: **95**
+- Output diffs: **96**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,62 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `554 / 657` unless the
+Do **not** replace the recorded project baseline with `553 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: port OCaml's `remove_pure_sub_exp` behavior in
+  `compile_ifthenelse` so effect-position `if` branches with allocating values
+  stay on the conditional-expression path instead of being dropped early by the
+  Rust backend's generic purity check
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this slice stays in
+  `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially the `EffectCall Not_tail`
+    branch inside `compile_ifthenelse`
+  - `compiler/core/js_exp_make.ml`, especially `remove_pure_sub_exp`
+- Rust change:
+  - added `remove_pure_subexpression(...)` / `is_pure_subexpression(...)` as a
+    direct Rust port of OCaml's `Js_exp_make.remove_pure_sub_exp`
+  - rewired the `then_prelude_empty && else_prelude_empty` arm of
+    `compile_if_effect_block(...)` to use that OCaml-aligned pruning instead of
+    the broader `js_expr_no_side_effects(...)` check
+  - added regression coverage in
+    `effect_blocks_keep_allocating_branches_inside_conditional_expressions_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release effect_blocks_lower_ifs_without_a_result_temp -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release effect_blocks_keep_allocating_branches_inside_conditional_expressions_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_4491_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh test_primitive --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_4491_test.res` now regains OCaml's explicit `else`
+    branch after Rust had previously dropped it entirely; the remaining diff is
+    only the blank no-op statement layout inside the branch bodies
+  - `tests/tests/src/bal_set_mini.res` likewise regains the explicit empty
+    `else` branch in its membership guard loop, which confirms the change is
+    affecting the intended `if`-effect lowering cluster rather than one file
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained an exact
+    snapshot match after the same backend change
+  - sibling diff `tests/tests/src/test_primitive.res` stayed on its existing
+    early-return drift, which keeps this slice isolated to the OCaml
+    `remove_pure_sub_exp` path rather than the broader `if` simplifier
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **555 / 657** -> **553 / 657** (**-2**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **94** -> **96** (**+2**)
+- Keep this change because the Rust backend was using the wrong notion of
+  purity for OCaml's effect-position `if` lowering. `compile_ifthenelse`
+  consults `remove_pure_sub_exp`, not the generic side-effect predicate, and
+  that distinction is exactly what restores the explicit empty-branch shape in
+  `gpr_4491_test` and `bal_set_mini` even though the current dirty-tree total
+  moved the wrong way.
 
 Latest iteration on **2026-04-16**:
 

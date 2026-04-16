@@ -2268,30 +2268,29 @@ impl LambdaCompiler {
         let cond_expr = cond_compiled.expr;
 
         if then_prelude_empty && else_prelude_empty {
-            match (then_expr_pure, else_expr_pure) {
-                (true, true) => {
+            match (
+                remove_pure_subexpression(then_compiled.expr.clone()),
+                remove_pure_subexpression(else_compiled.expr.clone()),
+            ) {
+                (None, None) => {
                     push_effect_expression(&mut block, cond_expr);
                     return block;
                 }
-                (false, false) => {
+                (Some(then_expr), Some(else_expr)) => {
                     push_effect_expression(
                         &mut block,
-                        Expression::cond(cond_expr, then_compiled.expr, else_compiled.expr),
+                        Expression::cond(cond_expr, then_expr, else_expr),
                     );
                     return block;
                 }
-                (false, true) => {
-                    block.push(Statement::if_(
-                        cond_expr,
-                        self.compiled_to_effect_block(then_compiled),
-                        vec![],
-                    ));
+                (Some(then_expr), None) => {
+                    block.push(Statement::if_(cond_expr, vec![Statement::exp(then_expr)], vec![]));
                     return block;
                 }
-                (true, false) => {
+                (None, Some(else_expr)) => {
                     block.push(Statement::if_(
                         Expression::not(cond_expr),
-                        self.compiled_to_effect_block(else_compiled),
+                        vec![Statement::exp(else_expr)],
                         vec![],
                     ));
                     return block;
@@ -8697,6 +8696,42 @@ fn js_expr_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::Await(_)
         | ExpressionDesc::Spread(_) => false,
     }
+}
+
+fn remove_pure_subexpression(expr: Expression) -> Option<Expression> {
+    match expr.desc {
+        ExpressionDesc::Var(_) | ExpressionDesc::Str { .. } | ExpressionDesc::Number(_) => None,
+        ExpressionDesc::ArrayIndex(left, right) => {
+            if is_pure_subexpression(left.as_ref()) && is_pure_subexpression(right.as_ref()) {
+                None
+            } else {
+                Some(Expression::new(ExpressionDesc::ArrayIndex(left, right)))
+            }
+        }
+        ExpressionDesc::Array(items, mutable_flag) => {
+            if items.iter().all(is_pure_subexpression) {
+                None
+            } else {
+                Some(Expression::new(ExpressionDesc::Array(items, mutable_flag)))
+            }
+        }
+        ExpressionDesc::Seq(left, right) => {
+            match (
+                remove_pure_subexpression(*left),
+                remove_pure_subexpression(*right),
+            ) {
+                (None, None) => None,
+                (Some(left), Some(right)) => Some(js_seq(left, right)),
+                (None, Some(right)) => Some(right),
+                (Some(left), None) => Some(left),
+            }
+        }
+        desc => Some(Expression::new(desc)),
+    }
+}
+
+fn is_pure_subexpression(expr: &Expression) -> bool {
+    remove_pure_subexpression(expr.clone()).is_none()
 }
 
 fn external_module_import_attributes(
@@ -19735,6 +19770,81 @@ mod tests {
                     ExpressionDesc::Number(Number::Int { i: 1, .. })
                 ) if lhs_id.same(&slot)
             )
+        ));
+    }
+
+    #[test]
+    fn effect_blocks_keep_allocating_branches_inside_conditional_expressions_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let effect = Ident::create_local("effect");
+        let allocating_block = Lambda::const_(Constant::Block {
+            tag: 0,
+            tag_info: TagInfo::tuple(),
+            elements: vec![Constant::int(1), Constant::int(2)],
+        });
+
+        let block = compiler.compile_effect_block(&Lambda::LifThenElse(
+            Box::new(Lambda::var(cond.clone())),
+            Box::new(Lambda::Lsequence(
+                Box::new(Lambda::apply(
+                    Lambda::var(effect.clone()),
+                    vec![],
+                    ApInfo {
+                        loc: Location::none(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Na,
+                    },
+                    false,
+                )),
+                Box::new(allocating_block.clone()),
+            )),
+            Box::new(allocating_block),
+        ));
+
+        let [stmt] = block.as_slice() else {
+            panic!("expected the allocating branches to stay as one conditional expression");
+        };
+        let StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Cond(test, then_expr, else_expr),
+            ..
+        }) = &stmt.desc
+        else {
+            panic!("expected effect-position if lowering to keep the conditional expression");
+        };
+        assert!(matches!(
+            test.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&cond)
+        ));
+        assert!(matches!(
+            then_expr.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Seq(left, right),
+                ..
+            } if matches!(
+                (&left.as_ref().desc, &right.as_ref().desc),
+                (
+                    ExpressionDesc::Call(func, args, _),
+                    ExpressionDesc::CamlBlock(_, _, _, _)
+                ) if matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&effect)
+                )
+                && args.is_empty()
+            )
+        ));
+        assert!(matches!(
+            else_expr.as_ref(),
+            Expression {
+                desc: ExpressionDesc::CamlBlock(_, _, _, _),
+                ..
+            }
         ));
     }
 
