@@ -129,6 +129,69 @@ When `encode(field.typ, @field(value, field.name))` is encountered:
 
 This is just the same mechanism applied recursively. Fuel limits prevent infinite recursion.
 
+## Two Comptime Mechanisms
+
+### `@comptime` — Partial Evaluation (No JS Engine)
+
+The function body mixes comptime and runtime expressions. The compiler substitutes `@typeInfo(T)` with literal values and the optimizer specializes the code. Runtime expressions (anything touching non-comptime parameters) pass through as code.
+
+```rescript
+@comptime
+let encode = (comptime T: type, value: T): Json.t => {
+  switch @typeInfo(T) {
+  | String => Json.string(value)      // value is runtime — emitted as code
+  | Record({fields}) =>
+    let obj = Dict.empty()             // runtime — emitted
+    inline for field in fields {       // fields is comptime — unrolled
+      Dict.set(obj, field.name, ...)   // field.name is comptime — folded to "name"
+    }
+  }
+}
+```
+
+### `@comptime.inline` — Full Evaluation in JS Engine (Boa)
+
+The ENTIRE function executes at compile time. All arguments must be comptime-known (literals, @typeInfo values, results of other comptime.inline calls). The function is compiled to JS, executed in Boa, and the result is inlined as a constant.
+
+```rescript
+@comptime.inline
+let capitalize = (s: string): string => {
+  String.charAt(s, 0)->String.toUpperCase ++ String.sliceToEnd(s, ~start=1)
+}
+
+// In a comptime context:
+// capitalize("name") → compiled to JS → Boa evaluates → "Name" → inlined as literal
+```
+
+The type checker verifies all arguments are comptime-known. If any argument is runtime, it's a compile error.
+
+**Comptime-known values:**
+- Literal constants (strings, ints, bools, arrays of literals)
+- Values constructed from `@typeInfo(T)` (always comptime — built by the compiler)
+- Results of `@comptime.inline` function calls (transitively comptime)
+- Destructured parts of comptime values (`field.name`, `field.typ`, etc.)
+
+**How `@comptime` and `@comptime.inline` compose:**
+
+```rescript
+@comptime.inline
+let capitalize = (s: string): string => { ... }
+
+@comptime
+let encode = (comptime T: type, value: T): Json.t => {
+  switch @typeInfo(T) {
+  | Record({fields}) =>
+    inline for field in fields {
+      // capitalize(field.name) → field.name is comptime-known → Boa evaluates
+      // value is runtime → stays as code
+      Dict.set(obj, capitalize(field.name), encode(field.typ, @field(value, field.name)))
+    }
+  }
+}
+```
+
+`capitalize(field.name)` is a `@comptime.inline` call where the argument `field.name` is comptime-known (it came from `@typeInfo`). Boa evaluates it to `"Name"`. The result is used as a constant in the runtime code.
+
 ## What Does NOT Need a JS Interpreter
 
 The entire encode/decode pattern works without Boa:
