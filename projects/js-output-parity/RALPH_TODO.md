@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 521 / 657 with 8 unrelated compile errors and 128 output diffs
+**Status:** 539 / 657 last clean JS snapshot baseline; current dirty worktree reproduces 520 / 657 with 8 unrelated compile errors and 129 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -64,9 +64,9 @@ Repeated rebuild + wrapper runs on **2026-04-16** in the current dirty
 worktree do **not** reproduce the project baseline above. They currently
 report:
 
-- JS snapshot parity: **521 / 657**
+- JS snapshot parity: **520 / 657**
 - Compile errors: **8**
-- Output diffs: **128**
+- Output diffs: **129**
 
 Those 8 compile failures are not in the JS backend slice and include unrelated
 typechecker/runtime regressions such as:
@@ -76,10 +76,73 @@ typechecker/runtime regressions such as:
 - `stdlib/Stdlib_TempTests.res`: `RefCell already borrowed` panic in `src/types/context.rs`
 - `inline_map2_test.res`: `CoreError(ExprTypeClash ... FunctionCall)`
 
-Do **not** replace the recorded project baseline with `521 / 657` unless the
+Do **not** replace the recorded project baseline with `520 / 657` unless the
 worktree is first restored to a stable state. For JS-output work, continue to
 use **539 / 657, 0 compile errors, 118 diffs** as the last known clean
 baseline.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: only normalize shared trailing `return` tails for wrapped
+  small literal return-switch bodies when they are peeled into the untagged
+  runtime-test `if` chain; keep the generic small literal return path itself
+  wrapped so outer literal-vs-block dispatch still matches OCaml
+- Active backend focus remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; this change stays in `compiler-rust/src/lambda/compile.rs`
+  plus a narrow positive-literal tail preservation in
+  `compiler-rust/src/js_ir/mod.rs`
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially the untagged
+  `compile_untagged_cases` runtime `build_if_chain` and the small-case
+  `compile_general_cases` / `S.if_` interaction that leaves generic small
+  literal returns wrapped but uses raw `switch_body` blocks in the runtime
+  guard chain
+- Rust change:
+  - added `normalize_runtime_test_return_body(...)` /
+    `shared_trailing_return_guard_block(...)` so peeled runtime-test case
+    bodies of the exact shape `if (...) { effect; return; } effect; return;`
+    become `if (...) { effect; } else { effect; } return;`
+  - limited that normalization to the runtime-test paths in
+    `compile_untagged_block_switch_return_statements(...)` and
+    `compile_small_untagged_block_switch_return(...)`
+  - kept `compile_small_string_switch_return(...)` on the wrapped generic path
+    so mixed literal-vs-block dispatches do not flatten their outer `else`
+  - exposed `ocaml_eq_expression(...)` as `pub(crate)` in `js_ir/mod.rs` so
+    the runtime-test normalization can compare the shared return expressions
+  - taught `js_ir::simplify_if_statement(...)` to preserve the recovered
+    positive outer literal dispatch when its shared tail is `return undefined`,
+    matching the OCaml nested structure instead of collapsing the outer guard
+    back into an early-return shape
+  - added focused regression coverage in
+    `runtime_test_return_bodies_share_trailing_return_outside_inner_test`,
+    `test_if_statement_keeps_positive_literal_dispatch_return_tail`, and kept
+    the nearby untagged return-shape guards green
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_if_statement_keeps_positive_literal_dispatch_return_tail -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml runtime_test_return_bodies_share_trailing_return_outside_inner_test -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml mixed_literal_and_block_untagged_return_dispatch_keeps_outer_else_block -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml object_and_array_untagged_return_switches_keep_object_inside_typeof_switch_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/UntaggedVariants.res` now matches its checked-in snapshot
+    again; the deeper nested number-case return chain now shares the trailing
+    `return` only inside the runtime guard where OCaml does, without pulling
+    unrelated guards like the array-length check into explicit `else` blocks
+  - `tests/tests/src/ExternalShadow.res` remained exact
+  - the current dirty-tree wrapper improved by one exact JS snapshot while
+    keeping the unrelated compile-error set unchanged
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **519 / 657** -> **520 / 657** (**+1**)
+  - Compile errors: **8** -> **8** (**no change**)
+  - Output diffs: **130** -> **129** (**-1**)
+- Keep this change because the new normalization is constrained to the exact
+  OCaml runtime-guard shape: generic small literal return lowering stays
+  wrapped, but runtime-test switch bodies now recover OCaml's shared trailing
+  `return` when the guard simplifier had previously sunk that tail into the
+  branch-local return path.
 
 Latest iteration on **2026-04-16**:
 

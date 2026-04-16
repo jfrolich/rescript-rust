@@ -1391,7 +1391,9 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         // `return undefined`. OCaml's backend preserves that final shape for
         // cases like async option switches, while the early-return rewrite here
         // flips them into `if (!cond) return; ...` too soon.
-        if preserves_positive_return_undefined_tail(&then_, else_ret) {
+        if preserves_positive_return_undefined_tail(&then_, else_ret)
+            || preserves_positive_literal_dispatch_return_tail(&cond, &then_, else_ret)
+        {
             return Statement::new(StatementDesc::If(cond, then_, else_));
         }
         let mut block = Vec::with_capacity(1 + then_.len());
@@ -1575,6 +1577,55 @@ fn preserves_positive_return_undefined_tail(then_: &Block, else_ret: &Expression
     }
 
     prefix.iter().any(statement_contains_await)
+}
+
+fn preserves_positive_literal_dispatch_return_tail(
+    cond: &Expression,
+    then_: &Block,
+    else_ret: &Expression,
+) -> bool {
+    if !matches!(else_ret.desc, ExpressionDesc::Undefined { .. }) {
+        return false;
+    }
+
+    let Some((nested_cond, _, nested_else)) = single_if_block(then_) else {
+        return false;
+    };
+    if !nested_else.is_empty()
+        && !matches!(
+            single_return_expr(nested_else),
+            Some(Expression {
+                desc: ExpressionDesc::Undefined { .. },
+                ..
+            })
+        )
+    {
+        return false;
+    }
+
+    let Some((inner_op, inner_vident, inner_literal)) = strict_var_literal_comparison(nested_cond)
+    else {
+        return false;
+    };
+    if inner_op != BinOp::EqEqEq
+        || !matches!(inner_literal.desc, ExpressionDesc::Str { .. })
+    {
+        return false;
+    }
+
+    let mut saw_inner_literal = false;
+    let mut saw_other_literal = false;
+    if !collect_same_var_literal_membership_terms(
+        cond,
+        inner_vident,
+        inner_literal,
+        &mut saw_inner_literal,
+        &mut saw_other_literal,
+    ) {
+        return false;
+    }
+
+    saw_inner_literal && saw_other_literal
 }
 
 fn statement_contains_await(stmt: &Statement) -> bool {
@@ -2280,7 +2331,7 @@ fn ocaml_eq_statement(left: &Statement, right: &Statement) -> bool {
     }
 }
 
-fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool {
+pub(crate) fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool {
     match (&left.desc, &right.desc) {
         (ExpressionDesc::Null, ExpressionDesc::Null) => true,
         (
@@ -3342,6 +3393,60 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn test_if_statement_keeps_positive_literal_dispatch_return_tail() {
+        let key = Ident::create_local("key");
+        let active = Ident::create_local("active");
+        let dispatch = raw_bin_expression(
+            BinOp::Or,
+            Expression::bin(
+                BinOp::EqEqEq,
+                Expression::var(key.clone()),
+                Expression::string("space"),
+            ),
+            Expression::bin(
+                BinOp::EqEqEq,
+                Expression::var(key.clone()),
+                Expression::string("a"),
+            ),
+        );
+        let inner_cond = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(key.clone()),
+            Expression::string("space"),
+        );
+        let then_block = vec![Statement::new(StatementDesc::If(
+            inner_cond.clone(),
+            vec![Statement::new(StatementDesc::If(
+                Expression::var(active),
+                vec![
+                    Statement::exp(Expression::call(
+                        Expression::var(Ident::create_local("seen")),
+                        vec![],
+                        CallInfo::default(),
+                    )),
+                    Statement::return_(Expression::undefined(true)),
+                ],
+                vec![Statement::return_(Expression::undefined(true))],
+            ))],
+            vec![],
+        ))];
+        let else_block = vec![Statement::return_(Expression::undefined(true))];
+
+        let stmt = Statement::if_(dispatch.clone(), then_block, else_block.clone());
+
+        let StatementDesc::If(test, kept_then, kept_else) = &stmt.desc else {
+            panic!("expected the literal dispatch tail to stay positive: {stmt:#?}");
+        };
+        assert!(ocaml_eq_expression(test, &dispatch));
+        let Some((nested_test, _, nested_else)) = single_if_block(kept_then) else {
+            panic!("expected the literal dispatch branch to keep the nested exact-literal check");
+        };
+        assert!(ocaml_eq_expression(nested_test, &inner_cond));
+        assert!(nested_else.is_empty());
+        assert!(ocaml_eq_block(kept_else, &else_block));
     }
 
     #[test]
