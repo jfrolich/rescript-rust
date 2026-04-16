@@ -457,7 +457,7 @@ fn build_field_info_expr<'a>(
 }
 
 /// Make a typed string constant expression.
-fn make_string_expr<'a>(
+pub fn make_string_expr<'a>(
     s: &str,
     ctx: &'a TypeContext<'a>,
     env: &Env,
@@ -473,7 +473,7 @@ fn make_string_expr<'a>(
 }
 
 /// Make a typed boolean expression.
-fn make_bool_expr<'a>(
+pub fn make_bool_expr<'a>(
     b: bool,
     ctx: &'a TypeContext<'a>,
     env: &Env,

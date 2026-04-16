@@ -729,6 +729,8 @@ pub struct TypeCheckContext<'a> {
         HashMap<crate::parse_arena::LocIdx, crate::types::decl::ModuleType>,
     /// Registry of @comptime functions for compile-time specialization.
     pub comptime_functions: HashMap<String, crate::types::comptime::ComptimeFunction>,
+    /// Comptime-known variable bindings (from @typeInfo destructuring, inline for, etc.)
+    pub comptime_bindings: HashMap<String, crate::types::comptime::ComptimeValue>,
 }
 
 /// A diagnostic from type checking.
@@ -758,6 +760,7 @@ impl<'a> TypeCheckContext<'a> {
             generic_constraint_body_ty: None,
             module_expr_semantic_types: HashMap::new(),
             comptime_functions: HashMap::new(),
+            comptime_bindings: HashMap::new(),
         }
     }
 
@@ -4255,8 +4258,22 @@ pub fn type_expect<'a>(
 
     match &*expr.pexp_desc {
         ED::Pexp_ident(lid) => {
-            // Identifier expression
+            // Check for comptime-known variable (from @typeInfo destructuring etc.)
             let longident = tctx.arena.get_longident(lid.txt);
+            if longident.is_simple() {
+                let name = tctx.arena.get_string(longident.last_idx());
+                if let Some(cv) = tctx.comptime_bindings.get(name).cloned() {
+                    // Substitute with the comptime value
+                    if let Some(typed_expr) = comptime_value_to_typed_expr(&cv, tctx.type_ctx, env, loc) {
+                        let expr_ty = typed_expr.exp_type;
+                        crate::types::ctype::unify(ctx, &mut tctx.unify_state, expr_ty, expected_ty)
+                            .map_err(|e| super::TypeCoreError::Other(format!("comptime binding type mismatch: {:?}", e)))?;
+                        return Ok(typed_expr);
+                    }
+                }
+            }
+
+            // Normal identifier expression
             let (path, desc) = env.lookup_value_by_lid(
                 longident,
                 tctx.arena,
@@ -20086,9 +20103,21 @@ fn try_comptime_match(
         };
 
         if matches {
-            // Type-check ONLY this branch's body
+            // Extract destructuring bindings from the pattern and extend env
+            let mut body_env = env.clone();
+            let pat = tctx.arena.get_pat(case.pc_lhs);
+            if let crate::parser::ast::PatternDesc::Ppat_construct(_, Some(arg_pat_idx)) = &*pat.ppat_desc {
+                let arg_pat = tctx.arena.get_pat(*arg_pat_idx);
+                // Record({fields, name, ...}) — the arg is a record pattern
+                if let crate::parser::ast::PatternDesc::Ppat_record(inner) = &*arg_pat.ppat_desc {
+                    let (ref fields, _) = **inner;
+                    bind_comptime_record_fields(tctx, &mut body_env, fields, &type_info);
+                }
+            }
+
+            // Type-check ONLY this branch's body in the extended env
             let body = tctx.arena.get_expr(case.pc_rhs);
-            match type_expect(tctx, env, body, expected_ty, None) {
+            match type_expect(tctx, &body_env, body, expected_ty, None) {
                 Ok(typed_body) => return Some(Ok(typed_body)),
                 Err(e) => return Some(Err(e)),
             }
@@ -20096,6 +20125,169 @@ fn try_comptime_match(
     }
 
     None
+}
+
+/// Convert a ComptimeValue to a typed tree Expression.
+/// Used to substitute comptime-known variables during type checking.
+fn comptime_value_to_typed_expr<'a>(
+    value: &crate::types::comptime::ComptimeValue,
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    loc: LocIdx,
+) -> Option<Expression> {
+    use crate::types::comptime::ComptimeValue;
+    let env_ref = ctx.store_typed_env(env);
+
+    match value {
+        ComptimeValue::String(s) => {
+            Some(crate::types::comptime::make_string_expr(s, ctx, env, loc))
+        }
+        ComptimeValue::Int(n) => {
+            Some(Expression::new(
+                ExpressionDesc::Texp_constant(super::typedtree::Constant::Int(*n)),
+                loc,
+                ctx.new_constr(crate::types::predef::path_int(), vec![]),
+                env_ref,
+                crate::parser::ast::Attributes::new(),
+            ))
+        }
+        ComptimeValue::Bool(b) => {
+            Some(crate::types::comptime::make_bool_expr(*b, ctx, env, loc))
+        }
+        ComptimeValue::Type(type_info) => {
+            crate::types::comptime::type_info_to_typed_expr(type_info, ctx, env, loc)
+        }
+        ComptimeValue::Array(elements) => {
+            let elem_exprs: Vec<_> = elements
+                .iter()
+                .filter_map(|e| comptime_value_to_typed_expr(e, ctx, env, loc))
+                .collect();
+            Some(Expression::new(
+                ExpressionDesc::Texp_array(elem_exprs),
+                loc,
+                ctx.new_constr(crate::types::predef::path_array(), vec![ctx.new_var(None)]),
+                env_ref,
+                crate::parser::ast::Attributes::new(),
+            ))
+        }
+        ComptimeValue::Record(entries) => {
+            // For comptime records (like fieldInfo), we produce a tuple
+            // representation for now
+            let exprs: Vec<_> = entries
+                .iter()
+                .filter_map(|(_, v)| comptime_value_to_typed_expr(v, ctx, env, loc))
+                .collect();
+            if exprs.is_empty() {
+                None
+            } else {
+                Some(Expression::new(
+                    ExpressionDesc::Texp_tuple(exprs),
+                    loc,
+                    ctx.new_var(None),
+                    env_ref,
+                    crate::parser::ast::Attributes::new(),
+                ))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Bind destructured record fields from a comptime typeInfo match into the environment.
+/// For `Record({fields, name})`, adds `fields` and `name` as values in the env.
+fn bind_comptime_record_fields(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &mut Env,
+    record_fields: &[crate::parser::ast::PatternRecordField],
+    type_info: &crate::types::comptime::TypeInfo,
+) {
+    use crate::types::comptime::TypeInfo;
+    let ctx = tctx.type_ctx;
+
+    for field in record_fields {
+        let pat = tctx.arena.get_pat(field.pat);
+        // Only handle Ppat_var (simple variable binding)
+        let var_name = match &*pat.ppat_desc {
+            crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
+                tctx.arena.get_string(name_loc.txt).to_string()
+            }
+            _ => continue,
+        };
+
+        // Get the field name from the record pattern
+        let field_name = {
+            let longident = tctx.arena.get_longident(field.lid.txt);
+            tctx.arena.get_string(longident.last_idx()).to_string()
+        };
+
+        // Determine the type and create the value based on the typeInfo
+        let val_ty = match (type_info, field_name.as_str()) {
+            (TypeInfo::Record { name, .. }, "name") => {
+                // name: string
+                ctx.new_constr(crate::types::predef::path_string(), vec![])
+            }
+            (TypeInfo::Record { fields, .. }, "fields") => {
+                // fields: array<fieldInfo>
+                let field_info_ty = ctx.new_constr(crate::types::predef::path_field_info(), vec![]);
+                ctx.new_constr(crate::types::predef::path_array(), vec![field_info_ty])
+            }
+            (TypeInfo::Record { .. }, "unboxed") => {
+                // unboxed: bool
+                ctx.new_constr(crate::types::predef::path_bool(), vec![])
+            }
+            (TypeInfo::Array { .. }, "element") => {
+                // element: typeInfo
+                ctx.new_constr(crate::types::predef::path_type_info(), vec![])
+            }
+            (TypeInfo::Option { .. }, "inner") => {
+                // inner: typeInfo
+                ctx.new_constr(crate::types::predef::path_type_info(), vec![])
+            }
+            _ => ctx.new_var(None),
+        };
+
+        // Add the binding to the environment
+        let id = ctx.create_ident(&var_name);
+        let vd = crate::types::decl::ValueDescription {
+            val_type: val_ty,
+            val_kind: crate::types::decl::ValueKind::ValReg,
+            val_loc: crate::location::Location::none(),
+            val_attributes: vec![],
+            val_path: None,
+        };
+        env.add_value(id, vd);
+
+        // Also add the comptime value so it can be substituted during type checking
+        let comptime_val = match (type_info, field_name.as_str()) {
+            (TypeInfo::Record { name, .. }, "name") => {
+                Some(crate::types::comptime::ComptimeValue::String(name.clone()))
+            }
+            (TypeInfo::Record { fields, .. }, "fields") => {
+                let field_values: Vec<_> = fields.iter().map(|f| {
+                    crate::types::comptime::ComptimeValue::Record(vec![
+                        ("name".to_string(), crate::types::comptime::ComptimeValue::String(f.name.clone())),
+                        ("typ".to_string(), crate::types::comptime::ComptimeValue::Type(f.typ.clone())),
+                        ("optional".to_string(), crate::types::comptime::ComptimeValue::Bool(f.optional)),
+                        ("mutable_".to_string(), crate::types::comptime::ComptimeValue::Bool(f.mutable)),
+                    ])
+                }).collect();
+                Some(crate::types::comptime::ComptimeValue::Array(field_values))
+            }
+            (TypeInfo::Record { unboxed, .. }, "unboxed") => {
+                Some(crate::types::comptime::ComptimeValue::Bool(*unboxed))
+            }
+            (TypeInfo::Array { element }, "element") => {
+                Some(crate::types::comptime::ComptimeValue::Type(*element.clone()))
+            }
+            (TypeInfo::Option { inner }, "inner") => {
+                Some(crate::types::comptime::ComptimeValue::Type(*inner.clone()))
+            }
+            _ => None,
+        };
+        if let Some(cv) = comptime_val {
+            tctx.comptime_bindings.insert(var_name, cv);
+        }
+    }
 }
 
 /// Check if a function application is a call to a registered @comptime function.
