@@ -5235,6 +5235,30 @@ pub fn type_expect<'a>(
             let core_type = tctx.arena.get_core_type(*ct_idx);
             let ctx = tctx.type_ctx;
 
+            // First check: is the core type a simple name that's a comptime
+            // type binding (from `(type t, ...)` parameter)?
+            if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
+                let (ref lid, _) = **inner;
+                let longident = tctx.arena.get_longident(lid.txt);
+                let name = tctx.arena.get_string(longident.last_idx());
+                if let Some(crate::types::comptime::ComptimeValue::Type(ti)) =
+                    tctx.comptime_bindings.get(name).cloned()
+                {
+                    // Build the typeInfo expression directly from the comptime binding
+                    match crate::types::comptime::type_info_to_typed_expr(&ti, ctx, env, loc) {
+                        Some(typed_expr) => {
+                            let type_info_ty = typed_expr.exp_type;
+                            crate::types::ctype::unify(ctx, &mut tctx.unify_state, type_info_ty, expected_ty)
+                                .map_err(|e| super::TypeCoreError::Other(format!("typeInfo type mismatch: {:?}", e)))?;
+                            return Ok(typed_expr);
+                        }
+                        None => return Err(super::TypeCoreError::Other(
+                            "Failed to construct typeInfo value for type parameter".to_string(),
+                        )),
+                    }
+                }
+            }
+
             // Try as a type name first
             ctx.begin_def();
             let resolved_ty = match transl_type(tctx, env, core_type) {
@@ -20529,36 +20553,59 @@ fn try_comptime_match(
         _ => return None,
     };
 
-    // Resolve the type (with variable fallback)
     let core_type = tctx.arena.get_core_type(ct_idx);
     let ctx = tctx.type_ctx;
-    ctx.begin_def();
-    let mut resolved_ty = match transl_type(tctx, env, core_type) {
-        Ok((_, ty)) => ty,
-        Err(_) => {
-            ctx.end_def();
-            return None;
-        }
-    };
-    ctx.end_def();
 
-    // If type resolves to External (unknown type name), try as variable
-    let mut visited_check = Vec::new();
-    let check_info = crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited_check);
-    if matches!(check_info, crate::types::comptime::TypeInfo::External { .. }) {
+    // First: check if the type argument is a comptime type binding
+    // (from `(type t, ...)` parameters). If so, use it directly.
+    let type_info_from_binding: Option<crate::types::comptime::TypeInfo> =
         if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
             let (ref lid, _) = **inner;
             let longident = tctx.arena.get_longident(lid.txt);
             let name = tctx.arena.get_string(longident.last_idx());
-            if let Ok(vd) = env.find_value(name) {
-                resolved_ty = vd.val_type;
+            if let Some(crate::types::comptime::ComptimeValue::Type(ti)) =
+                tctx.comptime_bindings.get(name).cloned()
+            {
+                Some(ti)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+    let type_info = if let Some(ti) = type_info_from_binding {
+        ti
+    } else {
+        // Resolve the type (with variable fallback)
+        ctx.begin_def();
+        let mut resolved_ty = match transl_type(tctx, env, core_type) {
+            Ok((_, ty)) => ty,
+            Err(_) => {
+                ctx.end_def();
+                return None;
+            }
+        };
+        ctx.end_def();
+
+        // If type resolves to External (unknown type name), try as variable
+        let mut visited_check = Vec::new();
+        let check_info = crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited_check);
+        if matches!(check_info, crate::types::comptime::TypeInfo::External { .. }) {
+            if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
+                let (ref lid, _) = **inner;
+                let longident = tctx.arena.get_longident(lid.txt);
+                let name = tctx.arena.get_string(longident.last_idx());
+                if let Ok(vd) = env.find_value(name) {
+                    resolved_ty = vd.val_type;
+                }
             }
         }
-    }
 
-    // Build TypeInfo
-    let mut visited = Vec::new();
-    let type_info = crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited);
+        // Build TypeInfo
+        let mut visited = Vec::new();
+        crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited)
+    };
 
     // Determine constructor name
     let ctor_name = match &type_info {
@@ -20831,7 +20878,9 @@ fn try_comptime_application(
 
     let ctx = tctx.type_ctx;
     let mut typed_args: Vec<(String, Expression, bool)> = Vec::new(); // (name, typed_arg, is_type)
-    let mut type_key_parts: Vec<crate::types::comptime::TypeInfo> = Vec::new();
+    let mut explicit_type_keys: Vec<crate::types::comptime::TypeInfo> = Vec::new();
+    let mut first_value_type: Option<crate::types::comptime::TypeInfo> = None;
+    let has_type_params = params.iter().any(|p| p.is_type);
 
     for (i, (_label, arg_idx)) in args.iter().enumerate() {
         let param = params.get(i);
@@ -20843,7 +20892,7 @@ fn try_comptime_application(
             let arg_expr = tctx.arena.get_expr(*arg_idx);
             let type_info = resolve_comptime_type_arg(tctx, env, arg_expr);
             if let Some(ti) = type_info {
-                type_key_parts.push(ti.clone());
+                explicit_type_keys.push(ti.clone());
                 // Bind as ComptimeValue::Type for @typeInfo resolution
                 tctx.comptime_bindings.insert(
                     param_name.clone(),
@@ -20870,11 +20919,12 @@ fn try_comptime_application(
             let arg_ty = ctx.new_var(None);
             match type_expect(tctx, env, arg_expr, arg_ty, None) {
                 Ok(typed_arg) => {
-                    // Build type key from the value's type
-                    let ti = crate::types::comptime::build_type_info(
-                        ctx, env, typed_arg.exp_type, &mut vec![],
-                    );
-                    type_key_parts.push(ti);
+                    if first_value_type.is_none() {
+                        // Use the first value's type for the implicit type key
+                        first_value_type = Some(crate::types::comptime::build_type_info(
+                            ctx, env, typed_arg.exp_type, &mut vec![],
+                        ));
+                    }
                     typed_args.push((param_name, typed_arg, false));
                 }
                 Err(_) => {
@@ -20886,14 +20936,19 @@ fn try_comptime_application(
         }
     }
 
-    // Build the type key from all type-bearing params
-    let type_key = if type_key_parts.len() == 1 {
-        type_key_parts[0].clone()
-    } else if type_key_parts.is_empty() {
-        // No type-bearing args — use Unit as a degenerate key
-        crate::types::comptime::TypeInfo::Unit
+    // Type key: explicit type params if any, otherwise the first value's type.
+    // Decoder: decode(user, json) → key=user (explicit)
+    // Encoder: encode(alice) → key=user (implicit from alice's type)
+    let type_key = if has_type_params {
+        if explicit_type_keys.len() == 1 {
+            explicit_type_keys[0].clone()
+        } else if explicit_type_keys.is_empty() {
+            crate::types::comptime::TypeInfo::Unit
+        } else {
+            crate::types::comptime::TypeInfo::Tuple { elements: explicit_type_keys }
+        }
     } else {
-        crate::types::comptime::TypeInfo::Tuple { elements: type_key_parts }
+        first_value_type.unwrap_or(crate::types::comptime::TypeInfo::Unit)
     };
 
     let gen_name = crate::types::comptime::make_monomorph_name(&func_name, &type_key);

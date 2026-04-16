@@ -79,6 +79,44 @@ fn json_codec() {
     }
 }
 
+#[test]
+fn parse_type_param_mixed_with_value_param() {
+    let source = r#"
+@comptime
+let identity = (type t, x: t) => x
+let y = identity(int, 5)
+"#;
+    let mut parser = rescript_compiler::parser::Parser::new("test.res", source);
+    let _structure = rescript_compiler::parser::module::parse_structure(&mut parser);
+    assert!(!parser.has_errors(), "Mixed (type t, x) params should parse");
+}
+
+#[test]
+fn comptime_type_param_decoder_pattern() {
+    // Minimal test: type param + value param + @typeInfo(t)
+    let source = r#"
+@comptime
+let describe = (type t, x) => {
+  switch @typeInfo(t) {
+  | Int => "int"
+  | String => "string"
+  | _ => "other"
+  }
+}
+
+let y = describe(int, 42)
+"#;
+    let result = compile_with_stdlib(source, "type_param_decoder.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== TYPE PARAM DECODER JS ===\n{}\n=== END ===", output);
+            assert!(output.contains("\"int\""), "Expected 'int' in output:\n{output}");
+            assert!(!output.contains("typeInfo"), "No runtime typeInfo:\n{output}");
+        }
+        Err(e) => panic!("decoder with type param should compile: {e}"),
+    }
+}
+
 // ============================================================================
 // Parser tests
 // ============================================================================
