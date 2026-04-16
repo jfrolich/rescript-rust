@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 568 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 89 output diffs
+**Status:** 570 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 87 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **568 / 657**
+- JS snapshot parity: **570 / 657**
 - Compile errors: **0**
-- Output diffs: **89**
+- Output diffs: **87**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,64 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **568 / 657**
+- JS snapshot parity: **570 / 657**
 - Compile errors: **0**
-- Output diffs: **89**
+- Output diffs: **87**
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: port the OCaml pretty-printer grouping that still affected the
+  remaining multiline object-literal JS snapshot diffs in `gpr_1946_test` and
+  `equal_exception_test`, while keeping the existing nested member-target
+  array-call guard from over-indenting Promise-style chains inside blocks
+- Active backend focus stays in **Phase 5: Printer-only drift** from `PLAN.md`;
+  the OCaml reference lives in `compiler/core/js_dump.ml` and
+  `compiler/ext/ext_pp.ml`, and the Rust change stays in
+  `compiler-rust/src/js_ir/printer.rs`
+- OCaml reference:
+  - `compiler/core/js_dump.ml`, especially `If`, `Caml_block_tag`, `Call`,
+    and `arguments`
+  - `compiler/ext/ext_pp.ml`, especially `group` and `paren_group`
+- Rust change:
+  - matched OCaml's `If` condition printer by wrapping the condition
+    expression in an extra indent level while it is printed inside `(...)`
+  - matched OCaml's `Caml_block_tag` printer by adding the missing grouped
+    target indentation before `.TAG`
+  - kept the existing call-argument extra-group rule scoped to
+    `level == 15` member/index-target calls, but suppressed it when the
+    printer is already inside an indented block so nested `Promise.all([...]).then`
+    shapes do not double-indent
+  - added regression coverage in
+    `test_print_if_condition_call_object_argument_uses_snapshot_indent_like_ocaml`,
+    `test_print_caml_block_tag_call_argument_uses_group_indent_like_ocaml`,
+    and `test_print_nested_member_target_call_with_multiline_array_arg_avoids_double_indent`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_if_condition_call_object_argument_uses_snapshot_indent_like_ocaml -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_parenthesized_object_literal_dot_access_as_call_argument_preserves_base_indent -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_caml_block_tag_call_argument_uses_group_indent_like_ocaml -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_ir::printer::tests::test_print_nested_member_target_call_with_multiline_array_arg_avoids_double_indent -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_1946_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh equal_exception_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh src/stdlib/Stdlib_PromiseTest.res --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1946_test.res` now matches its checked-in snapshot
+    again; the plain `({"_5": 3})._5` call argument stays at OCaml's base
+    indent while the `Obj.tag(Obj.repr(...))` path regains OCaml's grouped
+    `.TAG` indentation
+  - `tests/tests/src/equal_exception_test.res` now matches its checked-in
+    snapshot; the `if (Primitive_object.equal(..., { ... }) !== false)` shape
+    regains the missing condition-group indentation from `js_dump.ml`
+  - `tests/tests/src/ExternalShadow.res` remained exact, and
+    `tests/tests/src/stdlib/Stdlib_PromiseTest.res` stayed on its separate
+    `let tmp` normalization diff, which confirms this slice stayed scoped to
+    multiline literal indentation only
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **568 / 657** -> **570 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **89** -> **87** (**-2**)
 
 This current worktree measurement now supersedes the earlier stale warning
 about the temporary `RefCell already borrowed` compile failures.

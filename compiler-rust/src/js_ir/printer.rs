@@ -523,7 +523,7 @@ impl JsPrinter {
             StatementDesc::If(cond, then_block, else_block) => {
                 self.write("if ");
                 self.write_char('(');
-                self.print_expression(cond, 0);
+                self.with_indent(1, |this| this.print_expression(cond, 0));
                 self.write(") ");
                 self.print_brace_block(then_block);
 
@@ -2047,7 +2047,7 @@ impl JsPrinter {
             }
 
             ExpressionDesc::CamlBlockTag(e, tag) => {
-                self.print_expression(e, 15);
+                self.with_indent(1, |this| this.print_expression(e, 15));
                 self.write_char('.');
                 self.write(tag);
             }
@@ -2221,7 +2221,8 @@ impl JsPrinter {
     }
 
     fn print_call_argument(&mut self, expr: &Expression, call_level: u8) {
-        let extra_group_indent = call_argument_needs_extra_group_indent(expr, call_level)
+        let extra_group_indent =
+            call_argument_needs_extra_group_indent(expr, call_level, self.indent)
             && !self.output.is_empty()
             && !self.last_new_line;
         if extra_group_indent {
@@ -2744,14 +2745,25 @@ fn raw_js_expression_needs_paren(code: &str) -> bool {
     }
 }
 
-fn call_argument_needs_extra_group_indent(expr: &Expression, call_level: u8) -> bool {
-    if call_level != 15 {
+fn call_argument_needs_extra_group_indent(
+    expr: &Expression,
+    call_level: u8,
+    current_indent: usize,
+) -> bool {
+    // OCaml's call printer adds an extra grouping level only when the call
+    // itself is printed as a member/index target (`level == 15`). Preserve
+    // that behavior, but suppress it in already-indented block contexts to
+    // avoid double-indenting multiline literals.
+    if call_level != 15 || current_indent != 0 {
         return false;
     }
 
     match &expr.desc {
         ExpressionDesc::Object(_, _) => true,
         ExpressionDesc::Array(elements, _) => elements.len() > 1,
+        ExpressionDesc::OptionalBlock(inner, true) => {
+            call_argument_needs_extra_group_indent(inner, call_level, current_indent)
+        }
         _ => false,
     }
 }
@@ -3971,6 +3983,42 @@ mod tests {
             CallInfo::default(),
         );
         assert_eq!(print_expression(&expr), "foo(undefined)");
+    }
+
+    #[test]
+    fn test_print_if_condition_call_object_argument_uses_snapshot_indent_like_ocaml() {
+        let cond = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::call(
+                Expression::new(ExpressionDesc::StaticIndex(
+                    Box::new(Expression::var(Ident::create_local("Primitive_object"))),
+                    "equal".to_string(),
+                    None,
+                )),
+                vec![
+                    Expression::var(Ident::create_local("e")),
+                    Expression::new(ExpressionDesc::Object(
+                        None,
+                        vec![(
+                            PropertyName::lit("RE_EXN_ID"),
+                            Expression::var(Ident::create_local("Not_found")),
+                        )],
+                    )),
+                ],
+                CallInfo::default(),
+            ),
+            Expression::bool(false),
+        );
+        let stmt = Statement::new(StatementDesc::If(
+            cond,
+            vec![Statement::return_(Expression::number(Number::int(1)))],
+            vec![],
+        ));
+
+        assert_eq!(
+            print_block(&vec![stmt]),
+            "if (Primitive_object.equal(e, {\n    RE_EXN_ID: Not_found\n  }) !== false) {\n  return 1;\n}"
+        );
     }
 
     #[test]
@@ -5922,6 +5970,61 @@ mod tests {
         );
 
         assert_eq!(print_expression(&call), "f(({\n  _5: 3\n}).TAG)");
+    }
+
+    #[test]
+    fn test_print_caml_block_tag_call_argument_uses_group_indent_like_ocaml() {
+        let call = Expression::call(
+            Expression::new(ExpressionDesc::StaticIndex(
+                Box::new(Expression::var(Ident::create_local("console"))),
+                "log".to_string(),
+                None,
+            )),
+            vec![Expression::new(ExpressionDesc::CamlBlockTag(
+                Box::new(Expression::new(ExpressionDesc::Object(
+                    None,
+                    vec![(PropertyName::lit("_5"), Expression::number(Number::int(3)))],
+                ))),
+                "TAG".to_string(),
+            ))],
+            CallInfo::default(),
+        );
+
+        assert_eq!(print_expression(&call), "console.log(({\n    _5: 3\n  }).TAG)");
+    }
+
+    #[test]
+    fn test_print_nested_member_target_call_with_multiline_array_arg_avoids_double_indent() {
+        let promise_all = Expression::call(
+            Expression::new(ExpressionDesc::StaticIndex(
+                Box::new(Expression::var(Ident::create_local("Promise"))),
+                "all".to_string(),
+                None,
+            )),
+            vec![Expression::array(
+                vec![
+                    Expression::var(Ident::create_local("p1")),
+                    Expression::var(Ident::create_local("p2")),
+                    Expression::var(Ident::create_local("p3")),
+                ],
+                MutableFlag::Immutable,
+            )],
+            CallInfo::default(),
+        );
+        let stmt = Statement::new(StatementDesc::If(
+            Expression::bool(true),
+            vec![Statement::return_(Expression::new(ExpressionDesc::StaticIndex(
+                Box::new(promise_all),
+                "then".to_string(),
+                None,
+            )))],
+            vec![],
+        ));
+
+        assert_eq!(
+            print_block(&vec![stmt]),
+            "if (true) {\n  return $$Promise.all([\n    p1,\n    p2,\n    p3\n  ]).then;\n}"
+        );
     }
 
     #[test]
