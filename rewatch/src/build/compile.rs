@@ -131,15 +131,28 @@ pub fn compile(
     // so the namespace signature must be available in the PersistentEnv first.
     if build_state.build_mode().is_in_process() {
         register_namespace_signatures(build_state);
-        // Runtime modules (Pervasives, Stdlib, Js, Belt, etc.) are loaded
-        // on-demand from their CMI files via the include_paths mechanism.
-        // No source pre-compilation needed — the CMI files have fully
-        // resolved module aliases and signatures.
-
-        // Clear source-fallback paths — the main compile
-        // loop must NOT use source-fallback (it causes stack overflow on Rayon
-        // workers). Modules not pre-compiled into the registry will fail to
-        // load, producing type errors instead of crashes.
+        register_source_fallback_paths(build_state);
+        // Pre-compile all @rescript/runtime modules into the registry.
+        // In in-process mode, the registry is the sole source of truth —
+        // no CMI fallback. Every dependency must be in the registry.
+        let pre_compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rayon::scope(|s| {
+                s.spawn(|_| {
+                    pre_compile_runtime_modules(build_state);
+                });
+            });
+        }));
+        if let Err(e) = pre_compile_result {
+            let msg = if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = e.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "unknown".to_string()
+            };
+            eprintln!("Warning: runtime pre-compilation panicked: {}", msg);
+        }
+        // Clear source-fallback paths after pre-compilation.
         build_state
             .module_registry
             .lock()
@@ -238,6 +251,7 @@ pub fn compile(
                         // Record interface generation before compilation for staleness detection
                         let gen_before = build_state.get_interface_generation(module_name);
 
+                        let compile_start = std::time::Instant::now();
                         let result = compile_module_in_process(
                             package,
                             module,
@@ -246,6 +260,10 @@ pub fn compile(
                             &build_state.build_state,
                             build_state,
                         );
+                        let elapsed = compile_start.elapsed();
+                        if elapsed.as_millis() > 100 {
+                            eprintln!("[timing] {} {:.0}ms", module_name, elapsed.as_secs_f64() * 1000.0);
+                        }
 
                         let gen_after = build_state.get_interface_generation(module_name);
 
@@ -868,13 +886,6 @@ fn build_compiler_options(
 
     // Add dev dependency paths if the module is type:dev
     // (omitted for simplicity in first cut; can be added later)
-
-    // Add the runtime lib/ocaml directory so modules can resolve
-    // Pervasives, Stdlib, Js, Belt, etc. from CMI when not yet in the registry.
-    let runtime_ocaml = build_state.compiler_info.runtime_path.join("lib").join("ocaml");
-    if !include_paths.contains(&runtime_ocaml) {
-        include_paths.push(runtime_ocaml);
-    }
 
     // Extract JSX version from root config
     let jsx_version = root_config

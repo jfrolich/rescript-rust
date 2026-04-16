@@ -1722,6 +1722,7 @@ pub fn compile_source_in_process(
     let mut env = initial_env(&type_ctx);
 
     // Create a fresh PersistentEnv from the shared registry.
+    let t_env = std::time::Instant::now();
     let mut pers_env = PersistentEnv::from_registry(registry);
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
@@ -1731,13 +1732,14 @@ pub fn compile_source_in_process(
     pers_env.set_nopervasives(options.nopervasives);
     pers_env.set_compiling_module(options.module_name.clone());
     load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    let env_ms = t_env.elapsed().as_millis();
 
     tctx.set_persistent_env(pers_env);
 
-    log::debug!("[compile_source_in_process] {} type_structure start", module_name);
+    let t_tc = std::time::Instant::now();
     let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
-    log::debug!("[compile_source_in_process] {} type_structure done", module_name);
+    let tc_ms = t_tc.elapsed().as_millis();
 
     // Apply interface constraints if a .resi was pre-registered.
     if has_interface {
@@ -1762,7 +1764,7 @@ pub fn compile_source_in_process(
         crate::types::includemod::simplify_signature(&typed_structure.str_type);
 
     // Lambda conversion
-    log::debug!("[compile_source_in_process] {} lambda start", module_name);
+    let t_lambda = std::time::Instant::now();
     let lambda_start_stamp = type_ctx
         .current_stamp()
         .max(max_lambda_input_stamp(&typed_structure));
@@ -1794,8 +1796,10 @@ pub fn compile_source_in_process(
         raw_lambda,
         raw_lambda_current_stamp,
     );
+    let raw_lambda_ms = t_lambda.elapsed().as_millis();
 
     // Lambda -> JS IR
+    let t_jsir = std::time::Instant::now();
     let mut module_path_resolver = ModulePathResolver::from_compile_options(
         options.source_filename.as_deref(),
         options.output_path.as_deref(),
@@ -1818,11 +1822,19 @@ pub fn compile_source_in_process(
         &possible_required_modules,
     );
 
+    let jsir_ms = t_jsir.elapsed().as_millis();
+
     // JS IR -> JS source
-    log::debug!("[compile_source_in_process] {} js-print start", module_name);
+    let t_js = std::time::Instant::now();
     let js =
         print_deps_program_with_directives(&program, Some(&module_path_resolver), &file_directives, options.debug, options.jsx_preserve);
-    log::debug!("[compile_source_in_process] {} complete", module_name);
+    let js_ms = t_js.elapsed().as_millis();
+
+    let total_ms = env_ms + tc_ms + raw_lambda_ms + jsir_ms + js_ms;
+    if total_ms > 100 {
+        eprintln!("[phases] {} env={}ms tc={}ms raw={}ms jsir={}ms js={}ms total={}ms",
+            module_name, env_ms, tc_ms, raw_lambda_ms, jsir_ms, js_ms, total_ms);
+    }
 
     // Register the module's published interface in the internal PersistentEnv
     // and extract the finalized PersStruct for the caller's registry.

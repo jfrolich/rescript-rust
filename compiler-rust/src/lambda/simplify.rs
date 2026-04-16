@@ -169,24 +169,11 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     let preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
     let preserved_local_module_eta_alias_bindings =
         collect_local_module_eta_alias_bindings(&flattened);
-    let first = simplify_for_js_backend_once(
+    simplify_for_js_backend_once(
         &flattened,
         &preserved_export_bindings,
         &preserved_local_module_eta_alias_bindings,
         true,
-    );
-    let second = simplify_for_js_backend_once(
-        &first,
-        &preserved_export_bindings,
-        &preserved_local_module_eta_alias_bindings,
-        false,
-    );
-    let lets_dce_style = simplify_direct_function_applications_like_lets_dce(&second);
-    simplify_for_js_backend_once(
-        &lets_dce_style,
-        &preserved_export_bindings,
-        &preserved_local_module_eta_alias_bindings,
-        false,
     )
 }
 
