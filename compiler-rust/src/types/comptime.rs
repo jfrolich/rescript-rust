@@ -370,16 +370,57 @@ pub fn type_info_to_typed_expr<'a>(
     let args = match info {
         // No-arg constructors
         TypeInfo::Int | TypeInfo::Float | TypeInfo::String | TypeInfo::Bool
-        | TypeInfo::Unit | TypeInfo::Char | TypeInfo::Bigint | TypeInfo::Unknown { .. } => {
+        | TypeInfo::Unit | TypeInfo::Char | TypeInfo::Bigint
+        | TypeInfo::Tuple { .. } | TypeInfo::Unknown { .. } => {
             vec![]
         }
-        // Constructors with record payloads would need more complex construction
-        // For now, return the simple constructor for no-arg cases
-        _ => {
-            // TODO: construct record payloads for Record, Variant, Array, etc.
-            // For now, skip complex constructors
-            vec![]
+        // Record({name, fields, unboxed}) — construct inline record
+        TypeInfo::Record { name, fields, unboxed } => {
+            // Build field info array
+            let field_exprs: Vec<typedtree::Expression> = fields
+                .iter()
+                .map(|f| build_field_info_expr(f, ctx, env, loc))
+                .collect();
+            let fields_arr = typedtree::Expression::new(
+                typedtree::ExpressionDesc::Texp_array(field_exprs),
+                loc,
+                ctx.new_constr(predef::path_array(), vec![ctx.new_constr(predef::path_field_info(), vec![])]),
+                env_ref,
+                crate::parser::ast::Attributes::new(),
+            );
+            let name_expr = make_string_expr(name, ctx, env, loc);
+            let unboxed_expr = make_bool_expr(*unboxed, ctx, env, loc);
+            // Inline record: the single arg is a record expression
+            // For now, wrap the fields as a tuple (the type checker will handle it)
+            vec![typedtree::Expression::new(
+                typedtree::ExpressionDesc::Texp_tuple(vec![name_expr, fields_arr, unboxed_expr]),
+                loc,
+                ctx.new_var(None),
+                env_ref,
+                crate::parser::ast::Attributes::new(),
+            )]
         }
+        TypeInfo::Array { element } => {
+            let inner = type_info_to_typed_expr(element, ctx, env, loc)?;
+            vec![typedtree::Expression::new(
+                typedtree::ExpressionDesc::Texp_tuple(vec![inner]),
+                loc,
+                ctx.new_var(None),
+                env_ref,
+                crate::parser::ast::Attributes::new(),
+            )]
+        }
+        TypeInfo::Option { inner } => {
+            let inner_expr = type_info_to_typed_expr(inner, ctx, env, loc)?;
+            vec![typedtree::Expression::new(
+                typedtree::ExpressionDesc::Texp_tuple(vec![inner_expr]),
+                loc,
+                ctx.new_var(None),
+                env_ref,
+                crate::parser::ast::Attributes::new(),
+            )]
+        }
+        _ => vec![],
     };
 
     Some(typedtree::Expression::new(
@@ -389,6 +430,73 @@ pub fn type_info_to_typed_expr<'a>(
         env_ref,
         crate::parser::ast::Attributes::new(),
     ))
+}
+
+/// Build a typed expression for a fieldInfo record value.
+fn build_field_info_expr<'a>(
+    field: &FieldInfo,
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    loc: crate::parse_arena::LocIdx,
+) -> typedtree::Expression {
+    let env_ref = ctx.store_typed_env(env);
+    let name_expr = make_string_expr(&field.name, ctx, env, loc);
+    let typ_expr = type_info_to_typed_expr(&field.typ, ctx, env, loc)
+        .unwrap_or_else(|| make_string_expr("unknown", ctx, env, loc));
+    let optional_expr = make_bool_expr(field.optional, ctx, env, loc);
+    let mutable_expr = make_bool_expr(field.mutable, ctx, env, loc);
+
+    // Return as a tuple for now (proper record construction needs LabelDescription)
+    typedtree::Expression::new(
+        typedtree::ExpressionDesc::Texp_tuple(vec![name_expr, typ_expr, optional_expr, mutable_expr]),
+        loc,
+        ctx.new_constr(predef::path_field_info(), vec![]),
+        env_ref,
+        crate::parser::ast::Attributes::new(),
+    )
+}
+
+/// Make a typed string constant expression.
+fn make_string_expr<'a>(
+    s: &str,
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    loc: crate::parse_arena::LocIdx,
+) -> typedtree::Expression {
+    typedtree::Expression::new(
+        typedtree::ExpressionDesc::Texp_constant(typedtree::Constant::String(s.to_string(), None)),
+        loc,
+        ctx.new_constr(predef::path_string(), vec![]),
+        ctx.store_typed_env(env),
+        crate::parser::ast::Attributes::new(),
+    )
+}
+
+/// Make a typed boolean expression.
+fn make_bool_expr<'a>(
+    b: bool,
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    loc: crate::parse_arena::LocIdx,
+) -> typedtree::Expression {
+    let bool_ty = ctx.new_constr(predef::path_bool(), vec![]);
+    let env_ref = ctx.store_typed_env(env);
+    let ctor_name = if b { "true" } else { "false" };
+    let cstr_desc = match env.find_constructor(ctor_name) {
+        Ok(desc) => desc.clone(),
+        Err(_) => return typedtree::Expression::new(
+            typedtree::ExpressionDesc::Texp_constant(typedtree::Constant::Int(if b { 1 } else { 0 })),
+            loc, bool_ty, env_ref, crate::parser::ast::Attributes::new(),
+        ),
+    };
+    let lid_loc = crate::parse_arena::Located {
+        txt: crate::parse_arena::LidentIdx(0),
+        loc: crate::parse_arena::LocIdx::none(),
+    };
+    typedtree::Expression::new(
+        typedtree::ExpressionDesc::Texp_construct(lid_loc, cstr_desc, vec![]),
+        loc, bool_ty, env_ref, crate::parser::ast::Attributes::new(),
+    )
 }
 
 // ── ComptimeValue ───────────────────────────────────────────────────────────
