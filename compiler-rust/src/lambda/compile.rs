@@ -5336,6 +5336,11 @@ impl LambdaCompiler {
             Pobjorder => self.runtime_call_expr("Primitive_object", "compare", compiled_args),
             Pobjmin => self.runtime_call_expr("Primitive_object", "min", compiled_args),
             Pobjmax => self.runtime_call_expr("Primitive_object", "max", compiled_args),
+            Pobjtag => Expression::new(ExpressionDesc::CamlBlockTag(
+                Box::new(compiled_args[0].clone()),
+                "TAG".to_string(),
+            )),
+            Pobjsize => Expression::length(compiled_args[0].clone(), LengthObject::CamlBlock),
             Pboolorder => match (
                 bool_literal(&compiled_args[0]),
                 bool_literal(&compiled_args[1]),
@@ -15180,6 +15185,34 @@ mod tests {
 
         assert!(compiled.prelude.is_empty());
         assert_eq!(print_expression(&compiled.expr), "Primitive_object.compare");
+    }
+
+    #[test]
+    fn compile_obj_tag_uses_caml_block_tag_access_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pobjtag,
+            vec![Lambda::var(value.clone())],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "value.TAG");
+    }
+
+    #[test]
+    fn compile_obj_size_uses_caml_block_length_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let value = Ident::create_local("value");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::Pobjsize,
+            vec![Lambda::var(value.clone())],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "value.length");
     }
 
     #[test]

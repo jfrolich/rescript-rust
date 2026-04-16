@@ -72,6 +72,53 @@ about the temporary `RefCell already borrowed` compile failures.
 
 Latest iteration on **2026-04-16**:
 
+- Active slice: port OCaml's missing object primitive lowering for `Pobjtag`
+  and `Pobjsize`, which were still falling through to `undefined` in Rust's
+  primitive table
+- Active backend focus stays in **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`; the fix lands in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile_primitive.ml`, especially the `Pobjtag` and
+    `Pobjsize` branches that lower to `E.tag e` and `E.obj_length e`
+  - `compiler/core/js_exp_make.ml`, especially `tag` and `obj_length`
+- Rust change:
+  - added explicit `Pobjtag` lowering to `ExpressionDesc::CamlBlockTag(...)`
+    with the OCaml `TAG` field name instead of falling through to the wildcard
+    `undefined` case
+  - added explicit `Pobjsize` lowering to
+    `Expression::length(..., LengthObject::CamlBlock)` instead of the same
+    wildcard `undefined` fallback
+  - added regression coverage in
+    `compile_obj_tag_uses_caml_block_tag_access_like_ocaml` and
+    `compile_obj_size_uses_caml_block_length_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_obj_ -- --nocapture`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_1946_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh chain_code_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - primitive lowering is now OCaml-aligned and unit-covered; direct
+    `Pobjtag`/`Pobjsize` compilation no longer produces the wildcard
+    `undefined` fallback
+  - unchanged guards `tests/tests/src/chain_code_test.res` and
+    `tests/tests/src/ExternalShadow.res` remained exact after the primitive
+    change
+  - `tests/tests/src/gpr_1946_test.res` still differs exactly at
+    `console.log(({"_5": 3}).TAG)`, which means a later rewrite is still
+    collapsing `CamlBlockTag` over a plain object literal to `undefined`
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **564 / 657** -> **564 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **93** -> **93** (**no change**)
+- Keep this change because it is a direct OCaml primitive port:
+  `lam_compile_primitive.ml` does not route `Pobjtag` or `Pobjsize` through an
+  `undefined` fallback. Even though the current snapshot surface still needs a
+  follow-up rewrite fix to expose the new primitive lowering on `gpr_1946`,
+  the primitive table itself is now correct and should not be reverted.
+
+Latest iteration on **2026-04-16**:
+
 - Active slice: narrow the flatten-and-mark-dead literal projection rewrite
   back to OCaml's immutable `Caml_block` / array cases and stop collapsing
   plain JS object property reads, fixing the over-optimization cluster behind
