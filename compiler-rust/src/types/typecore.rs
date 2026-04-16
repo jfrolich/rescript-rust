@@ -4864,8 +4864,29 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_field(record_expr_idx, field_lid) => {
-            // Field access
+            // Check for comptime field access: field.name where field is comptime-known
             let record_expr = tctx.arena.get_expr(*record_expr_idx);
+            if let crate::parser::ast::ExpressionDesc::Pexp_ident(rec_lid) = &*record_expr.pexp_desc {
+                let longident = tctx.arena.get_longident(rec_lid.txt);
+                if longident.is_simple() {
+                    let var_name = tctx.arena.get_string(longident.last_idx());
+                    if let Some(crate::types::comptime::ComptimeValue::Record(entries)) = tctx.comptime_bindings.get(var_name).cloned() {
+                        let field_name = {
+                            let fl = tctx.arena.get_longident(field_lid.txt);
+                            tctx.arena.get_string(fl.last_idx()).to_string()
+                        };
+                        if let Some((_, field_val)) = entries.iter().find(|(k, _)| k == &field_name) {
+                            if let Some(typed_expr) = comptime_value_to_typed_expr(field_val, ctx, env, loc) {
+                                let expr_ty = typed_expr.exp_type;
+                                crate::types::ctype::unify(ctx, &mut tctx.unify_state, expr_ty, expected_ty)
+                                    .map_err(|e| super::TypeCoreError::Other(format!("comptime field access type mismatch: {:?}", e)))?;
+                                return Ok(typed_expr);
+                            }
+                        }
+                    }
+                }
+            }
+            // Normal field access
             let typed_field = type_field(
                 tctx,
                 env,
