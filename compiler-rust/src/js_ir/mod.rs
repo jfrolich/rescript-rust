@@ -1564,6 +1564,13 @@ fn block_last_is_terminal(block: &Block) -> bool {
     )
 }
 
+fn block_last_is_return(block: &Block) -> bool {
+    matches!(
+        last_statement(block).map(|stmt| &stmt.desc),
+        Some(StatementDesc::Return(_))
+    )
+}
+
 fn single_return_expr(block: &Block) -> Option<&Expression> {
     let [stmt] = block.as_slice() else {
         return None;
@@ -1729,8 +1736,8 @@ fn preserves_nullish_success_guard(cond: &Expression, then_: &Block, else_: &Blo
         return false;
     }
 
-    let then_nontrivial_terminal = then_.len() > 1 && block_last_is_terminal(then_);
-    let else_nontrivial_terminal = else_.len() > 1 && block_last_is_terminal(else_);
+    let then_nontrivial_terminal = then_.len() > 1 && block_last_is_return(then_);
+    let else_nontrivial_terminal = else_.len() > 1 && block_last_is_return(else_);
     let then_simple_fallback = then_.is_empty() || single_return_expr(then_).is_some();
     let else_simple_fallback = else_.is_empty() || single_return_expr(else_).is_some();
 
@@ -4040,6 +4047,76 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn test_if_statement_rewrites_strict_undefined_continue_success_tail_like_ocaml() {
+        let value = Ident::create_local("value");
+        let next_value = Ident::create_local("nextValue");
+        let cond = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::var(value.clone()),
+            Expression::undefined(false),
+        );
+        let then_block = vec![
+            Statement::exp(Expression::bin(
+                BinOp::Eq,
+                Expression::var(next_value.clone()),
+                Expression::var(value.clone()),
+            )),
+            Statement::continue_(),
+        ];
+        let else_block = vec![Statement::return_(Expression::number(Number::int(1)))];
+
+        let stmt = Statement::if_(cond, then_block, else_block);
+
+        let StatementDesc::Block(block) = &stmt.desc else {
+            panic!("expected strict undefined continue tail to become a negative guard: {stmt:#?}");
+        };
+        let [guard, assign, continue_stmt] = block.as_slice() else {
+            panic!("expected guard + fallthrough assignment + continue");
+        };
+        assert!(matches!(
+            &guard.desc,
+            StatementDesc::If(test, then_block, else_block)
+                if matches!(
+                    &test.desc,
+                    ExpressionDesc::Bin(
+                        BinOp::EqEqEq,
+                        left,
+                        right
+                    ) if matches!(
+                        (&left.desc, &right.desc),
+                        (
+                            ExpressionDesc::Var(VIdent::Id(id)),
+                            ExpressionDesc::Undefined { .. }
+                        ) if id.same(&value)
+                    )
+                ) && matches!(
+                    then_block.as_slice(),
+                    [Statement {
+                        desc: StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                            ..
+                        }),
+                        ..
+                    }]
+                ) && else_block.is_empty()
+        ));
+        assert!(matches!(
+            &assign.desc,
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Bin(BinOp::Eq, target, source),
+                ..
+            }) if matches!(
+                (&target.desc, &source.desc),
+                (
+                    ExpressionDesc::Var(VIdent::Id(target_id)),
+                    ExpressionDesc::Var(VIdent::Id(source_id))
+                ) if target_id.same(&next_value) && source_id.same(&value)
+            )
+        ));
+        assert!(matches!(continue_stmt.desc, StatementDesc::Continue));
     }
 
     #[test]

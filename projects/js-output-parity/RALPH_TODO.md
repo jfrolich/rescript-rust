@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 564 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 93 output diffs
+**Status:** 565 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 92 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **564 / 657**
+- JS snapshot parity: **565 / 657**
 - Compile errors: **0**
-- Output diffs: **93**
+- Output diffs: **92**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,12 +63,71 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **564 / 657**
+- JS snapshot parity: **565 / 657**
 - Compile errors: **0**
-- Output diffs: **93**
+- Output diffs: **92**
 
 This current worktree measurement now supersedes the earlier stale warning
 about the temporary `RefCell already borrowed` compile failures.
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: finish the `gpr_1701_test` cluster by matching OCaml's
+  tail-loop lowering for wrapped `staticcatch`/`trywith` recursion and
+  restoring OCaml's negative early-return `if_` normalization for strict
+  `undefined` success guards that fall through into a `continue`
+- Active backend focus spans the same OCaml backend boundary from `PLAN.md`:
+  `compiler/core/lam_compile.ml` for the recursive `staticcatch`/`trywith`
+  lowering path and `compiler/core/js_stmt_make.ml` for the final `if_`
+  statement normalization that decides whether the emitted JS uses an
+  early-return negative guard or a positive guarded block
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially `compile_staticcatch`,
+    `compile_trywith`, and the self-tailcall handling in `compile_apply`
+  - `compiler/core/js_stmt_make.ml`, especially `if_` and its
+    `else = [return ...]` early-return rewrite
+- Rust change:
+  - in `compiler-rust/src/lambda/compile.rs`, kept the verified
+    `staticcatch` tail-loop lowering and added the missing
+    `LtryWith`-under-fallthrough path so the wrapped `read_lines2` recursion
+    now lowers like OCaml instead of staying as a direct recursive local
+    function
+  - in `compiler-rust/src/js_ir/mod.rs`, narrowed
+    `preserves_nullish_success_guard(...)` to nontrivial `return` tails only,
+    so strict `value !== undefined` guards with a `continue` success tail now
+    follow OCaml's `Js_stmt_make.if_` negative-guard rewrite instead of being
+    preserved as a positive branch
+  - added regression coverage in
+    `nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701` and
+    `test_if_statement_rewrites_strict_undefined_continue_success_tail_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release staticcatch_trywith -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release test_if_statement_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 600 cargo build --manifest-path rewatch/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_1701_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh exception_raise_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1701_test.res` now matches its checked-in snapshot
+    exactly; `read_lines2` lowers through the wrapped `staticcatch` loop path
+    and `read_lines` now uses OCaml's negative early-return guard for the
+    `undefined` sentinel case
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained exact after
+    the same JS-IR normalization change
+  - `tests/tests/src/exception_raise_test.res` still differs on the separate
+    grouped exception-catch merge shape, which confirms this slice stayed
+    scoped to the `gpr_1701` tail-loop / statement-normalization cluster
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **564 / 657** -> **565 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **93** -> **92** (**-1**)
+- Keep this change because both parts are direct OCaml ports:
+  `lam_compile.ml` keeps the wrapped `staticcatch` handler outside the
+  `trywith` body while still turning the recursive handler into a loop, and
+  `js_stmt_make.ml` rewrites `if cond then <continue-tail> else return x` into
+  a negative early-return guard when the fallback is the single `return`.
 
 Latest iteration on **2026-04-16**:
 

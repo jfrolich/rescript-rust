@@ -1545,6 +1545,35 @@ impl LambdaCompiler {
         block
     }
 
+    fn compile_fallthrough_staticcatch_tail_loop_return_block(
+        &mut self,
+        label: i32,
+        bindings: &[Ident],
+        body: &Lambda,
+        handler: &Lambda,
+        tail_loop: &mut TailLoopState,
+    ) -> Block {
+        let mut block: Block = bindings
+            .iter()
+            .map(|binding| {
+                Statement::variable(VariableDeclaration {
+                    ident: binding.clone(),
+                    value: None,
+                    property: LetKind::Variable,
+                    ident_info: IdentInfo::default(),
+                })
+            })
+            .collect();
+        let body_block = self.with_fallthrough_return_handler(label, bindings, |this| {
+            this.compile_tail_loop_return_block(body, tail_loop)
+        });
+        block.extend(body_block);
+        if !block_terminates(&block) {
+            block.extend(self.compile_tail_loop_return_block(handler, tail_loop));
+        }
+        block
+    }
+
     fn uses_fallthrough_staticcatch_return(
         &self,
         body: &Lambda,
@@ -1664,6 +1693,17 @@ impl LambdaCompiler {
                 }
                 _ => false,
             },
+            Lambda::LtryWith(try_body, _, _)
+                if !inside_enclosing_staticcatch_chain
+                    && !bindings.is_empty()
+                    && !self.handler_returns_unit_undefined(bindings, handler)
+                    && !lambda_contains_static_raise(handler)
+                    && !lambda_contains_staticcatch(handler)
+                    && body_has_target_exit
+                    && !lambda_contains_static_raise_to_other_label(try_body, label) =>
+            {
+                true
+            }
             _ => false,
         }
     }
@@ -1829,7 +1869,8 @@ impl LambdaCompiler {
         func: &crate::lambda::LFunction,
         tail_targets: &[Ident],
     ) -> Expression {
-        if !function_has_self_tailcall(tail_targets, &func.body) {
+        let has_self_tailcall = function_has_self_tailcall(tail_targets, &func.body);
+        if !has_self_tailcall {
             return self.compile_expr(&Lambda::Lfunction(func.clone())).expr;
         }
 
@@ -1939,10 +1980,18 @@ impl LambdaCompiler {
                 block
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
-                if (self.return_unit_stack.last().copied() == Some(true) && !bindings.is_empty())
-                    || self
-                        .return_staticcatch_requires_explicit_jump(*label, bindings, body, handler)
-                {
+                let uses_fallthrough =
+                    self.uses_fallthrough_staticcatch_return(body, *label, bindings, handler);
+                let requires_explicit_jump =
+                    (self.return_unit_stack.last().copied() == Some(true) && !bindings.is_empty())
+                        || self.return_staticcatch_requires_explicit_jump(
+                            *label, bindings, body, handler,
+                        );
+                if uses_fallthrough {
+                    self.compile_fallthrough_staticcatch_tail_loop_return_block(
+                        *label, bindings, body, handler, tail_loop,
+                    )
+                } else if requires_explicit_jump {
                     self.compile_staticcatch_tail_loop_return_block(
                         *label, bindings, body, handler, tail_loop,
                     )
@@ -1951,6 +2000,13 @@ impl LambdaCompiler {
                         this.compile_tail_loop_return_block(body, tail_loop)
                     })
                 }
+            }
+            Lambda::LtryWith(body, exn, handler)
+                if !self.fallthrough_return_handlers.is_empty() =>
+            {
+                let body_block = self.compile_tail_loop_return_block(body, tail_loop);
+                let handler_block = self.compile_tail_loop_return_block(handler, tail_loop);
+                vec![self.try_statement(body_block, exn, handler_block)]
             }
             Lambda::Lswitch(scrut, switch) => {
                 self.compile_tail_loop_switch_return_block(scrut, switch, tail_loop)
@@ -8142,13 +8198,13 @@ fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
             function_has_self_tailcall(tail_targets, body)
                 || function_has_self_tailcall(tail_targets, handler)
         }
+        Lambda::LtryWith(_, _, _) => false,
         Lambda::Lvar(_)
         | Lambda::LglobalModule(_, _)
         | Lambda::Lconst(_)
         | Lambda::Lfunction(_)
         | Lambda::Lletrec(_, _)
         | Lambda::LstaticRaise(_, _)
-        | Lambda::LtryWith(_, _, _)
         | Lambda::Lwhile(_, _)
         | Lambda::Lfor(_, _, _, _, _)
         | Lambda::Lassign(_, _) => false,
@@ -16652,6 +16708,422 @@ mod tests {
                 ..
             } if id.same(result)
         ));
+    }
+
+    #[test]
+    fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let x = Ident::create_local("x");
+        let g = Ident::create_local("g");
+        let exn = Ident::create_local("exn");
+        let val = Ident::create_local("val");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::LtryWith(
+                Box::new(Lambda::LstaticRaise(
+                    -2,
+                    vec![Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(x.clone())),
+                        ap_args: vec![],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })],
+                )),
+                exn.clone(),
+                Box::new(Lambda::const_(Constant::int(1))),
+            )),
+            (-2, vec![val.clone()]),
+            Box::new(Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::var(g.clone())),
+                ap_args: vec![],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            })),
+        ));
+
+        let [declare, try_stmt, ret] = block.as_slice() else {
+            panic!("expected binding decl, try, and trailing return, got {block:?}");
+        };
+
+        assert!(matches!(
+            &declare.desc,
+            StatementDesc::Variable(VariableDeclaration { ident, value, .. })
+                if ident.same(&val) && value.is_none()
+        ));
+
+        let StatementDesc::Try(body, Some((caught, handler)), None) = &try_stmt.desc else {
+            panic!("expected a try statement, got {try_stmt:?}");
+        };
+        assert!(caught.same(&exn));
+        assert!(matches!(
+            body.as_slice(),
+            [Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Bin(BinOp::Eq, lhs, rhs),
+                    ..
+                }),
+                ..
+            }] if matches!(
+                (&lhs.as_ref().desc, &rhs.as_ref().desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                    ExpressionDesc::Call(func, args, _)
+                ) if lhs_id.same(&val)
+                    && args.is_empty()
+                    && matches!(
+                        func.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(func_id)),
+                            ..
+                        } if func_id.same(&x)
+                    )
+            )
+        ));
+        assert!(matches!(
+            handler.as_slice(),
+            [Statement {
+                desc: StatementDesc::Return(Expression {
+                    desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                    ..
+                }),
+                ..
+            }]
+        ));
+
+        assert!(matches!(
+            &ret.desc,
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) if args.is_empty()
+                && matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(func_id)),
+                        ..
+                    } if func_id.same(&g)
+                )
+        ));
+    }
+
+    #[test]
+    fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let loop_ = Ident::create_local("loop");
+        let acc = Ident::create_local("acc");
+        let read = Ident::create_local("read");
+        let next_acc = Ident::create_local("nextAcc");
+        let exn = Ident::create_local("exn");
+        let lam = Lambda::letrec(
+            vec![(
+                loop_.clone(),
+                Lambda::function_(
+                    1,
+                    vec![acc.clone()],
+                    Lambda::LstaticCatch(
+                        Box::new(Lambda::LtryWith(
+                            Box::new(Lambda::LstaticRaise(
+                                -1,
+                                vec![Lambda::Lapply(Apply {
+                                    ap_func: Box::new(Lambda::var(read.clone())),
+                                    ap_args: vec![Lambda::var(acc.clone())],
+                                    ap_info: ApInfo {
+                                        loc: Location::none(),
+                                        inlined: InlineAttribute::Default,
+                                        status: ApplyStatus::Na,
+                                    },
+                                    ap_transformed_jsx: false,
+                                })],
+                            )),
+                            exn.clone(),
+                            Box::new(Lambda::const_(Constant::int(0))),
+                        )),
+                        (-1, vec![next_acc.clone()]),
+                        Box::new(Lambda::Lapply(Apply {
+                            ap_func: Box::new(Lambda::var(loop_.clone())),
+                            ap_args: vec![Lambda::var(next_acc.clone())],
+                            ap_info: ApInfo {
+                                loc: Location::none(),
+                                inlined: InlineAttribute::Default,
+                                status: ApplyStatus::Na,
+                            },
+                            ap_transformed_jsx: false,
+                        })),
+                    ),
+                    FunctionAttribute::default(),
+                ),
+            )],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert!(
+            rendered.contains("while (true)"),
+            "expected staticcatch trywith lowering to stay on the tail loop path:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("let nextAcc;"),
+            "expected the bound staticcatch value to be declared outside the try:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("try {"),
+            "expected the bound exit effect to stay inside the try body:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("nextAcc = read(")
+                || rendered.contains("nextAcc = read(acc)")
+                || rendered.contains("nextAcc = _read(")
+                || rendered.contains("nextAcc = _read(acc)"),
+            "expected the fallthrough exit value to be assigned before the loop continue:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("continue;"),
+            "expected the recursive handler to stay as a loop continue:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("return loop("),
+            "unexpected direct recursive return remained after the staticcatch handler:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn direct_recursive_trywith_self_calls_do_not_lower_to_loops_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let loop_ = Ident::create_local("loop");
+        let acc = Ident::create_local("acc");
+        let exn = Ident::create_local("exn");
+        let lam = Lambda::letrec(
+            vec![(
+                loop_.clone(),
+                Lambda::function_(
+                    1,
+                    vec![acc.clone()],
+                    Lambda::LtryWith(
+                        Box::new(Lambda::Lapply(Apply {
+                            ap_func: Box::new(Lambda::var(loop_.clone())),
+                            ap_args: vec![Lambda::var(acc.clone())],
+                            ap_info: ApInfo {
+                                loc: Location::none(),
+                                inlined: InlineAttribute::Default,
+                                status: ApplyStatus::Na,
+                            },
+                            ap_transformed_jsx: false,
+                        })),
+                        exn,
+                        Box::new(Lambda::const_(Constant::int(0))),
+                    ),
+                    FunctionAttribute::default(),
+                ),
+            )],
+            Lambda::unit(),
+        );
+
+        let compiled = compiler.compile_expr(&lam);
+        let rendered = print_block(&compiled.prelude);
+
+        assert!(
+            !rendered.contains("while (true)"),
+            "expected direct recursive trywith lowering to stay as a recursive call:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("try {"),
+            "expected the recursive self-call to stay inside the try body:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("return loop(acc)")
+                || rendered.contains("return loop(_acc)")
+                || rendered.contains("return loop("),
+            "expected the direct recursive return to remain in the emitted body:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
+        let mut compiler = LambdaCompiler::new();
+        let outer = Ident::create_local("readLines");
+        let inc = Ident::create_local("inc");
+        let loop_ = Ident::create_local("loop");
+        let acc = Ident::create_local("acc");
+        let read = Ident::create_local("read");
+        let next_acc = Ident::create_local("nextAcc");
+        let exn = Ident::create_local("exn");
+        let raw_exn = Ident::create_local("rawExn");
+        let reverse = Ident::create_local("reverse");
+        let eof = Ident::create_local("End_of_file");
+        let cons = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::Constructor {
+                    name: "::".to_string(),
+                    num_nonconst: 1,
+                    tag: 0,
+                    attrs: vec![],
+                },
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(next_acc.clone()), Lambda::var(acc.clone())],
+            Location::none(),
+        );
+
+        let lam = Lambda::letrec(
+            vec![(
+                outer.clone(),
+                Lambda::prim(
+                    Primitive::PjsFnMake(1),
+                    vec![Lambda::function_(
+                        1,
+                        vec![inc.clone()],
+                        Lambda::letrec(
+                            vec![(
+                                loop_.clone(),
+                                Lambda::prim(
+                                    Primitive::PjsFnMake(1),
+                                    vec![Lambda::function_(
+                                        1,
+                                        vec![acc.clone()],
+                                        Lambda::LstaticCatch(
+                                            Box::new(Lambda::LtryWith(
+                                                Box::new(Lambda::LstaticRaise(
+                                                    -1,
+                                                    vec![Lambda::Lapply(Apply {
+                                                        ap_func: Box::new(Lambda::var(
+                                                            read.clone(),
+                                                        )),
+                                                        ap_args: vec![Lambda::var(inc.clone())],
+                                                        ap_info: ApInfo {
+                                                            loc: Location::none(),
+                                                            inlined: InlineAttribute::Default,
+                                                            status: ApplyStatus::Na,
+                                                        },
+                                                        ap_transformed_jsx: false,
+                                                    })],
+                                                )),
+                                                raw_exn.clone(),
+                                                Box::new(Lambda::let_(
+                                                    LetKind::StrictOpt,
+                                                    exn.clone(),
+                                                    Lambda::prim(
+                                                        Primitive::PwrapExn,
+                                                        vec![Lambda::var(raw_exn.clone())],
+                                                        Location::none(),
+                                                    ),
+                                                    Lambda::LstaticCatch(
+                                                        Box::new(Lambda::if_(
+                                                            Lambda::prim(
+                                                                Primitive::Pstringcomp(
+                                                                    Comparison::Eq,
+                                                                ),
+                                                                vec![
+                                                                    Lambda::prim(
+                                                                        Primitive::Pfield(
+                                                                            0,
+                                                                            crate::lambda::compat::FieldDbgInfo::Record {
+                                                                                name: "RE_EXN_ID".to_string(),
+                                                                                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                                                                            },
+                                                                        ),
+                                                                        vec![Lambda::var(exn.clone())],
+                                                                        Location::none(),
+                                                                    ),
+                                                                    Lambda::var(eof.clone()),
+                                                                ],
+                                                                Location::none(),
+                                                            ),
+                                                            Lambda::Lapply(Apply {
+                                                                ap_func: Box::new(Lambda::var(
+                                                                    reverse.clone(),
+                                                                )),
+                                                                ap_args: vec![Lambda::var(
+                                                                    acc.clone(),
+                                                                )],
+                                                                ap_info: ApInfo {
+                                                                    loc: Location::none(),
+                                                                    inlined:
+                                                                        InlineAttribute::Default,
+                                                                    status: ApplyStatus::Na,
+                                                                },
+                                                                ap_transformed_jsx: false,
+                                                            }),
+                                                            Lambda::LstaticRaise(3, vec![]),
+                                                        )),
+                                                        (3, vec![]),
+                                                        Box::new(Lambda::prim(
+                                                            Primitive::Praise,
+                                                            vec![Lambda::var(exn.clone())],
+                                                            Location::none(),
+                                                        )),
+                                                    ),
+                                                )),
+                                            )),
+                                            (-1, vec![next_acc.clone()]),
+                                            Box::new(Lambda::Lapply(Apply {
+                                                ap_func: Box::new(Lambda::var(loop_.clone())),
+                                                ap_args: vec![cons],
+                                                ap_info: ApInfo {
+                                                    loc: Location::none(),
+                                                    inlined: InlineAttribute::Default,
+                                                    status: ApplyStatus::Na,
+                                                },
+                                                ap_transformed_jsx: false,
+                                            })),
+                                        ),
+                                        FunctionAttribute::default(),
+                                    )],
+                                    Location::none(),
+                                ),
+                            )],
+                            Lambda::Lapply(Apply {
+                                ap_func: Box::new(Lambda::var(loop_.clone())),
+                                ap_args: vec![Lambda::const_(Constant::int(0))],
+                                ap_info: ApInfo {
+                                    loc: Location::none(),
+                                    inlined: InlineAttribute::Default,
+                                    status: ApplyStatus::Na,
+                                },
+                                ap_transformed_jsx: false,
+                            }),
+                        ),
+                        FunctionAttribute::default(),
+                    )],
+                    Location::none(),
+                ),
+            )],
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::ModuleExport(vec![outer.clone()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::var(outer.clone())],
+                Location::none(),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+        let rendered = print_deps_program(&deps, None);
+
+        assert!(
+            rendered.contains("while (true)"),
+            "expected nested wrapped staticcatch tail recursion to emit a loop:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("continue;"),
+            "expected nested wrapped staticcatch tail recursion to continue the loop:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("return loop({")
+                && !rendered.contains("return loop(nextAcc)"),
+            "unexpected direct recursive return remained in the wrapped staticcatch path:\n{rendered}"
+        );
     }
 
     #[test]
