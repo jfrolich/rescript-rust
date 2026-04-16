@@ -20788,6 +20788,10 @@ fn bind_comptime_record_fields(
 /// If so, inline the function body at the call site. The body will have
 /// @typeInfo(T) expanded to literal values by the type checker, and the
 /// optimizer handles switch elimination and constant folding.
+///
+/// Monomorphization: each unique (function, type-key) pair produces one
+/// specialized function. Recursive types terminate because re-entering
+/// the same pair emits a self-reference instead of expanding again.
 fn try_comptime_application(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -20808,23 +20812,211 @@ fn try_comptime_application(
     // Check if it's a registered comptime function
     let comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
 
-    // Fuel limit to prevent infinite recursive inlining
+    // Safety: depth limit as fallback (monomorph cache is the primary guard)
     static COMPTIME_DEPTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let depth = COMPTIME_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if depth > 50 {
+    if depth > 200 {
         COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        return None; // Too deep — fall through to normal call
+        return None;
     }
 
-    // Extract function parameters and body
+    // Extract function parameters and body from parse tree
     let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx);
-    let (param_names, inner_body) = extract_function_params_and_body(body_expr, tctx.arena);
+    let (params, inner_body) = extract_function_params_and_body(body_expr, tctx.arena);
 
-    // Save comptime bindings so we can restore after inlining
-    // (recursive calls overwrite bindings with the same parameter names)
+    // Save comptime bindings so we can restore after specialization
     let saved_bindings = tctx.comptime_bindings.clone();
 
-    // Type-check arguments and add parameter bindings
+    // ── Phase 1: Type-check arguments and determine the type key ──
+
+    let ctx = tctx.type_ctx;
+    let mut typed_args: Vec<(String, Expression, bool)> = Vec::new(); // (name, typed_arg, is_type)
+    let mut type_key_parts: Vec<crate::types::comptime::TypeInfo> = Vec::new();
+
+    for (i, (_label, arg_idx)) in args.iter().enumerate() {
+        let param = params.get(i);
+        let is_type_param = param.map_or(false, |p| p.is_type);
+        let param_name = param.map_or(format!("__arg{i}"), |p| p.name.clone());
+
+        if is_type_param {
+            // Type parameter: resolve as a type name, not a value
+            let arg_expr = tctx.arena.get_expr(*arg_idx);
+            let type_info = resolve_comptime_type_arg(tctx, env, arg_expr);
+            if let Some(ti) = type_info {
+                type_key_parts.push(ti.clone());
+                // Bind as ComptimeValue::Type for @typeInfo resolution
+                tctx.comptime_bindings.insert(
+                    param_name.clone(),
+                    crate::types::comptime::ComptimeValue::Type(ti),
+                );
+                // Create a dummy typed expression for the type arg
+                // (type params are erased at runtime)
+                let dummy = Expression::new(
+                    ExpressionDesc::Texp_constant(Constant::Int(0)),
+                    LocIdx(0),
+                    ctx.new_var(None),
+                    EnvRef(0),
+                    Attributes::new(),
+                );
+                typed_args.push((param_name, dummy, true));
+            } else {
+                tctx.comptime_bindings = saved_bindings;
+                COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                return None;
+            }
+        } else {
+            // Value parameter: type-check normally
+            let arg_expr = tctx.arena.get_expr(*arg_idx);
+            let arg_ty = ctx.new_var(None);
+            match type_expect(tctx, env, arg_expr, arg_ty, None) {
+                Ok(typed_arg) => {
+                    // Build type key from the value's type
+                    let ti = crate::types::comptime::build_type_info(
+                        ctx, env, typed_arg.exp_type, &mut vec![],
+                    );
+                    type_key_parts.push(ti);
+                    typed_args.push((param_name, typed_arg, false));
+                }
+                Err(_) => {
+                    tctx.comptime_bindings = saved_bindings;
+                    COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    return None;
+                }
+            }
+        }
+    }
+
+    // Use the first type key part as the primary key (most comptime functions
+    // have one type-bearing parameter). For multiple, combine them.
+    let type_key = if type_key_parts.len() == 1 {
+        type_key_parts[0].clone()
+    } else if type_key_parts.is_empty() {
+        // No type-bearing args — fall back to old inline behavior
+        tctx.comptime_bindings = saved_bindings;
+        COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        return try_comptime_application_inline(tctx, env, &func_name, &comptime_fn, args, expected_ty, &params, &inner_body);
+    } else {
+        // Multiple type args — use a Tuple TypeInfo as composite key
+        crate::types::comptime::TypeInfo::Tuple { elements: type_key_parts }
+    };
+
+    // ── Phase 2: Check monomorphization cache ──
+
+    // Already completed?
+    if let Some(gen_name) = tctx.monomorph_cache.lookup(&func_name, &type_key) {
+        let gen_name = gen_name.to_string();
+        tctx.comptime_bindings = saved_bindings;
+        COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        // Emit call to the already-generated function
+        let runtime_args: Vec<_> = typed_args.iter()
+            .filter(|(_, _, is_type)| !is_type)
+            .map(|(_, arg, _)| arg.clone())
+            .collect();
+        return Some(Ok(make_comptime_call(tctx, &gen_name, &runtime_args, expected_ty)));
+    }
+
+    // Recursive: in-progress for the same type?
+    if tctx.monomorph_cache.is_in_progress(&func_name, &type_key) {
+        let gen_name = crate::types::comptime::make_monomorph_name(&func_name, &type_key);
+        tctx.comptime_bindings = saved_bindings;
+        COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        // Emit forward reference — this is what breaks infinite expansion
+        let runtime_args: Vec<_> = typed_args.iter()
+            .filter(|(_, _, is_type)| !is_type)
+            .map(|(_, arg, _)| arg.clone())
+            .collect();
+        return Some(Ok(make_comptime_call(tctx, &gen_name, &runtime_args, expected_ty)));
+    }
+
+    // ── Phase 3: Specialize — create a new monomorphized function ──
+
+    let gen_name = tctx.monomorph_cache.begin(&func_name, &type_key);
+
+    // Set up environment with a fresh parameter (not the call-site argument)
+    let mut spec_env = env.clone();
+    let mut runtime_param_name = "value".to_string();
+    let mut runtime_param_type = ctx.new_var(None);
+
+    for (name, typed_arg, is_type) in &typed_args {
+        if *is_type {
+            // Type params already bound as ComptimeValue::Type above
+        } else {
+            runtime_param_name = name.clone();
+            runtime_param_type = typed_arg.exp_type;
+
+            // Add parameter to env with its type (so body type-checks)
+            let id = ctx.create_ident(name);
+            let vd = crate::types::decl::ValueDescription {
+                val_type: typed_arg.exp_type,
+                val_kind: crate::types::decl::ValueKind::ValReg,
+                val_loc: crate::location::Location::none(),
+                val_attributes: vec![],
+                val_path: None,
+            };
+            spec_env.add_value(id, vd);
+            // Bind as TypedExpr so Pexp_ident resolves the parameter
+            tctx.comptime_bindings.insert(
+                name.clone(),
+                crate::types::comptime::ComptimeValue::TypedExpr(typed_arg.clone()),
+            );
+        }
+    }
+
+    // Type-check the body (may trigger recursive try_comptime_application
+    // calls that hit the cache — Phase 2 — and terminate)
+    let body_result = type_expect(tctx, &spec_env, &inner_body, expected_ty, None);
+
+    // Restore bindings
+    tctx.comptime_bindings = saved_bindings;
+    COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+
+    match body_result {
+        Ok(typed_body) => {
+            let return_type = typed_body.exp_type;
+            // Check if any recursive calls were made (function references itself)
+            let recursive = tctx.monomorph_cache.is_in_progress(&func_name, &type_key)
+                || contains_ident_reference(&typed_body, &gen_name);
+
+            // Store the generated function
+            let gen_ident = ctx.create_ident(&gen_name);
+            tctx.monomorph_cache.complete(
+                &func_name,
+                &type_key,
+                gen_name.clone(),
+                crate::types::comptime::GeneratedFunction {
+                    name: gen_name.clone(),
+                    ident: gen_ident,
+                    body: typed_body,
+                    param_name: runtime_param_name,
+                    param_type: runtime_param_type,
+                    return_type,
+                    recursive,
+                },
+            );
+
+            // Emit call to the generated function
+            let runtime_args: Vec<_> = typed_args.iter()
+                .filter(|(_, _, is_type)| !is_type)
+                .map(|(_, arg, _)| arg.clone())
+                .collect();
+            Some(Ok(make_comptime_call(tctx, &gen_name, &runtime_args, expected_ty)))
+        }
+        Err(_) => None,
+    }
+}
+
+/// Fallback: inline-at-call-site for comptime functions without type-bearing params.
+fn try_comptime_application_inline(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    _func_name: &str,
+    _comptime_fn: &crate::types::comptime::ComptimeFunction,
+    args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
+    expected_ty: TypeExprRef,
+    params: &[crate::types::comptime::ComptimeParam],
+    inner_body: &ParsedExpression,
+) -> Option<TypeCoreResult<Expression>> {
+    let saved_bindings = tctx.comptime_bindings.clone();
     let mut inline_env = env.clone();
     let ctx = tctx.type_ctx;
 
@@ -20833,9 +21025,8 @@ fn try_comptime_application(
         let arg_ty = ctx.new_var(None);
         match type_expect(tctx, &inline_env, arg_expr, arg_ty, None) {
             Ok(typed_arg) => {
-                if let Some(param_name) = param_names.get(i) {
-                    // Add to env so body type-checks
-                    let id = ctx.create_ident(param_name);
+                if let Some(param) = params.get(i) {
+                    let id = ctx.create_ident(&param.name);
                     let vd = crate::types::decl::ValueDescription {
                         val_type: typed_arg.exp_type,
                         val_kind: crate::types::decl::ValueKind::ValReg,
@@ -20844,10 +21035,8 @@ fn try_comptime_application(
                         val_path: None,
                     };
                     inline_env.add_value(id, vd);
-                    // Add to comptime_bindings so Pexp_ident resolves
-                    // the parameter to the actual argument expression
                     tctx.comptime_bindings.insert(
-                        param_name.clone(),
+                        param.name.clone(),
                         crate::types::comptime::ComptimeValue::TypedExpr(typed_arg.clone()),
                     );
                 }
@@ -20859,17 +21048,130 @@ fn try_comptime_application(
         }
     }
 
-    // Type-check the body in the extended environment
-    let result = match type_expect(tctx, &inline_env, &inner_body, expected_ty, None) {
+    let result = match type_expect(tctx, &inline_env, inner_body, expected_ty, None) {
         Ok(typed_expr) => Some(Ok(typed_expr)),
         Err(_) => None,
     };
 
-    // Restore comptime bindings and depth
     tctx.comptime_bindings = saved_bindings;
-    COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-
     result
+}
+
+/// Resolve a call-site argument as a comptime type.
+/// For `decode(user, json)`, resolves `user` as a type name.
+fn resolve_comptime_type_arg(
+    tctx: &TypeCheckContext<'_>,
+    env: &Env,
+    arg_expr: &ParsedExpression,
+) -> Option<crate::types::comptime::TypeInfo> {
+    if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &*arg_expr.pexp_desc {
+        let longident = tctx.arena.get_longident(lid.txt);
+        let name = tctx.arena.get_string(longident.last_idx());
+        // Try as a type in the environment
+        if let Ok((id, _decl)) = env.find_type_with_id(name) {
+            let ty = tctx.type_ctx.new_constr(
+                crate::types::Path::Pident(id.clone()),
+                vec![],
+            );
+            return Some(crate::types::comptime::build_type_info(
+                tctx.type_ctx, env, ty, &mut vec![],
+            ));
+        }
+        // Try as a primitive type name
+        match name {
+            "string" => return Some(crate::types::comptime::TypeInfo::String),
+            "int" => return Some(crate::types::comptime::TypeInfo::Int),
+            "float" => return Some(crate::types::comptime::TypeInfo::Float),
+            "bool" => return Some(crate::types::comptime::TypeInfo::Bool),
+            "unit" => return Some(crate::types::comptime::TypeInfo::Unit),
+            "char" => return Some(crate::types::comptime::TypeInfo::Char),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Build a Texp_apply calling a generated monomorphized function.
+fn make_comptime_call(
+    tctx: &TypeCheckContext<'_>,
+    gen_name: &str,
+    runtime_args: &[Expression],
+    expected_ty: TypeExprRef,
+) -> Expression {
+    let ctx = tctx.type_ctx;
+    let func_ident = crate::ident::Ident::create_persistent(gen_name);
+    let func_path = crate::types::Path::Pident(func_ident.clone());
+
+    // Create Texp_ident for the generated function
+    let func_type = if runtime_args.is_empty() {
+        expected_ty
+    } else {
+        let arg_ty = runtime_args.first().map_or(ctx.new_var(None), |a| a.exp_type);
+        ctx.new_arrow_simple(arg_ty, expected_ty)
+    };
+
+    let func_vd = crate::types::ValueDescription {
+        val_type: func_type,
+        val_kind: crate::types::ValueKind::ValReg,
+        val_loc: crate::location::Location::none(),
+        val_attributes: vec![],
+        val_path: Some(func_path.clone()),
+    };
+
+    // Texp_ident needs a Loc<LidentIdx> — use a zero index as placeholder
+    let lid_loc = Located { txt: LidentIdx(0), loc: LocIdx(0) };
+
+    let func_expr = Expression::new(
+        ExpressionDesc::Texp_ident(func_path, lid_loc, func_vd),
+        LocIdx(0),
+        func_type,
+        EnvRef(0),
+        Attributes::new(),
+    );
+
+    if runtime_args.is_empty() {
+        func_expr
+    } else {
+        let apply_args: Vec<_> = runtime_args.iter().map(|arg| {
+            crate::types::typedtree::ApplyArg {
+                label: crate::types::asttypes::ArgLabel::Nolabel,
+                expression: Some(arg.clone()),
+            }
+        }).collect();
+        Expression::new(
+            ExpressionDesc::Texp_apply {
+                funct: Box::new(func_expr),
+                args: apply_args,
+                partial: false,
+                transformed_jsx: false,
+            },
+            LocIdx(0),
+            expected_ty,
+            EnvRef(0),
+            Attributes::new(),
+        )
+    }
+}
+
+/// Check if a typed expression contains a reference to a named identifier.
+fn contains_ident_reference(expr: &Expression, name: &str) -> bool {
+    match &expr.exp_desc {
+        ExpressionDesc::Texp_ident(path, _, _) => {
+            matches!(path, crate::types::Path::Pident(id) if id.name() == name)
+        }
+        ExpressionDesc::Texp_apply { funct, args, .. } => {
+            contains_ident_reference(funct, name)
+                || args.iter().any(|a| a.expression.as_ref().map_or(false, |e| contains_ident_reference(e, name)))
+        }
+        ExpressionDesc::Texp_let(_, bindings, body) => {
+            bindings.iter().any(|vb| contains_ident_reference(&vb.vb_expr, name))
+                || contains_ident_reference(body, name)
+        }
+        ExpressionDesc::Texp_sequence(a, b) => {
+            contains_ident_reference(a, name) || contains_ident_reference(b, name)
+        }
+        _ => false, // Conservative: may miss some cases but safe
+    }
 }
 
 /// Substitute all occurrences of a named identifier in a typed expression
@@ -20952,11 +21254,12 @@ fn substitute_ident(
     }
 }
 
-/// Extract parameter names and innermost body from a function parse tree.
+/// Extract parameter info and innermost body from a function parse tree.
+/// Handles both `Pexp_fun` (value params) and `Pexp_newtype` (type params).
 fn extract_function_params_and_body<'a>(
     expr: &'a ParsedExpression,
     arena: &'a crate::parse_arena::ParseArena,
-) -> (Vec<String>, ParsedExpression) {
+) -> (Vec<crate::types::comptime::ComptimeParam>, ParsedExpression) {
     let mut params = Vec::new();
     let mut current = expr;
 
@@ -20965,20 +21268,40 @@ fn extract_function_params_and_body<'a>(
             crate::parser::ast::ExpressionDesc::Pexp_fun(inner) => {
                 // Extract parameter name from pattern
                 let pat = arena.get_pat(inner.lhs);
-                match &*pat.ppat_desc {
+                let name = match &*pat.ppat_desc {
                     crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
-                        params.push(arena.get_string(name_loc.txt).to_string());
+                        Some(arena.get_string(name_loc.txt).to_string())
                     }
                     crate::parser::ast::PatternDesc::Ppat_constraint(inner_box) => {
                         let (inner_pat_idx, _) = &**inner_box;
                         let inner_pat = arena.get_pat(*inner_pat_idx);
                         if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) = &*inner_pat.ppat_desc {
-                            params.push(arena.get_string(name_loc.txt).to_string());
+                            Some(arena.get_string(name_loc.txt).to_string())
+                        } else {
+                            None
                         }
                     }
-                    _ => {}
+                    _ => None,
+                };
+                if let Some(name) = name {
+                    params.push(crate::types::comptime::ComptimeParam {
+                        name,
+                        is_comptime: false,
+                        is_type: false,
+                    });
                 }
                 current = arena.get_expr(inner.rhs);
+            }
+            crate::parser::ast::ExpressionDesc::Pexp_newtype(inner) => {
+                // (type t) => body — this is a comptime type parameter
+                let (ref name_loc, ref body_idx) = **inner;
+                let name = arena.get_string(name_loc.txt).to_string();
+                params.push(crate::types::comptime::ComptimeParam {
+                    name,
+                    is_comptime: true,
+                    is_type: true,
+                });
+                current = arena.get_expr(*body_idx);
             }
             _ => return (params, current.clone()),
         }

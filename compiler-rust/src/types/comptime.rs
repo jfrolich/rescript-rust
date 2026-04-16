@@ -137,7 +137,7 @@ impl MonomorphCache {
 
 /// Generate a name for a monomorphized function.
 /// e.g. "encode" + Record{name: "user", ...} → "encode$user"
-fn make_monomorph_name(func_name: &str, type_key: &TypeInfo) -> String {
+pub fn make_monomorph_name(func_name: &str, type_key: &TypeInfo) -> String {
     let type_suffix = match type_key {
         TypeInfo::Int => "int".to_string(),
         TypeInfo::Float => "float".to_string(),
