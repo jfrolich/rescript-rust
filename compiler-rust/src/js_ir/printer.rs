@@ -40,6 +40,9 @@ pub struct JsPrinter {
     debug: bool,
     /// Matches OCaml's `!Js_config.jsx_preserve` guard in the dumper.
     jsx_preserve: bool,
+    /// Suppresses extra multiline call-argument grouping while printing the target
+    /// of a dot-style member access like `foo(...).bar`.
+    suppress_member_target_call_arg_group_indent: usize,
 }
 
 impl Default for JsPrinter {
@@ -60,6 +63,7 @@ impl JsPrinter {
             module_path_resolver: None,
             debug: false,
             jsx_preserve: false,
+            suppress_member_target_call_arg_group_indent: 0,
         }
     }
 
@@ -115,6 +119,8 @@ impl JsPrinter {
             module_path_resolver: self.module_path_resolver.clone(),
             debug: self.debug,
             jsx_preserve: self.jsx_preserve,
+            suppress_member_target_call_arg_group_indent: self
+                .suppress_member_target_call_arg_group_indent,
         };
         printer.print_expression(expr, level);
         printer.output
@@ -1633,11 +1639,8 @@ impl JsPrinter {
                 if needs_paren {
                     self.write_char('(');
                 }
-                let extra_group_indent =
-                    matches!(
-                        &arr.as_ref().desc,
-                        ExpressionDesc::Object(_, props) if props.len() > 1
-                    ) && matches!(self.previous_non_space_char_on_line(), Some('(' | ','));
+                let extra_group_indent = member_target_needs_extra_group_indent(arr)
+                    && matches!(self.previous_non_space_char_on_line(), Some('(' | ','));
                 self.print_member_target_expression(arr, extra_group_indent);
                 self.write_char('[');
                 self.print_expression(idx, 0);
@@ -1659,7 +1662,7 @@ impl JsPrinter {
                 if needs_paren {
                     self.write_char('(');
                 }
-                self.print_expression(obj, 15);
+                self.print_dot_member_target_expression(obj);
                 self.print_property_access(field);
                 if needs_paren {
                     self.write_char(')');
@@ -1671,7 +1674,7 @@ impl JsPrinter {
                 if needs_paren {
                     self.write_char('(');
                 }
-                self.print_expression(e, 15);
+                self.print_dot_member_target_expression(e);
                 self.write(".length");
                 if needs_paren {
                     self.write_char(')');
@@ -2220,9 +2223,16 @@ impl JsPrinter {
         }
     }
 
+    fn print_dot_member_target_expression(&mut self, expr: &Expression) {
+        self.suppress_member_target_call_arg_group_indent += 1;
+        self.print_expression(expr, 15);
+        self.suppress_member_target_call_arg_group_indent -= 1;
+    }
+
     fn print_call_argument(&mut self, expr: &Expression, call_level: u8) {
         let extra_group_indent =
             call_argument_needs_extra_group_indent(expr, call_level, self.indent)
+            && self.suppress_member_target_call_arg_group_indent == 0
             && !self.output.is_empty()
             && !self.last_new_line;
         if extra_group_indent {
@@ -2914,6 +2924,15 @@ fn raw_js_expression_needs_paren(code: &str) -> bool {
         JsExpClassification::JsFunction { .. } | JsExpClassification::JsExpUnknown => {
             !raw_snippet_exp_simple_enough(code)
         }
+    }
+}
+
+fn member_target_needs_extra_group_indent(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Object(_, props) => props.len() > 1,
+        ExpressionDesc::Array(elements, _) => elements.len() > 1,
+        ExpressionDesc::OptionalBlock(inner, true) => member_target_needs_extra_group_indent(inner),
+        _ => false,
     }
 }
 
@@ -6506,6 +6525,105 @@ mod tests {
         assert_eq!(
             print_expression(&call),
             "f(new $$BigInt64Array([\n    num1,\n    num2\n  ])[1])"
+        );
+    }
+
+    #[test]
+    fn test_print_indexed_multiline_array_call_argument_uses_group_indent_like_ocaml() {
+        let arg = Expression::new(ExpressionDesc::ArrayIndex(
+            Box::new(Expression::array(
+                vec![
+                    Expression::number(Number::int(0)),
+                    Expression::number(Number::int(1)),
+                    Expression::number(Number::int(2)),
+                ],
+                MutableFlag::Immutable,
+            )),
+            Box::new(Expression::number(Number::int(10))),
+        ));
+        let call = Expression::call(
+            Expression::var(Ident::create_local("f")),
+            vec![arg],
+            CallInfo::default(),
+        );
+
+        assert_eq!(
+            print_expression(&call),
+            "f([\n    0,\n    1,\n    2\n  ][10])"
+        );
+    }
+
+    #[test]
+    fn test_print_length_of_member_target_call_with_multiline_array_arg_preserves_base_indent() {
+        let arg = Expression::length(
+            Expression::call(
+                Expression::var(Ident::create_local("g")),
+                vec![Expression::array(
+                    vec![
+                        Expression::number(Number::int(1)),
+                        Expression::number(Number::int(2)),
+                        Expression::number(Number::int(3)),
+                    ],
+                    MutableFlag::Immutable,
+                )],
+                CallInfo::default(),
+            ),
+            LengthObject::Array,
+        );
+        let call = Expression::call(
+            Expression::var(Ident::create_local("f")),
+            vec![arg],
+            CallInfo::default(),
+        );
+
+        assert_eq!(
+            print_expression(&call),
+            "f(g([\n  1,\n  2,\n  3\n]).length)"
+        );
+    }
+
+    #[test]
+    fn test_print_static_member_target_new_with_multiline_array_arg_preserves_base_indent() {
+        let map_entries = Expression::array(
+            vec![
+                Expression::array(
+                    vec![
+                        Expression::number(Number::int(1)),
+                        Expression::number(Number::int(3)),
+                    ],
+                    MutableFlag::Immutable,
+                ),
+                Expression::array(
+                    vec![
+                        Expression::number(Number::int(2)),
+                        Expression::number(Number::int(4)),
+                    ],
+                    MutableFlag::Immutable,
+                ),
+            ],
+            MutableFlag::Immutable,
+        );
+        let values_call = Expression::call(
+            Expression::new(ExpressionDesc::StaticIndex(
+                Box::new(Expression::new(ExpressionDesc::New(
+                    Box::new(Expression::var(Ident::create_local("Map"))),
+                    Some(vec![map_entries]),
+                ))),
+                "values".to_string(),
+                None,
+            )),
+            vec![],
+            CallInfo::default(),
+        );
+        let call = Expression::call(
+            Expression::var(Ident::create_local("f")),
+            vec![values_call],
+            CallInfo::default(),
+        );
+
+        assert_eq!(
+            print_expression(&call),
+            "f(new $$Map([\n  [\n    1,\n    3\n  ],\n  [\n    2,\n    4\n  ]\n]).values())"
         );
     }
 

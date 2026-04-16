@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 581 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 76 output diffs
+**Status:** 582 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 75 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **581 / 657**
+- JS snapshot parity: **582 / 657**
 - Compile errors: **0**
-- Output diffs: **76**
+- Output diffs: **75**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,55 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **581 / 657**
+- JS snapshot parity: **582 / 657**
 - Compile errors: **0**
-- Output diffs: **76**
+- Output diffs: **75**
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: match OCaml's multiline array grouping in `js_dump.ml` when
+  arrays appear under member/index targets, so bracket-index targets keep the
+  extra group indent but dot-member chains like `foo([...]).length` and
+  `new Map([...]).values()` do not pick up a second Rust-only indent level
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change stays in `compiler-rust/src/js_ir/printer.rs`
+- OCaml reference:
+  - `compiler/core/js_dump.ml`, especially the `Call`, `Array_index`,
+    `Static_index`, and `Length` expression printer branches
+  - `compiler/core/js_dump.ml`, especially `arguments` and the `P.group` /
+    `P.bracket_group` / `P.bracket_vgroup` usage that determines how multiline
+    arrays inherit grouping under chained member/index targets
+- Rust change:
+  - added `print_dot_member_target_expression(...)` so dot-style member targets
+    temporarily suppress the extra call-argument group indent while printing
+    nested call/new arguments
+  - generalized the existing array-index target grouping predicate into
+    `member_target_needs_extra_group_indent(...)`, so multiline array literals
+    now get the same OCaml-aligned group indent as multiline object literals
+    when they are immediately indexed inside a surrounding call argument
+  - added focused printer regression coverage in
+    `test_print_indexed_multiline_array_call_argument_uses_group_indent_like_ocaml`,
+    `test_print_length_of_member_target_call_with_multiline_array_arg_preserves_base_indent`,
+    and
+    `test_print_static_member_target_new_with_multiline_array_arg_preserves_base_indent`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release multiline_array -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh src/stdlib/Stdlib_ArrayTests.res --diff`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `diff -u tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/stdlib/Stdlib_ArrayTests.res` now matches its checked-in
+    snapshot again; the remaining drift there was pure printer byte shape, not
+    backend semantics, and it drops out of the authoritative diff cache after
+    this grouping fix
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained an exact
+    snapshot match after the same printer change
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **581 / 657** -> **582 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **76** -> **75** (**-1**)
 
 Latest iteration on **2026-04-16**:
 
