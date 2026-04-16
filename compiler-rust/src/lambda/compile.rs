@@ -4059,11 +4059,10 @@ impl LambdaCompiler {
         complete: bool,
         allow_small: bool,
     ) -> Block {
-        let filtered_cases = self.filtered_switch_case_refs(cases, default);
         if allow_small {
             if let Some(block) = self.compile_small_string_switch_return(
                 test.clone(),
-                filtered_cases.as_slice(),
+                cases,
                 default,
                 complete,
             )
@@ -4072,6 +4071,7 @@ impl LambdaCompiler {
             }
         }
 
+        let filtered_cases = self.filtered_switch_case_refs(cases, default);
         let grouped_cases = stable_group_switch_cases(filtered_cases, |_, _| true);
         let mut shared_tail = None;
         let clauses = if default.is_none() && self.active_fallthrough_return_handler().is_none() {
@@ -21292,6 +21292,146 @@ mod tests {
             rendered.contains("return typeof action !== \"object\" && action === \"A1\" ? 1 : 42;"),
             "expected the incomplete const-only dispatch to keep the literal-side guard:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_like_typeof_test()
+    {
+        let mut compiler = LambdaCompiler::new();
+        let action = Ident::create_local("action");
+        let block =
+            compiler.compile_named_variant_switch_return_statements(Expression::var(action.clone()), &LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![
+                    (0, Lambda::const_(Constant::int(0))),
+                    (1, Lambda::const_(Constant::int(0))),
+                    (2, Lambda::const_(Constant::int(0))),
+                ],
+                sw_blocks_full: false,
+                sw_blocks: vec![
+                    (0, Lambda::const_(Constant::int(1))),
+                    (1, Lambda::const_(Constant::int(2))),
+                    (2, Lambda::const_(Constant::int(3))),
+                ],
+                sw_failaction: Some(Box::new(Lambda::const_(Constant::int(0)))),
+                sw_names: Some(SwitchNames {
+                    consts: vec![
+                        crate::lambda::SwitchTag::named("A"),
+                        crate::lambda::SwitchTag::named("B"),
+                        crate::lambda::SwitchTag::named("C"),
+                    ],
+                    blocks: vec![
+                        crate::lambda::SwitchBlock::named("WithPayloadA"),
+                        crate::lambda::SwitchBlock::named("WithPayloadB"),
+                        crate::lambda::SwitchBlock::named("WithPayloadC"),
+                    ],
+                }),
+            });
+
+        let [dispatch] = block.as_slice() else {
+            panic!("expected a single outer named-variant dispatch");
+        };
+        let StatementDesc::If(test, then_block, else_block) = &dispatch.desc else {
+            panic!(
+                "expected the mixed named-variant return dispatch to stay as an explicit if/else:\n{}",
+                print_block(&block)
+            );
+        };
+        assert!(
+            matches!(
+                &test.desc,
+                ExpressionDesc::Bin(BinOp::NotEqEq, left, right)
+                    if matches!(
+                        (&left.as_ref().desc, &right.as_ref().desc),
+                        (
+                            ExpressionDesc::Typeof(inner),
+                            ExpressionDesc::Str { txt, .. }
+                        ) if matches!(
+                            inner.as_ref(),
+                            Expression {
+                                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                                ..
+                            } if id.same(&action)
+                        ) && txt == "object"
+                    )
+            ),
+            "unexpected outer literal-vs-payload dispatch test:\n{}",
+            print_block(&block)
+        );
+
+        let [const_switch] = then_block.as_slice() else {
+            panic!(
+                "expected the const branch to stay wrapped in a switch default:\n{}",
+                print_block(&block)
+            );
+        };
+        let StatementDesc::StringSwitch(const_test, const_clauses, Some(const_default)) =
+            &const_switch.desc
+        else {
+            panic!(
+                "expected the const branch to stay as a string switch with a default arm:\n{}",
+                print_block(&block)
+            );
+        };
+        assert!(
+            matches!(
+                &const_test.desc,
+                ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) if id.same(&action)
+            ),
+            "unexpected const-side switch test:\n{}",
+            print_block(&block)
+        );
+        assert!(
+            const_clauses.is_empty(),
+            "expected default-duplicate const cases to filter away while keeping the switch:\n{}",
+            print_block(&block)
+        );
+        assert_switch_default_returns_int_result(const_default, 0);
+
+        let [payload_switch] = else_block.as_slice() else {
+            panic!(
+                "expected the payload branch to stay attached as the outer else block:\n{}",
+                print_block(&block)
+            );
+        };
+        let StatementDesc::StringSwitch(payload_test, payload_clauses, Some(payload_default)) =
+            &payload_switch.desc
+        else {
+            panic!(
+                "expected the payload branch to stay as a tag switch:\n{}",
+                print_block(&block)
+            );
+        };
+        assert!(
+            matches!(
+                &payload_test.desc,
+                ExpressionDesc::StaticIndex(inner, field, _)
+                    if matches!(
+                        inner.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                            ..
+                        } if id.same(&action)
+                    ) && field == "TAG"
+            ),
+            "expected the payload branch to switch on the variant TAG field:\n{}",
+            print_block(&block)
+        );
+        assert_eq!(
+            payload_clauses
+                .iter()
+                .map(|clause| clause.tag_type.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                SwitchCaseTag::String("WithPayloadA".to_string()),
+                SwitchCaseTag::String("WithPayloadB".to_string()),
+                SwitchCaseTag::String("WithPayloadC".to_string()),
+            ]
+        );
+        assert_switch_case_returns_int_result(&payload_clauses[0].clause.body, 1);
+        assert_switch_case_returns_int_result(&payload_clauses[1].clause.body, 2);
+        assert_switch_case_returns_int_result(&payload_clauses[2].clause.body, 3);
+        assert_switch_default_returns_int_result(payload_default, 0);
     }
 
     #[test]

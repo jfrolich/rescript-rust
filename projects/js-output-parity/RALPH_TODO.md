@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-16
-**Status:** 583 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 74 output diffs
+**Status:** 584 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 73 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **583 / 657**
+- JS snapshot parity: **584 / 657**
 - Compile errors: **0**
-- Output diffs: **74**
+- Output diffs: **73**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,58 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-16** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **582 / 657**
+- JS snapshot parity: **584 / 657**
 - Compile errors: **0**
-- Output diffs: **75**
+- Output diffs: **73**
+
+Latest iteration on **2026-04-16**:
+
+- Active slice: keep the mixed named-variant return lowering on OCaml's
+  `compile_general_cases` path when the const side collapses to default-only
+  arms, so Rust preserves the explicit outer `typeof ... !== "object"` split
+  and still emits a real `switch` with only a `default:` arm instead of
+  folding that branch into a bare `return`
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially `compile_switch`,
+    `compile_general_cases`, and the point where OCaml decides whether to take
+    the small direct-return path before filtering cases equal to the default
+- Rust change:
+  - `compile_named_string_switch_return_with_strategy(...)` now tries
+    `compile_small_string_switch_return(...)` against the original case slice
+    before applying `filtered_switch_case_refs(...)`, matching OCaml's
+    case-shape decision order on the return path
+  - added focused regression coverage in
+    `named_variant_return_switches_keep_default_only_const_side_inside_outer_else_like_typeof_test`
+    so mixed const/payload named-variant returns keep the outer `if/else`, an
+    empty const-side `StringSwitch` with a `default`, and the payload-side tag
+    switch intact
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release named_variant_return_switches_keep_default_only_const_side_inside_outer_else_like_typeof_test -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release named_variant_incomplete_const_only_return_switches_keep_literal_guard -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `cd tests/tests/lib/bs && timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/typeof_test.ast -o /tmp/typeof_test.mjs && diff -u /Users/jake/dev/workspaces/rescript-rust/parity-stamp/tests/tests/src/typeof_test.mjs /tmp/typeof_test.mjs`
+  - `cd tests/tests/lib/bs && timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/js_json_test.ast -o /tmp/js_json_test.mjs && diff -u /Users/jake/dev/workspaces/rescript-rust/parity-stamp/tests/tests/src/js_json_test.mjs /tmp/js_json_test.mjs`
+  - `cd tests/tests/lib/bs && timeout 10 /Users/jake/dev/workspaces/rescript-rust/parity-stamp/compiler-rust/target/release/bsc -I ../ocaml -runtime-path /Users/jake/dev/workspaces/rescript-rust/parity-stamp/node_modules/@rescript/runtime -w -3-6-26-27-29-30-32..40-44-45-52-60-9-106+104 -warn-error A -bs-package-name rescript-tests -bs-package-output esmodule:src:.mjs src/ExternalShadow.ast -o /tmp/ExternalShadow.mjs && diff -u /Users/jake/dev/workspaces/rescript-rust/parity-stamp/tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/typeof_test.res` now matches its checked-in snapshot
+    again; Rust no longer collapses the const-only side of the mixed
+    named-variant return dispatch into a bare `return false` and instead keeps
+    OCaml's explicit `switch (ty) { default: ... }` inside the outer `else`
+    split
+  - unchanged guard `tests/tests/src/ExternalShadow.res` remained an exact
+    snapshot match after the same lowering change
+  - broader guard `tests/tests/src/js_json_test.res` still differs on nested
+    object-refinement return shapes, which confirms this slice stayed scoped to
+    the default-only named-variant return lowering
+  - `temp/rust-parity/diffs` no longer contains `typeof_test`; among the
+    focused guards only `js_json_test` remains in the diff cache
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **583 / 657** -> **584 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **74** -> **73** (**-1**)
 
 Latest iteration on **2026-04-16**:
 
