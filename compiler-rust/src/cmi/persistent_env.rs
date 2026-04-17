@@ -1345,7 +1345,7 @@ fn insert_module_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_cmj {
     use super::*;
 
     #[test]
