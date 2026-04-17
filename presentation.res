@@ -8,9 +8,13 @@ Big milestone. Finally feels like a mature language.
 
 The thing I worked on Rewatch was upstreamed. ReScript now has it's own bespoke build system and file watcher.
 
+
+
 We achieved a 2-3x speed up in net build times, and support for monorepos using full backward compatibility of bsb (backed by ninja). No changes in the compiler itself.
 
-I talked last year about making rewatch the entry point of the compiler - and a lot of great stuff is happening around that (deamon).
+
+
+I talked last year about making rewatch the entry point of the compiler - and a lot of great stuff is happening around that (daemon).
 
 
 
@@ -161,7 +165,7 @@ The largest barrier for adoption is gone:
   - If it results in more solid programs & has faster tooling there is a lot of reason to adopt it.
 
 
-Comptime.
+## Comptime
 
 
 I think the largest problem and the largest opportunity with the rescript language is the state of metaprogramming
@@ -185,13 +189,6 @@ Metaprogramming usually sucks if you are in a typed language (non homoiconic). B
 
 
 To accomplish something like that in ReScript it would be GREAT if the build system and all compile iterations are a single program.
-
-
-
-
-
-
-
 
 
 
