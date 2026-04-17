@@ -28,7 +28,9 @@ struct SimplifyEnv {
     plain_strings: HashMap<Ident, String>,
     preserved_export_bindings: HashSet<Ident>,
     preserved_local_module_eta_alias_bindings: HashSet<Ident>,
+    allow_dead_binding_direct_wrapper_cleanup: bool,
     allow_direct_function_beta_reduce: bool,
+    repeat_direct_wrapper_beta_reduce: bool,
     preserve_direct_wrapper_values: bool,
     jsx_preserve: bool,
     substitutions: HashMap<Ident, Lambda>,
@@ -104,6 +106,7 @@ impl SimplifyEnv {
             .retain(|_, value| captured_substitution_allowed(value));
         next.substitutions
             .retain(|_, value| captured_substitution_allowed(value));
+        next.allow_dead_binding_direct_wrapper_cleanup = true;
         next
     }
 }
@@ -1229,10 +1232,24 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 && !preserve_local_module_field_eta_alias
                 && !free_variables(&body).contains(id)
             {
-                if analysis::no_side_effects(&value) {
+                let dead_value = if analysis::no_side_effects(&value) {
+                    value.clone()
+                } else if !env.allow_dead_binding_direct_wrapper_cleanup {
+                    value.clone()
+                } else {
+                    let dead_value_env = SimplifyEnv {
+                        allow_dead_binding_direct_wrapper_cleanup: true,
+                        allow_direct_function_beta_reduce: true,
+                        repeat_direct_wrapper_beta_reduce: true,
+                        preserve_direct_wrapper_values: false,
+                        ..env.clone()
+                    };
+                    simplify_with_env(&value, &dead_value_env, exports)
+                };
+                if analysis::no_side_effects(&dead_value) {
                     body
                 } else {
-                    Lambda::seq(value, body)
+                    Lambda::seq(dead_value, body)
                 }
             } else {
                 refine_let_binding(kind, id, value, body)
@@ -3089,8 +3106,8 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
             reduce_direct_wrapper_application_once(&apply.ap_func, &apply.ap_args)
         {
             let followup_env = SimplifyEnv {
-                allow_direct_function_beta_reduce: false,
-                preserve_direct_wrapper_values: true,
+                allow_direct_function_beta_reduce: env.repeat_direct_wrapper_beta_reduce,
+                preserve_direct_wrapper_values: !env.repeat_direct_wrapper_beta_reduce,
                 ..env.clone()
             };
             return simplify_with_env(&reduced, &followup_env, exports);
@@ -8563,6 +8580,99 @@ mod tests {
             })] if s.is_empty()
         ));
         assert_eq!(apply.ap_args.len(), 1);
+    }
+
+    #[test]
+    fn eliminates_dead_nested_direct_wrapper_application_chain_like_gpr_1667() {
+        let e = Ident::create_local("e");
+        let o = Ident::create_local("o");
+        let z = Ident::create_local("z");
+        let m = Ident::create_local("m");
+        let n = Ident::create_local("n");
+        let q = Ident::create_local("q");
+        let y = Ident::create_local("y");
+
+        let inner_wrapper = Lambda::let_(
+            LetKind::Strict,
+            m,
+            Lambda::unit(),
+            Lambda::prim(
+                Primitive::PjsFnMake(1),
+                vec![Lambda::function_(
+                    1,
+                    vec![n],
+                    Lambda::const_(Constant::int(0)),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            ),
+        );
+
+        let nested_wrapper_application = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::prim(
+                Primitive::PjsFnMake(1),
+                vec![Lambda::function_(
+                    1,
+                    vec![z],
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(inner_wrapper),
+                        ap_args: vec![Lambda::prim(
+                            Primitive::PjsFnMake(2),
+                            vec![Lambda::function_(
+                                2,
+                                vec![q, y],
+                                Lambda::var(o.clone()),
+                                FunctionAttribute::default(),
+                            )],
+                            Location::none(),
+                        )],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    }),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            )),
+            ap_args: vec![Lambda::var(o.clone())],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            e,
+            Lambda::let_(
+                LetKind::Strict,
+                o,
+                Lambda::false_(),
+                Lambda::prim(
+                    Primitive::Pjscomp(crate::lambda::compat::Comparison::Eq),
+                    vec![nested_wrapper_application, Lambda::const_(Constant::int(0))],
+                    Location::none(),
+                ),
+            ),
+            Lambda::const_(Constant::int(0)),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        assert!(
+            matches!(
+                simplified,
+                Lambda::Lconst(Constant::Int {
+                    i: 0,
+                    comment: None
+                })
+            ),
+            "expected the dead wrapper application chain to disappear, got {simplified:?}"
+        );
     }
 
     #[test]

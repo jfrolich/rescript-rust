@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 585 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 72 output diffs
+**Status:** 586 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 71 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **585 / 657**
+- JS snapshot parity: **586 / 657**
 - Compile errors: **0**
-- Output diffs: **72**
+- Output diffs: **71**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,61 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **585 / 657**
+- JS snapshot parity: **586 / 657**
 - Compile errors: **0**
-- Output diffs: **72**
+- Output diffs: **71**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: match OCaml's local dead-let cleanup around nested direct
+  `PjsFnMake` application chains without over-optimizing top-level module
+  effects, so dead wrapper/equality bindings inside callback bodies disappear
+  like OCaml while top-level modules still keep conservative side-effect
+  statements
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change stays in `compiler-rust/src/lambda/simplify.rs`
+- OCaml reference:
+  - `compiler/core/lam_pass_lets_dce.ml`, especially the unused
+    `Strict`/`Variable` let branch that only removes the binding after the
+    value has been simplified enough to prove purity
+  - `compiler/core/lam_analysis.ml`, which remains conservative for general
+    `Lapply` and therefore requires fixing the simplification path rather than
+    loosening purity analysis
+- Rust change:
+  - extended `SimplifyEnv` with a local-only
+    `allow_dead_binding_direct_wrapper_cleanup` gate and a
+    `repeat_direct_wrapper_beta_reduce` mode
+  - when an unused binding is being simplified inside a local/function context,
+    re-run the value through repeated direct-wrapper beta reduction before the
+    final lets-DCE purity check; keep the old conservative behavior at module
+    top level
+  - kept the general backend path unchanged outside that dead-binding cleanup,
+    so top-level files like `gpr_1692_test` still preserve OCaml's visible
+    module effect statement instead of collapsing to an empty module
+  - added focused regression coverage in
+    `eliminates_dead_nested_direct_wrapper_application_chain_like_gpr_1667`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct `bsc` + snapshot diffs for `tests/tests/src/gpr_1667_test.res`
+    and `tests/tests/src/gpr_1692_test.res`
+  - direct `bsc` + snapshot diff for broader guard
+    `tests/tests/src/UncurriedAlways.res`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1667_test.res` now matches its checked-in snapshot;
+    Rust no longer leaves the dead nested wrapper/equality statement alive in
+    the Mocha callback body
+  - `tests/tests/src/gpr_1692_test.res` also matches again; the local cleanup
+    no longer over-reduces the top-level module effect into an empty file
+  - broader guard `tests/tests/src/UncurriedAlways.res` remained an exact
+    snapshot match after the same backend simplifier change
+  - current smallest remaining JS diffs now start at
+    `js_re_test` (15 lines), `gpr_5280_optimize_test` (16 lines),
+    `test_primitive` (18 lines), and `test_simple_ref` (19 lines)
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **585 / 657** -> **586 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **72** -> **71** (**-1**)
 
 Latest iteration on **2026-04-17**:
 
