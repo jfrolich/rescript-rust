@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 597 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 60 output diffs
+**Status:** 596 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 61 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **597 / 657**
+- JS snapshot parity: **596 / 657**
 - Compile errors: **0**
-- Output diffs: **60**
+- Output diffs: **61**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,49 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **597 / 657**
+- JS snapshot parity: **596 / 657**
 - Compile errors: **0**
-- Output diffs: **60**
+- Output diffs: **61**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: re-baseline the current dirty worktree and re-check the
+  smallest snapshot diffs against the current OCaml compiler before spending
+  another backend iteration on a potentially stale target
+- Active backend focus stayed in the **Phase 4 / Phase 5 triage boundary**
+  from `PLAN.md`: this pass was about separating live backend mismatches from
+  stale checked-in snapshots, not landing a speculative Rust backend rewrite
+- Verified investigation commands:
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+  - direct current-OCaml repro for `tests/tests/src/bs_poly_map_test.res`,
+    `tests/tests/src/inline_string_test.res`, and
+    `tests/tests/src/bs_unwrap_test.res` using
+    `packages/@rescript/darwin-arm64/bin/rescript.exe compiler-args` plus the
+    dune-built `_build/install/default/bin/bsc` from `tests/tests/lib/bs`
+  - `timeout 30 ./scripts/test_js_single.sh inline_string_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh bs_unwrap_test --diff`
+- Focused findings:
+  - the current dirty worktree baseline is **596 / 657** with **61** output
+    diffs, so the previously recorded **597 / 657** / **60** numbers were
+    stale for this branch state
+  - `tests/tests/src/bs_poly_map_test.res` is another stale snapshot diff:
+    current OCaml also emits the split
+    `let acc = ...; let acc$1 = ...;` shape, so do **not** treat that file as
+    a live backend regression right now
+  - `tests/tests/src/inline_string_test.res` is a live backend mismatch:
+    current OCaml and the checked-in snapshot both keep the local
+    `function f(x)` materialized, while Rust still over-inlines the calls down
+    to `"Some"` / `"None"`
+  - `tests/tests/src/bs_unwrap_test.res` is a live backend mismatch:
+    current OCaml and the checked-in snapshot both keep `arg_string.VAL` /
+    `arg_pair.VAL` materialized, while Rust still unwraps the bound polyvariant
+    payloads too early to `"hi runtime"` / `arg_pair_1`
+  - no Rust backend change from the direct-wrapper inlining experiment was kept
+    from this investigation because it did not move a live snapshot mismatch
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **597 / 657** -> **596 / 657** (**-1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **60** -> **61** (**+1**)
 
 Latest iteration on **2026-04-17**:
 
