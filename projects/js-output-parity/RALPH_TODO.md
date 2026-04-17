@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 586 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 71 output diffs
+**Status:** 587 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 70 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **586 / 657**
+- JS snapshot parity: **587 / 657**
 - Compile errors: **0**
-- Output diffs: **71**
+- Output diffs: **70**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,59 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **586 / 657**
+- JS snapshot parity: **587 / 657**
 - Compile errors: **0**
-- Output diffs: **71**
+- Output diffs: **70**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: rerun named-function inlining on the final JS-backend
+  simplify pass after field-folding and alias cleanup so Rust stops getting
+  stuck at direct dead wrapper calls such as `find(p);` in `variant`
+- Active backend focus stayed in **Phase 4** late lambda / JS-backend cleanup
+  from `PLAN.md`: the verified change is in
+  `compiler-rust/src/lambda/simplify.rs`, not in the printer
+- OCaml reference:
+  - `compiler/core/lam_compile_main.ml`, whose backend pass order runs another
+    `Lam_pass_remove_alias.simplify_alias` after the earlier alias and lets-DCE
+    cleanup stages
+  - `compiler/core/lam_pass_remove_alias.ml`, whose named-function inlining is
+    the OCaml behavior Rust needed to re-apply once projected module-field
+    calls had simplified into direct `Lvar` callees
+- Rust change:
+  - kept `allow_named_function_inlining = true` for the final
+    `simplify_for_js_backend_once(...)` call in
+    `compiler-rust/src/lambda/simplify.rs` so the last backend cleanup pass can
+    beta-reduce newly-exposed direct wrapper calls before JS lowering
+  - added focused checked-in fixture coverage in
+    `variant_drops_pure_local_module_wrapper_call_outside_materialized_block_like_ocaml`
+    and
+    `a_drops_dead_functor_argument_wrapper_call_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release variant_drops_pure_local_module_wrapper_call_outside_materialized_block_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release a_drops_dead_functor_argument_wrapper_call_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release local_module_blocks_keep_ -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release local_module_skip_set_ignores_variant_style_calls_outside_materialized_module_block -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh variant --diff`
+  - `timeout 30 ./scripts/test_js_single.sh a --diff`
+  - `timeout 30 ./scripts/test_js_single.sh uncurried_cast --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/variant.res` is exact again; Rust now drops the dead local
+    wrapper call and starts `rollback_path` directly at the checked-in `try`
+    block
+  - `tests/tests/src/uncurried_cast.res` stayed exact, so the extra final
+    named-function pass did not reopen the materialized-local-module guard
+    cluster
+  - `tests/tests/src/a.res` still differs from the checked-in snapshot even
+    though the new OCaml-aligned fixture test now drops the dead `add(1, 2);`
+    call, so keep treating `a` as a remaining snapshot diff while this cluster
+    is resolved across the checked-in suite
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **586 / 657** -> **587 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **71** -> **70** (**-1**)
 
 Latest iteration on **2026-04-17**:
 

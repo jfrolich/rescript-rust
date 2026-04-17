@@ -20327,6 +20327,32 @@ mod tests {
     }
 
     #[test]
+    fn variant_drops_pure_local_module_wrapper_call_outside_materialized_block_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("variant");
+        assert!(
+            !output.contains("find(p);"),
+            "unexpected retained pure local-module wrapper call in variant:\n{output}"
+        );
+        assert!(
+            output.contains("function rollback_path(subst, p) {\n  try {"),
+            "expected variant.rollback_path to start directly with the try block, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn a_drops_dead_functor_argument_wrapper_call_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("a");
+        assert!(
+            !output.contains("function add(x, y) {") && !output.contains("add(1, 2);"),
+            "unexpected retained dead functor-argument wrapper or call in a:\n{output}"
+        );
+        assert!(
+            output.contains("/* No side effect */"),
+            "expected a to recover OCaml's pure-module comment after dropping the dead call, got:\n{output}"
+        );
+    }
+
+    #[test]
     fn test_match_exception_keeps_direct_try_return_like_ocaml() {
         let output = compile_checked_in_test_file_to_js("test_match_exception");
         assert!(
@@ -20531,6 +20557,67 @@ mod tests {
         assert!(
             !output.contains("let v = ({") && !output.contains("}).d;"),
             "unexpected materialized fresh-record projection remained in checked-in fixture output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn module_parameter_test_keeps_local_module_alias_binding_materialized_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("module_parameter_test");
+        assert!(
+            output.contains("let s = Stdlib_String;\n\nlet N = {\n  s: s\n};"),
+            "expected module_parameter_test to keep the local module alias binding materialized, got:\n{output}"
+        );
+        assert!(
+            output.contains("3, v(\"abc\")"),
+            "expected module_parameter_test to keep the exported function call at the snapshot site, got:\n{output}"
+        );
+        assert!(
+            !output.contains("s: Stdlib_String") && !output.contains("3, \"abc\".length"),
+            "unexpected inlined local-module alias or exported-call body in module_parameter_test:\n{output}"
+        );
+    }
+
+    #[test]
+    fn uncurried_cast_keeps_local_module_field_alias_binding_materialized_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("uncurried_cast");
+        assert!(
+            output.contains("let map = Belt_List.map;\n\nlet List = {\n  map: map\n};"),
+            "expected uncurried_cast to keep the eta-reduced module field alias materialized in List, got:\n{output}"
+        );
+        assert!(
+            output.contains("let l = Belt_List.map({")
+                && output.contains("function partial(x) {\n  return Belt_List.map({")
+                && output.contains("let l$1 = Belt_List.map({")
+                && output.contains("function partial$1(extra) {\n  return Belt_List.map({"),
+            "expected uncurried_cast to rewrite map call sites back to Belt_List.map like OCaml, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let List = {\n  map: Belt_List.map\n};"),
+            "unexpected inlined Belt_List.map inside the local module block for uncurried_cast:\n{output}"
+        );
+        assert!(
+            !output.contains("let l = map({")
+                && !output.contains("function partial(x) {\n  return map({")
+                && !output.contains("let l$1 = map({")
+                && !output.contains("function partial$1(extra) {\n  return map({"),
+            "unexpected residual local alias calls remained in uncurried_cast:\n{output}"
+        );
+    }
+
+    #[test]
+    fn recursive_module_test_keeps_include_field_alias_binding_materialized_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("recursive_module_test");
+        assert!(
+            output.contains("let fact$1 = M.fact;\n\nlet Fact = {\n  M: M,\n  fact: fact$1\n};"),
+            "expected recursive_module_test to keep the included module field alias materialized, got:\n{output}"
+        );
+        assert!(
+            output.contains("120, fact$1(5)"),
+            "expected recursive_module_test to keep the fact$1 call shape, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let Fact_fact = M.fact;") && !output.contains("120, M.fact(5)"),
+            "unexpected renamed or inlined recursive module field alias in recursive_module_test:\n{output}"
         );
     }
 
