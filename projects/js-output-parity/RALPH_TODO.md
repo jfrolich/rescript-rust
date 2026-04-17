@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 582 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 75 output diffs
+**Status:** 579 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 78 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **582 / 657**
+- JS snapshot parity: **579 / 657**
 - Compile errors: **0**
-- Output diffs: **75**
+- Output diffs: **78**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,65 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **582 / 657**
+- JS snapshot parity: **579 / 657**
 - Compile errors: **0**
-- Output diffs: **75**
+- Output diffs: **78**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: keep OCaml's unit-return fallthrough guards intact when
+  `compile_if_return_block(...)` lowers effectful success branches and
+  `LstaticCatch` handlers, so Rust stops re-collapsing `effect; return ()`
+  branches back into `return (effect, undefined)` and emitting the wrong
+  negative-guard / `if ... else ...` shapes in final JS
+- Active backend focus stays on the **Phase 3 / Phase 4 boundary** from
+  `PLAN.md`: the fix is in `compiler-rust/src/lambda/compile.rs`, but it is
+  matching OCaml's JS-statement shaping before the final dump rather than
+  changing the printer
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, whose return-tail lowering for branchy
+    unit code keeps fallthrough statement blocks instead of forcing everything
+    back through a conditional return expression
+  - `compiler/core/js_stmt_make.ml`, whose `if_` construction preserves the
+    positive-guard / fallthrough statement shape that shows up in the checked-in
+    snapshots
+  - `compiler/core/js_dump.ml`, which confirmed this cluster is not a
+    printer-only issue because the dumper simply prints the already-shaped
+    statement blocks
+- Rust change:
+  - taught `take_return_tail_expr(...)` to stop collapsing
+    `effect; return undefined;` tails back into `return (effect, undefined)`
+    when the branch has a non-empty statement prefix
+  - added `normalize_unit_return_if_branch(...)` and used it from
+    `compile_if_return_block(...)` so unit-return branches are flattened and
+    peeled before condition shaping, matching OCaml's positive-guard
+    fallthrough form
+  - added focused regression coverage in
+    `single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like_variant_pattern_matching_spreads`,
+    `js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard`,
+    and
+    `variant_pattern_matching_spreads_keeps_positive_unit_fallthrough_guards_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like_variant_pattern_matching_spreads -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml variant_pattern_matching_spreads_keeps_positive_unit_fallthrough_guards_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh VariantPatternMatchingSpreads --diff`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/VariantPatternMatchingSpreads.res` is exact again and no
+    longer appears under `temp/rust-parity/diffs`
+  - `tests/tests/src/UntaggedVariants.res` still differs, but the same cluster
+    moved closer to OCaml: Rust now keeps the positive
+    `Array.isArray(s) && s.length === 3` guard and drops one extra nested
+    `else` wrapper in the trailing string/object/promise dispatch
+  - the verified improvement is backend return lowering / JS statement shaping,
+    not a printer-only string rewrite
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **582 / 657** -> **579 / 657** (**-3**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **75** -> **78** (**+3**)
 
 Latest iteration on **2026-04-17**:
 

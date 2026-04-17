@@ -4720,6 +4720,10 @@ impl LambdaCompiler {
             return Err(block);
         };
 
+        if matches!(expr.desc, ExpressionDesc::Undefined { .. }) && !prefix.is_empty() {
+            return Err(block);
+        }
+
         // OCaml reaches `return cond ? (effect, value) : fallback` here for
         // simple effectful success branches, and `js_pass_flatten` later turns
         // that back into the checked-in positive `if/else` shape.
@@ -4739,8 +4743,10 @@ impl LambdaCompiler {
 
     fn compile_if_return_block(&mut self, cond: &Lambda, then_: &Lambda, else_: &Lambda) -> Block {
         let cond_compiled = self.compile_expr(cond);
-        let then_block = Self::peel_single_block_statement(self.compile_return_block(then_));
-        let else_block = Self::peel_single_block_statement(self.compile_return_block(else_));
+        let then_block = self.compile_return_block(then_);
+        let else_block = self.compile_return_block(else_);
+        let then_block = self.normalize_unit_return_if_branch(then_block);
+        let else_block = self.normalize_unit_return_if_branch(else_block);
 
         let mut block = cond_compiled.prelude;
         block.extend(self.compile_test_return_block(
@@ -4776,6 +4782,14 @@ impl LambdaCompiler {
                 vec![Statement::if_(cond, then_block, else_block)]
             }
         }
+    }
+
+    fn normalize_unit_return_if_branch(&self, block: Block) -> Block {
+        if self.return_unit_stack.last().copied() != Some(true) {
+            return Self::peel_single_block_statement(block);
+        }
+
+        Self::peel_single_block_statement(flatten_block(block))
     }
 
     fn compile_switch_value_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
@@ -18912,6 +18926,146 @@ mod tests {
     }
 
     #[test]
+    fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like_variant_pattern_matching_spreads(
+    ) {
+        let mut compiler = LambdaCompiler::new();
+        let action = Ident::create_local("action");
+        let then_seen = Ident::create_local("then_seen");
+        let else_seen = Ident::create_local("else_seen");
+        let block = compiler.with_return_unit_context(true, |compiler| {
+            compiler.compile_return_block(&Lambda::LstaticCatch(
+                Box::new(Lambda::Lswitch(
+                    Box::new(Lambda::var(action.clone())),
+                    LambdaSwitch {
+                        sw_consts_full: false,
+                        sw_consts: vec![(
+                            0,
+                            Lambda::Lassign(
+                                then_seen.clone(),
+                                Box::new(Lambda::const_(Constant::int(1))),
+                            ),
+                        )],
+                        sw_blocks_full: true,
+                        sw_blocks: vec![],
+                        sw_failaction: Some(Box::new(Lambda::static_raise(7, Vec::new()))),
+                        sw_names: Some(SwitchNames {
+                            consts: vec![crate::lambda::SwitchTag::named("One")],
+                            blocks: vec![],
+                        }),
+                    },
+                )),
+                (7, vec![]),
+                Box::new(Lambda::Lassign(
+                    else_seen.clone(),
+                    Box::new(Lambda::const_(Constant::int(2))),
+                )),
+            ))
+        });
+
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains("if (action === \"One\") {"),
+            "expected the single-case handler to stay as a positive guard:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("then_seen = 1;"),
+            "expected the matching branch effect to stay inside the guard:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("else_seen = 2;"),
+            "expected the non-matching handler to fall through after the guard:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("return;"),
+            "expected the matching branch to keep its explicit unit return:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("} else {"),
+            "unexpected explicit else around the fallthrough handler:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard() {
+        let mut compiler = LambdaCompiler::new();
+        let run = Ident::create_local("run");
+        let action = Ident::create_local("action");
+        let then_seen = Ident::create_local("then_seen");
+        let else_seen = Ident::create_local("else_seen");
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            run.clone(),
+            Lambda::function_(
+                1,
+                vec![action.clone()],
+                Lambda::LstaticCatch(
+                    Box::new(Lambda::Lswitch(
+                        Box::new(Lambda::var(action.clone())),
+                        LambdaSwitch {
+                            sw_consts_full: false,
+                            sw_consts: vec![(
+                                0,
+                                Lambda::Lassign(
+                                    then_seen.clone(),
+                                    Box::new(Lambda::const_(Constant::int(1))),
+                                ),
+                            )],
+                            sw_blocks_full: true,
+                            sw_blocks: vec![],
+                            sw_failaction: Some(Box::new(Lambda::static_raise(7, Vec::new()))),
+                            sw_names: Some(SwitchNames {
+                                consts: vec![crate::lambda::SwitchTag::named("One")],
+                                blocks: vec![],
+                            }),
+                        },
+                    )),
+                    (7, vec![]),
+                    Box::new(Lambda::Lassign(
+                        else_seen.clone(),
+                        Box::new(Lambda::const_(Constant::int(2))),
+                    )),
+                ),
+                crate::lambda::FunctionAttribute {
+                    return_unit: true,
+                    ..Default::default()
+                },
+            ),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::ModuleExport(vec![run.clone()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::var(run.clone())],
+                Location::none(),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+        let rendered = print_deps_program(&deps, None);
+        assert!(
+            rendered.contains("if (action === \"One\") {"),
+            "expected the final JS pipeline to keep the positive guard:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("then_seen = 1;"),
+            "expected the matching branch effect to stay materialized:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("else_seen = 2;"),
+            "expected the handler effect to stay after the guard:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("return;"),
+            "expected the matching branch to keep its explicit unit return:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("} else {"),
+            "unexpected explicit else around the final JS pipeline output:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn single_case_staticcatch_wrapped_untagged_object_unit_handler_keeps_negative_guard() {
         let mut compiler = LambdaCompiler::new();
         let json = Ident::create_local("json");
@@ -20149,6 +20303,27 @@ mod tests {
         assert!(
             !output.contains("let someResult = x.TAG === \"Ok\" ? x._0 : ("),
             "unexpected initialized declaration for LetUnwrap's switch-bound result:\n{output}"
+        );
+    }
+
+    #[test]
+    fn variant_pattern_matching_spreads_keeps_positive_unit_fallthrough_guards_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("VariantPatternMatchingSpreads");
+        assert!(
+            output.contains(
+                "function doWithB(b) {\n  if (b === \"One\") {\n    console.log(\"aaa\");\n    return;\n  }\n  console.log(\"twwwoooo\");"
+            ),
+            "expected doWithB to keep the positive-guard fallthrough shape, got:\n{output}"
+        );
+        assert!(
+            output.contains("function lookupOpt(b) {\n  if (b !== undefined) {"),
+            "expected lookupOpt to keep the positive option guard, got:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "function doWithZ(z) {\n  if (z === \"First\") {\n    console.log(\"First\");\n    return;\n  }\n  console.log(\"Second\");"
+            ),
+            "expected doWithZ to keep the positive-guard fallthrough shape, got:\n{output}"
         );
     }
 
