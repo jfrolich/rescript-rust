@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 592 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 65 output diffs
+**Status:** 599 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 58 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **592 / 657**
+- JS snapshot parity: **599 / 657**
 - Compile errors: **0**
-- Output diffs: **65**
+- Output diffs: **58**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,66 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **592 / 657**
+- JS snapshot parity: **599 / 657**
 - Compile errors: **0**
-- Output diffs: **65**
+- Output diffs: **58**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: align the Rust `js_pass_flatten_and_mark_dead` immutable
+  Caml-block substitution threshold with OCaml for the live `res_debug` /
+  `RecordCoercion` cluster, where Rust was still collapsing non-polyvar
+  two-field record payloads that OCaml keeps materialized at pass 05
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this is late JS-pass cleanup, not printer work and not an upstream
+  typedtree/raw-lambda issue
+- OCaml reference:
+  - `compiler/core/js_pass_flatten_and_mark_dead.ml`, where the pattern
+    `Caml_block ((_ :: _ :: _ as ls), Immutable, tag, tag_info)` means
+    "two or more payload elements" because the final wildcard is the tail of
+    the list, not a third required payload slot
+  - pass dumps `tests/tests/src/res_debug.05.flatten_and_mark_dead.jsx` and
+    `tests/tests/src/RecordCoercion.05.flatten_and_mark_dead.jsx`, which both
+    materialize the two-field record payload temps at pass 05, and
+    `tests/tests/src/record_debug_test.05.flatten_and_mark_dead.jsx`, which
+    shows a remaining separate projection case still in the diff set
+- Rust change:
+  - changed `flatten_and_mark_dead_statement(...)` in
+    `compiler-rust/src/lambda/compile.rs` to record immutable Caml-block
+    substitutions for blocks with **two or more** payload elements, matching
+    the OCaml list-pattern semantics instead of the previous Rust-only
+    `>= 3` check
+  - kept `TagInfo::PolyVar(_)` out of that path so exported `{ NAME; VAL }`
+    wrappers still stay materialized and continue to emit `.VAL` access
+  - added focused regression coverage
+    `res_debug_materializes_two_field_record_payload_bindings_like_ocaml` and
+    `record_coercion_materializes_nested_two_field_record_blocks_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release res_debug_materializes_two_field_record_payload_bindings_like_ocaml -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release record_coercion_materializes_nested_two_field_record_blocks_like_ocaml -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release bs_unwrap_keeps_exported_polyvar_wrappers_materialized_like_snapshot -- --nocapture`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/res_debug.res -o /tmp/res_debug.mjs`
+  - `diff -u tests/tests/src/res_debug.mjs /tmp/res_debug.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/RecordCoercion.res -o /tmp/RecordCoercion.mjs`
+  - `diff -u tests/tests/src/RecordCoercion.mjs /tmp/RecordCoercion.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/res_debug.res` is exact again; Rust now keeps the
+    snapshot-style `ok_name` / `bad_name` temps instead of inlining the
+    `optionMap(undefined, x => x)` calls directly into the record literal
+  - `tests/tests/src/RecordCoercion.res` is exact again; Rust now keeps the
+    nested `TestInlining_a` record temp materialized before building the outer
+    record
+  - the `bs_unwrap` exported polyvar guard still passes, so the broader
+    two-field materialization did not re-open the `.VAL` regression
+  - `tests/tests/src/record_debug_test.res` still fails in the authoritative
+    diff set, which confirms a separate earlier projection-collapse issue
+    remains after this pass-05 alignment
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **592 / 657** -> **599 / 657** (**+7**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **65** -> **58** (**-7**)
 
 Latest iteration on **2026-04-17**:
 

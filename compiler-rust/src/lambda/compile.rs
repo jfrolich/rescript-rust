@@ -11555,7 +11555,7 @@ fn flatten_and_mark_dead_statement(
                     comment: value_comment,
                 }) = decl.value
                 {
-                    if items.len() >= 3 {
+                    if items.len() >= 2 && !matches!(tag_info, TagInfo::PolyVar(_)) {
                         let mut rewritten_items = Vec::with_capacity(items.len());
                         let mut bindings = Vec::new();
 
@@ -11616,12 +11616,12 @@ fn flatten_and_mark_dead_statement(
                         };
                     }
 
-                    // OCaml's js_pass_flatten_and_mark_dead only records block
-                    // substitutions for immutable Caml blocks with at least
-                    // three fields. Two-field polyvariant wrappers such as
-                    // `{ NAME; VAL }` stay materialized so later passes still
-                    // emit `.VAL` instead of collapsing directly to the raw
-                    // payload.
+                    // OCaml's js_pass_flatten_and_mark_dead matches
+                    // `_ :: _ :: _ as ls`, which means immutable Caml blocks
+                    // with at least two payload elements. Polyvar wrappers stay
+                    // out of this path because their exported `NAME`/`VAL`
+                    // object shape is already materialized before this pass in
+                    // the OCaml backend.
                     return Statement {
                         desc: {
                             let rewritten_value = Expression {
@@ -22096,6 +22096,34 @@ mod tests {
         assert!(
             !output.contains("let tmp = typeof email === \"string\" ? email : undefined;"),
             "unexpected initialized conditional temp in json_decorders:\n{output}"
+        );
+    }
+
+    #[test]
+    fn res_debug_materializes_two_field_record_payload_bindings_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("res_debug");
+        assert!(
+            output.contains("let ok_name = optionMap(undefined, x => x);")
+                && output.contains("let bad_name = optionMap(undefined, x => x);"),
+            "expected res_debug to materialize the optional record payload temps, got:\n{output}"
+        );
+        assert!(
+            output.contains("let ok = {\n  name: ok_name\n};")
+                && output.contains("let bad = {\n  name: bad_name\n};"),
+            "expected res_debug to reuse the materialized record payload temps, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn record_coercion_materializes_nested_two_field_record_blocks_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("RecordCoercion");
+        assert!(
+            output.contains("let TestInlining_a = {\n  number: 42,\n  name: \"a\"\n};"),
+            "expected RecordCoercion to keep the nested record payload materialized, got:\n{output}"
+        );
+        assert!(
+            output.contains("let TestInlining = {\n  a: TestInlining_a,\n  name: \"a\"\n};"),
+            "expected RecordCoercion to reuse the nested record temp in the module block, got:\n{output}"
         );
     }
 
