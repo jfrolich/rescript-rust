@@ -840,6 +840,124 @@ let aliceJson = encode(alice)
 }
 
 #[test]
+fn playground_variants_with_payloads() {
+    // Variants with payloads: encode as [name, ...payloads].
+    // Uses %raw helpers to inspect the runtime tag/arg since ReScript
+    // compiles payload-carrying variants to {TAG: "Name", _0: v}.
+    let source = r#"
+type shape = Circle(float) | Square(float, float) | Point
+
+exception DecodeError(string)
+
+external variantToJson: 'a => JSON.t = "%identity"
+
+let getTag: 'a => string = %raw(`function(v) {
+  return typeof v === "string" ? v : v.TAG;
+}`)
+
+// Returns the i-th constructor argument. Typed as JSON.t since ReScript's
+// runtime representation of primitives matches JSON.t's @unboxed form.
+let getArg: ('a, int) => JSON.t = %raw(`function(v, i) {
+  return v["_" + i];
+}`)
+
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | Float => JSON.Encode.float(value)
+  | Variant({constructors}) =>
+    let tag = getTag(value)
+    let result = ref(JSON.Null)
+    inline for c in constructors {
+      if tag == c.name {
+        let arr = [JSON.Encode.string(c.name)]
+        let idx = ref(0)
+        inline for _argType in c.args {
+          Array.push(arr, getArg(value, idx.contents))
+          idx := idx.contents + 1
+        }
+        result := JSON.Encode.array(arr)
+      }
+    }
+    result.contents
+  | _ => @compileError("unsupported")
+  }
+}
+
+let s1 = Circle(5.0)
+let j1 = encode(s1)
+let s2 = Point
+let j2 = encode(s2)
+"#;
+    match compile_with_stdlib(source, "variants_payload.res") {
+        Ok(o) => {
+            eprintln!("VARIANTS PAYLOAD OUTPUT:\n{o}");
+            assert!(o.contains("encode$shape"), "Expected encode$shape:\n{o}");
+        }
+        Err(e) => panic!("payload variants should compile: {e}"),
+    }
+}
+
+#[test]
+fn playground_variants_array_format() {
+    // Variants encode as `[name, ...payloads]`. For enum-style variants
+    // (no payload) that's just `[name]`.
+    let source = r#"
+type status = Active | Inactive | Pending
+
+exception DecodeError(string)
+
+external variantToJson: 'a => JSON.t = "%identity"
+
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Variant(_) => JSON.Encode.array([variantToJson(value)])
+  | _ => @compileError("unsupported")
+  }
+}
+
+@comptime
+let rec decode = (type t, json: JSON.t) => {
+  switch @typeInfo(t) {
+  | Variant({constructors}) =>
+    switch json {
+    | Array(items) =>
+      switch items[0] {
+      | Some(String(name)) =>
+        let result = ref(None)
+        inline for c in constructors {
+          if name == c.name { result := Some(@constructor(t, c.name)) }
+        }
+        switch result.contents {
+        | Some(v) => v
+        | None => throw(DecodeError("unknown variant: " ++ name))
+        }
+      | _ => throw(DecodeError("expected string at array[0]"))
+      }
+    | _ => throw(DecodeError("expected array"))
+    }
+  | _ => @compileError("unsupported")
+  }
+}
+
+let s = Active
+let j = encode(s)
+let d = decode(status, j)
+"#;
+    match compile_with_stdlib(source, "variants_array.res") {
+        Ok(o) => {
+            eprintln!("VARIANTS ARRAY OUTPUT:\n{o}");
+            assert!(o.contains("encode$status"), "Expected encode$status:\n{o}");
+            assert!(o.contains("decode$status"), "Expected decode$status:\n{o}");
+        }
+        Err(e) => panic!("variants array format should compile: {e}"),
+    }
+}
+
+#[test]
 fn playground_variant_constructor_primitive() {
     // Decoder using the existing @variant(t, "CtorName") primitive to
     // construct variant values — no %identity cast needed.
@@ -1198,7 +1316,12 @@ type tree = { value: string, children: array<tree> }
 
 exception DecodeError(string)
 
-external variantToJson: 'a => JSON.t = "%identity"
+let getTag: 'a => string = %raw(`function(v) {
+  return typeof v === "string" ? v : v.TAG;
+}`)
+let getArg: ('a, int) => JSON.t = %raw(`function(v, i) {
+  return v["_" + i];
+}`)
 
 @comptime
 let rec encode = (value): JSON.t => {
@@ -1212,7 +1335,21 @@ let rec encode = (value): JSON.t => {
       Dict.set(dict, field.name, encode(@field(value, field.name)))
     }
     JSON.Encode.object(dict)
-  | Variant(_) => variantToJson(value)
+  | Variant({constructors}) =>
+    let tag = getTag(value)
+    let result = ref(JSON.Null)
+    inline for c in constructors {
+      if tag == c.name {
+        let arr = [JSON.Encode.string(c.name)]
+        let idx = ref(0)
+        inline for _argType in c.args {
+          Array.push(arr, getArg(value, idx.contents))
+          idx := idx.contents + 1
+        }
+        result := JSON.Encode.array(arr)
+      }
+    }
+    result.contents
   | Array(_) => JSON.Encode.array(Array.map(value, v => encode(v)))
   | _ => @compileError("encode: unsupported type")
   }
@@ -1243,16 +1380,20 @@ let rec decode = (type t, json: JSON.t) => {
     }
   | Variant({constructors}) =>
     switch json {
-    | String(s) =>
-      let result = ref(None)
-      inline for c in constructors {
-        if s == c.name { result := Some(@constructor(t, c.name)) }
+    | Array(items) =>
+      switch items[0] {
+      | Some(String(name)) =>
+        let result = ref(None)
+        inline for c in constructors {
+          if name == c.name { result := Some(@constructor(t, c.name)) }
+        }
+        switch result.contents {
+        | Some(v) => v
+        | None => throw(DecodeError("unknown variant: " ++ name))
+        }
+      | _ => throw(DecodeError("expected [name, ...] array"))
       }
-      switch result.contents {
-      | Some(v) => v
-      | None => throw(DecodeError("unknown variant: " ++ s))
-      }
-    | _ => throw(DecodeError("expected variant string"))
+    | _ => throw(DecodeError("expected variant array"))
     }
   | _ => @compileError("decode: unsupported type")
   }

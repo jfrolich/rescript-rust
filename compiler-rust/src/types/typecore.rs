@@ -5147,7 +5147,10 @@ pub fn type_expect<'a>(
         ED::Pexp_inline_for(inner) => {
             let (ref pat_idx, ref collection_idx, ref body_idx) = **inner;
 
-            // Check if the collection is a comptime-known variable
+            // Check if the collection is a comptime-known variable. Accepts
+            // either a bare ident (`fields`) bound to ComptimeValue::Array,
+            // or a field access (`c.args`) where `c` is a ComptimeValue::
+            // Record holding an Array at that field.
             let collection_expr = tctx.arena.get_expr(*collection_idx);
             let comptime_array = match &*collection_expr.pexp_desc {
                 crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
@@ -5160,6 +5163,29 @@ pub fn type_expect<'a>(
                             }
                             _ => None,
                         }
+                    } else { None }
+                }
+                crate::parser::ast::ExpressionDesc::Pexp_field(rec_idx, field_lid) => {
+                    let rec_expr = tctx.arena.get_expr(*rec_idx);
+                    if let crate::parser::ast::ExpressionDesc::Pexp_ident(rec_lid) = &*rec_expr.pexp_desc {
+                        let rec_longident = tctx.arena.get_longident(rec_lid.txt);
+                        if rec_longident.is_simple() {
+                            let rec_name = tctx.arena.get_string(rec_longident.last_idx());
+                            if let Some(crate::types::comptime::ComptimeValue::Record(entries)) =
+                                tctx.comptime_bindings.get(rec_name)
+                            {
+                                let field_name = {
+                                    let fl = tctx.arena.get_longident(field_lid.txt);
+                                    tctx.arena.get_string(fl.last_idx()).to_string()
+                                };
+                                match entries.iter().find(|(k, _)| k == &field_name).map(|(_, v)| v) {
+                                    Some(crate::types::comptime::ComptimeValue::Array(elements)) => {
+                                        Some(elements.clone())
+                                    }
+                                    _ => None,
+                                }
+                            } else { None }
+                        } else { None }
                     } else { None }
                 }
                 _ => None,
@@ -5271,15 +5297,39 @@ pub fn type_expect<'a>(
                     }
                 }
                 Some(_) => {
-                    // Empty array — produce empty array
-                    let elem_ty = ctx.new_var(None);
-                    let array_ty = ctx.new_constr(crate::types::predef::path_array(), vec![elem_ty]);
-                    crate::types::ctype::unify(ctx, &mut tctx.unify_state, array_ty, expected_ty)
-                        .map_err(|e| super::TypeCoreError::Other(format!("{:?}", e)))?;
-                    Ok(Expression::new(
-                        ExpressionDesc::Texp_array(vec![]),
-                        loc, array_ty, ctx.store_typed_env(env), crate::parser::ast::Attributes::new(),
-                    ))
+                    // Empty iteration: either an empty array (in array
+                    // context) or unit (in statement context). Check the
+                    // expected type before committing to a shape — otherwise
+                    // an empty `inline for` used as a statement (e.g.
+                    // iterating an empty `c.args`) would clash with unit.
+                    let expected_repr = ctx.repr(expected_ty);
+                    let expected_desc = ctx.get_desc(expected_repr);
+                    let is_array_context = matches!(&*expected_desc,
+                        crate::types::type_expr::TypeDesc::Tconstr { path, .. }
+                        if path.same(&crate::types::predef::path_array())
+                    );
+                    if is_array_context {
+                        let elem_ty = ctx.new_var(None);
+                        let array_ty = ctx.new_constr(crate::types::predef::path_array(), vec![elem_ty]);
+                        crate::types::ctype::unify(ctx, &mut tctx.unify_state, array_ty, expected_ty)
+                            .map_err(|e| super::TypeCoreError::Other(format!("{:?}", e)))?;
+                        Ok(Expression::new(
+                            ExpressionDesc::Texp_array(vec![]),
+                            loc, array_ty, ctx.store_typed_env(env), crate::parser::ast::Attributes::new(),
+                        ))
+                    } else {
+                        let unit_ty = ctx.new_constr(crate::types::predef::path_unit(), vec![]);
+                        let void_cstr = env.find_constructor("()").map_err(|_| {
+                            super::TypeCoreError::Other("cannot find ()".into())
+                        })?.clone();
+                        Ok(Expression::new(
+                            ExpressionDesc::Texp_construct(
+                                crate::parse_arena::Located { txt: crate::parse_arena::LidentIdx(0), loc: crate::parse_arena::LocIdx::none() },
+                                void_cstr, vec![],
+                            ),
+                            loc, unit_ty, ctx.store_typed_env(env), crate::parser::ast::Attributes::new(),
+                        ))
+                    }
                 }
                 None => {
                     Err(super::TypeCoreError::Other(
