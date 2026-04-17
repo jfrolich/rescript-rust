@@ -263,8 +263,9 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
         false,
     );
     let lets_dce_style = simplify_direct_function_applications_like_lets_dce(&second);
+    let lets_dce_aliases = simplify_alias_bindings_like_lets_dce(&lets_dce_style);
     simplify_for_js_backend_once(
-        &lets_dce_style,
+        &lets_dce_aliases,
         &preserved_export_bindings_after_first,
         &preserved_local_module_module_field_call_bindings,
         &preserved_local_module_module_alias_bindings,
@@ -1134,6 +1135,141 @@ fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
         Lambda::Lassign(id, value) => Lambda::Lassign(
             id.clone(),
             Box::new(simplify_direct_function_applications_like_lets_dce(value)),
+        ),
+    }
+}
+
+fn simplify_alias_bindings_like_lets_dce(lam: &Lambda) -> Lambda {
+    match lam {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
+        Lambda::Lapply(apply) => Lambda::apply(
+            simplify_alias_bindings_like_lets_dce(&apply.ap_func),
+            apply
+                .ap_args
+                .iter()
+                .map(simplify_alias_bindings_like_lets_dce)
+                .collect(),
+            apply.ap_info.clone(),
+            apply.ap_transformed_jsx,
+        ),
+        Lambda::Lfunction(func) => Lambda::function_(
+            func.arity,
+            func.params.clone(),
+            simplify_alias_bindings_like_lets_dce(&func.body),
+            func.attr.clone(),
+        ),
+        Lambda::Llet(kind, id, value, body) => {
+            let value = simplify_alias_bindings_like_lets_dce(value);
+            let body = simplify_alias_bindings_like_lets_dce(body);
+            if *kind == LetKind::Alias {
+                let use_info = alias_use_info(id, &body);
+                if use_info.times == 0 {
+                    return body;
+                }
+                if use_info.times == 1
+                    && matches!(
+                        value,
+                        Lambda::Lconst(ref constant) if constant.is_allocating()
+                    )
+                {
+                    return simplify_alias_bindings_like_lets_dce(&substitute_alias_use(
+                        &body, id, &value,
+                    ));
+                }
+            }
+            Lambda::let_(*kind, id.clone(), value, body)
+        }
+        Lambda::Lletrec(bindings, body) => Lambda::letrec(
+            bindings
+                .iter()
+                .map(|(id, binding)| {
+                    (
+                        id.clone(),
+                        simplify_alias_bindings_like_lets_dce(binding),
+                    )
+                })
+                .collect(),
+            simplify_alias_bindings_like_lets_dce(body),
+        ),
+        Lambda::Lprim(info) => Lambda::prim(
+            info.primitive.clone(),
+            info.args
+                .iter()
+                .map(simplify_alias_bindings_like_lets_dce)
+                .collect(),
+            info.loc.clone(),
+        ),
+        Lambda::Lswitch(scrutinee, switch) => Lambda::Lswitch(
+            Box::new(simplify_alias_bindings_like_lets_dce(scrutinee)),
+            LambdaSwitch {
+                sw_consts_full: switch.sw_consts_full,
+                sw_consts: switch
+                    .sw_consts
+                    .iter()
+                    .map(|(tag, lam)| (*tag, simplify_alias_bindings_like_lets_dce(lam)))
+                    .collect(),
+                sw_blocks_full: switch.sw_blocks_full,
+                sw_blocks: switch
+                    .sw_blocks
+                    .iter()
+                    .map(|(tag, lam)| (*tag, simplify_alias_bindings_like_lets_dce(lam)))
+                    .collect(),
+                sw_failaction: switch
+                    .sw_failaction
+                    .as_ref()
+                    .map(|lam| Box::new(simplify_alias_bindings_like_lets_dce(lam))),
+                sw_names: switch.sw_names.clone(),
+            },
+        ),
+        Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
+            Box::new(simplify_alias_bindings_like_lets_dce(scrutinee)),
+            cases
+                .iter()
+                .map(|(tag, lam)| (tag.clone(), simplify_alias_bindings_like_lets_dce(lam)))
+                .collect(),
+            default
+                .as_ref()
+                .map(|lam| Box::new(simplify_alias_bindings_like_lets_dce(lam))),
+        ),
+        Lambda::LstaticRaise(id, args) => Lambda::LstaticRaise(
+            *id,
+            args.iter()
+                .map(simplify_alias_bindings_like_lets_dce)
+                .collect(),
+        ),
+        Lambda::LstaticCatch(body, handler, recover) => Lambda::LstaticCatch(
+            Box::new(simplify_alias_bindings_like_lets_dce(body)),
+            handler.clone(),
+            Box::new(simplify_alias_bindings_like_lets_dce(recover)),
+        ),
+        Lambda::LtryWith(body, exn, handler) => Lambda::LtryWith(
+            Box::new(simplify_alias_bindings_like_lets_dce(body)),
+            exn.clone(),
+            Box::new(simplify_alias_bindings_like_lets_dce(handler)),
+        ),
+        Lambda::LifThenElse(cond, then_, else_) => Lambda::if_(
+            simplify_alias_bindings_like_lets_dce(cond),
+            simplify_alias_bindings_like_lets_dce(then_),
+            simplify_alias_bindings_like_lets_dce(else_),
+        ),
+        Lambda::Lsequence(first, second) => Lambda::seq(
+            simplify_alias_bindings_like_lets_dce(first),
+            simplify_alias_bindings_like_lets_dce(second),
+        ),
+        Lambda::Lwhile(cond, body) => Lambda::Lwhile(
+            Box::new(simplify_alias_bindings_like_lets_dce(cond)),
+            Box::new(simplify_alias_bindings_like_lets_dce(body)),
+        ),
+        Lambda::Lfor(id, from, to, direction, body) => Lambda::Lfor(
+            id.clone(),
+            Box::new(simplify_alias_bindings_like_lets_dce(from)),
+            Box::new(simplify_alias_bindings_like_lets_dce(to)),
+            *direction,
+            Box::new(simplify_alias_bindings_like_lets_dce(body)),
+        ),
+        Lambda::Lassign(id, value) => Lambda::Lassign(
+            id.clone(),
+            Box::new(simplify_alias_bindings_like_lets_dce(value)),
         ),
     }
 }
@@ -3476,6 +3612,20 @@ fn reduce_named_function_application(
         return None;
     }
 
+    // OCaml's backend alias cleanup can expose literal block arguments after
+    // field-folding, but it does not then reopen the const-argument inlining
+    // heuristic for larger named functions. Keeping that boundary avoids
+    // collapsing wrappers like `update_record_test` past the OCaml lambda state.
+    let has_allocating_const_arg = args
+        .iter()
+        .any(|arg| matches!(arg, Lambda::Lconst(constant) if constant.is_allocating()));
+    if has_allocating_const_arg
+        && matches!(func.attr.inline, InlineAttribute::Default)
+        && analysis::size(&func.body) >= analysis::SMALL_INLINE_SIZE
+    {
+        return None;
+    }
+
     if func.attr.is_a_functor {
         return Some(beta_reduce::propagate_beta_reduce(
             &func.params,
@@ -5000,7 +5150,7 @@ mod tests {
     use crate::location::Location;
 
     use super::{
-        inlineable_local_function, simplify_for_js_backend,
+        alias_use_info, inlineable_local_function, simplify_for_js_backend,
         simplify_for_js_backend_with_jsx_preserve, substitute_alias_use,
     };
 
@@ -6945,7 +7095,7 @@ mod tests {
     }
 
     #[test]
-    fn named_function_inlining_does_not_treat_alias_bound_record_constants_as_literal_args() {
+    fn final_backend_cleanup_inlines_record_constant_alias_after_projection_folding() {
         let val0 = Ident::create_local("val0");
         let fff = Ident::create_local("fff");
         let val1 = Ident::create_local("val1");
@@ -6982,7 +7132,7 @@ mod tests {
                             Lambda::prim(
                                 Primitive::Pmakeblock(
                                     0,
-                                    invalid_record,
+                                    invalid_record.clone(),
                                     Mutable::Immutable,
                                 ),
                                 vec![
@@ -7036,34 +7186,84 @@ mod tests {
                         },
                         ap_transformed_jsx: false,
                     }),
-                    Lambda::var(val1.clone()),
+                    Lambda::prim(
+                        Primitive::Paddint,
+                        vec![
+                            Lambda::prim(
+                                Primitive::Pfield(
+                                    0,
+                                    crate::lambda::compat::FieldDbgInfo::Record {
+                                        name: "invalid_js_id'".to_string(),
+                                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                                    },
+                                ),
+                                vec![Lambda::var(val0.clone())],
+                                Location::none(),
+                            ),
+                            Lambda::prim(
+                                Primitive::Pfield(
+                                    0,
+                                    crate::lambda::compat::FieldDbgInfo::Record {
+                                        name: "invalid_js_id'".to_string(),
+                                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                                    },
+                                ),
+                                vec![Lambda::var(val1.clone())],
+                                Location::none(),
+                            ),
+                        ],
+                        Location::none(),
+                    ),
                 ),
             ),
         );
 
         let simplified = simplify_for_js_backend(&lambda);
-        let Lambda::Llet(_, kept_val0, _, body) = &simplified else {
-            panic!("expected the record constant binding to remain outermost, got {simplified:?}");
+        assert!(
+            find_binding_value(&simplified, &val0).is_none(),
+            "expected the once-used record constant alias to inline after its projection folded away, got {simplified:?}"
+        );
+        assert_eq!(
+            alias_use_info(&val0, &simplified).times,
+            0,
+            "expected no remaining uses of the projected record alias, got {simplified:?}"
+        );
+        let Some(fff_value) = find_binding_value(&simplified, &fff) else {
+            panic!("expected the direct wrapper binding to remain after alias cleanup, got {simplified:?}");
         };
-        assert!(kept_val0.same(&val0));
-
-        let Lambda::Llet(_, kept_fff, fff_value, body) = body.as_ref() else {
-            panic!("expected the wrapper function binding to remain after val0, got {simplified:?}");
-        };
-        assert!(kept_fff.same(&fff));
         assert!(
             inlineable_local_function(fff_value).is_some(),
-            "expected the wrapper binding to remain callable, got {fff_value:?}"
+            "expected the surviving wrapper binding to stay callable, got {fff_value:?}"
         );
-
-        let Lambda::Lapply(Apply { ap_func, ap_args, .. }) = body.as_ref() else {
-            panic!("expected the final body to stay as a named call, got {simplified:?}");
+        let Some(Lambda::Lapply(Apply { ap_func, ap_args, .. })) =
+            find_binding_value(&simplified, &val1)
+        else {
+            panic!(
+                "expected the simplified val1 binding to remain a wrapper call, got {simplified:?}"
+            );
         };
-        assert!(matches!(
-            ap_func.as_ref(),
-            Lambda::Lvar(id) if id.same(&fff)
-        ));
-        assert!(matches!(ap_args.as_slice(), [Lambda::Lvar(id)] if id.same(&val0)));
+        assert!(
+            matches!(ap_func.as_ref(), Lambda::Lvar(id) if id.same(&fff)),
+            "expected val1 to keep calling the surviving wrapper binding, got {simplified:?}"
+        );
+        assert!(
+            matches!(
+                ap_args.as_slice(),
+                [Lambda::Lconst(Constant::Block {
+                    tag_info,
+                    elements,
+                    ..
+                })] if tag_info == &invalid_record
+                    && matches!(
+                        elements.as_slice(),
+                        [
+                            Constant::Int { i: 3, .. },
+                            Constant::Int { i: 2, .. },
+                        ]
+                    )
+            ),
+            "expected alias cleanup to inline the record constant into the surviving wrapper call without beta-reducing the wrapper itself, got {simplified:?}"
+        );
     }
 
     #[test]

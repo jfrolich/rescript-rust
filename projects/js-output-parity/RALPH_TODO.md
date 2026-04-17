@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 581 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 76 output diffs
+**Status:** 582 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 75 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **581 / 657**
+- JS snapshot parity: **582 / 657**
 - Compile errors: **0**
-- Output diffs: **76**
+- Output diffs: **75**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,72 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **581 / 657**
+- JS snapshot parity: **582 / 657**
 - Compile errors: **0**
-- Output diffs: **76**
+- Output diffs: **75**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: match OCaml's post-`lets_dce` alias cleanup when projection
+  folding exposes a single-use allocating constant record, so the backend can
+  inline the record literal back into the surviving wrapper call without
+  re-opening the larger named-function const-argument inlining that OCaml
+  still avoids in `update_record_test`
+- Active backend focus stays on the **Phase 2 / Phase 3 boundary** from
+  `PLAN.md`: the fix is still in the backend lambda cleanup
+  (`compiler-rust/src/lambda/simplify.rs`), but it is correcting a shape that
+  only matters because later JS lowering / cleanup expects OCaml's exact
+  surviving wrapper-call boundary
+- OCaml reference:
+  - `compiler/core/lam_pass_remove_alias.ml`, whose alias cleanup can erase a
+    single-use alias once later simplification has exposed an immutable
+    allocating constant at the use site
+  - `compiler/core/lam_pass_lets_dce.ml`, whose let cleanup runs before the
+    repeated alias sweep and leaves this post-projection-folding shape for the
+    later pass to simplify
+  - `compiler/core/lam_compile_main.ml`, whose repeated backend lambda passes
+    explain why Rust needs one more OCaml-aligned cleanup after the
+    `lets_dce`-style pass rather than treating the checked-in JS diff as a
+    printer issue
+  - checked-in `tests/tests/src/update_record_test.01.initial.jsx`, which
+    confirms OCaml has already dropped `val0` by initial JS lowering while
+    still preserving the `fff(...)` wrapper call boundary
+- Rust change:
+  - added `simplify_alias_bindings_like_lets_dce(...)` and ran it after the
+    existing `lets_dce`-style simplifier in
+    `simplify_for_js_backend_with_jsx_preserve(...)`
+  - kept that alias cleanup narrow: it only drops unused aliases and
+    substitutes single-use aliases whose RHS is an allocating constant
+    (`Lambda::Lconst` with `constant.is_allocating()`)
+  - added a guard in `reduce_named_function_application(...)` so exposing an
+    allocating constant argument does not cause Rust to inline larger
+    default-inline named functions that OCaml still keeps as wrapper calls
+  - replaced the earlier regression test with
+    `final_backend_cleanup_inlines_record_constant_alias_after_projection_folding`
+    to lock the exact OCaml-aligned `update_record_test` shape
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml final_backend_cleanup_inlines_record_constant_alias_after_projection_folding -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml simplifies_named_nested_pjs_fn_make_application_chain_from_ari_regress_shape -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml reruns_backend_cleanup_after_lets_dce_beta_reduces_uncurried_pjs_fn_make_calls -- --nocapture`
+  - `timeout 30 ./scripts/test_js_single.sh update_record_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh DerivingAccessorsCurried --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/update_record_test.res` is exact again; Rust now removes
+    the intermediate `val0` record alias while still keeping the outer
+    `fff(...)` wrapper-call boundary that OCaml emits
+  - earlier exact guards `tests/tests/src/DerivingAccessorsCurried.res` and
+    `tests/tests/src/ExternalShadow.res` stayed exact after narrowing the new
+    alias cleanup to allocating constants only, so the change does not reopen
+    the broader constant-let ordering regressions from the first attempt
+  - the verified improvement is backend-pass behavior, not printer-only drift:
+    the OCaml-aligned lambda cleanup removed one real snapshot failure from the
+    authoritative baseline
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **581 / 657** -> **582 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **76** -> **75** (**-1**)
 
 Latest iteration on **2026-04-17**:
 
