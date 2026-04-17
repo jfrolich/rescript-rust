@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 581 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 76 output diffs
+**Status:** 584 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 73 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **581 / 657**
+- JS snapshot parity: **584 / 657**
 - Compile errors: **0**
-- Output diffs: **76**
+- Output diffs: **73**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,82 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **581 / 657**
+- JS snapshot parity: **584 / 657**
 - Compile errors: **0**
-- Output diffs: **76**
+- Output diffs: **73**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: match OCaml's late `lam_pass_lets_dce` alias cleanup for
+  multi-use non-string constants and multi-use global-module field aliases,
+  while still keeping exported aliases materialized so top-level export order
+  stays identical in the checked-in snapshots
+- Active backend focus stays on the **Phase 2 / Phase 3 boundary** from
+  `PLAN.md`: the fix is in `compiler-rust/src/lambda/simplify.rs`, and it is
+  correcting the repeated backend lambda cleanup that runs after optimized
+  lambda parity rather than changing the final JS printer
+- OCaml reference:
+  - `compiler/core/lam_pass_lets_dce.ml`, whose alias helper unconditionally
+    substitutes non-string non-allocating constants and
+    `Pfield(..., [Lglobal_module ...])` aliases into the simplified body
+  - `compiler/core/lam_pass_remove_alias.ml`, whose surrounding backend alias
+    cleanup preserves exported bindings instead of letting them disappear and
+    re-materialize later in a different source order
+  - checked-in snapshots such as
+    `tests/tests/src/belt_hashset_int_test.mjs`,
+    `tests/tests/src/list_test.mjs`,
+    `tests/tests/src/recursive_records_test.mjs`, and
+    `tests/tests/src/test_string_map.mjs`, which confirm OCaml removes these
+    local aliases before final JS emission, plus
+    `tests/tests/src/DerivingAccessorsCurried.mjs` /
+    `tests/tests/src/DisambiguateOptionalFields.mjs`, which confirm exported
+    aliases must remain in place
+- Rust change:
+  - taught `simplify_alias_bindings_like_lets_dce(...)` to substitute
+    multi-use alias bindings when their RHS is an OCaml-lets_dce-style
+    non-string non-allocating constant or a global-module field read
+  - kept that late substitution out of exported aliases so final JS does not
+    reorder top-level exported bindings after `resolve_export_aliases(...)`
+  - added focused regression coverage in
+    `lets_dce_inlines_multi_use_non_string_constant_aliases_like_ocaml` and
+    `lets_dce_inlines_multi_use_global_module_field_aliases_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lets_dce_inlines_multi_use_non_string_constant_aliases_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lets_dce_inlines_multi_use_global_module_field_aliases_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml keeps_multi_use_plain_string_bindings_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh belt_hashset_int_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh list_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh recursive_records_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh test_string_map --diff`
+  - `timeout 30 ./scripts/test_js_single.sh belt_hashmap_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh DerivingAccessorsCurried --diff`
+  - `timeout 30 ./scripts/test_js_single.sh DisambiguateOptionalFields --diff`
+  - `timeout 30 ./scripts/test_js_single.sh async_inline --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/belt_hashset_int_test.res`,
+    `tests/tests/src/list_test.res`,
+    `tests/tests/src/recursive_records_test.res`, and
+    `tests/tests/src/test_string_map.res` are exact again; Rust now drops the
+    same local integer/function aliases that OCaml removes during backend alias
+    cleanup
+  - previously regressed exported-order guards
+    `tests/tests/src/DerivingAccessorsCurried.res`,
+    `tests/tests/src/DisambiguateOptionalFields.res`,
+    `tests/tests/src/async_inline.res`, and
+    `tests/tests/src/belt_hashmap_test.res` are exact again after keeping the
+    late substitution off exported aliases
+  - `tests/tests/src/bs_poly_map_test.res` still differs, confirming the
+    remaining `acc` / `acc$1` split is a separate backend function-wrapper
+    cluster rather than part of this constant/module-field alias slice
+  - the verified improvement is backend lambda alias cleanup, not a
+    printer-only string rewrite
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **581 / 657** -> **584 / 657** (**+3**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **76** -> **73** (**-3**)
 
 Latest iteration on **2026-04-17**:
 

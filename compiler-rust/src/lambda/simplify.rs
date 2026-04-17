@@ -1162,9 +1162,16 @@ fn simplify_alias_bindings_like_lets_dce(lam: &Lambda) -> Lambda {
             let value = simplify_alias_bindings_like_lets_dce(value);
             let body = simplify_alias_bindings_like_lets_dce(body);
             if *kind == LetKind::Alias {
+                let binding_is_exported = lambda_exports_ident(&body, id);
+                if binding_is_exported {
+                    return Lambda::let_(*kind, id.clone(), value, body);
+                }
                 let use_info = alias_use_info(id, &body);
                 if use_info.times == 0 {
                     return body;
+                }
+                if lets_dce_unconditional_alias_substitution(&value) {
+                    return substitute_alias_use(&body, id, &value);
                 }
                 if use_info.times == 1
                     && matches!(
@@ -1271,6 +1278,18 @@ fn simplify_alias_bindings_like_lets_dce(lam: &Lambda) -> Lambda {
             id.clone(),
             Box::new(simplify_alias_bindings_like_lets_dce(value)),
         ),
+    }
+}
+
+fn lets_dce_unconditional_alias_substitution(value: &Lambda) -> bool {
+    match value {
+        Lambda::Lconst(constant) => can_substitute_constant_unconditionally(constant),
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
+            args,
+            ..
+        }) => matches!(args.as_slice(), [Lambda::LglobalModule(_, _)]),
+        _ => false,
     }
 }
 
@@ -8322,6 +8341,99 @@ mod tests {
         assert!(matches!(
             *func.body,
             Lambda::Lconst(Constant::String { ref s, delim: None }) if s == "hello"
+        ));
+    }
+
+    #[test]
+    fn lets_dce_inlines_multi_use_non_string_constant_aliases_like_ocaml() {
+        let shared = Ident::create_local("shared");
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Alias,
+            shared.clone(),
+            Lambda::const_(Constant::int(6825)),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::Tuple,
+                    crate::lambda::primitive::Mutable::Immutable,
+                ),
+                vec![Lambda::var(shared.clone()), Lambda::var(shared.clone())],
+                Location::none(),
+            ),
+        ));
+
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive:
+                Primitive::Pmakeblock(0, TagInfo::Tuple, crate::lambda::primitive::Mutable::Immutable),
+            args,
+            ..
+        }) = simplified
+        else {
+            panic!("expected the shared integer alias to inline into the tuple block");
+        };
+        assert!(matches!(
+            args.as_slice(),
+            [
+                Lambda::Lconst(Constant::Int { i: 6825, .. }),
+                Lambda::Lconst(Constant::Int { i: 6825, .. })
+            ]
+        ));
+    }
+
+    #[test]
+    fn lets_dce_inlines_multi_use_global_module_field_aliases_like_ocaml() {
+        let projected = Ident::create_local("projected");
+        let belt_list = Ident::create_persistent("Belt_List");
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Alias,
+            projected.clone(),
+            Lambda::prim(
+                Primitive::Pfield(
+                    0,
+                    FieldDbgInfo::Module {
+                        name: "headExn".to_string(),
+                    },
+                ),
+                vec![Lambda::global_module(belt_list.clone(), false)],
+                Location::none(),
+            ),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::Tuple,
+                    crate::lambda::primitive::Mutable::Immutable,
+                ),
+                vec![Lambda::var(projected.clone()), Lambda::var(projected.clone())],
+                Location::none(),
+            ),
+        ));
+
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive:
+                Primitive::Pmakeblock(0, TagInfo::Tuple, crate::lambda::primitive::Mutable::Immutable),
+            args,
+            ..
+        }) = simplified
+        else {
+            panic!("expected the shared module field alias to inline into the tuple block");
+        };
+        assert!(matches!(
+            args.as_slice(),
+            [
+                Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+                    args,
+                    ..
+                }),
+                Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name: name2 }),
+                    args: args2,
+                    ..
+                })
+            ] if name == "headExn"
+                && name2 == "headExn"
+                && matches!(args.as_slice(), [Lambda::LglobalModule(id, false)] if id.same(&belt_list))
+                && matches!(args2.as_slice(), [Lambda::LglobalModule(id, false)] if id.same(&belt_list))
         ));
     }
 
