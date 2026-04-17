@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 586 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 71 output diffs
+**Status:** 587 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 70 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **586 / 657**
+- JS snapshot parity: **587 / 657**
 - Compile errors: **0**
-- Output diffs: **71**
+- Output diffs: **70**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,57 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **586 / 657**
+- JS snapshot parity: **587 / 657**
 - Compile errors: **0**
-- Output diffs: **71**
+- Output diffs: **70**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: match OCaml's return-tail lowering for non-unit `if` branches
+  whose success side is a simple effect sequence ending in `return`, so Rust
+  emits the same conditional-return shape that later flattens back into
+  OCaml's explicit positive `if/else` instead of prematurely flipping to a
+  negative early-return guard
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change stays in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/js_stmt_make.ml`, especially the `if_` builder and how it
+    preserves `return (cond ? (effect, value) : fallback)` until
+    `js_pass_flatten` expands it back into an explicit `if/else`
+  - checked-in OCaml diagnose dumps for `tests/tests/src/test_primitive`, where
+    `.01.initial.jsx` carries `return b ? (console.log(1), 32) : 7;` and
+    `.06.shake.jsx` matches the snapshot's positive `if (b) { ... } else { ... }`
+- Rust change:
+  - replaced `take_single_return_expr(...)` with
+    `take_return_tail_expr(...)` in `compiler-rust/src/lambda/compile.rs`
+  - when a return block consists only of expression statements followed by one
+    `return`, collapse it into a JS `Seq` expression so
+    `compile_if_return_block(...)` can lower through the conditional-return
+    path instead of routing through `Statement::if_`'s early-return guard
+    rewrite
+  - added end-to-end regression coverage in
+    `test_primitive_keeps_positive_effectful_if_else_return_shape`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_primitive_keeps_positive_effectful_if_else_return_shape`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh src/test_primitive.res --diff`
+  - `timeout 30 ./scripts/test_js_single.sh array_subtle_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_primitive.res` now matches its checked-in snapshot;
+    `u` keeps OCaml's explicit positive `if (b) { console.log(1); return 32; }
+    else { return 7; }` shape instead of Rust's inverted `if (!b) return 7`
+    guard
+  - broader guard `tests/tests/src/array_subtle_test.res` remained an exact
+    snapshot match after the same return-tail lowering change, so the fix
+    stayed scoped to non-unit effect-sequence return branches
+  - current smallest remaining JS diffs now start at
+    `inline_record_test` (13 lines), `js_re_test` (15 lines),
+    `gpr_5280_optimize_test` (16 lines), and `test_simple_ref` (19 lines)
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **586 / 657** -> **587 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **71** -> **70** (**-1**)
 
 Latest iteration on **2026-04-17**:
 

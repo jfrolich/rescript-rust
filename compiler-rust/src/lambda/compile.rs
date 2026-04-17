@@ -4694,22 +4694,33 @@ impl LambdaCompiler {
         ))
     }
 
-    fn take_single_return_expr(&self, block: Block) -> Result<Expression, Block> {
-        let [stmt] = block.as_slice() else {
+    fn take_return_tail_expr(&self, block: Block) -> Result<Expression, Block> {
+        let mut prefix = block.clone();
+        let Some(last) = prefix.pop() else {
             return Err(block);
         };
-        if !matches!(stmt.desc, StatementDesc::Return(_)) {
+        let Statement {
+            desc: StatementDesc::Return(mut expr),
+            ..
+        } = last
+        else {
             return Err(block);
+        };
+
+        // OCaml reaches `return cond ? (effect, value) : fallback` here for
+        // simple effectful success branches, and `js_pass_flatten` later turns
+        // that back into the checked-in positive `if/else` shape.
+        for stmt in prefix.into_iter().rev() {
+            let Statement {
+                desc: StatementDesc::Exp(effect),
+                ..
+            } = stmt
+            else {
+                return Err(block);
+            };
+            expr = js_seq(effect, expr);
         }
 
-        let stmt = block.into_iter().next().expect("single-statement block");
-        let Statement {
-            desc: StatementDesc::Return(expr),
-            ..
-        } = stmt
-        else {
-            unreachable!("validated single return shape")
-        };
         Ok(expr)
     }
 
@@ -4720,8 +4731,8 @@ impl LambdaCompiler {
 
         let mut block = cond_compiled.prelude;
         match (
-            self.take_single_return_expr(then_block),
-            self.take_single_return_expr(else_block),
+            self.take_return_tail_expr(then_block),
+            self.take_return_tail_expr(else_block),
         ) {
             (Ok(then_expr), Ok(else_expr)) => {
                 block.push(Statement::return_(Expression::cond(
@@ -19983,6 +19994,27 @@ mod tests {
         assert!(
             !output.contains("if (x.length < 10) {"),
             "unexpected negative early-return guard in checked-in fixture output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_primitive_keeps_positive_effectful_if_else_return_shape() {
+        let output = compile_checked_in_test_file_to_js("test_primitive");
+        assert!(
+            output.contains("function u(b) {\n  if (b) {"),
+            "expected test_primitive.u to keep OCaml's positive if/else guard, got:\n{output}"
+        );
+        assert!(
+            output.contains("console.log(1);"),
+            "expected the effectful success branch to stay inside the positive guard, got:\n{output}"
+        );
+        assert!(
+            output.contains("} else {\n    return 7;\n  }"),
+            "expected the fallback return to stay in an explicit else branch, got:\n{output}"
+        );
+        assert!(
+            !output.contains("function u(b) {\n  if (!b) {"),
+            "unexpected negative early-return guard for test_primitive.u:\n{output}"
         );
     }
 
