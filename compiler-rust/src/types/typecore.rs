@@ -21820,6 +21820,72 @@ fn evaluate_comptime_string(
             }
             Err(super::TypeCoreError::Other("expected comptime string from field access".into()))
         }
+        ED::Pexp_apply(inner) => {
+            // Call to an @comptime.inline function with comptime-known args:
+            // compile body to JS, evaluate in Boa, return the result.
+            let crate::parser::ast::PexpApply { funct, args, .. } = &**inner;
+            let funct_expr = tctx.arena.get_expr(*funct);
+            let func_name = match &*funct_expr.pexp_desc {
+                ED::Pexp_ident(lid) => {
+                    let longident = tctx.arena.get_longident(lid.txt);
+                    tctx.arena.get_string(longident.last_idx()).to_string()
+                }
+                _ => return Err(super::TypeCoreError::Other(
+                    "expected comptime string — complex calls not supported".into(),
+                )),
+            };
+            let comptime_fn = tctx.comptime_functions.get(&func_name).cloned()
+                .ok_or_else(|| super::TypeCoreError::Other(format!(
+                    "'{}' is not registered as @comptime or @comptime.inline", func_name
+                )))?;
+            if !comptime_fn.is_inline {
+                return Err(super::TypeCoreError::Other(format!(
+                    "'{}' is not @comptime.inline — cannot evaluate at compile time", func_name
+                )));
+            }
+
+            // Resolve each argument as a comptime-known string/int/float/bool
+            let arg_js_values: Vec<String> = args.iter()
+                .map(|(_label, arg_idx)| -> TypeCoreResult<String> {
+                    let arg_expr = tctx.arena.get_expr(*arg_idx);
+                    // Try as a string first
+                    if let Ok(s) = evaluate_comptime_string(tctx, arg_expr) {
+                        return Ok(format!("{:?}", s));
+                    }
+                    // Fall back to translating as a simple JS expression
+                    crate::types::comptime_inline::translate_simple_expr_to_js(arg_expr, tctx.arena)
+                        .ok_or_else(|| super::TypeCoreError::Other(
+                            "@comptime.inline arg could not be translated to JS".into(),
+                        ))
+                })
+                .collect::<Result<_, _>>()?;
+
+            // Compile the function body to JS
+            let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx);
+            let body_js = crate::types::comptime_inline::translate_simple_expr_to_js(body_expr, tctx.arena)
+                .ok_or_else(|| super::TypeCoreError::Other(format!(
+                    "could not translate @comptime.inline body for '{}' to JS", func_name
+                )))?;
+
+            // Build a JS program: apply the function expression to the args
+            let program = format!("({})({})", body_js, arg_js_values.join(", "));
+
+            match crate::types::comptime_inline::evaluate_js(&program) {
+                crate::types::comptime_inline::InlineEvalResult::Value(
+                    crate::types::comptime::ComptimeValue::String(s)
+                ) => Ok(s),
+                crate::types::comptime_inline::InlineEvalResult::Value(other) => {
+                    Err(super::TypeCoreError::Other(format!(
+                        "@comptime.inline '{}' returned non-string: {:?}", func_name, other
+                    )))
+                }
+                crate::types::comptime_inline::InlineEvalResult::Error(e) => {
+                    Err(super::TypeCoreError::Other(format!(
+                        "@comptime.inline '{}' evaluation failed: {}", func_name, e
+                    )))
+                }
+            }
+        }
         _ => Err(super::TypeCoreError::Other("expected comptime-known string".into())),
     }
 }

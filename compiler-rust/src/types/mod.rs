@@ -34,6 +34,7 @@
 pub mod asttypes;
 pub mod btype;
 pub mod comptime;
+pub mod comptime_inline;
 pub mod context;
 pub mod ctype;
 pub mod decl;

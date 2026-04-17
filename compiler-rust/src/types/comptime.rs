@@ -37,6 +37,8 @@ pub struct ComptimeFunction {
     pub params: Vec<ComptimeParam>,
     /// Function name (for error messages).
     pub name: String,
+    /// Whether this is @comptime.inline (evaluated in JS engine).
+    pub is_inline: bool,
 }
 
 /// A parameter of a comptime function.

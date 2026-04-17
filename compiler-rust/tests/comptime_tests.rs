@@ -225,6 +225,43 @@ let y = describe(int, 42)
 // ============================================================================
 
 #[test]
+fn comptime_inline_prefix_field_names() {
+    // @comptime.inline function runs at compile time via JS (Boa).
+    // addPrefix(f.name) evaluates "user_" + s at compile time.
+    let source = r#"
+type user = { name: string, age: int, email: string }
+
+@comptime.inline
+let addPrefix = (s) => "user_" ++ s
+
+@comptime
+let prefixedKeys =
+  switch @typeInfo(user) {
+  | Record({fields}) =>
+    @buildVariant(Array.map(fields, f => @variantCase({name: addPrefix(f.name)})))
+  | _ => @compileError("expected record")
+  }
+
+// Use the generated variant — constructor names come from JS-evaluated
+// addPrefix("name") → "user_name", then capitalized to "User_name"
+let k1: prefixedKeys = User_name
+let k2: prefixedKeys = User_age
+let k3: prefixedKeys = User_email
+"#;
+    let result = compile_with_stdlib(source, "comptime_inline_prefix.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== COMPTIME.INLINE PREFIX JS ===\n{}\n=== END ===", output);
+            // The variant constructors should be User_name, User_age, User_email
+            assert!(output.contains("User_name"), "Expected User_name:\n{output}");
+            assert!(output.contains("User_age"), "Expected User_age:\n{output}");
+            assert!(output.contains("User_email"), "Expected User_email:\n{output}");
+        }
+        Err(e) => panic!("@comptime.inline should compile: {e}"),
+    }
+}
+
+#[test]
 fn comptime_array_map_value_context() {
     // Array.map on a comptime array (like fields from @typeInfo)
     // should unroll to a concrete array literal at compile time.

@@ -9042,7 +9042,10 @@ fn type_structure_item<'a>(
             for vb in bindings {
                 let is_comptime = vb.pvb_attributes.iter().any(|(name, _)| {
                     let attr_name = arena.get_string(name.txt);
-                    attr_name == "comptime" || attr_name == "comptime.derive"
+                    attr_name == "comptime" || attr_name == "comptime.derive" || attr_name == "comptime.inline"
+                });
+                let is_inline = vb.pvb_attributes.iter().any(|(name, _)| {
+                    arena.get_string(name.txt) == "comptime.inline"
                 });
                 if is_comptime {
                     has_comptime = true;
@@ -9077,6 +9080,7 @@ fn type_structure_item<'a>(
                             body_expr_idx: vb.pvb_expr,
                             params: Vec::new(),
                             name: name.clone(),
+                            is_inline,
                         };
 
                         // Register under the function name (for @comptime calls)
