@@ -20299,6 +20299,31 @@ mod tests {
     }
 
     #[test]
+    fn gpr_3770_keeps_all_zero_guard_conjoined_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("gpr_3770_test");
+        assert!(
+            output.contains("if (a === 0 && x._1 === 0 && x._2 === 0) {"),
+            "expected gpr_3770_test.show to keep the all-zero guard collapsed into one positive conjunction, got:\n{output}"
+        );
+        assert!(
+            output.contains("return \"zeroes\";"),
+            "expected gpr_3770_test.show to keep the zero case in the guarded branch, got:\n{output}"
+        );
+        assert!(
+            output.contains("return a.toString() + x._1.toString();"),
+            "expected gpr_3770_test.show to keep the non-zero fallback return after the guard, got:\n{output}"
+        );
+        assert!(
+            !output.contains("if (a !== 0) {"),
+            "unexpected leading negative guard in gpr_3770_test.show:\n{output}"
+        );
+        assert!(
+            !output.contains("else if (x._1 !== 0) {") && !output.contains("else if (x._2 !== 0) {"),
+            "unexpected nested negative guard chain in gpr_3770_test.show:\n{output}"
+        );
+    }
+
+    #[test]
     fn bal_set_mini_unwraps_terminal_return_blocks_before_if_fallthrough_flattening() {
         let output = compile_checked_in_test_file_to_js("bal_set_mini");
         assert!(

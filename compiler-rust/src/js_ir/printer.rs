@@ -2404,6 +2404,20 @@ impl JsPrinter {
             return;
         }
 
+        if let Some(rewritten) =
+            try_function_body_shared_success_disjunction_fallthrough_rewrite(stmts)
+        {
+            self.print_function_body(&rewritten, return_unit);
+            return;
+        }
+
+        if let Some(rewritten) =
+            try_function_body_shared_success_else_if_chain_suffix_rewrite(stmts)
+        {
+            self.print_function_body(&rewritten, return_unit);
+            return;
+        }
+
         if let Some(rewritten) = try_function_body_shared_return_guard_chain_suffix_rewrite(stmts) {
             self.print_function_body(&rewritten, return_unit);
             return;
@@ -3006,6 +3020,127 @@ fn try_function_body_shared_return_guard_chain_suffix_rewrite(stmts: &Block) -> 
     }
 
     None
+}
+
+fn try_function_body_shared_success_else_if_chain_suffix_rewrite(stmts: &Block) -> Option<Block> {
+    let (last, prefix) = stmts.split_last()?;
+    let (cond, fallback, success) = shared_success_else_if_chain(last)?;
+
+    let mut rewritten = prefix.to_vec();
+    rewritten.push(Statement {
+        desc: StatementDesc::If(cond, vec![Statement::return_(fallback)], vec![]),
+        comment: last.comment.clone(),
+    });
+    rewritten.push(Statement::return_(success));
+    Some(rewritten)
+}
+
+fn try_function_body_shared_success_disjunction_fallthrough_rewrite(stmts: &Block) -> Option<Block> {
+    let (last, prefix) = stmts.split_last()?;
+    let stmt = unwrap_single_block_stmt(last);
+    let StatementDesc::If(cond, then_, else_) = &stmt.desc else {
+        return None;
+    };
+
+    let success = single_wrapped_return_expr(then_)?;
+    let fallback = single_wrapped_return_expr(else_)?;
+    if ocaml_eq_expression(success, fallback) {
+        return None;
+    }
+
+    let cond = positive_conjunction_from_disjunction_chain(cond)?;
+
+    let mut rewritten = prefix.to_vec();
+    rewritten.push(Statement {
+        desc: StatementDesc::If(cond, vec![Statement::return_(fallback.clone())], vec![]),
+        comment: last.comment.clone(),
+    });
+    rewritten.push(Statement::return_(success.clone()));
+    Some(rewritten)
+}
+
+fn shared_success_else_if_chain(stmt: &Statement) -> Option<(Expression, Expression, Expression)> {
+    let mut guards = Vec::new();
+    let mut success: Option<Expression> = None;
+    let fallback = collect_shared_success_else_if_chain(stmt, &mut guards, &mut success)?;
+    if guards.len() < 2 {
+        return None;
+    }
+
+    let mut positive_guards = guards.into_iter().map(|guard| negate_tail_merge_condition(&guard));
+    let cond = positive_guards.next()?;
+    let cond = positive_guards.fold(cond, |acc, guard| Expression::bin(BinOp::And, acc, guard));
+
+    Some((cond, fallback, success?))
+}
+
+fn positive_conjunction_from_disjunction_chain(cond: &Expression) -> Option<Expression> {
+    let mut guards = Vec::new();
+    collect_disjunction_chain(cond, &mut guards);
+    if guards.len() < 2 || !guards.iter().all(disjunction_guard_is_nonzero_zero_test) {
+        return None;
+    }
+
+    let mut positive_guards = guards.into_iter().map(|guard| negate_tail_merge_condition(&guard));
+    let cond = positive_guards.next()?;
+    Some(positive_guards.fold(cond, |acc, guard| Expression::bin(BinOp::And, acc, guard)))
+}
+
+fn disjunction_guard_is_nonzero_zero_test(cond: &Expression) -> bool {
+    matches!(
+        &cond.desc,
+        ExpressionDesc::Bin(BinOp::NotEqEq, left, right)
+            if is_zero_int_literal(left) || is_zero_int_literal(right)
+    )
+}
+
+fn is_zero_int_literal(expr: &Expression) -> bool {
+    matches!(expr.desc, ExpressionDesc::Number(Number::Int { i: 0, .. }))
+}
+
+fn collect_disjunction_chain(cond: &Expression, guards: &mut Vec<Expression>) {
+    match &cond.desc {
+        ExpressionDesc::Bin(BinOp::Or, left, right) => {
+            collect_disjunction_chain(left, guards);
+            collect_disjunction_chain(right, guards);
+        }
+        _ => guards.push(cond.clone()),
+    }
+}
+
+fn collect_shared_success_else_if_chain(
+    stmt: &Statement,
+    guards: &mut Vec<Expression>,
+    success: &mut Option<Expression>,
+) -> Option<Expression> {
+    let stmt = unwrap_single_block_stmt(stmt);
+    let StatementDesc::If(cond, then_, else_) = &stmt.desc else {
+        return None;
+    };
+
+    let then_return = single_wrapped_return_expr(then_)?;
+    match success {
+        Some(existing) if !ocaml_eq_expression(existing, then_return) => return None,
+        Some(_) => {}
+        None => {
+            *success = Some(then_return.clone());
+        }
+    }
+
+    guards.push(cond.clone());
+
+    if let Some(fallback) = single_wrapped_return_expr(else_) {
+        if success
+            .as_ref()
+            .is_some_and(|existing| ocaml_eq_expression(existing, fallback))
+        {
+            return None;
+        }
+        return Some(fallback.clone());
+    }
+
+    let nested = single_else_if_stmt_like_ocaml(else_)?;
+    collect_shared_success_else_if_chain(nested, guards, success)
 }
 
 fn collect_function_tail_negative_guard_chain_stmt(
@@ -5660,6 +5795,113 @@ mod tests {
             !rendered.contains("if (value !== undefined) {"),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn test_print_non_unit_function_body_collapses_shared_success_else_if_chain_like_ocaml() {
+        let show = Ident::create_local("show");
+        let a = Ident::create_local("a");
+        let b = Ident::create_local("b");
+        let c = Ident::create_local("c");
+        let result = Ident::create_local("result");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: show,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![a.clone(), b.clone(), c.clone(), result.clone()],
+                body: vec![Statement::new(StatementDesc::If(
+                    Expression::bin(
+                        BinOp::NotEqEq,
+                        Expression::var(a.clone()),
+                        Expression::number(Number::int(0)),
+                    ),
+                    vec![Statement::return_(Expression::var(result.clone()))],
+                    vec![Statement::new(StatementDesc::If(
+                        Expression::bin(
+                            BinOp::NotEqEq,
+                            Expression::var(b.clone()),
+                            Expression::number(Number::int(0)),
+                        ),
+                        vec![Statement::return_(Expression::var(result.clone()))],
+                        vec![Statement::new(StatementDesc::If(
+                            Expression::bin(
+                                BinOp::NotEqEq,
+                                Expression::var(c.clone()),
+                                Expression::number(Number::int(0)),
+                            ),
+                            vec![Statement::return_(Expression::var(result.clone()))],
+                            vec![Statement::return_(Expression::string("zeroes"))],
+                        ))],
+                    ))],
+                ))],
+                env: Default::default(),
+                return_unit: false,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (a === 0 && b === 0 && c === 0) {"), "{rendered}");
+        assert!(rendered.contains("return \"zeroes\";"), "{rendered}");
+        assert!(rendered.contains("return result;"), "{rendered}");
+        assert!(!rendered.contains("if (a !== 0) {"), "{rendered}");
+        assert!(!rendered.contains("else if (b !== 0) {"), "{rendered}");
+        assert!(!rendered.contains("else if (c !== 0) {"), "{rendered}");
+    }
+
+    #[test]
+    fn test_print_non_unit_function_body_inverts_shared_success_or_guard_into_fallthrough() {
+        let show = Ident::create_local("show");
+        let a = Ident::create_local("a");
+        let b = Ident::create_local("b");
+        let c = Ident::create_local("c");
+        let result = Ident::create_local("result");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: show,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![a.clone(), b.clone(), c.clone(), result.clone()],
+                body: vec![Statement::new(StatementDesc::If(
+                    Expression::bin(
+                        BinOp::Or,
+                        Expression::bin(
+                            BinOp::Or,
+                            Expression::bin(
+                                BinOp::NotEqEq,
+                                Expression::var(a.clone()),
+                                Expression::number(Number::int(0)),
+                            ),
+                            Expression::bin(
+                                BinOp::NotEqEq,
+                                Expression::var(b.clone()),
+                                Expression::number(Number::int(0)),
+                            ),
+                        ),
+                        Expression::bin(
+                            BinOp::NotEqEq,
+                            Expression::var(c.clone()),
+                            Expression::number(Number::int(0)),
+                        ),
+                    ),
+                    vec![Statement::return_(Expression::var(result.clone()))],
+                    vec![Statement::return_(Expression::string("zeroes"))],
+                ))],
+                env: Default::default(),
+                return_unit: false,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (a === 0 && b === 0 && c === 0) {"), "{rendered}");
+        assert!(rendered.contains("return \"zeroes\";"), "{rendered}");
+        assert!(rendered.contains("return result;"), "{rendered}");
+        assert!(!rendered.contains("if (a !== 0 || b !== 0 || c !== 0) {"), "{rendered}");
+        assert!(!rendered.contains("} else {"), "{rendered}");
     }
 
     #[test]

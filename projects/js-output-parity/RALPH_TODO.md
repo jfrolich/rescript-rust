@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 586 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 71 output diffs
+**Status:** 587 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 70 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **586 / 657**
+- JS snapshot parity: **587 / 657**
 - Compile errors: **0**
-- Output diffs: **71**
+- Output diffs: **70**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,81 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **586 / 657**
+- JS snapshot parity: **587 / 657**
 - Compile errors: **0**
-- Output diffs: **71**
+- Output diffs: **70**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: match OCaml's recursive `Js_stmt_make.if_` collapse for the
+  remaining all-zero tuple guard chain, so Rust stops emitting
+  `if (a !== 0) return expr; else if (x._1 !== 0) return expr; else if (x._2 !== 0) return expr; else return "zeroes";`
+  or the intermediate `if (a !== 0 || x._1 !== 0 || x._2 !== 0) { return expr; } else { return "zeroes"; }`
+  and instead prints the checked-in fallthrough form
+  `if (a === 0 && x._1 === 0 && x._2 === 0) { return "zeroes"; } return expr;`
+- Active backend focus stays on the **Phase 5** last-mile printer slice from
+  `PLAN.md`: the verified changes are in
+  `compiler-rust/src/js_ir/printer.rs` and `compiler-rust/src/js_ir/mod.rs`,
+  and they only collapse the final tail-guard shape after the backend has
+  already built the correct shared-success chain
+- OCaml reference:
+  - `compiler/core/js_stmt_make.ml`, whose recursive `if_` helper first merges
+    shared-success nested `else if` chains with `E.or_`, then applies the
+    `| _, [Return _] -> ...` fallthrough rewrite with `E.not`
+  - checked-in `tests/tests/src/gpr_3770_test.mjs`, whose `show` snapshot
+    proves OCaml emits one positive all-zero conjunction followed by the shared
+    fallback return
+  - checked-in exact guards such as `tests/tests/src/gpr_2413_test.mjs`,
+    `tests/tests/src/large_integer_pat.mjs`,
+    `tests/tests/src/record_extension_test.mjs`, and
+    `tests/tests/src/variant.mjs`, which prove this fallthrough rewrite must
+    stay narrower than general disjunction-return tails
+- Rust change:
+  - extended `ocaml_eq_expression(...)` in `compiler-rust/src/js_ir/mod.rs`
+    with `StringAppend` equality so shared-success return blocks from
+    `gpr_3770_test` compare like OCaml
+  - added
+    `try_function_body_shared_success_else_if_chain_suffix_rewrite(...)` and
+    `try_function_body_shared_success_disjunction_fallthrough_rewrite(...)` in
+    `compiler-rust/src/js_ir/printer.rs` so the printer can finish the same
+    shared-success tail collapse that OCaml's `if_` performs
+  - narrowed the disjunction-tail inversion to zero-valued `!== 0` guard
+    chains only, so range checks and variant/tag refinement guards keep the
+    checked-in negative-guard form
+  - added focused printer regression coverage in
+    `test_print_non_unit_function_body_collapses_shared_success_else_if_chain_like_ocaml`
+    and
+    `test_print_non_unit_function_body_inverts_shared_success_or_guard_into_fallthrough`
+  - added a checked-in end-to-end fixture guard in
+    `gpr_3770_keeps_all_zero_guard_conjoined_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_non_unit_function_body_collapses_shared_success_else_if_chain_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_non_unit_function_body_inverts_shared_success_or_guard_into_fallthrough -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml gpr_3770_keeps_all_zero_guard_conjoined_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml gpr_3154_keeps_none_guard_chain_conjoined_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_3770_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_2413_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh variant --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_3770_test.res` is exact again; Rust now prints the
+    same all-zero conjunction and shared fallback return that OCaml checks in
+  - `tests/tests/src/ExternalShadow.res` and
+    `tests/tests/src/gpr_3154_test.res` stayed exact after the same tail merge,
+    so this non-unit function-body rewrite did not reopen the earlier import
+    or shared-fallback guard clusters
+  - accidental regressions in `gpr_2413_test`, `large_integer_pat`,
+    `record_extension_test`, and `variant` were eliminated by narrowing the
+    disjunction-tail inversion back to the zero-valued guard family only
+  - the verified improvement is a last-mile printer tail merge, not a backend
+    string rewrite: the function-body printer now recognizes the same
+    shared-success zero-guard collapse that OCaml emits for `gpr_3770_test`
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **586 / 657** -> **587 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **71** -> **70** (**-1**)
 
 Latest iteration on **2026-04-17**:
 
