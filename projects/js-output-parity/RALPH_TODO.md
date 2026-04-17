@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 584 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 73 output diffs
+**Status:** 585 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 72 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **584 / 657**
+- JS snapshot parity: **585 / 657**
 - Compile errors: **0**
-- Output diffs: **73**
+- Output diffs: **72**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,50 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **584 / 657**
+- JS snapshot parity: **585 / 657**
 - Compile errors: **0**
-- Output diffs: **73**
+- Output diffs: **72**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: align JS dependency collection with the printer's dead-binding
+  elision so Rust stops retaining dead private relative external imports from
+  functor-local bindings and therefore stops emitting the extra
+  `import * as X from "./x";` line in `internal_unused_test`
+- Active backend focus stayed in **Phase 4** backend lowering / dependency
+  collection from `PLAN.md`: the verified change is in
+  `compiler-rust/src/lambda/compile.rs`, not in the string printer
+- OCaml reference:
+  - `compiler/ml/translmod.ml`, whose private-relative-external expansion keeps
+    these bindings local to the structure
+  - `compiler/core/lam_convert.ml` and
+    `compiler/core/lam_compile_main.ml`, which take required-module information
+    from the converted lambda traversal rather than from a separate printer-only
+    rewrite pass
+- Rust change:
+  - updated `collect_modules_from_statement(...)` in
+    `compiler-rust/src/lambda/compile.rs` to skip `UsedStats::DeadPure`
+    variable initializers entirely and only keep `DeadNonPure` initializers
+    when the printer will still emit them
+  - added focused regression coverage in
+    `required_modules_skip_dead_pure_external_bindings_like_printer` and
+    `internal_unused_test_omits_dead_private_relative_external_import_like_ocaml`
+- Verified focused guards for this slice:
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release required_modules_skip_dead_pure_external_bindings_like_printer`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release internal_unused_test_omits_dead_private_relative_external_import_like_ocaml`
+  - `timeout 30 ./scripts/test_js_single.sh internal_unused_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/internal_unused_test.res` is exact again; Rust no longer
+    keeps the dead `./x` dependency alive once the binding is omitted from the
+    printed JS
+  - `tests/tests/src/ExternalShadow.res` stayed exact, so the dependency fix
+    did not reopen the import/export guard slice
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **584 / 657** -> **585 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **73** -> **72** (**-1**)
 
 Latest iteration on **2026-04-17**:
 

@@ -14308,8 +14308,20 @@ fn collect_modules_from_statement(stmt: &Statement, modules: &mut OcamlModuleSet
     match &stmt.desc {
         StatementDesc::Block(block) => collect_modules_from_block(block, modules),
         StatementDesc::Variable(decl) => {
-            if let Some(value) = &decl.value {
-                collect_modules_from_expression(value, modules);
+            match decl.ident_info.used_stats {
+                UsedStats::DeadPure => {}
+                UsedStats::DeadNonPure => {
+                    if let Some(value) = &decl.value
+                        && !matches!(value.desc, ExpressionDesc::Var(_))
+                    {
+                        collect_modules_from_expression(value, modules);
+                    }
+                }
+                _ => {
+                    if let Some(value) = &decl.value {
+                        collect_modules_from_expression(value, modules);
+                    }
+                }
             }
         }
         StatementDesc::Exp(expr) | StatementDesc::Throw(expr) | StatementDesc::Return(expr) => {
@@ -27332,6 +27344,53 @@ let fib3 = n => {
             compiler.compile_deps_program_with_possible_required_modules(&Lambda::unit(), &extras);
 
         assert!(deps.modules.is_empty());
+    }
+
+    #[test]
+    fn required_modules_skip_dead_pure_external_bindings_like_printer() {
+        let compiler = LambdaCompiler::new();
+        let mut dead_info = IdentInfo::default();
+        dead_info.used_stats = UsedStats::DeadPure;
+        let block = vec![Statement::variable(VariableDeclaration {
+            ident: Ident::create_local("dead_external"),
+            value: Some(Expression::qualified(
+                ModuleId {
+                    id: Ident::create_local("X"),
+                    kind: Kind::External {
+                        name: "./x".to_string(),
+                        default: false,
+                        import_attributes: None,
+                    },
+                    dynamic_import: false,
+                },
+                Some("x".to_string()),
+            )),
+            property: LetKind::StrictOpt,
+            ident_info: dead_info,
+        })];
+
+        let modules = compiler.collect_required_modules(&block);
+
+        assert!(
+            modules.is_empty(),
+            "dead pure bindings are omitted by the printer, so they must not keep module deps"
+        );
+    }
+
+    #[test]
+    fn internal_unused_test_omits_dead_private_relative_external_import_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("internal_unused_test");
+
+        assert!(
+            !output.contains("import * as X from \"./x\";"),
+            "expected dead private relative external import to be omitted, got:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "import * as Primitive_exceptions from \"@rescript/runtime/lib/es6/Primitive_exceptions.js\";"
+            ),
+            "expected checked-in runtime import to remain, got:\n{output}"
+        );
     }
 
     #[test]
