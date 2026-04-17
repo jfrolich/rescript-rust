@@ -11104,7 +11104,7 @@ fn flatten_and_mark_dead_statement(
                     comment: value_comment,
                 }) = decl.value
                 {
-                    if items.len() >= 2 {
+                    if items.len() >= 3 {
                         let mut rewritten_items = Vec::with_capacity(items.len());
                         let mut bindings = Vec::new();
 
@@ -11166,8 +11166,11 @@ fn flatten_and_mark_dead_statement(
                     }
 
                     // OCaml's js_pass_flatten_and_mark_dead only records block
-                    // substitutions for immutable Caml blocks with at least two
-                    // fields. Single-field module blocks stay materialized.
+                    // substitutions for immutable Caml blocks with at least
+                    // three fields. Two-field polyvariant wrappers such as
+                    // `{ NAME; VAL }` stay materialized so later passes still
+                    // emit `.VAL` instead of collapsing directly to the raw
+                    // payload.
                     return Statement {
                         desc: {
                             let rewritten_value = Expression {
@@ -26619,6 +26622,7 @@ mod tests {
                                         CallInfo::default(),
                                     ),
                                     Expression::number(Number::int(2)),
+                                    Expression::number(Number::int(3)),
                                 ],
                                 MutableFlag::Immutable,
                                 Box::new(Expression::number(Number::int(0))),
@@ -26698,6 +26702,10 @@ mod tests {
                         },
                         Expression {
                             desc: ExpressionDesc::Number(Number::Int { i: 2, .. }),
+                            ..
+                        },
+                        Expression {
+                            desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
                             ..
                         }
                     ]
@@ -28168,6 +28176,45 @@ let f = x =>
 
         let rendered = print_block(&compiler.compile_program(&lam).block);
         assert_eq!(rendered, "handle(\"renamed\", 2);");
+    }
+
+    #[test]
+    fn bs_unwrap_keeps_exported_polyvar_wrappers_materialized_like_snapshot() {
+        let source = r#"
+@val
+external log1: @unwrap
+[
+  | #Pair(string, int)
+  | #Int(int)
+  | #String(string)
+] => unit = "console.log"
+
+let arg_string = #String("hi runtime")
+let _ = log1(arg_string)
+
+let arg_pair = #Pair("hi", 1)
+let _ = log1(arg_pair)
+"#;
+
+        let output = crate::driver::compile_source_to_js(source, "bs_unwrap_exported_polyvars.res")
+            .unwrap();
+
+        assert!(
+            output.contains("console.log(arg_string.VAL);"),
+            "expected the exported string polyvar wrapper to stay materialized, got:\n{output}"
+        );
+        assert!(
+            output.contains("console.log(arg_pair.VAL);"),
+            "expected the exported pair polyvar wrapper to stay materialized, got:\n{output}"
+        );
+        assert!(
+            !output.contains("console.log(\"hi runtime\");"),
+            "did not expect the exported string polyvar wrapper to unwrap to a raw payload:\n{output}"
+        );
+        assert!(
+            !output.contains("let arg_pair_1 = ["),
+            "did not expect the exported pair payload to be split into a separate temp:\n{output}"
+        );
     }
 
     #[test]

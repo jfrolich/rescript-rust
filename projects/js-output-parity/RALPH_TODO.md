@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 596 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 61 output diffs
+**Status:** 590 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 67 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **596 / 657**
+- JS snapshot parity: **590 / 657**
 - Compile errors: **0**
-- Output diffs: **61**
+- Output diffs: **67**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,63 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **596 / 657**
+- JS snapshot parity: **590 / 657**
 - Compile errors: **0**
-- Output diffs: **61**
+- Output diffs: **67**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: align the Rust `js_pass_flatten_and_mark_dead` Caml-block
+  substitution threshold with OCaml for the live `bs_unwrap_test` snapshot
+  mismatch, where Rust was still collapsing exported two-field polyvariant
+  wrappers to raw payloads
+- Active backend focus moved into **Phase 4** JS-pass cleanup from `PLAN.md`:
+  this fix is in the JS IR cleanup boundary, not the printer and not the
+  earlier lambda simplifier
+- OCaml reference:
+  - `compiler/core/js_pass_flatten_and_mark_dead.ml`, whose substitution case
+    only matches `Caml_block ((_ :: _ :: _ as ls), Immutable, tag, tag_info)`
+    before recording a block substitution, so two-field wrappers stay
+    materialized
+  - `compiler/core/js_of_lam_variant.ml`, whose `eval_as_unwrap` only unwraps
+    direct `Caml_block` expressions and otherwise emits `E.poly_var_value_access`
+    (`.VAL`)
+- Rust change:
+  - changed `flatten_and_mark_dead_statement(...)` in
+    `compiler-rust/src/lambda/compile.rs` to record immutable Caml-block
+    substitutions only for blocks with **three or more** fields, matching the
+    OCaml JS pass instead of the previous Rust-only `>= 2` rule
+  - updated the existing
+    `js_flatten_and_mark_dead_substitutes_immutable_caml_block_index_reads`
+    unit to exercise the real OCaml threshold with a three-field tuple
+  - added focused regression coverage
+    `bs_unwrap_keeps_exported_polyvar_wrappers_materialized_like_snapshot`
+    so bound `@unwrap` polyvariant arguments keep `.VAL` materialized like the
+    checked-in snapshot
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_flatten_and_mark_dead_substitutes_immutable_caml_block_index_reads -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release bs_unwrap_keeps_exported_polyvar_wrappers_materialized_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh bs_unwrap_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/bs_unwrap_test.res -o /tmp/bs_unwrap_test.mjs`
+  - `diff -u tests/tests/src/bs_unwrap_test.mjs /tmp/bs_unwrap_test.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bs_unwrap_test.res` is exact again; Rust now keeps
+    `arg_string.VAL` / `arg_pair.VAL` materialized instead of collapsing the
+    exported two-field wrappers to `"hi runtime"` / `arg_pair_1`
+  - `tests/tests/src/ExternalShadow.res` stayed exact, so the JS-pass threshold
+    correction did not perturb the stable import/export guard
+  - the authoritative baseline regressed after the verified OCaml-aligned fix:
+    new snapshot failures now include small two-field-block families such as
+    `Import.res` and `RecordCoercion.res`, which means the corrected JS-pass
+    boundary has exposed remaining earlier-pipeline gaps that Rust had been
+    papering over with the too-aggressive `>= 2` substitution rule
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **597 / 657** -> **590 / 657** (**-7**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **60** -> **67** (**+7**)
 
 Latest iteration on **2026-04-17**:
 
