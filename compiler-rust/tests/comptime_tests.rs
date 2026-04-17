@@ -18,69 +18,27 @@ fn stdlib_registry() -> &'static ModuleRegistry {
 
         let mut registry = ModuleRegistry::new();
 
-        // Prefer .resi when both exist, but fall back to .res for modules
-        // like Pervasives and Stdlib that have no interface file.
-        let mut interfaces: HashMap<String, PathBuf> = HashMap::new();
+        // Register source fallback paths. Prefer .resi when both exist.
+        // Modules are compiled lazily on first lookup (matches the playground).
         if let Ok(entries) = std::fs::read_dir(&runtime_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                if ext == "resi" {
-                    interfaces.insert(name.to_string(), path.clone());
-                } else if ext == "res" && !interfaces.contains_key(name) {
-                    interfaces.insert(name.to_string(), path.clone());
-                }
-                if ext == "res" || ext == "resi" {
+                if ext == "res" {
                     registry.source_fallback_paths.insert(name.to_string(), path);
                 }
             }
         }
-        // Second pass to prefer .resi where both exist
         if let Ok(entries) = std::fs::read_dir(&runtime_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
                 if ext == "resi" {
-                    interfaces.insert(name.to_string(), path);
+                    registry.source_fallback_paths.insert(name.to_string(), path);
                 }
             }
-        }
-
-        // Pre-compile interfaces. Order: Pervasives first (it has nopervasives),
-        // then individual Stdlib_* modules, then Stdlib itself (which re-exports them).
-        // We do a multi-pass: try each module, skip those that fail due to unresolved
-        // dependencies, repeat until stable.
-        let mut remaining: Vec<(String, PathBuf)> = interfaces.into_iter().collect();
-        // Sort: Pervasives first, Stdlib_* next, Stdlib last, others in between
-        remaining.sort_by_key(|(name, _)| {
-            match name.as_str() {
-                "Pervasives" => 0,
-                n if n.starts_with("Stdlib_") => 1,
-                n if n.starts_with("Belt_") => 1,
-                n if n.starts_with("Js_") => 1,
-                n if n.starts_with("Primitive_") => 1,
-                "Stdlib" => 3,
-                _ => 2,
-            }
-        });
-
-        // Multi-pass compilation: some modules depend on others, so we may
-        // need several passes to resolve all dependencies.
-        let mut passes = 0;
-        while !remaining.is_empty() && passes < 5 {
-            passes += 1;
-            let mut still_remaining = Vec::new();
-            for (name, path) in remaining.drain(..) {
-                if registry.cached_modules.contains_key(&name) {
-                    continue;
-                }
-                if compile_runtime_module(&name, &path, &mut registry).is_err() {
-                    still_remaining.push((name, path));
-                }
-            }
-            remaining = still_remaining;
         }
 
         registry
@@ -819,4 +777,542 @@ let x = switch Red {
 "#;
     let output = compile_with_stdlib(source, "fold.res").unwrap();
     assert!(output.contains("let x = \"red\""), "Expected fold to 'red':\n{output}");
+}
+
+#[test]
+fn playground_double_compile() {
+    // Simulate the playground's flow: compile twice with registry state
+    // accumulating between compiles (as happens on user edits in the playground).
+    use rescript_compiler::cmi::persistent_env::{ModuleRegistry, PersistentEnv};
+
+    // Use a mutable registry that gets updated after each compile
+    let mut registry = stdlib_registry().clone();
+    let source = r#"type user = { name: string, age: int }
+
+exception DecodeError(string)
+
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Record({fields}) =>
+    let dict = Dict.make()
+    inline for field in fields {
+      Dict.set(dict, field.name, encode(@field(value, field.name)))
+    }
+    JSON.Encode.object(dict)
+  | _ => @compileError("unsupported")
+  }
+}
+
+let alice: user = { name: "Alice", age: 30 }
+let aliceJson = encode(alice)
+"#;
+
+    for iteration in 1..=2 {
+        let options = CompilerOptions {
+            source_filename: Some("Playground.res".to_string()),
+            ..Default::default()
+        };
+        let module_name = "Playground".to_string();
+
+        // Like the playground: remove this module from registry before compile
+        registry.cached_modules.remove(&module_name);
+        registry.module_info.remove(&module_name);
+
+        let result = compile_source_in_process(source, "Playground.res", &module_name, &options, &registry, false);
+        match result {
+            Ok(r) => {
+                eprintln!("=== Iteration {iteration} output ===");
+                assert!(r.js_output.contains("encode$user"),
+                    "Iteration {iteration}: expected encode$user:\n{}", r.js_output);
+                // Save module to registry (mimics playground's extract_all_cached_modules)
+                if let Some(ps) = r.pers_struct {
+                    registry.cached_modules.insert(module_name.clone(), ps);
+                }
+                registry.alias_rewrites.extend(r.new_alias_rewrites);
+                eprintln!("Iteration {iteration}: OK");
+            }
+            Err(e) => panic!("Iteration {iteration} failed: {e}"),
+        }
+    }
+}
+
+#[test]
+fn playground_variants_encoding() {
+    // Simple enum-variant encoding via runtime tag trick.
+    // Tag int indexes into a comptime-populated names array.
+    let source = r#"
+type status = Active | Inactive | Pending
+
+exception DecodeError(string)
+
+external tagOfVariant: 'a => int = "%identity"
+external variantOfTag: int => 'a = "%identity"
+
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Variant({constructors}) =>
+    let names = []
+    inline for c in constructors {
+      Array.push(names, c.name)
+    }
+    JSON.Encode.string(Array.getUnsafe(names, tagOfVariant(value)))
+  | _ => @compileError("unsupported")
+  }
+}
+
+@comptime
+let rec decode = (type t, json: JSON.t) => {
+  switch @typeInfo(t) {
+  | String =>
+    switch json { | String(s) => s | _ => throw(DecodeError("expected string")) }
+  | Variant({constructors}) =>
+    switch json {
+    | String(s) =>
+      let result = ref(None)
+      let idx = ref(0)
+      inline for c in constructors {
+        if s == c.name { result := Some(variantOfTag(idx.contents)) }
+        idx := idx.contents + 1
+      }
+      switch result.contents {
+      | Some(v) => v
+      | None => throw(DecodeError("unknown variant: " ++ s))
+      }
+    | _ => throw(DecodeError("expected variant string"))
+    }
+  | _ => @compileError("unsupported")
+  }
+}
+
+let s = Active
+let j = encode(s)
+let d = decode(status, j)
+"#;
+    match compile_with_stdlib(source, "variants.res") {
+        Ok(o) => {
+            eprintln!("VARIANTS OUTPUT:\n{o}");
+            assert!(o.contains("encode$status"), "Expected encode$status:\n{o}");
+            assert!(o.contains("decode$status"), "Expected decode$status:\n{o}");
+        }
+        Err(e) => panic!("variants should compile: {e}"),
+    }
+}
+
+#[test]
+fn playground_exact_init_code() {
+    // Exact INITIAL_CODE from playground/src/App.jsx as of 2026-04-17
+    let source = r#"// ── Comptime playground ─────────────────────────────────────────────────
+// Functions marked @comptime run at compile time. @typeInfo introspects a
+// type; inline for unrolls loops. Each call monomorphizes to a specialized
+// function — recursive types produce self-recursive code, no infinite
+// expansion.
+
+type address = { street: string, city: string }
+type user = { name: string, age: int, active: bool, address: address }
+type tree = { value: string, children: array<tree> }
+
+exception DecodeError(string)
+
+// ── 1. Zero-overhead JSON encoder ───────────────────────────────────────
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Bool => JSON.Encode.bool(value)
+  | Record({fields}) =>
+    let dict = Dict.make()
+    inline for field in fields {
+      Dict.set(dict, field.name, encode(@field(value, field.name)))
+    }
+    JSON.Encode.object(dict)
+  | Array(_) => JSON.Encode.array(Array.map(value, v => encode(v)))
+  | _ => @compileError("encode: unsupported type")
+  }
+}
+
+let alice: user = {
+  name: "Alice",
+  age: 30,
+  active: true,
+  address: {street: "Main St", city: "NYC"},
+}
+
+let aliceJson = encode(alice)
+
+let myTree: tree = {
+  value: "root",
+  children: [
+    {value: "child1", children: []},
+    {value: "child2", children: []},
+  ],
+}
+let treeJson = encode(myTree)
+
+@comptime
+let rec decode = (type t, json: JSON.t) => {
+  switch @typeInfo(t) {
+  | String =>
+    switch json { | String(s) => s | _ => throw(DecodeError("expected string")) }
+  | Int =>
+    switch json { | Number(n) => Float.toInt(n) | _ => throw(DecodeError("expected int")) }
+  | Bool =>
+    switch json { | Boolean(b) => b | _ => throw(DecodeError("expected bool")) }
+  | Record({fields}) =>
+    switch json {
+    | Object(dict) =>
+      @record(t, inline for field in fields {
+        decode(field.typ, Dict.getUnsafe(dict, field.name))
+      })
+    | _ => throw(DecodeError("expected object"))
+    }
+  | _ => @compileError("decode: unsupported type")
+  }
+}
+
+let decodedAlice = try Some(decode(user, aliceJson)) catch {
+| DecodeError(_) => None
+}
+
+@comptime
+let userKey =
+  switch @typeInfo(user) {
+  | Record({fields}) =>
+    @buildVariant(inline for field in fields {
+      @variantCase({name: field.name})
+    })
+  | _ => @compileError("expected record")
+  }
+
+let k1: userKey = Name
+let k2: userKey = Age
+"#;
+    match compile_with_stdlib(source, "Playground.res") {
+        Ok(o) => {
+            assert!(o.contains("encode$user"), "Expected encode$user:\n{o}");
+            assert!(o.contains("decode$user"), "Expected decode$user:\n{o}");
+        }
+        Err(e) => panic!("Exact init code should compile: {e}"),
+    }
+}
+
+#[test]
+fn playground_flow_matches_test() {
+    // Emulate the playground's compile_all flow: use default CompilerOptions
+    // (no open_modules, no module_name), rely on load_pervasives auto-opens.
+    let registry = stdlib_registry().clone();
+    let source = r#"type user = { name: string, age: int }
+
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Record({fields}) =>
+    let dict = Dict.make()
+    inline for field in fields {
+      Dict.set(dict, field.name, encode(@field(value, field.name)))
+    }
+    JSON.Encode.object(dict)
+  | _ => @compileError("unsupported")
+  }
+}
+
+let alice: user = { name: "Alice", age: 30 }
+let aliceJson = encode(alice)
+"#;
+
+    // Playground uses default options (no open_modules)
+    let options = CompilerOptions {
+        source_filename: Some("Playground.res".to_string()),
+        ..Default::default()
+    };
+    let module_name = "Playground".to_string();
+    match compile_source_in_process(source, "Playground.res", &module_name, &options, &registry, false) {
+        Ok(r) => {
+            eprintln!("PLAYGROUND FLOW OUTPUT:\n{}", r.js_output);
+            assert!(r.js_output.contains("encode$user"), "Expected encode$user:\n{}", r.js_output);
+        }
+        Err(e) => panic!("playground flow should compile: {e}"),
+    }
+}
+
+#[test]
+fn playground_exact_user_code() {
+    // Exact source the user reported as not emitting encode function.
+    let source = r#"type address = { street: string, city: string }
+type user = { name: string, age: int, active: bool, address: address }
+type tree = { value: string, children: array<tree> }
+
+exception DecodeError(string)
+
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Bool => JSON.Encode.bool(value)
+  | Record({fields}) =>
+    let dict = Dict.make()
+    inline for field in fields {
+      Dict.set(dict, field.name, encode(@field(value, field.name)))
+    }
+    JSON.Encode.object(dict)
+  | Array(_) => JSON.Encode.array(Array.map(value, v => encode(v)))
+  | _ => @compileError("encode: unsupported type")
+  }
+}
+
+let alice: user = {
+  name: "Alice",
+  age: 30,
+  active: true,
+  address: {street: "Main St", city: "NYC"},
+}
+
+let aliceJson = encode(alice)
+"#;
+    let output = compile_with_stdlib(source, "Playground.res").expect("compile");
+    eprintln!("USER CODE OUTPUT:\n{output}");
+    assert!(output.contains("encode$user"), "Expected encode$user in output:\n{output}");
+}
+
+#[test]
+fn playground_enc_only() {
+    let source = r#"
+type address = { street: string, city: string }
+type user = { name: string, age: int, active: bool, address: address }
+
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Bool => JSON.Encode.bool(value)
+  | Record({fields}) =>
+    let dict = Dict.make()
+    inline for field in fields {
+      Dict.set(dict, field.name, encode(@field(value, field.name)))
+    }
+    JSON.Encode.object(dict)
+  | _ => @compileError("encode: unsupported type")
+  }
+}
+
+let alice: user = {name: "Alice", age: 30, active: true, address: {street: "x", city: "y"}}
+let aliceJson = encode(alice)
+"#;
+    match compile_with_stdlib(source, "pg_enc.res") {
+        Ok(output) => eprintln!("ENC OUTPUT:\n{output}"),
+        Err(e) => panic!("enc should compile: {e}"),
+    }
+}
+
+#[test]
+fn playground_tree_only() {
+    let source = r#"
+type tree = { value: string, children: array<tree> }
+
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | String => JSON.Encode.string(value)
+  | Record({fields}) =>
+    let dict = Dict.make()
+    inline for field in fields {
+      Dict.set(dict, field.name, encode(@field(value, field.name)))
+    }
+    JSON.Encode.object(dict)
+  | Array(_) => JSON.Encode.array(Array.map(value, v => encode(v)))
+  | _ => @compileError("encode: unsupported type")
+  }
+}
+
+let myTree: tree = { value: "root", children: [{value: "c1", children: []}] }
+let treeJson = encode(myTree)
+"#;
+    match compile_with_stdlib(source, "pg_tree.res") {
+        Ok(_) => {}
+        Err(e) => panic!("tree should compile: {e}"),
+    }
+}
+
+#[test]
+fn playground_console_only() {
+    let source = r#"Console.log("hi")
+"#;
+    match compile_with_stdlib(source, "pg_console.res") {
+        Ok(_) => {}
+        Err(e) => panic!("Console.log should compile: {e}"),
+    }
+}
+
+#[test]
+fn playground_full_default() {
+    // The full playground default — encoder + decoder + variants + variant
+    // builder, exactly as the user will see it.
+    let source = r#"
+type address = { street: string, city: string }
+type status = Active | Inactive | Pending
+type user = { name: string, age: int, active: bool, status: status, address: address }
+type tree = { value: string, children: array<tree> }
+
+exception DecodeError(string)
+
+external tagOfVariant: 'a => int = "%identity"
+external variantOfTag: int => 'a = "%identity"
+
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Bool => JSON.Encode.bool(value)
+  | Record({fields}) =>
+    let dict = Dict.make()
+    inline for field in fields {
+      Dict.set(dict, field.name, encode(@field(value, field.name)))
+    }
+    JSON.Encode.object(dict)
+  | Variant({constructors}) =>
+    let names = []
+    inline for c in constructors {
+      Array.push(names, c.name)
+    }
+    JSON.Encode.string(Array.getUnsafe(names, tagOfVariant(value)))
+  | Array(_) => JSON.Encode.array(Array.map(value, v => encode(v)))
+  | _ => @compileError("encode: unsupported type")
+  }
+}
+
+let alice: user = {name: "Alice", age: 30, active: true, status: Active, address: {street: "Main St", city: "NYC"}}
+let aliceJson = encode(alice)
+
+let myTree: tree = {value: "root", children: [{value: "child1", children: []}, {value: "child2", children: []}]}
+let treeJson = encode(myTree)
+
+@comptime
+let rec decode = (type t, json: JSON.t) => {
+  switch @typeInfo(t) {
+  | String =>
+    switch json { | String(s) => s | _ => throw(DecodeError("expected string")) }
+  | Int =>
+    switch json { | Number(n) => Float.toInt(n) | _ => throw(DecodeError("expected int")) }
+  | Bool =>
+    switch json { | Boolean(b) => b | _ => throw(DecodeError("expected bool")) }
+  | Record({fields}) =>
+    switch json {
+    | Object(dict) =>
+      @record(t, inline for field in fields {
+        decode(field.typ, Dict.getUnsafe(dict, field.name))
+      })
+    | _ => throw(DecodeError("expected object"))
+    }
+  | Variant({constructors}) =>
+    switch json {
+    | String(s) =>
+      let result = ref(None)
+      let idx = ref(0)
+      inline for c in constructors {
+        if s == c.name { result := Some(variantOfTag(idx.contents)) }
+        idx := idx.contents + 1
+      }
+      switch result.contents {
+      | Some(v) => v
+      | None => throw(DecodeError("unknown variant: " ++ s))
+      }
+    | _ => throw(DecodeError("expected variant string"))
+    }
+  | _ => @compileError("decode: unsupported type")
+  }
+}
+
+let decodedAlice = try Some(decode(user, aliceJson)) catch { | DecodeError(_) => None }
+
+@comptime
+let userKey =
+  switch @typeInfo(user) {
+  | Record({fields}) =>
+    @buildVariant(inline for field in fields {
+      @variantCase({name: field.name})
+    })
+  | _ => @compileError("expected record")
+  }
+
+let k1: userKey = Name
+let k2: userKey = Age
+"#;
+    match compile_with_stdlib(source, "playground_full.res") {
+        Ok(o) => {
+            assert!(o.contains("encode$status"), "Expected encode$status:\n{o}");
+            assert!(o.contains("encode$user"), "Expected encode$user:\n{o}");
+            assert!(o.contains("decode$user"), "Expected decode$user:\n{o}");
+        }
+        Err(e) => panic!("full playground default should compile: {e}"),
+    }
+}
+
+#[test]
+fn playground_decoder() {
+    // Minimal decoder: type t + JSON.t value param, return annotated
+    let source = r#"
+@comptime
+let decode = (type t, json: JSON.t) => {
+  switch @typeInfo(t) {
+  | String =>
+    switch json { | String(s) => Ok(s) | _ => Error("err") }
+  | _ => Error("unsupported")
+  }
+}
+
+let j = JSON.Encode.string("hi")
+let decoded = decode(string, j)
+"#;
+    match compile_with_stdlib(source, "pg_dec.res") {
+        Ok(o) => eprintln!("DEC OUTPUT:\n{o}"),
+        Err(e) => panic!("decoder should compile: {e}"),
+    }
+}
+
+#[test]
+fn playground_decoder_user_type() {
+    // Decoder with a user-defined record type. Uses Result.flatMap pattern
+    // instead of `return` (which isn't yet supported in comptime inline for).
+    let source = r#"
+type user = { name: string, age: int }
+
+exception DecodeError(string)
+
+@comptime
+let rec decode = (type t, json: JSON.t) => {
+  switch @typeInfo(t) {
+  | String =>
+    switch json { | String(s) => s | _ => throw(DecodeError("expected string")) }
+  | Int =>
+    switch json { | Number(n) => Float.toInt(n) | _ => throw(DecodeError("expected int")) }
+  | Record({fields}) =>
+    switch json {
+    | Object(dict) =>
+      @record(t, inline for field in fields {
+        decode(field.typ, Dict.getUnsafe(dict, field.name))
+      })
+    | _ => throw(DecodeError("expected object"))
+    }
+  | _ => @compileError("decode: unsupported type")
+  }
+}
+
+let j = JSON.Encode.string("hi")
+let decoded = try Some(decode(user, j)) catch { | DecodeError(_) => None }
+"#;
+    match compile_with_stdlib(source, "pg_dec_user.res") {
+        Ok(o) => eprintln!("DEC USER OUTPUT:\n{o}"),
+        Err(e) => panic!("decoder with user type should compile: {e}"),
+    }
 }

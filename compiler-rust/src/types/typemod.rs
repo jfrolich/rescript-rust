@@ -6091,6 +6091,7 @@ fn anchor_local_module_aliases_to_owner(
 /// to add modules to sig_env for subsequent items.
 pub(crate) fn decl_signature_from_typed_signature(
     sig: &crate::types::typedtree::TypedSignature,
+    arena: &ParseArena,
 ) -> crate::types::decl::Signature {
     use crate::types::decl::{
         ModtypeDeclaration, ModuleDeclaration, SignatureItem as SigItem, ValueDescription,
@@ -6107,7 +6108,7 @@ pub(crate) fn decl_signature_from_typed_signature(
                 } else {
                     ValueKind::ValPrim(crate::types::PrimitiveDescription {
                         prim_name: vd.val_prim.first().cloned().unwrap_or_default(),
-                        prim_arity: 0,
+                        prim_arity: primitive_arity_from_typed_core_type(&vd.val_desc),
                         prim_native_name: vd.val_prim.get(1).cloned().unwrap_or_default(),
                         prim_native_float: false,
                         prim_from_constructor: false,
@@ -6119,7 +6120,7 @@ pub(crate) fn decl_signature_from_typed_signature(
                         val_type: vd.val_desc.ctyp_type,
                         val_kind,
                         val_loc: crate::location::Location::none(),
-                        val_attributes: vec![],
+                        val_attributes: parser_attrs_to_decl_attrs(arena, &vd.val_attributes),
                         val_path: None,
                     },
                 ));

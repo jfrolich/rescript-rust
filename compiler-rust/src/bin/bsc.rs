@@ -246,6 +246,7 @@ fn run() -> Result<()> {
         check_div_by_zero: true,
         nopervasives: false,
         module_name: opts.module_name.clone(),
+        capture_intermediates: false,
     };
 
     if is_interface {

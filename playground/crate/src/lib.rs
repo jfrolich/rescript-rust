@@ -2,16 +2,15 @@ use wasm_bindgen::prelude::*;
 
 use std::cell::RefCell;
 
-use rescript_compiler::cmi::persistent_env::{ModuleRegistry, PersistentEnv};
+use rescript_compiler::cmi::persistent_env::ModuleRegistry;
 use rescript_compiler::driver::{self, CompilerOptions};
-use rescript_compiler::parser::{module, jsx_ppx, Parser};
-use rescript_compiler::binary_ast::ppx;
-use rescript_compiler::context::IdGenerator;
-use rescript_compiler::types::{
-    initial_env, type_structure, TypeCheckContext, TypeContext,
-    sexp_typedtree,
-};
+use rescript_compiler::parser::{module, Parser};
 use rescript_compiler::wasm_vfs;
+
+#[wasm_bindgen(start)]
+pub fn init() {
+    console_error_panic_hook::set_once();
+}
 
 // ── Virtual filesystem ──────────────────────────────────────────────────────
 
@@ -97,181 +96,79 @@ pub fn parse_to_sexp(source: &str, filename: &str) -> String {
 /// or { type: "error", stage, errors, ...partial results }
 #[wasm_bindgen]
 pub fn compile_all(source: &str, filename: &str) -> String {
-    // 1. Parse
-    let mut parser = Parser::new(filename, source);
-    let structure = module::parse_structure(&mut parser);
-
-    if parser.has_errors() {
-        let errors: Vec<String> = parser
+    // Capture parse tree for display (separate parser since we don't want to
+    // mutate the one compile_source_in_process uses).
+    let mut parse_parser = Parser::new(filename, source);
+    let parse_structure = module::parse_structure(&mut parse_parser);
+    if parse_parser.has_errors() {
+        let errors: Vec<String> = parse_parser
             .diagnostics()
             .iter()
             .map(|d| format!("{:?}", d))
             .collect();
-        return serde_json::json!({
-            "type": "error",
-            "stage": "parse",
-            "errors": errors,
-        })
-        .to_string();
+        return serde_json::json!({ "type": "error", "stage": "parse", "errors": errors }).to_string();
     }
-
-    // Capture parse tree sexp
     let mut parse_buf = Vec::new();
     rescript_compiler::parser::sexp_locs::print_structure(
-        &structure,
-        parser.arena(),
+        &parse_structure,
+        parse_parser.arena(),
         &mut parse_buf,
     );
     let parse_tree_sexp = String::from_utf8_lossy(&parse_buf).into_owned();
 
-    // 2. PPX transforms
-    let options = CompilerOptions::default();
-    let jsx_version = driver::jsx_version_for_structure(&structure, &options, parser.arena());
-    let structure = if let Some(jsx_version) = jsx_version {
-        jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
-    } else {
-        structure
+    // Derive a stable module name from the source filename.
+    let module_name = driver::module_name_from_source_filename(filename);
+
+    // Remove any stale copy of this module from the registry before compiling
+    // (so a previous compile's signature doesn't shadow the new source).
+    REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        reg.cached_modules.remove(&module_name);
+        reg.module_info.remove(&module_name);
+    });
+
+    let options = CompilerOptions {
+        source_filename: Some(filename.to_string()),
+        module_name: Some(module_name.clone()),
+        capture_intermediates: true,
+        ..Default::default()
     };
-    let structure = ppx::expand_extensions(&structure, parser.arena_mut());
-    let structure = match ppx::rewrite_structure(&structure, parser.arena_mut()) {
-        Ok(s) => s,
-        Err(e) => {
-            return serde_json::json!({
-                "type": "error",
-                "stage": "ppx",
-                "errors": [format!("{e}")],
+
+    let registry_snapshot = REGISTRY.with(|r| r.borrow().clone());
+    let result = driver::compile_source_in_process(
+        source,
+        filename,
+        &module_name,
+        &options,
+        &registry_snapshot,
+        false,
+    );
+
+    match result {
+        Ok(compiled) => {
+            REGISTRY.with(|r| {
+                let mut reg = r.borrow_mut();
+                if let Some(ps) = compiled.pers_struct {
+                    reg.cached_modules.insert(module_name.clone(), ps);
+                }
+                reg.alias_rewrites.extend(compiled.new_alias_rewrites);
+            });
+            serde_json::json!({
+                "type": "success",
                 "parse_tree": parse_tree_sexp,
+                "typed_tree": compiled.typed_tree_sexp,
+                "raw_lambda": compiled.raw_lambda_sexp,
+                "lambda": compiled.lambda_sexp,
+                "js": compiled.js_output,
             })
-            .to_string();
+            .to_string()
         }
-    };
-
-    // 3. Type check
-    rescript_compiler::Ident::set_current_time(999);
-    let id_gen = IdGenerator::with_start_stamp(999);
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
-    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    let mut env = initial_env(&type_ctx);
-
-    // Set up persistent env from registry (in-process mode)
-    let pers_env = REGISTRY.with(|r| PersistentEnv::from_registry(&r.borrow()));
-    tctx.set_persistent_env(pers_env);
-
-    // Load pervasives
-    if let Some(ref mut pe) = tctx.persistent_env {
-        driver::load_pervasives(
-            pe,
-            &mut env,
-            &type_ctx,
-            &options.open_modules,
-            options.nopervasives,
-            options.module_name.as_deref(),
-        );
+        Err(e) => serde_json::json!({
+            "type": "error",
+            "stage": "compile",
+            "errors": [format!("{e:?}")],
+            "parse_tree": parse_tree_sexp,
+        })
+        .to_string(),
     }
-
-    let (typed_structure, _final_env) =
-        match type_structure(&mut tctx, &env, parser.arena(), &structure) {
-            Ok(result) => result,
-            Err(e) => {
-                return serde_json::json!({
-                    "type": "error",
-                    "stage": "typecheck",
-                    "errors": [format!("{e:?}")],
-                    "parse_tree": parse_tree_sexp,
-                })
-                .to_string();
-            }
-        };
-
-    // Capture typed tree sexp
-    let mut typed_buf = Vec::new();
-    let _ = sexp_typedtree::print_typed_structure_with_locs(
-        parser.arena(),
-        &type_ctx,
-        &typed_structure,
-        &mut typed_buf,
-    );
-    let typed_tree_sexp = String::from_utf8_lossy(&typed_buf).into_owned();
-
-    // Save all compiled stdlib modules back to the registry so subsequent
-    // compiles don't re-type-check them from source.
-    if let Some(ref pe) = tctx.persistent_env {
-        let (portables, alias_rewrites) = pe.extract_all_cached_modules(&type_ctx);
-        REGISTRY.with(|r| {
-            let mut reg = r.borrow_mut();
-            reg.cached_modules.extend(portables);
-            reg.alias_rewrites.extend(alias_rewrites);
-        });
-    }
-
-    // 4. Lambda conversion
-    let lambda_start_stamp = type_ctx
-        .current_stamp()
-        .max(driver::max_lambda_input_stamp(&typed_structure));
-
-    let unit_name = driver::module_name_from_source_filename(filename);
-    let implementation_coercion =
-        rescript_compiler::types::typedtree::ModuleCoercion::Tcoerce_none;
-
-    let mut raw_converter =
-        rescript_compiler::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
-            parser.arena(),
-            &type_ctx,
-            &env,
-            lambda_start_stamp,
-            unit_name,
-        );
-    if let Some(persistent_env) = tctx.persistent_env.clone() {
-        raw_converter.set_persistent_env(persistent_env);
-    }
-    let raw_lambda =
-        raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
-    let raw_lambda_current_stamp = raw_converter.current_stamp();
-
-    // Capture raw lambda
-    let mut raw_lambda_buf = Vec::new();
-    rescript_compiler::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut raw_lambda_buf);
-    let raw_lambda_str = String::from_utf8_lossy(&raw_lambda_buf).into_owned();
-
-    // 5. Lambda lowering
-    let lowered_lambda =
-        rescript_compiler::raw_lambda::lower::lower_to_lambda_with_start_stamp(
-            raw_lambda,
-            raw_lambda_current_stamp,
-        );
-
-    // Capture lambda sexp
-    let mut lambda_buf = Vec::new();
-    let _ = rescript_compiler::lambda::sexp_lambda::print_lambda_with_locs(
-        &lowered_lambda,
-        &mut lambda_buf,
-    );
-    let lambda_sexp = String::from_utf8_lossy(&lambda_buf).into_owned();
-
-    // 6. JS codegen
-    let mut compiler =
-        rescript_compiler::lambda::compile::LambdaCompiler::with_module_path_resolver(None);
-    let empty_modules = std::collections::HashSet::new();
-    let program = compiler
-        .compile_deps_program_with_possible_required_modules(&lowered_lambda, &empty_modules);
-
-    let empty_directives: Vec<String> = vec![];
-    let js = rescript_compiler::js_ir::printer::print_deps_program_with_directives(
-        &program,
-        None,
-        &empty_directives,
-        false,
-        false,
-    );
-
-    serde_json::json!({
-        "type": "success",
-        "parse_tree": parse_tree_sexp,
-        "typed_tree": typed_tree_sexp,
-        "raw_lambda": raw_lambda_str,
-        "lambda": lambda_sexp,
-        "js": js,
-    })
-    .to_string()
 }

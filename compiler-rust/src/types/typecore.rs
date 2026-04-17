@@ -21077,6 +21077,20 @@ fn bind_comptime_record_fields(
                 // unboxed: bool
                 ctx.new_constr(crate::types::predef::path_bool(), vec![])
             }
+            (TypeInfo::Variant { name, .. }, "name") => {
+                // name: string
+                let _ = name;
+                ctx.new_constr(crate::types::predef::path_string(), vec![])
+            }
+            (TypeInfo::Variant { constructors, .. }, "constructors") => {
+                // constructors: array<constructorInfo>
+                let _ = constructors;
+                let field_info_ty = ctx.new_constr(crate::types::predef::path_field_info(), vec![]);
+                ctx.new_constr(crate::types::predef::path_array(), vec![field_info_ty])
+            }
+            (TypeInfo::Variant { .. }, "unboxed") => {
+                ctx.new_constr(crate::types::predef::path_bool(), vec![])
+            }
             (TypeInfo::Array { .. }, "element") => {
                 // element: typeInfo
                 ctx.new_constr(crate::types::predef::path_type_info(), vec![])
@@ -21117,6 +21131,24 @@ fn bind_comptime_record_fields(
                 Some(crate::types::comptime::ComptimeValue::Array(field_values))
             }
             (TypeInfo::Record { unboxed, .. }, "unboxed") => {
+                Some(crate::types::comptime::ComptimeValue::Bool(*unboxed))
+            }
+            (TypeInfo::Variant { name, .. }, "name") => {
+                Some(crate::types::comptime::ComptimeValue::String(name.clone()))
+            }
+            (TypeInfo::Variant { constructors, .. }, "constructors") => {
+                let ctor_values: Vec<_> = constructors.iter().map(|c| {
+                    let arg_types: Vec<_> = c.args.iter()
+                        .map(|t| crate::types::comptime::ComptimeValue::Type(t.clone()))
+                        .collect();
+                    crate::types::comptime::ComptimeValue::Record(vec![
+                        ("name".to_string(), crate::types::comptime::ComptimeValue::String(c.name.clone())),
+                        ("args".to_string(), crate::types::comptime::ComptimeValue::Array(arg_types)),
+                    ])
+                }).collect();
+                Some(crate::types::comptime::ComptimeValue::Array(ctor_values))
+            }
+            (TypeInfo::Variant { unboxed, .. }, "unboxed") => {
                 Some(crate::types::comptime::ComptimeValue::Bool(*unboxed))
             }
             (TypeInfo::Array { element }, "element") => {

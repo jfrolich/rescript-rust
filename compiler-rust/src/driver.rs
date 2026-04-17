@@ -32,6 +32,21 @@ use crate::types::{TypeCheckContext, TypeContext, initial_env, transl_signature,
 const OCAML_NON_PREDEF_STAMP_START: i32 = 999;
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 
+/// WASM-safe timing: native returns `Instant::now()`, WASM returns `None`
+/// (Instant::now panics on WASM since time isn't implemented there).
+#[inline]
+fn phase_now() -> Option<std::time::Instant> {
+    #[cfg(not(target_arch = "wasm32"))]
+    { Some(std::time::Instant::now()) }
+    #[cfg(target_arch = "wasm32")]
+    { None }
+}
+
+#[inline]
+fn phase_elapsed_ms(t: Option<std::time::Instant>) -> u128 {
+    t.map(|t| t.elapsed().as_millis()).unwrap_or(0)
+}
+
 pub fn enable_cli_cleanup_skip() {
     SKIP_CLI_CLEANUP.store(true, Ordering::Relaxed);
 }
@@ -1129,6 +1144,9 @@ pub struct CompilerOptions {
     pub nopervasives: bool,
     /// The module name being compiled. Used to filter self-opens.
     pub module_name: Option<String>,
+    /// When true, `compile_source_in_process` captures the typed tree,
+    /// raw lambda, and lambda sexps for display (used by the playground).
+    pub capture_intermediates: bool,
 }
 
 impl Default for CompilerOptions {
@@ -1150,6 +1168,7 @@ impl Default for CompilerOptions {
             check_div_by_zero: true,
             nopervasives: false,
             module_name: None,
+            capture_intermediates: false,
         }
     }
 }
@@ -2921,6 +2940,11 @@ pub struct InProcessCompileResult {
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
+    /// Intermediate-representation sexps, populated when
+    /// `CompilerOptions::capture_intermediates` is true (for the playground).
+    pub typed_tree_sexp: String,
+    pub raw_lambda_sexp: String,
+    pub lambda_sexp: String,
 }
 
 /// Result of an in-process `.resi` interface type-check.
@@ -2969,7 +2993,7 @@ pub fn compile_source_in_process(
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     let mut env = initial_env(&type_ctx);
 
-    let t_env = std::time::Instant::now();
+    let t_env = phase_now();
     let mut pers_env = PersistentEnv::from_registry(registry);
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
@@ -2986,14 +3010,14 @@ pub fn compile_source_in_process(
         options.nopervasives,
         options.module_name.as_deref(),
     );
-    let env_ms = t_env.elapsed().as_millis();
+    let env_ms = phase_elapsed_ms(t_env);
 
     tctx.set_persistent_env(pers_env);
 
-    let t_tc = std::time::Instant::now();
+    let t_tc = phase_now();
     let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
-    let tc_ms = t_tc.elapsed().as_millis();
+    let tc_ms = phase_elapsed_ms(t_tc);
 
     if has_interface {
         apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
@@ -3013,7 +3037,21 @@ pub fn compile_source_in_process(
     let published_signature =
         crate::types::includemod::simplify_signature(&typed_structure.str_type);
 
-    let t_lambda = std::time::Instant::now();
+    // Capture typed tree sexp for the playground (only if requested).
+    let typed_tree_sexp = if options.capture_intermediates {
+        let mut buf = Vec::new();
+        let _ = crate::types::sexp_typedtree::print_typed_structure_with_locs(
+            parser.arena(),
+            &type_ctx,
+            &typed_structure,
+            &mut buf,
+        );
+        String::from_utf8_lossy(&buf).into_owned()
+    } else {
+        String::new()
+    };
+
+    let t_lambda = phase_now();
     let lambda_start_stamp = type_ctx
         .current_stamp()
         .max(max_lambda_input_stamp(&typed_structure));
@@ -3041,13 +3079,31 @@ pub fn compile_source_in_process(
     let possible_required_modules = raw_converter.take_possible_required_modules();
     let raw_lambda_current_stamp = raw_converter.current_stamp();
 
+    // Capture raw lambda sexp for the playground (only if requested).
+    let raw_lambda_sexp = if options.capture_intermediates {
+        let mut buf = Vec::new();
+        crate::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut buf);
+        String::from_utf8_lossy(&buf).into_owned()
+    } else {
+        String::new()
+    };
+
     let lowered_lambda = crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
         raw_lambda,
         raw_lambda_current_stamp,
     );
-    let raw_lambda_ms = t_lambda.elapsed().as_millis();
+    let raw_lambda_ms = phase_elapsed_ms(t_lambda);
 
-    let t_jsir = std::time::Instant::now();
+    // Capture lambda sexp for the playground (only if requested).
+    let lambda_sexp = if options.capture_intermediates {
+        let mut buf = Vec::new();
+        let _ = crate::lambda::sexp_lambda::print_lambda_with_locs(&lowered_lambda, &mut buf);
+        String::from_utf8_lossy(&buf).into_owned()
+    } else {
+        String::new()
+    };
+
+    let t_jsir = phase_now();
     let mut module_path_resolver = ModulePathResolver::from_compile_options(
         options.source_filename.as_deref(),
         options.output_path.as_deref(),
@@ -3069,9 +3125,9 @@ pub fn compile_source_in_process(
         &lowered_lambda,
         &possible_required_modules,
     );
-    let jsir_ms = t_jsir.elapsed().as_millis();
+    let jsir_ms = phase_elapsed_ms(t_jsir);
 
-    let t_js = std::time::Instant::now();
+    let t_js = phase_now();
     let js = print_deps_program_with_directives(
         &program,
         Some(&module_path_resolver),
@@ -3079,7 +3135,7 @@ pub fn compile_source_in_process(
         options.debug,
         options.jsx_preserve,
     );
-    let js_ms = t_js.elapsed().as_millis();
+    let js_ms = phase_elapsed_ms(t_js);
 
     let total_ms = env_ms + tc_ms + raw_lambda_ms + jsir_ms + js_ms;
     if total_ms > 100 {
@@ -3109,6 +3165,9 @@ pub fn compile_source_in_process(
         signature: published_signature,
         pers_struct,
         new_alias_rewrites,
+        typed_tree_sexp,
+        raw_lambda_sexp,
+        lambda_sexp,
     })
 }
 

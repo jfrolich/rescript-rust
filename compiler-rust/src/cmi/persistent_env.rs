@@ -291,6 +291,25 @@ impl PersistentEnv {
         (portable, new_rewrites)
     }
 
+    /// Extract all currently-cached modules as portable structs, plus the full
+    /// alias-rewrite table. Used by the playground to hydrate the shared
+    /// registry after a compile so subsequent compiles can reuse the typed
+    /// stdlib instead of re-loading every dependency from source.
+    pub fn extract_all_cached_modules(
+        &self,
+        ctx: &TypeContext<'_>,
+    ) -> (HashMap<String, PortablePersStruct>, HashMap<String, Path>) {
+        let portables: HashMap<String, PortablePersStruct> = self
+            .cache
+            .iter()
+            .filter_map(|(name, opt)| {
+                opt.as_ref()
+                    .map(|ps| (name.clone(), portable_types::serialize_pers_struct(ps, ctx)))
+            })
+            .collect();
+        (portables, self.alias_prefix_rewrites.clone())
+    }
+
     /// Set the load path (list of directories to search for .cmi files).
     pub fn set_load_path(&mut self, paths: Vec<PathBuf>) {
         self.load_path = paths;
@@ -534,6 +553,14 @@ impl PersistentEnv {
     }
 
     fn read_source_latin1(path: &FsPath) -> Option<String> {
+        // On WASM, route through the virtual filesystem since there's no
+        // real disk to read from. Fall back to fs::read for native targets.
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(content) = crate::wasm_vfs::read_file(&path.to_string_lossy()) {
+                return Some(content);
+            }
+        }
         let bytes = fs::read(path).ok()?;
         Some(bytes.iter().map(|&b| b as char).collect())
     }
@@ -610,7 +637,7 @@ impl PersistentEnv {
                 transl_signature(&mut tctx, &env, parser.arena(), &signature).ok()?;
             let fallback_pers = tctx.persistent_env.take()?;
             let decl_signature =
-                crate::types::typemod::decl_signature_from_typed_signature(&typed_signature);
+                crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, parser.arena());
             let typed_module_type = TypedModuleType {
                 mty_desc: TypedModuleTypeDesc::Tmty_signature(typed_signature),
                 mty_type: crate::types::decl::ModuleType::MtySignature(decl_signature),
@@ -723,7 +750,15 @@ impl PersistentEnv {
         // Exception: nopervasives modules (runtime bootstrap) may load from
         // CMI since they're being pre-compiled into the registry.
         if self.in_process_mode && !self.nopervasives {
+            // When a source fallback path is registered, allow lazy loading
+            // from source (used by the playground to compile stdlib on demand).
+            // Otherwise, the registry is the sole source of truth — missing
+            // dependencies indicate a dependency-graph bug in the build system.
+            if self.source_fallback_paths.contains_key(name) {
+                return self.load_module_from_source_path_fallback(name, ctx);
+            }
             eprintln!("ERROR: in-process module '{}' not found in registry — dependency graph bug", name);
+            eprintln!("  alias rewrites has '{}': {:?}", name, self.alias_prefix_rewrites.get(name));
             return None;
         }
 
