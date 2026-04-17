@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 589 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 68 output diffs
+**Status:** 590 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 67 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **588 / 657**
+- JS snapshot parity: **590 / 657**
 - Compile errors: **0**
-- Output diffs: **68**
+- Output diffs: **67**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,72 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **588 / 657**
+- JS snapshot parity: **590 / 657**
 - Compile errors: **0**
-- Output diffs: **68**
+- Output diffs: **67**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: keep OCaml's boxed nullable-option wrapper shape across
+  JS-path direct-wrapper beta reduction so later backend cleanup does not
+  reclassify beta-reduced `Pnull_to_opt` / `Pnull_undefined_to_opt` arguments
+  as plain collected optional aliases, restoring the checked-in
+  `js_re_test` snapshot without regressing the earlier direct-wrapper fixes
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change stays in `compiler-rust/src/lambda/beta_reduce.rs`
+  and `compiler-rust/src/lambda/simplify.rs`
+- OCaml reference:
+  - `compiler/core/lam_beta_reduce.ml`, where `propagate_beta_reduce` only
+    records fresh bindings for immutable blocks and `Psome`-style values, not
+    for `Pnull_to_opt` / `Pnull_undefined_to_opt`
+  - `compiler/core/lam_pass_remove_alias.ml`, whose nullable-option cleanup
+    only triggers on plain `Lvar` aliases recorded in `Lam_stats.ident_tbl`
+  - `compiler/core/lam_compile_primitive.ml`, where `Pnull_to_opt` and
+    `Pnull_undefined_to_opt` still lower to
+    `Primitive_option.fromNull` / `Primitive_option.fromNullable` for
+    non-inline operands
+- Rust change:
+  - in `compiler-rust/src/lambda/beta_reduce.rs`, wrapped beta-reduced boxed
+    nullable bindings and their substituted parameter references in
+    `Pidentity(...)` so the later JS-path cleanup no longer mistakes those
+    fresh lets for OCaml-collected optional aliases while codegen still erases
+    the marker back to the same JS value
+  - kept the existing direct-wrapper followup in
+    `compiler-rust/src/lambda/simplify.rs` from collecting boxed optional
+    aliases in the immediate post-beta-reduction sweep, so the marker remains
+    scoped to the OCaml-matching nullable-wrapper case instead of broadly
+    disabling `Some(...)` cleanup
+  - added focused regression coverage in
+    `test_propagate_beta_reduce_marks_boxed_nullable_bindings_with_identity`
+    and
+    `direct_wrapper_beta_reduce_keeps_boxed_nullable_aliases_like_js_re_test`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_propagate_beta_reduce_marks_boxed_nullable_bindings_with_identity -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release direct_wrapper_beta_reduce_keeps_boxed_nullable_aliases_like_js_re_test -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh js_re_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_1692_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh array_subtle_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/js_re_test.res` now matches its checked-in `.mjs`
+    snapshot exactly again; Rust keeps OCaml's
+    `Primitive_option.fromNull(...)` boxed-option path instead of collapsing
+    back to a raw `null` check after beta reduction
+  - earlier direct-wrapper guard `tests/tests/src/gpr_1692_test.res` remained
+    exact, confirming the nullable-option marker did not reopen that
+    local-module wrapper fix
+  - broader exact guards `tests/tests/src/ExternalShadow.res` and
+    `tests/tests/src/array_subtle_test.res` also remained exact after the same
+    backend change
+  - current smallest remaining JS diffs now start at
+    `gpr_5280_optimize_test` (16 lines), `test_simple_ref` (19 lines), and
+    `gpr_3770_test` / `update_record_test` (20 lines each)
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **589 / 657** -> **590 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **68** -> **67** (**-1**)
 
 Latest iteration on **2026-04-17**:
 

@@ -29,6 +29,7 @@ struct SimplifyEnv {
     preserved_export_bindings: HashSet<Ident>,
     preserved_local_module_module_field_call_bindings: HashSet<Ident>,
     preserved_local_module_eta_alias_bindings: HashSet<Ident>,
+    disable_boxed_optional_alias_collection: bool,
     allow_dead_binding_direct_wrapper_cleanup: bool,
     allow_direct_function_beta_reduce: bool,
     repeat_direct_wrapper_beta_reduce: bool,
@@ -1148,7 +1149,11 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 body_env.blocks.insert(id.clone(), block_info);
             }
             if let Some(optional_info) = optional_block_info(&value) {
-                body_env.optional_blocks.insert(id.clone(), optional_info);
+                let boxed_alias_disallowed = env.disable_boxed_optional_alias_collection
+                    && matches!(optional_info.kind, OptionalAliasKind::Boxed(_));
+                if !boxed_alias_disallowed {
+                    body_env.optional_blocks.insert(id.clone(), optional_info);
+                }
             }
             if matches!(kind, LetKind::Strict | LetKind::StrictOpt) && is_safe_to_alias(&value) {
                 kind = LetKind::Alias;
@@ -3122,6 +3127,7 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
             reduce_direct_wrapper_application_once(&apply.ap_func, &apply.ap_args)
         {
             let followup_env = SimplifyEnv {
+                disable_boxed_optional_alias_collection: true,
                 allow_direct_function_beta_reduce: env.repeat_direct_wrapper_beta_reduce,
                 preserve_direct_wrapper_values: !env.repeat_direct_wrapper_beta_reduce,
                 ..env.clone()
@@ -7357,6 +7363,306 @@ mod tests {
             else_.as_ref(),
             Lambda::Lconst(Constant::Int { i: 0, .. })
         ));
+    }
+
+    #[test]
+    fn direct_wrapper_beta_reduce_keeps_boxed_nullable_aliases_like_js_re_test() {
+        fn has_apply(lam: &Lambda) -> bool {
+            match lam {
+                Lambda::Lapply(_) => true,
+                Lambda::Lfunction(func) => has_apply(&func.body),
+                Lambda::Llet(_, _, value, body) => has_apply(value) || has_apply(body),
+                Lambda::Lletrec(bindings, body) => {
+                    bindings.iter().any(|(_, value)| has_apply(value)) || has_apply(body)
+                }
+                Lambda::Lprim(info) => info.args.iter().any(has_apply),
+                Lambda::Lswitch(scrutinee, switch) => {
+                    has_apply(scrutinee)
+                        || switch.sw_consts.iter().any(|(_, body)| has_apply(body))
+                        || switch.sw_blocks.iter().any(|(_, body)| has_apply(body))
+                        || switch.sw_failaction.as_deref().is_some_and(has_apply)
+                }
+                Lambda::LstringSwitch(scrutinee, cases, default) => {
+                    has_apply(scrutinee)
+                        || cases.iter().any(|(_, body)| has_apply(body))
+                        || default.as_deref().is_some_and(has_apply)
+                }
+                Lambda::LstaticRaise(_, args) => args.iter().any(has_apply),
+                Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                    has_apply(body) || has_apply(handler)
+                }
+                Lambda::LifThenElse(cond, then_, else_) => {
+                    has_apply(cond) || has_apply(then_) || has_apply(else_)
+                }
+                Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                    has_apply(first) || has_apply(second)
+                }
+                Lambda::Lfor(_, start, end, _, body) => {
+                    has_apply(start) || has_apply(end) || has_apply(body)
+                }
+                Lambda::Lassign(_, value) => has_apply(value),
+                Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            }
+        }
+
+        fn body_uses_boxed_option_alias(body: &Lambda, target: &Ident) -> bool {
+            match body {
+                Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+                Lambda::Lapply(apply) => {
+                    body_uses_boxed_option_alias(&apply.ap_func, target)
+                        || apply
+                            .ap_args
+                            .iter()
+                            .any(|arg| body_uses_boxed_option_alias(arg, target))
+                }
+                Lambda::Lfunction(func) => body_uses_boxed_option_alias(&func.body, target),
+                Lambda::Llet(_, _, value, body) => {
+                    body_uses_boxed_option_alias(value, target)
+                        || body_uses_boxed_option_alias(body, target)
+                }
+                Lambda::Lletrec(bindings, body) => {
+                    bindings
+                        .iter()
+                        .any(|(_, value)| body_uses_boxed_option_alias(value, target))
+                        || body_uses_boxed_option_alias(body, target)
+                }
+                Lambda::Lprim(info) => match (&info.primitive, info.args.as_slice()) {
+                    (
+                        Primitive::PisNotNone
+                        | Primitive::PvalFromOption
+                        | Primitive::PvalFromOptionNotNest,
+                        [Lambda::Lvar(id)],
+                    ) => id.same(target),
+                    (
+                        Primitive::PisNotNone
+                        | Primitive::PvalFromOption
+                        | Primitive::PvalFromOptionNotNest,
+                        [Lambda::Lprim(crate::lambda::PrimInfo {
+                            primitive: Primitive::Pidentity,
+                            args,
+                            ..
+                        })],
+                    ) => matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(target)),
+                    _ => info
+                        .args
+                        .iter()
+                        .any(|arg| body_uses_boxed_option_alias(arg, target)),
+                },
+                Lambda::Lswitch(scrutinee, switch) => {
+                    body_uses_boxed_option_alias(scrutinee, target)
+                        || switch
+                            .sw_consts
+                            .iter()
+                            .any(|(_, body)| body_uses_boxed_option_alias(body, target))
+                        || switch
+                            .sw_blocks
+                            .iter()
+                            .any(|(_, body)| body_uses_boxed_option_alias(body, target))
+                        || switch
+                            .sw_failaction
+                            .as_deref()
+                            .is_some_and(|body| body_uses_boxed_option_alias(body, target))
+                }
+                Lambda::LstringSwitch(scrutinee, cases, default) => {
+                    body_uses_boxed_option_alias(scrutinee, target)
+                        || cases
+                            .iter()
+                            .any(|(_, body)| body_uses_boxed_option_alias(body, target))
+                        || default
+                            .as_deref()
+                            .is_some_and(|body| body_uses_boxed_option_alias(body, target))
+                }
+                Lambda::LstaticRaise(_, args) => {
+                    args.iter()
+                        .any(|arg| body_uses_boxed_option_alias(arg, target))
+                }
+                Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                    body_uses_boxed_option_alias(body, target)
+                        || body_uses_boxed_option_alias(handler, target)
+                }
+                Lambda::LifThenElse(cond, then_, else_) => {
+                    body_uses_boxed_option_alias(cond, target)
+                        || body_uses_boxed_option_alias(then_, target)
+                        || body_uses_boxed_option_alias(else_, target)
+                }
+                Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                    body_uses_boxed_option_alias(first, target)
+                        || body_uses_boxed_option_alias(second, target)
+                }
+                Lambda::Lfor(_, start, end, _, body) => {
+                    body_uses_boxed_option_alias(start, target)
+                        || body_uses_boxed_option_alias(end, target)
+                        || body_uses_boxed_option_alias(body, target)
+                }
+                Lambda::Lassign(_, value) => body_uses_boxed_option_alias(value, target),
+            }
+        }
+
+        fn has_boxed_nullable_alias_flow(lam: &Lambda) -> bool {
+            fn is_boxed_nullable_value(value: &Lambda) -> bool {
+                match value {
+                    Lambda::Lprim(crate::lambda::PrimInfo {
+                        primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
+                        ..
+                    }) => true,
+                    Lambda::Lprim(crate::lambda::PrimInfo {
+                        primitive: Primitive::Pidentity,
+                        args,
+                        ..
+                    }) => matches!(
+                        args.as_slice(),
+                        [Lambda::Lprim(crate::lambda::PrimInfo {
+                            primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
+                            ..
+                        })]
+                    ),
+                    _ => false,
+                }
+            }
+
+            match lam {
+                Lambda::Llet(_, id, value, body) if is_boxed_nullable_value(value) => {
+                    body_uses_boxed_option_alias(body, id)
+                        || has_boxed_nullable_alias_flow(value)
+                        || has_boxed_nullable_alias_flow(body)
+                }
+                Lambda::Llet(_, _, value, body) => {
+                    has_boxed_nullable_alias_flow(value) || has_boxed_nullable_alias_flow(body)
+                }
+                Lambda::Lfunction(func) => has_boxed_nullable_alias_flow(&func.body),
+                Lambda::Lletrec(bindings, body) => {
+                    bindings
+                        .iter()
+                        .any(|(_, value)| has_boxed_nullable_alias_flow(value))
+                        || has_boxed_nullable_alias_flow(body)
+                }
+                Lambda::Lprim(info) => info.args.iter().any(has_boxed_nullable_alias_flow),
+                Lambda::Lswitch(scrutinee, switch) => {
+                    has_boxed_nullable_alias_flow(scrutinee)
+                        || switch
+                            .sw_consts
+                            .iter()
+                            .any(|(_, body)| has_boxed_nullable_alias_flow(body))
+                        || switch
+                            .sw_blocks
+                            .iter()
+                            .any(|(_, body)| has_boxed_nullable_alias_flow(body))
+                        || switch
+                            .sw_failaction
+                            .as_deref()
+                            .is_some_and(has_boxed_nullable_alias_flow)
+                }
+                Lambda::LstringSwitch(scrutinee, cases, default) => {
+                    has_boxed_nullable_alias_flow(scrutinee)
+                        || cases
+                            .iter()
+                            .any(|(_, body)| has_boxed_nullable_alias_flow(body))
+                        || default
+                            .as_deref()
+                            .is_some_and(has_boxed_nullable_alias_flow)
+                }
+                Lambda::LstaticRaise(_, args) => args.iter().any(has_boxed_nullable_alias_flow),
+                Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                    has_boxed_nullable_alias_flow(body) || has_boxed_nullable_alias_flow(handler)
+                }
+                Lambda::LifThenElse(cond, then_, else_) => {
+                    has_boxed_nullable_alias_flow(cond)
+                        || has_boxed_nullable_alias_flow(then_)
+                        || has_boxed_nullable_alias_flow(else_)
+                }
+                Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                    has_boxed_nullable_alias_flow(first) || has_boxed_nullable_alias_flow(second)
+                }
+                Lambda::Lfor(_, start, end, _, body) => {
+                    has_boxed_nullable_alias_flow(start)
+                        || has_boxed_nullable_alias_flow(end)
+                        || has_boxed_nullable_alias_flow(body)
+                }
+                Lambda::Lassign(_, value) => has_boxed_nullable_alias_flow(value),
+                Lambda::Lapply(_)
+                | Lambda::Lvar(_)
+                | Lambda::LglobalModule(_, _)
+                | Lambda::Lconst(_) => false,
+            }
+        }
+
+        let x = Ident::create_local("x");
+        let result = Ident::create_local("result");
+        let lambda = Lambda::Lapply(Apply {
+            ap_func: Box::new(Lambda::prim(
+                Primitive::PjsFnMake(1),
+                vec![Lambda::function_(
+                    1,
+                    vec![x.clone()],
+                    Lambda::if_(
+                        Lambda::prim(
+                            Primitive::PisNotNone,
+                            vec![Lambda::var(x.clone())],
+                            Location::none(),
+                        ),
+                        Lambda::let_(
+                            LetKind::Alias,
+                            result.clone(),
+                            Lambda::prim(
+                                Primitive::PvalFromOption,
+                                vec![Lambda::var(x.clone())],
+                                Location::none(),
+                            ),
+                            Lambda::prim(
+                                Primitive::PnullUndefinedToOpt,
+                                vec![Lambda::prim(
+                                    Primitive::Parrayrefu,
+                                    vec![Lambda::var(result), Lambda::const_(Constant::int(1))],
+                                    Location::none(),
+                                )],
+                                Location::none(),
+                            ),
+                        ),
+                        Lambda::const_(Constant::JsUndefined { is_unit: false }),
+                    ),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            )),
+            ap_args: vec![Lambda::prim(
+                Primitive::PnullToOpt,
+                vec![Lambda::prim(
+                    Primitive::PjsCall {
+                        prim_name: "exec".to_string(),
+                        arg_types: vec![],
+                        ffi: crate::lambda::primitive::ExternalFfiSpec {
+                            kind: crate::lambda::primitive::ExternalFfiKind::Default,
+                            spec: None,
+                            obj_params: None,
+                            return_wrapper:
+                                crate::lambda::primitive::ExternalReturnWrapper::Identity,
+                            inline_constant: None,
+                        },
+                        dynamic_import: false,
+                        transformed_jsx: false,
+                    },
+                    vec![Lambda::const_(Constant::string("subject"))],
+                    Location::none(),
+                )],
+                Location::none(),
+            )],
+            ap_info: ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Uncurry,
+            },
+            ap_transformed_jsx: false,
+        });
+
+        let simplified = simplify_for_js_backend(&lambda);
+        assert!(
+            !has_apply(&simplified),
+            "expected the direct wrapper application to beta-reduce into lets, got {simplified:?}"
+        );
+        assert!(
+            has_boxed_nullable_alias_flow(&simplified),
+            "expected boxed nullable alias flow to survive after beta reduction, got {simplified:?}"
+        );
     }
 
     #[test]
