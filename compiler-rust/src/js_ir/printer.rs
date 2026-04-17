@@ -2508,6 +2508,29 @@ impl JsPrinter {
                 self.print_function_tail_statement(&inner[0], return_unit);
             }
             StatementDesc::If(cond, then_, else_)
+                if else_.is_empty()
+                    && return_unit
+                    && try_tail_nested_negative_guard_merge(then_).is_some() =>
+            {
+                let (inner_cond, inner_body) =
+                    try_tail_nested_negative_guard_merge(then_).expect("checked above");
+                self.print_function_tail_statement(
+                    &Statement {
+                        desc: StatementDesc::If(
+                            Expression::bin(
+                                BinOp::And,
+                                cond.clone(),
+                                negate_tail_merge_condition(&inner_cond),
+                            ),
+                            inner_body,
+                            vec![],
+                        ),
+                        comment: stmt.comment.clone(),
+                    },
+                    return_unit,
+                );
+            }
+            StatementDesc::If(cond, then_, else_)
                 if else_.is_empty() && try_tail_nested_if_merge(then_, return_unit).is_some() =>
             {
                 let (inner_cond, inner_then, inner_else) =
@@ -2612,6 +2635,20 @@ fn try_tail_nested_if_merge_with_outer_undefined_else(
             inner_else
         },
     ))
+}
+
+fn try_tail_nested_negative_guard_merge(block: &Block) -> Option<(Expression, Block)> {
+    let [stmt] = block.as_slice() else {
+        return None;
+    };
+    let StatementDesc::If(cond, then_, else_) = &unwrap_single_block_stmt(stmt).desc else {
+        return None;
+    };
+    if !return_is_undefined_block(then_) || else_.is_empty() {
+        return None;
+    }
+
+    Some((cond.clone(), else_.clone()))
 }
 
 fn try_function_body_trailing_return_nested_if_merge(
@@ -5581,6 +5618,73 @@ mod tests {
         assert!(rendered.contains("return;"));
         assert!(!rendered.contains("if (state.active)"));
         assert!(!rendered.contains("else"));
+    }
+
+    #[test]
+    fn test_print_unit_function_tail_merges_nested_negative_guard_with_implicit_outer_return() {
+        let foo4 = Ident::create_local("foo4");
+        let x = Ident::create_local("x");
+        let h = Ident::create_local("h");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: foo4,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![x.clone(), h.clone()],
+                body: vec![Statement::new(StatementDesc::If(
+                    Expression::bin(
+                        BinOp::And,
+                        Expression::bin(
+                            BinOp::EqEqEq,
+                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
+                                x.clone(),
+                            )))),
+                            Expression::string("object"),
+                        ),
+                        Expression::bin(
+                            BinOp::EqEqEq,
+                            Expression::new(ExpressionDesc::StaticIndex(
+                                Box::new(Expression::var(x.clone())),
+                                "NAME".to_string(),
+                                None,
+                            )),
+                            Expression::string("Foo"),
+                        ),
+                    ),
+                    vec![Statement::new(StatementDesc::If(
+                        Expression::bin(
+                            BinOp::NotEqEq,
+                            Expression::new(ExpressionDesc::StaticIndex(
+                                Box::new(Expression::var(x.clone())),
+                                "VAL".to_string(),
+                                None,
+                            )),
+                            Expression::number(Number::int(3)),
+                        ),
+                        vec![Statement::return_(Expression::undefined(true))],
+                        vec![Statement::return_(Expression::call(
+                            Expression::var(h),
+                            vec![],
+                            CallInfo::default(),
+                        ))],
+                    ))],
+                    vec![],
+                ))],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(
+            rendered.contains("if (typeof x === \"object\" && x.NAME === \"Foo\" && x.VAL === 3) {"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("return h();"), "{rendered}");
+        assert!(!rendered.contains("if (x.VAL !== 3)"), "{rendered}");
+        assert!(!rendered.contains("} else {"), "{rendered}");
     }
 
     #[test]

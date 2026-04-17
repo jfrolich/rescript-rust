@@ -20263,6 +20263,23 @@ mod tests {
     }
 
     #[test]
+    fn gpr_1891_keeps_unit_polyvariant_guard_flattened_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("gpr_1891_test");
+        assert!(
+            output.contains("if (typeof x === \"object\" && x.NAME === \"Foo\" && x.VAL === 3) {"),
+            "expected gpr_1891_test.foo4 to keep the flattened payload guard, got:\n{output}"
+        );
+        assert!(
+            output.contains("return h();"),
+            "expected gpr_1891_test.foo4 to keep the guarded call in the body, got:\n{output}"
+        );
+        assert!(
+            !output.contains("if (typeof x === \"object\" && x.NAME === \"Foo\") {\n    if (x.VAL !== 3) {"),
+            "unexpected nested negative payload guard in gpr_1891_test.foo4:\n{output}"
+        );
+    }
+
+    #[test]
     fn bal_set_mini_unwraps_terminal_return_blocks_before_if_fallthrough_flattening() {
         let output = compile_checked_in_test_file_to_js("bal_set_mini");
         assert!(

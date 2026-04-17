@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 584 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 73 output diffs
+**Status:** 585 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 72 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **584 / 657**
+- JS snapshot parity: **585 / 657**
 - Compile errors: **0**
-- Output diffs: **73**
+- Output diffs: **72**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,64 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **584 / 657**
+- JS snapshot parity: **585 / 657**
 - Compile errors: **0**
-- Output diffs: **73**
+- Output diffs: **72**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: merge OCaml-style implicit unit fallthrough with a nested
+  negative payload guard at function-tail print time, so unit-return payload
+  pattern matches stop emitting
+  `if (typeof x === "object" && x.NAME === "Foo") { if (x.VAL !== 3) return; else return h(); }`
+  and instead print the flattened checked-in guard
+  `if (typeof x === "object" && x.NAME === "Foo" && x.VAL === 3) { return h(); }`
+- Active backend focus is the **Phase 5** last-mile printer slice from
+  `PLAN.md`: the verified change is in `compiler-rust/src/js_ir/printer.rs`,
+  and it only adjusts function-tail JS emission after the backend has already
+  produced the right nested unit-return guard structure
+- OCaml reference:
+  - `compiler/core/js_stmt_make.ml`, whose recursive `if_` helper collapses
+    nested guards with `E.and_` when the failure path is the same unit
+    fallthrough
+  - checked-in `tests/tests/src/gpr_1891_test.mjs`, whose `foo4` snapshot
+    proves OCaml emits the flattened payload guard rather than Rust's nested
+    negative tail guard
+  - `compiler/core/js_dump.ml`, which confirms the final emitted shape is just
+    the already-canonicalized `If` tree printed at function tail
+- Rust change:
+  - added `try_tail_nested_negative_guard_merge(...)` in
+    `compiler-rust/src/js_ir/printer.rs` and used it from
+    `print_function_tail_statement(...)` for `return_unit` functions with an
+    outer empty else and an inner `return undefined` failure guard
+  - added focused printer regression coverage in
+    `test_print_unit_function_tail_merges_nested_negative_guard_with_implicit_outer_return`
+  - added a checked-in end-to-end fixture guard in
+    `gpr_1891_keeps_unit_polyvariant_guard_flattened_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_unit_function_tail_merges_nested_negative_guard_with_implicit_outer_return -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml gpr_1891_keeps_unit_polyvariant_guard_flattened_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_1891_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_3770_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_1891_test.res` is exact again; Rust now prints
+    `foo4` with the same flattened payload guard that OCaml checks in
+  - `tests/tests/src/ExternalShadow.res` stayed exact after the same printer
+    change, so this unit-tail merge did not reopen the earlier import/export
+    guard cluster
+  - `tests/tests/src/gpr_3770_test.res` still differs, confirming the
+    remaining all-zero tuple guard is a separate non-unit negative-guard-chain
+    cluster rather than part of this unit-tail printer slice
+  - the verified improvement is a last-mile printer tail merge, not a backend
+    string rewrite: the AST-level function-tail printer now recognizes the same
+    implicit-unit nested guard pattern OCaml emits for `foo4`
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **584 / 657** -> **585 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **73** -> **72** (**-1**)
 
 Latest iteration on **2026-04-17**:
 
