@@ -225,6 +225,33 @@ let y = describe(int, 42)
 // ============================================================================
 
 #[test]
+fn comptime_array_map_value_context() {
+    // Array.map on a comptime array (like fields from @typeInfo)
+    // should unroll to a concrete array literal at compile time.
+    let source = r#"
+type user = { name: string, age: int, email: string }
+
+let fieldNames: array<string> = switch @typeInfo(user) {
+| Record({fields}) => Array.map(fields, f => f.name)
+| _ => []
+}
+"#;
+    let result = compile_with_stdlib(source, "array_map_value.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== ARRAY.MAP VALUE CONTEXT ===\n{}\n=== END ===", output);
+            // Should be a concrete array literal
+            assert!(output.contains("\"name\""), "Expected 'name':\n{output}");
+            assert!(output.contains("\"age\""), "Expected 'age':\n{output}");
+            assert!(output.contains("\"email\""), "Expected 'email':\n{output}");
+            // Should NOT contain runtime Array.map call
+            assert!(!output.contains(".map("), "Should not have runtime .map:\n{output}");
+        }
+        Err(e) => panic!("Array.map in value context should compile: {e}"),
+    }
+}
+
+#[test]
 fn comptime_array_map_as_inline_for() {
     // Array.map(fields, f => ...) should work interchangeably with
     // inline for field in fields { ... } in comptime contexts.

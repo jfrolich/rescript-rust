@@ -4551,6 +4551,30 @@ pub fn type_expect<'a>(
                 return result;
             }
 
+            // Check for Array.map(comptime_array, lambda) — unroll like inline for
+            if let Some((pat_idx, coll_idx, body_idx)) = as_comptime_loop(expr, tctx.arena) {
+                // Only intercept if the collection resolves to a comptime array
+                let coll_expr = tctx.arena.get_expr(coll_idx);
+                let is_comptime = matches!(&*coll_expr.pexp_desc,
+                    ED::Pexp_ident(lid) if {
+                        let longident = tctx.arena.get_longident(lid.txt);
+                        longident.is_simple() && matches!(
+                            tctx.comptime_bindings.get(tctx.arena.get_string(longident.last_idx())),
+                            Some(crate::types::comptime::ComptimeValue::Array(_))
+                        )
+                    }
+                );
+                if is_comptime {
+                    // Build an Expression that looks like Pexp_inline_for and recurse
+                    let synthetic = ParsedExpression {
+                        pexp_desc: Box::new(ED::Pexp_inline_for(Box::new((pat_idx, coll_idx, body_idx)))),
+                        pexp_loc: expr.pexp_loc,
+                        pexp_attributes: crate::parser::ast::Attributes::new(),
+                    };
+                    return type_expect(tctx, env, &synthetic, expected_ty, context);
+                }
+            }
+
             let typed_apply = type_application(
                 tctx,
                 env,
