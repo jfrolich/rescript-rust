@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 589 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 68 output diffs
+**Status:** 590 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 67 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **589 / 657**
+- JS snapshot parity: **590 / 657**
 - Compile errors: **0**
-- Output diffs: **68**
+- Output diffs: **67**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,58 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **589 / 657**
+- JS snapshot parity: **590 / 657**
 - Compile errors: **0**
-- Output diffs: **68**
+- Output diffs: **67**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: drop dead local temp bindings that are only assigned
+  `undefined` on one branch before a terminating `throw`/`return`, so the
+  printer emits OCaml's direct negative guard instead of preserving the dead
+  declaration-and-assignment prefix
+- Active backend focus stayed in **Phase 5** last-mile printer cleanup from
+  `PLAN.md`: the fix is isolated to `compiler-rust/src/js_ir/printer.rs`
+- OCaml reference:
+  - `compiler/core/js_stmt_make.ml` and the final emitted
+    `tests/tests/src/exception_value_test.ocaml.mjs`, which keep
+    `assert_f` as `if (x <= 3) { throw ... } return 3;` even though the
+    lowered lambda still materializes the intermediate `match` binding
+  - `compiler/core/js_dump_program.ml` / `js_dump.ml`, which confirms this is a
+    final emitted-JS shape issue rather than a typedtree or lambda parity
+    problem
+- Rust change:
+  - added a new function-body printer rewrite in
+    `compiler-rust/src/js_ir/printer.rs` that collapses a dead `let <tmp>;`
+    prefix when the only use is `tmp = undefined` on one `if` branch and the
+    opposite branch terminates
+  - taught that rewrite to see through a leading single block wrapper, which is
+    how the real `exception_value_test` JS IR reaches the printer
+  - added focused regression coverage in
+    `test_print_non_unit_function_body_drops_dead_undefined_binding_before_throw_guard`
+    and
+    `test_print_non_unit_function_body_drops_dead_undefined_binding_before_throw_guard_when_wrapped`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_non_unit_function_body_drops_dead_undefined_binding_before_throw_guard -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_non_unit_function_body_inverts_shared_success_or_guard_into_fallthrough -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_non_unit_function_body_collapses_shared_success_else_if_chain_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh exception_value_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_3980_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/exception_value_test.res` is exact again; Rust now drops
+    the dead `match = undefined` prefix and prints the checked-in negative
+    throw guard in `assert_f`
+  - `tests/tests/src/ExternalShadow.res` stayed exact, so the new rewrite did
+    not perturb the earlier stable non-unit printer guards
+  - `tests/tests/src/gpr_3980_test.res` still differs, confirming there is a
+    separate assert/undefined cleanup cluster beyond this dead-temp prefix case
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **589 / 657** -> **590 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **68** -> **67** (**-1**)
 
 Latest iteration on **2026-04-17**:
 

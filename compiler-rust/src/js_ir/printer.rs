@@ -2450,6 +2450,11 @@ impl JsPrinter {
             return;
         }
 
+        if let Some(rewritten) = try_function_body_drop_dead_undefined_binding_guard_prefix(stmts) {
+            self.print_function_body(&rewritten, return_unit);
+            return;
+        }
+
         if return_unit {
             if let Some(merged) = try_unit_function_body_single_clean_negative_guard_merge(stmts) {
                 self.print_function_tail_statement(&merged, return_unit);
@@ -3307,6 +3312,256 @@ fn collect_function_tail_negative_guard_chain_block(
             } else {
                 Some(block.clone())
             }
+        }
+    }
+}
+
+fn try_function_body_drop_dead_undefined_binding_guard_prefix(stmts: &Block) -> Option<Block> {
+    match stmts.as_slice() {
+        [Statement {
+            desc: StatementDesc::Block(inner),
+            ..
+        }] => {
+            return try_function_body_drop_dead_undefined_binding_guard_prefix(inner);
+        }
+        [
+            Statement {
+                desc: StatementDesc::Block(inner),
+                ..
+            },
+            rest @ ..,
+        ] => {
+            let mut flattened = inner.clone();
+            flattened.extend(rest.iter().cloned());
+            if let Some(rewritten) =
+                try_function_body_drop_dead_undefined_binding_guard_prefix(&flattened)
+            {
+                return Some(rewritten);
+            }
+        }
+        _ => {}
+    }
+
+    let [decl_stmt, if_stmt, rest @ ..] = stmts.as_slice() else {
+        return None;
+    };
+
+    let StatementDesc::Variable(decl) = &decl_stmt.desc else {
+        return None;
+    };
+    if decl.value.is_some() || block_mentions_ident(rest, &decl.ident) {
+        return None;
+    }
+
+    let StatementDesc::If(cond, then_block, else_block) = &unwrap_single_block_stmt(if_stmt).desc else {
+        return None;
+    };
+
+    if block_is_single_wrapped_assign_undefined_to_ident(then_block, &decl.ident)
+        && block_terminates_without_ident(else_block, &decl.ident)
+    {
+        let mut rewritten = Vec::with_capacity(stmts.len().saturating_sub(1));
+        rewritten.push(Statement {
+            desc: StatementDesc::If(
+                negate_tail_merge_condition(cond),
+                else_block.clone(),
+                vec![],
+            ),
+            comment: decl_stmt.comment.clone().or_else(|| if_stmt.comment.clone()),
+        });
+        rewritten.extend(rest.iter().cloned());
+        return Some(rewritten);
+    }
+
+    if block_is_single_wrapped_assign_undefined_to_ident(else_block, &decl.ident)
+        && block_terminates_without_ident(then_block, &decl.ident)
+    {
+        let mut rewritten = Vec::with_capacity(stmts.len().saturating_sub(1));
+        rewritten.push(Statement {
+            desc: StatementDesc::If(cond.clone(), then_block.clone(), vec![]),
+            comment: decl_stmt.comment.clone().or_else(|| if_stmt.comment.clone()),
+        });
+        rewritten.extend(rest.iter().cloned());
+        return Some(rewritten);
+    }
+
+    None
+}
+
+fn block_is_single_wrapped_assign_undefined_to_ident(block: &Block, ident: &Ident) -> bool {
+    matches!(
+        block.as_slice(),
+        [stmt] if assigns_undefined_to_ident(unwrap_single_block_stmt(stmt), ident)
+    )
+}
+
+fn assigns_undefined_to_ident(stmt: &Statement, ident: &Ident) -> bool {
+    matches!(
+        &stmt.desc,
+        StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Bin(
+                BinOp::Eq,
+                lhs,
+                rhs,
+            ),
+            ..
+        }) if matches!(
+            (&lhs.as_ref().desc, &rhs.as_ref().desc),
+            (
+                ExpressionDesc::Var(VIdent::Id(target)),
+                ExpressionDesc::Undefined { .. },
+            ) if target.same(ident)
+        )
+    )
+}
+
+fn block_terminates_without_ident(block: &Block, ident: &Ident) -> bool {
+    !block.is_empty() && block_terminates(block) && !block_mentions_ident(block, ident)
+}
+
+fn block_terminates(block: &Block) -> bool {
+    block.last().is_some_and(statement_terminates)
+}
+
+fn statement_terminates(stmt: &Statement) -> bool {
+    match &stmt.desc {
+        StatementDesc::Block(inner) => block_terminates(inner),
+        StatementDesc::Return(_)
+        | StatementDesc::Throw(_)
+        | StatementDesc::Break
+        | StatementDesc::Continue => true,
+        _ => false,
+    }
+}
+
+fn block_mentions_ident(block: &[Statement], ident: &Ident) -> bool {
+    block.iter().any(|stmt| statement_mentions_ident(stmt, ident))
+}
+
+fn statement_mentions_ident(stmt: &Statement, ident: &Ident) -> bool {
+    match &stmt.desc {
+        StatementDesc::Block(inner) => block_mentions_ident(inner, ident),
+        StatementDesc::Variable(VariableDeclaration {
+            ident: binding,
+            value,
+            ..
+        }) => {
+            binding.same(ident)
+                || value
+                    .as_ref()
+                    .is_some_and(|value| expression_mentions_ident(value, ident))
+        }
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
+            expression_mentions_ident(expr, ident)
+        }
+        StatementDesc::If(cond, then_block, else_block) => {
+            expression_mentions_ident(cond, ident)
+                || block_mentions_ident(then_block, ident)
+                || block_mentions_ident(else_block, ident)
+        }
+        StatementDesc::While(cond, body) => {
+            expression_mentions_ident(cond, ident) || block_mentions_ident(body, ident)
+        }
+        StatementDesc::ForRange(start, finish, loop_ident, _, body) => {
+            loop_ident.same(ident)
+                || start
+                    .as_ref()
+                    .is_some_and(|start| expression_mentions_ident(start, ident))
+                || expression_mentions_ident(finish, ident)
+                || block_mentions_ident(body, ident)
+        }
+        StatementDesc::IntSwitch(test, clauses, default) => {
+            expression_mentions_ident(test, ident)
+                || clauses
+                    .iter()
+                    .any(|(_, clause)| block_mentions_ident(&clause.body, ident))
+                || default
+                    .as_ref()
+                    .is_some_and(|block| block_mentions_ident(block, ident))
+        }
+        StatementDesc::StringSwitch(test, clauses, default) => {
+            expression_mentions_ident(test, ident)
+                || clauses
+                    .iter()
+                    .any(|clause| block_mentions_ident(&clause.clause.body, ident))
+                || default
+                    .as_ref()
+                    .is_some_and(|block| block_mentions_ident(block, ident))
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            block_mentions_ident(body, ident)
+                || catch.as_ref().is_some_and(|(catch_ident, catch_block)| {
+                    catch_ident.same(ident) || block_mentions_ident(catch_block, ident)
+                })
+                || finally
+                    .as_ref()
+                    .is_some_and(|block| block_mentions_ident(block, ident))
+        }
+        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => false,
+    }
+}
+
+fn expression_mentions_ident(expr: &Expression, ident: &Ident) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Var(VIdent::Id(binding)) => binding.same(ident),
+        ExpressionDesc::Var(VIdent::Qualified(_, _))
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::RawJsCode(_) => false,
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::StaticIndex(inner, _, _)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::New(inner, None) => expression_mentions_ident(inner, ident),
+        ExpressionDesc::In(left, right)
+        | ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::FlatCall(left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            expression_mentions_ident(left, ident) || expression_mentions_ident(right, ident)
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            expression_mentions_ident(test, ident)
+                || expression_mentions_ident(consequent, ident)
+                || expression_mentions_ident(alternate, ident)
+        }
+        ExpressionDesc::Call(func, args, _)
+        | ExpressionDesc::New(func, Some(args))
+        | ExpressionDesc::TaggedTemplate(func, _, args) => {
+            expression_mentions_ident(func, ident)
+                || args
+                    .iter()
+                    .any(|arg| expression_mentions_ident(arg, ident))
+        }
+        ExpressionDesc::Fun { params, body, .. } => {
+            params.iter().any(|param| param.same(ident)) || block_mentions_ident(body, ident)
+        }
+        ExpressionDesc::Array(items, _) => items
+            .iter()
+            .any(|item| expression_mentions_ident(item, ident)),
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            expression_mentions_ident(tag, ident)
+                || items
+                    .iter()
+                    .any(|item| expression_mentions_ident(item, ident))
+        }
+        ExpressionDesc::Object(dup, props) => {
+            dup.as_deref()
+                .is_some_and(|dup| expression_mentions_ident(dup, ident))
+                || props
+                    .iter()
+                    .any(|(_, value)| expression_mentions_ident(value, ident))
         }
     }
 }
@@ -6214,6 +6469,105 @@ mod tests {
         assert!(rendered.contains("return result;"), "{rendered}");
         assert!(!rendered.contains("if (a !== 0 || b !== 0 || c !== 0) {"), "{rendered}");
         assert!(!rendered.contains("} else {"), "{rendered}");
+    }
+
+    #[test]
+    fn test_print_non_unit_function_body_drops_dead_undefined_binding_before_throw_guard() {
+        let assert_f = Ident::create_local("assert_f");
+        let x = Ident::create_local("x");
+        let match_ = Ident::create_local("match");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: assert_f,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![x.clone()],
+                body: vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: match_.clone(),
+                        value: None,
+                        property: crate::lambda::compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    }),
+                    Statement::new(StatementDesc::If(
+                        Expression::bin(
+                            BinOp::Gt,
+                            Expression::var(x.clone()),
+                            Expression::number(Number::int(3)),
+                        ),
+                        vec![Statement::exp(Expression::bin(
+                            BinOp::Eq,
+                            Expression::var(match_),
+                            Expression::undefined(true),
+                        ))],
+                        vec![Statement::throw(Expression::string("boom"))],
+                    )),
+                    Statement::return_(Expression::number(Number::int(3))),
+                ],
+                env: Default::default(),
+                return_unit: false,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (x <= 3) {"), "{rendered}");
+        assert!(rendered.contains("throw \"boom\";"), "{rendered}");
+        assert!(rendered.contains("return 3;"), "{rendered}");
+        assert!(!rendered.contains("let match;"), "{rendered}");
+        assert!(!rendered.contains("match = undefined;"), "{rendered}");
+        assert!(!rendered.contains("if (x > 3) {"), "{rendered}");
+        assert!(!rendered.contains("} else {"), "{rendered}");
+    }
+
+    #[test]
+    fn test_print_non_unit_function_body_drops_dead_undefined_binding_before_throw_guard_when_wrapped()
+     {
+        let assert_f = Ident::create_local("assert_f");
+        let x = Ident::create_local("x");
+        let match_ = Ident::create_local("match");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: assert_f,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![x.clone()],
+                body: vec![Statement::new(StatementDesc::Block(vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: match_.clone(),
+                        value: None,
+                        property: crate::lambda::compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    }),
+                    Statement::new(StatementDesc::If(
+                        Expression::bin(
+                            BinOp::Gt,
+                            Expression::var(x.clone()),
+                            Expression::number(Number::int(3)),
+                        ),
+                        vec![Statement::exp(Expression::bin(
+                            BinOp::Eq,
+                            Expression::var(match_),
+                            Expression::undefined(true),
+                        ))],
+                        vec![Statement::throw(Expression::string("boom"))],
+                    )),
+                    Statement::return_(Expression::number(Number::int(3))),
+                ]))],
+                env: Default::default(),
+                return_unit: false,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (x <= 3) {"), "{rendered}");
+        assert!(rendered.contains("throw \"boom\";"), "{rendered}");
+        assert!(rendered.contains("return 3;"), "{rendered}");
+        assert!(!rendered.contains("let match;"), "{rendered}");
+        assert!(!rendered.contains("match = undefined;"), "{rendered}");
     }
 
     #[test]
