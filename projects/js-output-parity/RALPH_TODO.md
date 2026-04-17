@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 592 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 65 output diffs
+**Status:** 593 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 64 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **592 / 657**
+- JS snapshot parity: **593 / 657**
 - Compile errors: **0**
-- Output diffs: **65**
+- Output diffs: **64**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,65 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **592 / 657**
+- JS snapshot parity: **593 / 657**
 - Compile errors: **0**
-- Output diffs: **65**
+- Output diffs: **64**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: keep `Const_module_alias` bindings materialized across the
+  repeated JS-backend simplify passes when they feed a local module block that
+  is later projected with `Pfield`, so the Rust backend matches OCaml's
+  conservative alias-removal behavior instead of inlining the alias on the
+  first pass and deleting the now-"dead" binding on a later pass
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change stays in `compiler-rust/src/lambda/simplify.rs`
+- OCaml reference:
+  - `compiler/core/lam_pass_remove_alias.ml`, whose alias pass rewrites
+    selected alias consumers but does not keep re-running content-based alias
+    erasure after local-module projections have already been simplified away
+  - `compiler/core/lam_compile_main.ml`, where the backend simplifier runs in
+    repeated sweeps before JS lowering, which means any alias shape that must
+    survive to codegen has to be preserved across all of those sweeps, not
+    inferred only from the current intermediate body
+- Rust change:
+  - extended `SimplifyEnv` with a precomputed
+    `preserved_local_module_module_alias_bindings` set collected from the
+    original flattened lambda before the repeated JS-backend simplify passes
+  - added `collect_local_module_module_alias_bindings(...)` plus a precise
+    local-module projection detector so only module-alias bindings used inside
+    a local `Pmakeblock(..., TagInfo::Module(_), ...)` that is later read back
+    through a module `Pfield` are preserved
+  - switched the per-let preservation rule from a single-pass body check to
+    that precomputed set, which keeps the OCaml-aligned binding alive through
+    later simplify sweeps after the intermediate `Pfield` has already been
+    folded away
+  - kept the guard narrow enough that internal-only local module aliases
+    without a follow-up module-field projection still inline away, matching
+    the checked-in `pr6726` snapshot shape
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml module_alias -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh offset --diff`
+  - `timeout 30 ./scripts/test_js_single.sh pr6726 --diff`
+  - `timeout 30 ./scripts/test_js_single.sh coercion_module_alias_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/offset.res` now matches its checked-in snapshot exactly
+    and no longer appears under `temp/rust-parity/diffs`
+  - `tests/tests/src/pr6726.res` remained exact after the same change,
+    confirming the new preservation only triggers when the local module block
+    is actually projected later
+  - broader exact guard `tests/tests/src/ExternalShadow.res` also remained
+    exact after the same simplify change
+  - `tests/tests/src/coercion_module_alias_test.res` still differs, but it is
+    now the remaining deeper module-alias/coercion cluster rather than a
+    regression from the `offset` fix
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **592 / 657** -> **593 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **65** -> **64** (**-1**)
 
 Latest iteration on **2026-04-17**:
 
