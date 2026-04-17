@@ -635,8 +635,12 @@ impl PersistentEnv {
             let typed_signature =
                 transl_signature(&mut tctx, &env, parser.arena(), &signature).ok()?;
             let fallback_pers = tctx.persistent_env.take()?;
+            let decl_signature =
+                crate::types::typemod::decl_signature_from_typed_signature(&typed_signature);
             let typed_module_type = TypedModuleType {
                 mty_desc: TypedModuleTypeDesc::Tmty_signature(typed_signature),
+                mty_type: crate::types::decl::ModuleType::MtySignature(decl_signature),
+                mty_env: crate::types::typedtree::EnvRef(0),
                 mty_loc: crate::parse_arena::LocIdx(0),
                 mty_attributes: crate::parser::ast::Attributes::new(),
             };
@@ -739,11 +743,14 @@ impl PersistentEnv {
     /// Load a module from a .cmi file, or fall back to the source path embedded
     /// in a sibling `.ast` when the module is implementation-only.
     fn load_module<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<PersStruct> {
-        // In in-process mode, the registry/source fallback is authoritative.
-        // Never touch `.cmi` files on disk, even if stale artifacts happen to
-        // exist on the load path.
-        if self.in_process_mode {
-            return self.load_module_from_source_path_fallback(name, ctx);
+        // In in-process mode, the registry is the sole source of truth.
+        // No CMI files, no source fallback. If a dependency isn't in the
+        // registry, it means the build graph is wrong.
+        // Exception: nopervasives modules (runtime bootstrap) may load from
+        // CMI since they're being pre-compiled into the registry.
+        if self.in_process_mode && !self.nopervasives {
+            eprintln!("ERROR: in-process module '{}' not found in registry — dependency graph bug", name);
+            return None;
         }
 
         let cmi_filename = format!("{}.cmi", name);
@@ -1086,6 +1093,48 @@ fn register_sig_types_recursive<'a>(
             _ => {}
         }
     }
+}
+
+/// Load a module's signature for resolving module aliases during type registration.
+/// This is a lightweight version that doesn't use the persistent env cache.
+fn load_module_sig_for_alias<'a>(
+    name: &str,
+    ctx: &'a TypeContext<'a>,
+    load_path: &[PathBuf],
+) -> Option<Signature> {
+    let cmi_filename = format!("{}.cmi", name);
+
+    // Search load path for the CMI file
+    let full_path = find_in_path(load_path, &cmi_filename)?;
+
+    // Read and parse the CMI file
+    let cmi = cmi_format::read_cmi(&full_path).ok()?;
+
+    // Convert to Rust type structures
+    let mut sig_ctx = SigReadContext::new(ctx);
+    let signature = sig_ctx.read_signature(&cmi.cmi_sign);
+
+    Some(signature)
+}
+
+/// Search load paths for a file (case-insensitive on first character).
+fn find_in_path(load_path: &[PathBuf], filename: &str) -> Option<String> {
+    for dir in load_path {
+        let exact = dir.join(filename);
+        if exact.exists() {
+            return Some(exact.to_string_lossy().into_owned());
+        }
+        if let Some(first_char) = filename.chars().next() {
+            if first_char.is_ascii_uppercase() {
+                let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]);
+                let uncap_path = dir.join(&uncap);
+                if uncap_path.exists() {
+                    return Some(uncap_path.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

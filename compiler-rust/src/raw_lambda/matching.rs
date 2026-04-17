@@ -6625,7 +6625,16 @@ fn normalize_module_path_via_ctx(
     // Check if this path resolves to a module alias via sig caches
     match &path {
         Path::Pdot(prefix, name, _) => {
-            // Try to find the parent module's signature from multiple caches
+            // Strategy 1: check the qualified module components cache.
+            // This covers persistent module aliases like Js.Exn → Stdlib_Exn
+            // that were resolved during type checking via with_resolved_module_components_for_path.
+            if let Some(alias_target) = ctx_ref.find_module_alias_in_components(prefix, name) {
+                if !alias_target.same(&path) {
+                    return normalize_module_path_via_ctx(ctx_ref, &alias_target);
+                }
+            }
+
+            // Strategy 2: try to find the parent module's signature from sig caches.
             let prefix_name = prefix.name();
             let sig_opt = ctx_ref
                 .find_resolved_module_sig(&prefix_name)

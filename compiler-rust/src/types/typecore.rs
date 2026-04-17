@@ -218,6 +218,14 @@ fn convert_located_stridx(loc: &Located<StrIdx>, arena: &ParseArena) -> Located<
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PackageCoercionCacheKey {
+    env_id: u64,
+    packed_module_path: Path,
+    package_path: Path,
+    package_lids: Vec<Longident>,
+}
+
 fn has_dict_pattern_attribute(arena: &ParseArena, attrs: &[crate::parser::ast::Attribute]) -> bool {
     attrs
         .iter()
@@ -725,7 +733,7 @@ pub struct TypeCheckContext<'a> {
     /// Cached semantic module types from Tmod_apply, keyed by parsed module
     /// expression location.  Ensures that a second lookup for the same functor
     /// application reuses the types with correct path substitutions.
-    pub module_expr_semantic_types:
+    pub(crate) module_expr_semantic_types:
         HashMap<crate::parse_arena::LocIdx, crate::types::decl::ModuleType>,
     /// Registry of @comptime functions for compile-time specialization.
     pub comptime_functions: HashMap<String, crate::types::comptime::ComptimeFunction>,
@@ -735,6 +743,10 @@ pub struct TypeCheckContext<'a> {
     /// Comptime let bindings whose body is a type builder — to be evaluated
     /// at end of type_structure and emitted as type declarations.
     pub pending_type_builders: Vec<(String, crate::parse_arena::ExprIdx)>,
+    /// Cached coercions for repeated `module(M)` package expressions in the
+    /// same typing environment and package shape.
+    pub(crate) package_coercions:
+        HashMap<PackageCoercionCacheKey, crate::types::typedtree::ModuleCoercion>,
 }
 
 /// A diagnostic from type checking.
@@ -767,6 +779,7 @@ impl<'a> TypeCheckContext<'a> {
             comptime_bindings: HashMap::new(),
             monomorph_cache: crate::types::comptime::MonomorphCache::new(),
             pending_type_builders: Vec::new(),
+            package_coercions: HashMap::new(),
         }
     }
 
@@ -1157,8 +1170,6 @@ fn resolve_type_constructor_path(
     env: &Env,
     lid: &Longident,
 ) -> (Path, Option<crate::types::decl::TypeDeclaration>) {
-    use crate::types::decl::SignatureItem;
-
     match lid {
         Longident::Lident(name_idx) => {
             let name = tctx.arena.get_string(*name_idx);
@@ -1199,19 +1210,41 @@ fn resolve_type_constructor_path(
                 }
             }
 
-            if let Some((mod_path, sig)) =
-                env.resolve_module_lid(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
-            {
-                for item in &sig {
-                    if let SignatureItem::SigType(id, decl, _) = item {
-                        if id.name() == type_name {
-                            return (
-                                Path::pdot(mod_path.clone(), type_name.to_string()),
-                                Some(decl.clone()),
-                            );
-                        }
+            if let Some(Some((mod_path, decl))) = with_resolved_module_components_for_lid(
+                prefix,
+                tctx.arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+                |components| {
+                    let module_path = components.access_path().clone();
+                    if let Some((cached_path, _, decl)) = tctx
+                        .type_ctx
+                        .find_resolved_module_type(&module_path, type_name)
+                    {
+                        return Some((cached_path, decl));
                     }
-                }
+                    components.lookup_type(type_name).map(|(id, decl)| {
+                        let decl = decl.clone();
+                        tctx.type_ctx.register_resolved_module_type(
+                            &module_path,
+                            type_name,
+                            module_path.clone(),
+                            id.clone(),
+                            decl.clone(),
+                        );
+                        (module_path, decl)
+                    })
+                },
+            ) {
+                return (Path::pdot(mod_path, type_name.to_string()), Some(decl));
+            }
+            if let Some(mod_path) = env.resolve_module_access_path_for_lid(
+                prefix,
+                tctx.arena,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            ) {
                 return (Path::pdot(mod_path, type_name.to_string()), None);
             }
             (path_from_longident_persistent(lid, tctx.arena), None)
@@ -4216,6 +4249,7 @@ fn type_exp<'a>(
     expr: &ParsedExpression,
     context: Option<TypeClashContext>,
 ) -> TypeCoreResult<Expression> {
+    let debug_type_package = std::env::var_os("RUST_DEBUG_TYPE_PACKAGE").is_some();
     let expected_ty = tctx.type_ctx.new_var(None);
     type_expect(tctx, env, expr, expected_ty, context)
 }
@@ -6685,55 +6719,6 @@ fn type_application(
                 } else {
                     tctx.set_unify_env(env);
                 }
-                let preserved_local_ident_flat_alias = if !enforce_optional {
-                    match &typed_arg.exp_desc {
-                        ExpressionDesc::Texp_ident(Path::Pident(_), _, desc) => {
-                            let desc_repr = ctx.repr(desc.val_type);
-                            let unify_repr = ctx.repr(unify_ty);
-                            let desc_snapshot = ctx.get_desc(desc_repr);
-                            let unify_snapshot = ctx.get_desc(unify_repr);
-                            let preserved = match (&*desc_snapshot, &*unify_snapshot) {
-                                (
-                                    TypeDesc::Tconstr {
-                                        path: desc_path,
-                                        args: desc_args,
-                                        ..
-                                    },
-                                    TypeDesc::Tconstr {
-                                        path: unify_path,
-                                        args: unify_args,
-                                        ..
-                                    },
-                                ) => {
-                                    let desc_segments = desc_path.name().split('.').count();
-                                    desc_path.head().is_persistent()
-                                        && unify_path.head().is_persistent()
-                                        && desc_segments >= 3
-                                        && desc_args.len() == unify_args.len()
-                                        && crate::types::ctype::flattened_alias_paths_equivalent(
-                                            ctx,
-                                            env,
-                                            desc_path,
-                                            unify_path,
-                                            desc_args.len(),
-                                        )
-                                        && ctx.repr(desc.val_type) != ctx.repr(unify_ty)
-                                }
-                                _ => false,
-                            };
-                            drop(desc_snapshot);
-                            drop(unify_snapshot);
-                            if preserved {
-                                Some(crate::types::ctype::subst_identity_copy(ctx, desc.val_type))
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
                 // OCaml's type_unknown_args only calls type_expect (no
                 // subsequent unify_exp). Skip the post-unify for that path
                 // to preserve separate physical nodes in the typed tree.
@@ -6745,9 +6730,6 @@ fn type_application(
                         unify_ty,
                         Some(TypeClashContext::FunctionCall),
                     )?;
-                }
-                if let Some(preserved_ty) = preserved_local_ident_flat_alias {
-                    typed_arg.exp_type = preserved_ty;
                 }
                 let typed_arg = if enforce_optional {
                     let wrapped_loc = typed_arg.exp_loc;
@@ -12423,17 +12405,24 @@ fn inline_record_decl_from_variant_type<'a>(
                 return None;
             };
             let inline_params = inline_record_type_params(ctx, &type_decl.type_params, labels);
+            // For @unboxed types, the inline record uses RecordUnboxed representation
+            // (matching OCaml's datarepr.ml which sets Record_unboxed when type_unboxed.unboxed)
+            let inline_repr = if type_decl.type_unboxed.unboxed {
+                crate::types::RecordRepresentation::RecordUnboxed(false)
+            } else {
+                crate::types::RecordRepresentation::RecordInlined {
+                    tag: block_tag,
+                    name: cstr_name.to_string(),
+                    num_nonconsts,
+                    attrs: cd.cd_attributes.clone(),
+                }
+            };
             return Some(crate::types::TypeDeclaration {
                 type_params: inline_params.clone(),
                 type_arity: inline_params.len() as i32,
                 type_kind: crate::types::TypeKind::TypeRecord(
                     labels.clone(),
-                    crate::types::RecordRepresentation::RecordInlined {
-                        tag: block_tag,
-                        name: cstr_name.to_string(),
-                        num_nonconsts,
-                        attrs: cd.cd_attributes.clone(),
-                    },
+                    inline_repr,
                 ),
                 type_private: type_decl.type_private,
                 type_manifest: None,
@@ -13617,7 +13606,7 @@ fn resolve_letmodule_alias_root(env: &Env, module_id: &Ident) -> Option<Path> {
     resolve_alias_root_from_module_type(env, &md.md_type, &mut visited)
 }
 
-fn resolve_letmodule_direct_type_family_root<'a>(
+pub(crate) fn resolve_letmodule_direct_type_family_root<'a>(
     ctx: &'a TypeContext<'a>,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -14012,7 +14001,7 @@ fn type_letmodule(
                 let md = crate::types::typedtree::ModuleExpr {
                     mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_structure(structure),
                     mod_loc: module_expr.pmod_loc,
-                    mod_type: crate::types::typedtree::ModuleType::placeholder(),
+                    mod_type: crate::types::decl::ModuleType::MtySignature(sig_items.clone()),
                     mod_env: EnvRef(0),
                     mod_attributes: Attributes::new(),
                 };
@@ -14384,7 +14373,7 @@ fn type_pack(
                         placeholder_lid,
                     ),
                     mod_loc: loc,
-                    mod_type: crate::types::typedtree::ModuleType::placeholder(),
+                    mod_type: crate::types::decl::ModuleType::MtySignature(vec![]),
                     mod_env: EnvRef(0),
                     mod_attributes: Attributes::new(),
                 })),
@@ -14395,7 +14384,6 @@ fn type_pack(
             ));
         }
     };
-
     let typed_module = crate::types::typemod::type_module_expr_with_alias_mode(
         tctx,
         env,
@@ -14449,6 +14437,7 @@ fn type_pack(
     let pack_arg_base_path = packed_module_path
         .clone()
         .or_else(|| Some(Path::pident(ctx.create_ident("%M"))));
+    let mut pack_args_rebuilt_from_path = false;
     let pack_args = if let Some(pack_module_path) = pack_arg_base_path.as_ref() {
         let mut rebuilt_args = Vec::with_capacity(pack_lids.len());
         let mut can_rebuild = true;
@@ -14462,6 +14451,7 @@ fn type_pack(
             }
         }
         if can_rebuild && rebuilt_args.len() == pack_lids.len() {
+            pack_args_rebuilt_from_path = true;
             rebuilt_args
         } else {
             expected_pack_args.clone()
@@ -14480,45 +14470,53 @@ fn type_pack(
         ctx,
     )
     .unwrap_or(crate::types::decl::ModuleType::MtyIdent(pack_path.clone()));
-    let package_mty = typed_module_type_for_unpack(tctx.arena, loc, &decl_package_mty);
-    let arg_mty = {
-        crate::types::typemod::extract_module_type_from_mod_expr_with_ctx(
+    let constraint_arg_mty =
+        crate::types::typemod::decl_module_type_from_typed_module_expr_for_constraint_arg(
             &typed_module,
-            Some(env),
-            ctx,
-        )
-        .or_else(|| crate::types::typemod::decl_module_type_from_typed(&typed_module.mod_type))
+        );
+    let arg_mty =
+        constraint_arg_mty
+        .clone()
         .or_else(|| {
-            crate::types::typemod::lookup_module_type_from_parsed_module_expr(
-                tctx,
-                env,
-                tctx.arena,
-                module_expr,
+            crate::types::typemod::extract_module_type_from_mod_expr_with_ctx(
+                &typed_module,
+                Some(env),
+                ctx,
             )
         })
-        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]))
-    };
-    let arg_mty = if let Some(pack_module_path) = packed_module_path.as_ref() {
-        crate::types::ctype::strengthen_module_type_for_inclusion_path(
-            ctx,
-            env,
-            pack_module_path,
-            &arg_mty,
-        )
+    .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+    let package_coercion_key = if pack_args_rebuilt_from_path {
+        packed_module_path.as_ref().map(|packed_module_path| PackageCoercionCacheKey {
+            env_id: env.id(),
+            packed_module_path: packed_module_path.clone(),
+            package_path: pack_path.clone(),
+            package_lids: pack_lids.clone(),
+        })
     } else {
-        arg_mty
+        None
     };
-    let coercion = crate::types::includemod::modtypes(ctx, env, &arg_mty, &decl_package_mty)
-        .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
+    let cached_coercion = package_coercion_key
+        .as_ref()
+        .and_then(|key| tctx.package_coercions.get(key).cloned());
+    let coercion = if let Some(cached) = cached_coercion {
+        cached
+    } else {
+        let coercion = crate::types::includemod::modtypes(ctx, env, &arg_mty, &decl_package_mty)
+            .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
+        if let Some(key) = package_coercion_key {
+            tctx.package_coercions.insert(key, coercion.clone());
+        }
+        coercion
+    };
     let wrapped_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
             Box::new(typed_module),
-            package_mty.clone(),
+            decl_package_mty.clone(),
             crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
             coercion,
         ),
         mod_loc: typed_module_loc,
-        mod_type: package_mty,
+        mod_type: decl_package_mty,
         mod_env: EnvRef(0),
         mod_attributes: Attributes::new(),
     };
@@ -14614,11 +14612,15 @@ fn typed_module_type_for_unpack(
     match module_type {
         DeclMty::MtyIdent(path) => crate::types::typedtree::ModuleType {
             mty_desc: ModuleTypeDesc::Tmty_ident(path.clone(), arena.placeholder_located(loc)),
+            mty_type: module_type.clone(),
+            mty_env: EnvRef(0),
             mty_loc: loc,
             mty_attributes: Attributes::new(),
         },
         DeclMty::MtyAlias(_, path) => crate::types::typedtree::ModuleType {
             mty_desc: ModuleTypeDesc::Tmty_alias(path.clone(), arena.placeholder_located(loc)),
+            mty_type: module_type.clone(),
+            mty_env: EnvRef(0),
             mty_loc: loc,
             mty_attributes: Attributes::new(),
         },
@@ -14657,7 +14659,6 @@ fn type_expect_with_module_unpacks(
     };
 
     let decl_mty = module_type_from_package_binding(tctx, env, unpack.ty);
-    let typed_mty = typed_module_type_for_unpack(tctx.arena, unpack.loc_idx, &decl_mty);
     // Match OCaml Env.enter_module: create one fresh ident used for
     // both the body environment binding and the Texp_letmodule node.
     let letmod_id = tctx.type_ctx.create_ident(unpack.id.name());
@@ -14672,7 +14673,7 @@ fn type_expect_with_module_unpacks(
     body_env.add_module(
         letmod_id.clone(),
         crate::types::decl::ModuleDeclaration {
-            md_type: decl_mty,
+            md_type: decl_mty.clone(),
             md_attributes: vec![],
             md_loc: crate::location::Location::none(),
             md_path: None,
@@ -14719,10 +14720,10 @@ fn type_expect_with_module_unpacks(
     let unpack_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_unpack(
             unpack_expr,
-            typed_mty.clone(),
+            decl_mty.clone(),
         ),
         mod_loc: unpack.loc_idx,
-        mod_type: typed_mty,
+        mod_type: decl_mty,
         mod_env: EnvRef(0),
         mod_attributes: Attributes::new(),
     };
@@ -16002,6 +16003,33 @@ impl Env {
                 let value_name = arena.get_string(*idx);
                 let lid_str = Self::longident_to_string(lid, arena);
 
+                if let Some(Some(result)) = with_resolved_module_components_for_lid(
+                    prefix, arena, self, pers_env, ctx, |components| {
+                        let module_path = components.access_path().clone();
+                        if let Some(cached) =
+                            ctx.find_resolved_module_value(&module_path, value_name)
+                        {
+                            return Some(cached);
+                        }
+                        components.lookup_value(value_name).map(|(pos, _, vd)| {
+                            let path = Path::Pdot(
+                                Box::new(module_path.clone()),
+                                value_name.to_string(),
+                                pos as i32,
+                            );
+                            let result = (path, vd.clone());
+                            ctx.register_resolved_module_value(
+                                &module_path,
+                                value_name,
+                                result.0.clone(),
+                                result.1.clone(),
+                            );
+                            result
+                        })
+                    },
+                ) {
+                    return Ok(result);
+                }
                 if let Some(module_path) =
                     self.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)
                 {
@@ -16160,11 +16188,22 @@ impl Env {
             Longident::Ldot(prefix, submod_idx) => {
                 let parent_path =
                     self.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)?;
-                let submod_name = arena.get_string(*submod_idx).to_string();
-                if let Some(cached) =
-                    ctx.find_resolved_child_module_path(&parent_path, submod_name.as_str())
+                let submod_name = arena.get_string(*submod_idx);
+                if let Some(cached) = ctx.find_resolved_child_module_path(&parent_path, submod_name)
                 {
                     return Some(cached);
+                }
+                if let Some(result) =
+                    with_resolved_module_components_for_lid(lid, arena, self, pers_env, ctx, |components| {
+                        components.access_path().clone()
+                    })
+                {
+                    ctx.register_resolved_child_module_path(
+                        &parent_path,
+                        submod_name,
+                        result.clone(),
+                    );
+                    return Some(result);
                 }
                 let result = with_resolved_module_components_for_path(
                     &parent_path,
@@ -16173,18 +16212,18 @@ impl Env {
                     ctx,
                     |components| {
                         components
-                            .lookup_module(submod_name.as_str())
+                            .lookup_module(submod_name)
                             .map(|(pos, _, md)| {
                                 if parent_path.head().is_persistent()
                                     || parent_path.head().stamp() == 0
                                 {
                                     md.md_path.clone().unwrap_or_else(|| {
-                                        Path::pdot(parent_path.clone(), submod_name.clone())
+                                        Path::pdot(parent_path.clone(), submod_name.to_string())
                                     })
                                 } else {
                                     Path::Pdot(
                                         Box::new(parent_path.clone()),
-                                        submod_name.clone(),
+                                        submod_name.to_string(),
                                         pos as i32,
                                     )
                                 }
@@ -16194,7 +16233,7 @@ impl Env {
                 .flatten()?;
                 ctx.register_resolved_child_module_path(
                     &parent_path,
-                    submod_name.as_str(),
+                    submod_name,
                     result.clone(),
                 );
                 Some(result)
@@ -16508,6 +16547,21 @@ impl Env {
             Longident::Ldot(prefix, submod_idx) => {
                 let submod_name = arena.get_string(*submod_idx);
                 if apply_subst {
+                    if let Some(result) = with_resolved_module_components_for_lid(
+                        lid,
+                        arena,
+                        self,
+                        pers_env,
+                        ctx,
+                        |components| {
+                            (
+                                components.access_path().clone(),
+                                components.cloned_signature(),
+                            )
+                        },
+                    ) {
+                        return Some(result);
+                    }
                     let parent_path =
                         self.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)?;
                     let (_, sub_path, _) = lookup_module_in_resolved_path(
@@ -17029,17 +17083,23 @@ fn lookup_constructor_in_module<'b>(
                                             Path::pdot(type_path.clone(), cstr_name.to_string());
                                         let inline_constr = ctx
                                             .new_generic_constr(inline_path, inline_params.clone());
+                                        // For @unboxed types, inline record uses RecordUnboxed
+                                        let inline_repr_cmi = if type_decl.type_unboxed.unboxed {
+                                            crate::types::RecordRepresentation::RecordUnboxed(false)
+                                        } else {
+                                            crate::types::RecordRepresentation::RecordInlined {
+                                                tag: block_idx,
+                                                name: cstr_name.to_string(),
+                                                num_nonconsts,
+                                                attrs: cd.cd_attributes.clone(),
+                                            }
+                                        };
                                         let inline_decl = crate::types::TypeDeclaration {
                                             type_params: inline_params.clone(),
                                             type_arity: inline_params.len() as i32,
                                             type_kind: crate::types::TypeKind::TypeRecord(
                                                 labels.clone(),
-                                                crate::types::RecordRepresentation::RecordInlined {
-                                                    tag: block_idx,
-                                                    name: cstr_name.to_string(),
-                                                    num_nonconsts,
-                                                    attrs: cd.cd_attributes.clone(),
-                                                },
+                                                inline_repr_cmi,
                                             ),
                                             type_private: type_decl.type_private,
                                             type_manifest: None,
@@ -19113,17 +19173,23 @@ fn lookup_constructor_by_expected_type<'b>(
                             Path::pdot(result_type_path.clone(), cstr_name.to_string());
                         let inline_constr =
                             ctx.new_generic_constr(inline_path, inline_params.clone());
+                        // For @unboxed types, inline record uses RecordUnboxed
+                        let inline_repr_mod = if concrete_type_decl.type_unboxed.unboxed {
+                            crate::types::RecordRepresentation::RecordUnboxed(false)
+                        } else {
+                            crate::types::RecordRepresentation::RecordInlined {
+                                tag: block_idx,
+                                name: cstr_name.to_string(),
+                                num_nonconsts,
+                                attrs: cd.cd_attributes.clone(),
+                            }
+                        };
                         let inline_decl = crate::types::TypeDeclaration {
                             type_params: inline_params.clone(),
                             type_arity: inline_params.len() as i32,
                             type_kind: crate::types::TypeKind::TypeRecord(
                                 copied_labels,
-                                crate::types::RecordRepresentation::RecordInlined {
-                                    tag: block_idx,
-                                    name: cstr_name.to_string(),
-                                    num_nonconsts,
-                                    attrs: cd.cd_attributes.clone(),
-                                },
+                                inline_repr_mod,
                             ),
                             type_private: concrete_type_decl.type_private,
                             type_manifest: None,
@@ -19654,11 +19720,126 @@ fn scope_local_module_cache_key(base_key: &str, module_path: &Path, env: &Env) -
     }
 }
 
-fn module_components_cache_key(module_path: &Path, env: &Env) -> Option<String> {
-    path_cache_key(module_path).map(|key| {
-        let base_key = format!("module-components::{key}");
-        scope_local_module_cache_key(&base_key, module_path, env)
-    })
+fn module_components_cache_key(
+    module_path: &Path,
+    env: &Env,
+) -> Option<crate::types::context::QualifiedModuleComponentsCacheKey> {
+    if matches!(module_path, Path::Papply(_, _)) {
+        return None;
+    }
+    Some(crate::types::context::QualifiedModuleComponentsCacheKey::new(
+        module_path.clone(),
+        module_path_requires_env_scoped_cache(env, module_path).then_some(env.id()),
+    ))
+}
+
+fn with_resolved_child_module_components<'a, R>(
+    parent_components: &crate::types::env_lazy::QualifiedModuleComponents,
+    child_name: &str,
+    env: &Env,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
+) -> Option<R> {
+    let (runtime_pos, _, md) = parent_components.lookup_qualified_module(child_name, ctx)?;
+    let access_path = qualified_submodule_access_path(
+        parent_components.access_path(),
+        child_name,
+        runtime_pos,
+        &md,
+    );
+    ctx.register_resolved_child_module_path(parent_components.access_path(), child_name, access_path.clone());
+
+    let module_key = module_components_cache_key(&access_path, env);
+    let mut f = Some(f);
+    if let Some(module_key) = module_key.as_ref() {
+        if let Some(result) = ctx.with_qualified_module_components(module_key, |components| {
+            (f.take()
+                .expect("qualified child module components callback reused"))(components)
+        }) {
+            return Some(result);
+        }
+    }
+
+    let components = match md.md_type {
+        crate::types::decl::ModuleType::MtySignature(sig) => {
+            crate::types::env_lazy::QualifiedModuleComponents::new(access_path.clone(), sig)
+        }
+        _ => return None,
+    };
+    let result = (f
+        .take()
+        .expect("qualified child module components callback reused"))(&components);
+    if let Some(module_key) = module_key {
+        ctx.register_qualified_module_components(module_key, components);
+    }
+    Some(result)
+}
+
+fn with_resolved_module_components_for_lid_inner<'a, R>(
+    lid: &Longident,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    f: &mut dyn FnMut(&crate::types::env_lazy::QualifiedModuleComponents) -> Option<R>,
+) -> Option<R> {
+    match lid {
+        Longident::Lident(mod_idx) => {
+            let mod_name = arena.get_string(*mod_idx);
+            let module_path = if let Ok((mod_id, md, is_local)) = env.find_module_with_origin(mod_name) {
+                if is_local {
+                    Path::pident(mod_id.clone())
+                } else {
+                    md.md_path
+                        .clone()
+                        .unwrap_or_else(|| Path::pident(mod_id.clone()))
+                }
+            } else {
+                Path::pident(Ident::create_persistent(mod_name))
+            };
+            with_resolved_module_components_for_path(&module_path, env, pers_env, ctx, f).flatten()
+        }
+        Longident::Ldot(prefix, child_idx) => {
+            let child_name = arena.get_string(*child_idx).to_string();
+            let mut continue_with_child = |components: &crate::types::env_lazy::QualifiedModuleComponents| {
+                with_resolved_child_module_components(
+                    components,
+                    child_name.as_str(),
+                    env,
+                    ctx,
+                    |child| f(child),
+                )
+                .flatten()
+            };
+            with_resolved_module_components_for_lid_inner(
+                prefix,
+                arena,
+                env,
+                pers_env,
+                ctx,
+                &mut continue_with_child,
+            )
+        }
+        Longident::Lapply(_, _) => None,
+    }
+}
+
+pub(crate) fn with_resolved_module_components_for_lid<'a, R>(
+    lid: &Longident,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
+) -> Option<R> {
+    let mut f = Some(f);
+    let mut wrapper = |components: &crate::types::env_lazy::QualifiedModuleComponents| {
+        Some(
+            (f.take()
+                .expect("qualified module components by lid callback reused"))(components),
+        )
+    };
+    with_resolved_module_components_for_lid_inner(lid, arena, env, pers_env, ctx, &mut wrapper)
 }
 
 fn build_module_components_from_parent_path<'a>(
@@ -19720,7 +19901,7 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     }
 
     let module_key = module_components_cache_key(module_path, env);
-    if let Some(module_key) = module_key.as_deref() {
+    if let Some(module_key) = module_key.as_ref() {
         if let Some(result) = ctx.with_qualified_module_components(module_key, |components| {
             (f.take()
                 .expect("qualified module components callback reused"))(components)
@@ -19741,7 +19922,7 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     let result = (f
         .take()
         .expect("qualified module components callback reused"))(&components);
-    if let Some(module_key) = module_key.as_deref() {
+    if let Some(module_key) = module_key {
         ctx.register_qualified_module_components(module_key, components);
     }
     Some(result)
@@ -19887,13 +20068,14 @@ fn rewrite_alias_pident_child_prefixes<'a>(
     }
 }
 
-pub(crate) fn qualify_resolved_signature_for_access_path<'a>(
+fn qualify_resolved_signature_for_access_path_inner<'a>(
     access_path: &Path,
     mty: &crate::types::decl::ModuleType,
     resolved_sig: &crate::types::decl::Signature,
     resolved_name: Option<&str>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
+    force_generalize_values: bool,
 ) -> crate::types::decl::Signature {
     let (should_rebind_direct_type_family, allow_inferred_rebind_paths) =
         direct_sig_type_family_rebind_options(mty, access_path);
@@ -19979,11 +20161,51 @@ pub(crate) fn qualify_resolved_signature_for_access_path<'a>(
         crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, access_path, ctx);
         crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, access_path);
     }
-    crate::types::ctype::force_generalize_module_sig_values(
-        ctx,
-        &crate::types::decl::ModuleType::MtySignature(sig.clone()),
-    );
+    if force_generalize_values {
+        crate::types::ctype::force_generalize_module_sig_values(
+            ctx,
+            &crate::types::decl::ModuleType::MtySignature(sig.clone()),
+        );
+    }
     sig
+}
+
+pub(crate) fn qualify_resolved_signature_for_access_path<'a>(
+    access_path: &Path,
+    mty: &crate::types::decl::ModuleType,
+    resolved_sig: &crate::types::decl::Signature,
+    resolved_name: Option<&str>,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> crate::types::decl::Signature {
+    qualify_resolved_signature_for_access_path_inner(
+        access_path,
+        mty,
+        resolved_sig,
+        resolved_name,
+        pers_env,
+        ctx,
+        true,
+    )
+}
+
+pub(crate) fn qualify_resolved_signature_for_local_components<'a>(
+    access_path: &Path,
+    mty: &crate::types::decl::ModuleType,
+    resolved_sig: &crate::types::decl::Signature,
+    resolved_name: Option<&str>,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> crate::types::decl::Signature {
+    qualify_resolved_signature_for_access_path_inner(
+        access_path,
+        mty,
+        resolved_sig,
+        resolved_name,
+        pers_env,
+        ctx,
+        false,
+    )
 }
 
 pub(crate) fn build_qualified_signature_for_access_path<'a>(
@@ -20386,17 +20608,23 @@ fn lookup_type_decl_for_path<'a>(
                         {
                             let inline_params =
                                 inline_record_type_params(ctx, &parent_decl.type_params, labels);
+                            // For @unboxed types, inline record uses RecordUnboxed
+                            let inline_repr_path = if parent_decl.type_unboxed.unboxed {
+                                crate::types::RecordRepresentation::RecordUnboxed(false)
+                            } else {
+                                crate::types::RecordRepresentation::RecordInlined {
+                                    tag: block_idx,
+                                    name: type_name.to_string(),
+                                    num_nonconsts,
+                                    attrs: cd.cd_attributes.clone(),
+                                }
+                            };
                             return Some(crate::types::TypeDeclaration {
                                 type_params: inline_params.clone(),
                                 type_arity: inline_params.len() as i32,
                                 type_kind: crate::types::TypeKind::TypeRecord(
                                     labels.clone(),
-                                    crate::types::RecordRepresentation::RecordInlined {
-                                        tag: block_idx,
-                                        name: type_name.to_string(),
-                                        num_nonconsts,
-                                        attrs: cd.cd_attributes.clone(),
-                                    },
+                                    inline_repr_path,
                                 ),
                                 type_private: parent_decl.type_private,
                                 type_manifest: None,

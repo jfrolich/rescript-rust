@@ -103,6 +103,18 @@ impl Deref for TypeDescSnapshot {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct QualifiedModuleComponentsCacheKey {
+    path: Path,
+    env_id: Option<u64>,
+}
+
+impl QualifiedModuleComponentsCacheKey {
+    pub(crate) fn new(path: Path, env_id: Option<u64>) -> Self {
+        Self { path, env_id }
+    }
+}
+
 /// Type checking context.
 ///
 /// This context is created for each type checking session (typically one
@@ -205,7 +217,12 @@ pub struct TypeContext<'a> {
     /// Cached qualified module-component views keyed by access-path semantics.
     /// This is the Rust analogue of OCaml's lazy `components_of_module_maker`.
     qualified_module_components_cache:
-        RefCell<ahash::AHashMap<String, super::env_lazy::QualifiedModuleComponents>>,
+        RefCell<
+            ahash::AHashMap<
+                QualifiedModuleComponentsCacheKey,
+                super::env_lazy::QualifiedModuleComponents,
+            >,
+        >,
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache:
@@ -217,6 +234,9 @@ pub struct TypeContext<'a> {
 
     /// Cached child-module access paths keyed by resolved parent access path.
     resolved_child_module_path_cache: RefCell<ahash::AHashMap<(Path, String), Path>>,
+
+    /// Cached full normalize_path results keyed by environment identity.
+    normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
 
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
@@ -331,6 +351,7 @@ impl<'a> TypeContext<'a> {
             resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
+            normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Vec::new()),
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
@@ -477,23 +498,52 @@ impl<'a> TypeContext<'a> {
     /// Cache a lazily-built qualified module-components view.
     pub(crate) fn register_qualified_module_components(
         &self,
-        path: &str,
+        key: QualifiedModuleComponentsCacheKey,
         components: super::env_lazy::QualifiedModuleComponents,
     ) {
         self.qualified_module_components_cache
             .borrow_mut()
-            .insert(path.to_string(), components);
+            .insert(key, components);
     }
 
     /// Borrow a cached qualified module-components view.
+    /// Clones the components before calling `f` to avoid holding the borrow
+    /// across the callback (which may re-enter and register new components).
     pub(crate) fn with_qualified_module_components<R>(
         &self,
-        path: &str,
+        key: &QualifiedModuleComponentsCacheKey,
         f: impl FnOnce(&super::env_lazy::QualifiedModuleComponents) -> R,
     ) -> Option<R> {
-        let cache = self.qualified_module_components_cache.borrow();
-        let components = cache.get(path)?;
-        Some(f(components))
+        let components = {
+            let cache = self.qualified_module_components_cache.borrow();
+            cache.get(key)?.clone()
+        };
+        Some(f(&components))
+    }
+
+    /// Look up a module alias target from the qualified module components cache.
+    ///
+    /// For a path like `Pdot(Pident("Js"), "Exn", _)`, checks whether `Js`'s
+    /// qualified components contain `Exn` as a `MtyAlias`. If so, returns the
+    /// alias target (e.g., `Pident("Stdlib_Exn")`).
+    ///
+    /// Used by `matching.rs` to resolve persistent module aliases without
+    /// access to the full `PersistentEnv`.
+    pub fn find_module_alias_in_components(
+        &self,
+        parent_path: &Path,
+        module_name: &str,
+    ) -> Option<Path> {
+        let key = QualifiedModuleComponentsCacheKey::new(parent_path.clone(), None);
+        self.with_qualified_module_components(&key, |components| {
+            let (_, _, md) = components.lookup_module(module_name)?;
+            match &md.md_type {
+                super::decl::ModuleType::MtyAlias(_, target) => Some(target.clone()),
+                super::decl::ModuleType::MtyIdent(target) => Some(target.clone()),
+                _ => None,
+            }
+        })
+        .flatten()
     }
 
     /// Cache a dotted value lookup for a resolved module access path.
@@ -570,6 +620,30 @@ impl<'a> TypeContext<'a> {
         self.resolved_child_module_path_cache
             .borrow()
             .get(&(parent_path.clone(), child_name.to_string()))
+            .cloned()
+    }
+
+    /// Cache a normalized path for a specific environment identity.
+    pub(crate) fn register_normalized_path_full(
+        &self,
+        env_id: u64,
+        original_path: &Path,
+        normalized_path: Path,
+    ) {
+        self.normalized_path_full_cache
+            .borrow_mut()
+            .insert((env_id, original_path.clone()), normalized_path);
+    }
+
+    /// Look up a cached normalized path for a specific environment identity.
+    pub(crate) fn find_normalized_path_full(
+        &self,
+        env_id: u64,
+        original_path: &Path,
+    ) -> Option<Path> {
+        self.normalized_path_full_cache
+            .borrow()
+            .get(&(env_id, original_path.clone()))
             .cloned()
     }
 

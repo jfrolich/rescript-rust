@@ -131,24 +131,28 @@ pub fn compile(
     // so the namespace signature must be available in the PersistentEnv first.
     if build_state.build_mode().is_in_process() {
         register_namespace_signatures(build_state);
-        // Register source paths for ALL modules so the pre-compilation can
-        // type-check implicit dependencies (e.g., via `-open Pervasives`).
         register_source_fallback_paths(build_state);
-        // Pre-compile @rescript/runtime modules into the registry so the
-        // main parallel loop doesn't need source-fallback (which overflows
-        // worker thread stacks due to deep recursion).
-        // Spawn on a Rayon worker thread (64MB stack) because the main thread
-        // only has 8MB, which is insufficient for deep source-fallback
-        // type-checking chains during runtime pre-compilation.
-        rayon::scope(|s| {
-            s.spawn(|_| {
-                pre_compile_runtime_modules(build_state);
+        // Pre-compile all @rescript/runtime modules into the registry.
+        // In in-process mode, the registry is the sole source of truth —
+        // no CMI fallback. Every dependency must be in the registry.
+        let pre_compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rayon::scope(|s| {
+                s.spawn(|_| {
+                    pre_compile_runtime_modules(build_state);
+                });
             });
-        });
-        // Clear source-fallback paths after pre-compilation. The main compile
-        // loop must NOT use source-fallback (it causes stack overflow on Rayon
-        // workers). Modules not pre-compiled into the registry will fail to
-        // load, producing type errors instead of crashes.
+        }));
+        if let Err(e) = pre_compile_result {
+            let msg = if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = e.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "unknown".to_string()
+            };
+            eprintln!("Warning: runtime pre-compilation panicked: {}", msg);
+        }
+        // Clear source-fallback paths after pre-compilation.
         build_state
             .module_registry
             .lock()
@@ -247,6 +251,7 @@ pub fn compile(
                         // Record interface generation before compilation for staleness detection
                         let gen_before = build_state.get_interface_generation(module_name);
 
+                        let compile_start = std::time::Instant::now();
                         let result = compile_module_in_process(
                             package,
                             module,
@@ -255,6 +260,10 @@ pub fn compile(
                             &build_state.build_state,
                             build_state,
                         );
+                        let elapsed = compile_start.elapsed();
+                        if elapsed.as_millis() > 100 {
+                            eprintln!("[timing] {} {:.0}ms", module_name, elapsed.as_secs_f64() * 1000.0);
+                        }
 
                         let gen_after = build_state.get_interface_generation(module_name);
 
@@ -874,6 +883,7 @@ fn build_compiler_options(
         }
     }
 
+
     // Add dev dependency paths if the module is type:dev
     // (omitted for simplicity in first cut; can be added later)
 
@@ -1103,11 +1113,13 @@ fn register_source_fallback_paths(build_state: &BuildCommandState) {
 /// Runs on a dedicated thread with a large stack to handle any remaining
 /// source-fallback chains during the pre-compilation itself.
 fn pre_compile_runtime_modules(build_state: &BuildCommandState) {
-    let runtime_path = &build_state.build_state.compiler_info.runtime_path;
+    let runtime_root = &build_state.build_state.compiler_info.runtime_path;
+    // Runtime .res sources live in lib/ocaml/ alongside the .cmi/.cmj files
+    let runtime_path = runtime_root.join("lib").join("ocaml");
 
     // Collect all runtime .res files and check for .resi siblings
     let mut runtime_modules: Vec<(String, PathBuf, Option<PathBuf>)> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(runtime_path) {
+    if let Ok(entries) = std::fs::read_dir(&runtime_path) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("res") {
@@ -1145,7 +1157,7 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) {
     });
 
     let root_config = build_state.get_root_config();
-    let runtime_path_for_opts = runtime_path.clone();
+    let runtime_path_for_opts = runtime_root.clone();
     let jsx_version = root_config
         .jsx
         .as_ref()
@@ -1161,6 +1173,7 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) {
     let mut compiled = 0;
     for (module_name, res_path, resi_path) in &runtime_modules {
         let options = rescript_compiler::driver::CompilerOptions {
+            include_paths: vec![runtime_path.clone()],
             nopervasives: true,
             open_modules: vec!["Pervasives".to_string()],
             module_name: Some(module_name.clone()),

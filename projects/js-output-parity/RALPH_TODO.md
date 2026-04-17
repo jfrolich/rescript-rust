@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-15
-**Status:** 534 / 657 JS snapshots passing, 0 compile errors, 123 output diffs
+**Status:** 539 / 657 JS snapshots passing, 0 compile errors, 118 output diffs
 
 ## Goal
 
@@ -35,11 +35,333 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **534 / 657**
+- JS snapshot parity: **539 / 657**
 - Compile errors: **0**
-- Output diffs: **123**
+- Output diffs: **118**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep return-position staticcatch handlers explicit even when
+  they end in effectful `...; undefined` wrappers, instead of letting the
+  Rust fallthrough-return shortcut treat only the exact leaf `undefined` case
+  as special and collapse OCaml's fail-first guard shape back into a
+  success-shaped nest
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is `Lam_compile` staticcatch / switch
+  lowering in `compiler-rust/src/lambda/compile.rs`, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_staticcatch` and the
+  non-tail lowering that keeps exit/default structure explicit until the
+  surrounding switch/default guard shape is formed
+- Rust change:
+  - generalized the unit-handler check into
+    `handler_returns_unit_undefined(...)` so the return-position
+    fallthrough staticcatch shortcut is also blocked for zero-binding handlers
+    whose final result is `JsUndefined { is_unit: true }` through
+    `Lsequence`, `Llet`, or `Lletrec`
+  - this keeps effectful unit handlers materialized as the explicit default
+    path inside nested untagged return switches instead of resolving them away
+    into an empty trailing fallthrough block too early
+  - added focused regression coverage in
+    `effectful_unit_staticcatch_handlers_keep_fail_first_guards` to lock down
+    the OCaml-style `len !== 3` early-return guard for an effectful unit
+    handler
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml effectful_unit_staticcatch_handlers_keep_fail_first_guards -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/UntaggedVariants.res` now keeps the OCaml-aligned
+    fail-first `len !== 3` guard in `check$1`; the remaining drift in that
+    file is deeper untagged literal/type guard lowering, not the outer
+    staticcatch default shape
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the unchanged guard
+  - the full authoritative sweep in this current worktree still reports
+    **539 / 657** passing, **0** compile errors, and **118** output diffs
+- Topline impact in this current worktree:
+  - JS snapshot parity: **539 / 657** -> **539 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **118** -> **118** (**no change**)
+- Keep this change because OCaml's backend cares about the handler's final
+  unit-return shape, not whether the handler is syntactically the bare
+  `undefined` leaf. Preserving that distinction in Rust removes a verified
+  Rust-only shortcut in `Lam_compile` even though the current snapshot totals
+  do not move yet.
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep unit-`undefined` staticcatch handlers materialized as the
+  default arm in return-position untagged switches instead of using the Rust
+  fallthrough-return shortcut that collapses OCaml's negative guard shape into
+  a success-shaped nest
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is `Lam_compile` staticcatch / switch
+  lowering in `compiler-rust/src/lambda/compile.rs`, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_staticcatch` and the
+  non-tail lowering that keeps exit/default structure explicit, together with
+  `compiler/core/js_stmt_make.ml`'s `if_` lowering that then prints these
+  cases as negative early-return guards
+- Rust change:
+  - added `is_unit_undefined_handler(...)` and used it to block the
+    return-position fallthrough staticcatch shortcut for zero-binding
+    `JsUndefined { is_unit: true }` handlers
+  - this preserves the handler as the explicit default path inside nested
+    untagged return switches instead of resolving it away into an empty
+    fallthrough block too early
+  - added focused regression coverage in
+    `single_case_staticcatch_wrapped_untagged_object_unit_handler_keeps_negative_guard`
+    to lock down the OCaml-style negative guard shape
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml single_case_staticcatch_wrapped_untagged_object_unit_handler_keeps_negative_guard -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_handler -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/UntaggedVariants.res` now matches the OCaml snapshot for
+    `printLength`; the remaining diff in that file is down to the deeper
+    `check$1` staticcatch / guard-shape mismatch
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the unchanged guard
+  - the full authoritative sweep in this current worktree now reports
+    **539 / 657** passing, **0** compile errors, and **118** output diffs
+- Topline impact in this current worktree:
+  - JS snapshot parity: **537 / 657** -> **539 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **120** -> **118** (**-2**)
+- Keep this change because the removed shortcut was Rust-only. OCaml's
+  backend keeps these unit staticcatch handlers explicit long enough for the
+  surrounding guard/default control flow to lower into the checked-in early
+  return shape, so preserving that boundary in Rust improves emitted JS parity
+  at the backend source rather than by rewriting output text later.
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: port OCaml's mixed untagged literal-dispatch ordering and keep
+  residual `typeof` branches as real string switches after earlier runtime
+  `instanceof` splits instead of collapsing them into Rust-only small
+  `if`/`else` tails
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is `Lam_compile` / dynamic-check
+  lowering in `compiler-rust/src/lambda/compile.rs`, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `get_literal_cases`,
+  `get_block_cases`, and the mixed untagged path in `compile_switch`, together
+  with `compiler/ml/ast_untagged_variants.ml`'s
+  `DynamicChecks.is_a_literal_case`
+- Rust change:
+  - reversed `sw_names.consts` / `sw_names.blocks` collection for untagged
+    dispatch metadata so the Rust lowering sees the same reversed case lists
+    that OCaml builds with `Ext_array.iter` + cons
+  - ported OCaml's exact recursive `List.rev` literal-case disjunction and its
+    overlap `fold_right` behavior in `literal_case_dispatch_test(...)` instead
+    of using a simpler Rust reduction that reordered emitted operands
+  - kept residual `typeof` tails on the string-switch path whenever a mixed
+    untagged block dispatch already emitted earlier runtime checks; this avoids
+    shrinking the tail into a Rust-only small switch after `Array.isArray(...)`
+    or other runtime-test cases have already split control flow
+  - added `compile_small_untagged_block_switch_effect(...)` and focused
+    regression coverage for both the mixed `typeof` tail shape and the literal
+    ordering
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml untagged_literal_dispatch_keeps_ocaml_case_order -- --nocapture`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/UntaggedVariants.res` no longer shows the earlier
+    literal-order drift in `classify$3`, `classify$6`, `checkEnum`, or
+    `checkEnum$1`; the remaining diff in that file is now down to the deeper
+    guard-shape mismatches in `check$1` and `printLength`
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the broader unchanged guard
+  - the full authoritative sweep in this current worktree still reports
+    **537 / 657** passing, **0** compile errors, and **120** output diffs
+- Topline impact in this current worktree:
+  - JS snapshot parity: **537 / 657** -> **537 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **120** -> **120** (**no change**)
+- Keep this change because it is a direct OCaml backend port: both the reversed
+  case-list construction and the literal-dispatch expression shape come from
+  `Lam_compile` / `DynamicChecks.is_a_literal_case`, and preserving the mixed
+  `typeof` tail as a real switch removes Rust-only lowering drift without
+  patching the final emitted JavaScript.
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: align statement-valued `if` / `switch` / `trywith` result temp
+  names with OCaml's plain `Ext_ident.create_tmp ()` temps instead of emitting
+  Rust-only names like `ifres`, `switch`, and `tryres`
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is `Lam_compile` value-result lowering
+  in `compiler-rust/src/lambda/compile.rs`, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially the `NeedValue` paths in
+  `compile_switch`, `compile_stringswitch`, `compile_trywith`, and the
+  statement-valued `if` lowering, together with
+  `compiler/ext/ext_ident.ml` where `Ext_ident.create_tmp ()` defaults to the
+  base name `tmp`
+- Rust change:
+  - introduced `fresh_tmp_ident()` to mirror OCaml's default temp-name path
+  - switched statement-valued `LifThenElse`, `Lswitch`,
+    `LstringSwitch`, `LtryWith`, and switch-scrutinee binding temps to use
+    that OCaml-aligned `tmp` prefix instead of `ifres`, `switch`, or `tryres`
+  - added focused regression coverage in
+    `trywith_expression_result_temp_uses_tmp_name_like_ocaml`
+    plus explicit `tmp` assertions in the existing `if` / int-switch /
+    string-switch temp tests
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml trywith_expression_result_temp_uses_tmp_name_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml if_value_branches_keep_assignment_continuation_through_let_bindings -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml int_switch_expressions_assign_branch_values_into_the_result_temp -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml string_switch_expressions_assign_branch_values_into_the_result_temp -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml bind_switch_scrutinee_once_uses_tmp_name_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/arity_infer.res`, diffing
+    `/tmp/arity_infer.mjs` against the checked-in snapshot
+  - direct release guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/arity_infer.res` is now an exact snapshot match; the
+    `tmp` function-value temp now matches OCaml in both the `if` and `switch`
+    cases
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the unchanged guard
+  - no remaining failing JS diffs mention `ifres`, `switch` result temps, or
+    `tryres`; `recursive_module.res` still differs, but now only on its
+    recursive-module initialization / lazy alias shape rather than temp naming
+  - the full authoritative sweep in this current worktree now reports
+    **537 / 657** passing, **0** compile errors, and **120** output diffs
+- Topline impact in this current worktree:
+  - JS snapshot parity: **535 / 657** -> **537 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **122** -> **120** (**-2**)
+- Keep this change because OCaml's backend already routes these statement-valued
+  expressions through plain `Ext_ident.create_tmp ()` temps; matching that
+  naming rule in Rust removes user-visible backend drift at the lowering source
+  instead of papering over it in the emitted JavaScript later.
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: keep plain inner staticcatch handlers resolved inside
+  named-variant return switches when we are already inside an enclosing
+  staticcatch chain, instead of peeling the handler into a trailing
+  fallthrough return
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is `Lam_compile` staticcatch / switch
+  lowering in `compiler-rust/src/lambda/compile.rs`, not a printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_staticcatch` and the
+  pseudo-jump fast path that only applies when the tail context is not already
+  marked `in_staticcatch`
+- Rust change:
+  - tightened `uses_fallthrough_staticcatch_return(...)` so the plain-handler
+    switch fallthrough optimization no longer runs when
+    `inside_enclosing_staticcatch_chain` is true
+  - added focused regression coverage in
+    `nested_named_variant_return_switches_keep_complete_payload_handlers_inline`
+    to lock down the `adt_optimize_test` shape where the last payload case must
+    keep the resolved handler inline inside the switch
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_named_variant_return_switches_keep_complete_payload_handlers_inline -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml named_variant_return_switches_inline_resolved_static_handler_values_inside_the_switch -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for `tests/tests/src/adt_optimize_test.res`,
+    diffing `/tmp/adt_optimize_test.mjs` against the checked-in snapshot
+  - direct release guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/adt_optimize_test.res` is now an exact snapshot match;
+    the trailing `return 2;` / `return 3;` fallthroughs are gone and the final
+    payload cases stay inside their switches like OCaml
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the unchanged guard
+  - the full authoritative sweep in this current worktree now reports
+    **535 / 657** passing, **0** compile errors, and **122** output diffs
+- Topline impact in this current worktree:
+  - JS snapshot parity: **533 / 657** -> **535 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **124** -> **122** (**-2**)
+- Keep this change because it matches the OCaml backend's staticcatch boundary:
+  once we are already under an enclosing staticcatch chain, plain inner
+  handlers should stay resolved inside the named/string switch instead of being
+  lowered as an extra fallthrough return after the dispatch.
+
+Latest iteration on **2026-04-15**:
+
+- Active slice: only share repeated return-position staticcatch handlers behind
+  an explicit exit join when the handler re-raises outward; keep plain handlers
+  inline across multiple exit sites just like OCaml
+- Active backend focus for this slice remains **Phase 3: Port JS IR Lowering
+  And Metadata** from `PLAN.md`; this is `Lam_compile` return/staticcatch
+  control-flow lowering in `compiler-rust/src/lambda/compile.rs`, not a
+  printer rewrite
+- OCaml reference:
+  `compiler/core/lam_compile.ml`, especially `compile_staticcatch`,
+  `compile_switch`, and how repeated `exit` sites stay inlined unless the
+  handler itself transfers control outward again
+- Rust change:
+  - added `return_staticcatch_requires_explicit_jump(...)` so return-position
+    staticcatch lowering can distinguish between repeated exits into a plain
+    handler and repeated exits into a handler that re-raises to some other
+    label
+  - added `lambda_has_multiple_static_raises_to_label(...)` / counting helpers
+    to detect the repeated-exit shape in the current staticcatch body
+  - restricted the explicit shared-join path to handlers that still transfer
+    control outward via `lambda_contains_static_raise_to_other_label(...)`,
+    leaving plain handlers on the normal OCaml-style inlined path
+  - added focused regression coverage in
+    `return_staticcatchs_share_nontrivial_handlers_across_multiple_exit_sites`
+    and
+    `return_staticcatchs_keep_plain_handlers_inline_across_multiple_exit_sites`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml return_staticcatch -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml nested_staticcatch_binding_handlers_that_raise_outward_avoid_exit_temps -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repro for
+    `tests/tests/src/DictPatternMatchingOptimization.res`, diffing
+    `/tmp/DictPatternMatchingOptimization.mjs` against the checked-in snapshot
+  - direct release guard repro for `tests/tests/src/ExternalShadow.res`,
+    diffing `/tmp/ExternalShadow.mjs` against the checked-in snapshot
+  - direct release repro for
+    `tests/tests/src/VariantPatternMatchingSpreads.res`, diffing
+    `/tmp/VariantPatternMatchingSpreads.mjs` against the checked-in snapshot
+  - direct release repro for
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res`, diffing
+    `/tmp/VariantPatternMatchingSpreadsWithPayloads.mjs` against the checked-in
+    snapshot
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/DictPatternMatchingOptimization.res` is now an exact
+    snapshot match; the remaining nested `"e"` / `"f"` shared-handler drift is
+    gone
+  - `tests/tests/src/VariantPatternMatchingSpreads.res` and
+    `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` are now
+    exact snapshot matches again; the temporary explicit `exit` joins around
+    the shared plain handlers are gone
+  - `tests/tests/src/ExternalShadow.res` remained an exact snapshot match as
+    the unchanged guard
+  - the full authoritative sweep in this current worktree now reports
+    **532 / 657** passing, **0** compile errors, and **125** output diffs
+- Topline impact:
+  - JS snapshot parity: **534 / 657** -> **532 / 657** (**-2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **123** -> **125** (**+2**)
+- Keep this change because OCaml only needs the explicit shared return join
+  when the repeated-exit handler still jumps outward; applying that same rule
+  fixes the checked-in snapshot drift in the direct canaries at the backend
+  control-flow source instead of by rewriting emitted JavaScript later.
 
 Latest iteration on **2026-04-15**:
 

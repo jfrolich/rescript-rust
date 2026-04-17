@@ -570,6 +570,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
     }
 
     fn visit_module_expr(max_stamp: &mut i32, module_expr: &ModuleExpr) {
+        visit_decl_module_type(max_stamp, &module_expr.mod_type);
         match &module_expr.mod_desc {
             ModuleExprDesc::Tmod_ident(path, _) => visit_path(max_stamp, path),
             ModuleExprDesc::Tmod_structure(structure) => visit_structure(max_stamp, structure),
@@ -587,13 +588,13 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
             }
             ModuleExprDesc::Tmod_constraint(module_expr, module_type, constraint_, coercion) => {
                 visit_module_expr(max_stamp, module_expr);
-                visit_module_type(max_stamp, module_type);
+                visit_decl_module_type(max_stamp, module_type);
                 visit_module_type_constraint(max_stamp, constraint_);
                 visit_module_coercion(max_stamp, coercion);
             }
             ModuleExprDesc::Tmod_unpack(expr, module_type) => {
                 visit_expression(max_stamp, expr);
-                visit_module_type(max_stamp, module_type);
+                visit_decl_module_type(max_stamp, module_type);
             }
         }
     }
@@ -1411,6 +1412,82 @@ pub fn compile_source_to_js_with_options(
     Ok(js)
 }
 
+/// Build a structural module coercion by matching interface items to implementation
+/// positions by name, without type-checking. Used as a fallback when `compunit`
+/// fails due to type representation differences (e.g., OCaml CMI stamps vs Rust stamps).
+///
+/// This matches OCaml's `Tcoerce_structure` behavior: for each runtime component
+/// in the interface signature, find its runtime position in the implementation
+/// signature and emit a `(pos, Tcoerce_none)` entry. Items in the implementation
+/// that don't appear in the interface are excluded from the export block.
+fn build_name_based_coercion(
+    impl_sig: &crate::types::decl::Signature,
+    intf_sig: &crate::types::decl::Signature,
+) -> crate::types::typedtree::ModuleCoercion {
+    use crate::types::includemod::is_runtime_component;
+    use crate::types::typedtree::ModuleCoercion;
+
+    // Build name → runtime_position map from the implementation signature.
+    // Only runtime components get a position index.
+    let mut impl_name_to_pos: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut runtime_pos = 0usize;
+    for item in impl_sig {
+        if is_runtime_component(item) {
+            let name = match item {
+                crate::types::decl::SignatureItem::SigValue(id, _)
+                | crate::types::decl::SignatureItem::SigModule(id, _, _)
+                | crate::types::decl::SignatureItem::SigTypext(id, _, _) => id.name().to_string(),
+                _ => {
+                    runtime_pos += 1;
+                    continue;
+                }
+            };
+            impl_name_to_pos.insert(name, runtime_pos);
+            runtime_pos += 1;
+        }
+    }
+    let len_impl = runtime_pos;
+
+    // Build coercions and runtime_fields from the interface signature.
+    // For each runtime component in the interface, look up its position in the impl.
+    let mut coercions: Vec<(usize, ModuleCoercion)> = Vec::new();
+    let mut runtime_fields: Vec<String> = Vec::new();
+
+    for item in intf_sig {
+        if !is_runtime_component(item) {
+            continue;
+        }
+        let name = match item {
+            crate::types::decl::SignatureItem::SigValue(id, _)
+            | crate::types::decl::SignatureItem::SigModule(id, _, _)
+            | crate::types::decl::SignatureItem::SigTypext(id, _, _) => id.name().to_string(),
+            _ => continue,
+        };
+        if let Some(&pos) = impl_name_to_pos.get(&name) {
+            coercions.push((pos, ModuleCoercion::Tcoerce_none));
+            runtime_fields.push(name);
+        }
+    }
+
+    let len_sig = coercions.len();
+
+    // Check if this is already an identity coercion (same items in same order)
+    let is_identity = len_impl == len_sig
+        && coercions
+            .iter()
+            .enumerate()
+            .all(|(expected_pos, (actual_pos, coercion))| {
+                *actual_pos == expected_pos && matches!(coercion, ModuleCoercion::Tcoerce_none)
+            });
+
+    if is_identity {
+        ModuleCoercion::Tcoerce_none
+    } else {
+        ModuleCoercion::Tcoerce_structure(coercions, Vec::new(), runtime_fields)
+    }
+}
+
 fn compute_raw_implementation_coercion(
     tctx: &mut TypeCheckContext<'_>,
     type_ctx: &TypeContext<'_>,
@@ -1426,7 +1503,8 @@ fn compute_raw_implementation_coercion(
     }
 
     let impl_sig = typed_structure.str_type.clone();
-    let target_sig = if std::path::Path::new(&format!("{source_file}i")).exists() {
+    let has_resi = std::path::Path::new(&format!("{source_file}i")).exists();
+    let target_sig = if has_resi {
         let Some(module_name) = std::path::Path::new(source_file)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -1453,15 +1531,26 @@ fn compute_raw_implementation_coercion(
         crate::types::includemod::simplify_signature(&impl_sig)
     };
 
-    crate::types::includemod::compunit(
+    match crate::types::includemod::compunit(
         type_ctx,
         env,
         source_file,
         &impl_sig,
         "(inferred signature)",
         &target_sig,
-    )
-    .unwrap_or(crate::types::typedtree::ModuleCoercion::Tcoerce_none)
+    ) {
+        Ok(cc) => cc,
+        Err(_) if has_resi => {
+            // compunit can fail when the OCaml-built CMI has different type stamps
+            // than what Rust's type-checker produces. In that case, fall back to a
+            // name-based structural coercion that at least filters the export block
+            // to match the interface's set of exported items. This ensures functors
+            // and other implementation-only items are excluded from the module export
+            // block, matching OCaml's behavior.
+            build_name_based_coercion(&impl_sig, &target_sig)
+        }
+        Err(_) => crate::types::typedtree::ModuleCoercion::Tcoerce_none,
+    }
 }
 
 /// Type-check an interface file and dump typed sexp if requested.
@@ -1647,6 +1736,7 @@ pub fn compile_source_in_process(
     let mut env = initial_env(&type_ctx);
 
     // Create a fresh PersistentEnv from the shared registry.
+    let t_env = std::time::Instant::now();
     let mut pers_env = PersistentEnv::from_registry(registry);
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
@@ -1656,13 +1746,14 @@ pub fn compile_source_in_process(
     pers_env.set_nopervasives(options.nopervasives);
     pers_env.set_compiling_module(options.module_name.clone());
     load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    let env_ms = t_env.elapsed().as_millis();
 
     tctx.set_persistent_env(pers_env);
 
-    log::debug!("[compile_source_in_process] {} type_structure start", module_name);
+    let t_tc = std::time::Instant::now();
     let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
-    log::debug!("[compile_source_in_process] {} type_structure done", module_name);
+    let tc_ms = t_tc.elapsed().as_millis();
 
     // Apply interface constraints if a .resi was pre-registered.
     if has_interface {
@@ -1687,7 +1778,7 @@ pub fn compile_source_in_process(
         crate::types::includemod::simplify_signature(&typed_structure.str_type);
 
     // Lambda conversion
-    log::debug!("[compile_source_in_process] {} lambda start", module_name);
+    let t_lambda = std::time::Instant::now();
     let lambda_start_stamp = type_ctx
         .current_stamp()
         .max(max_lambda_input_stamp(&typed_structure));
@@ -1719,8 +1810,10 @@ pub fn compile_source_in_process(
         raw_lambda,
         raw_lambda_current_stamp,
     );
+    let raw_lambda_ms = t_lambda.elapsed().as_millis();
 
     // Lambda -> JS IR
+    let t_jsir = std::time::Instant::now();
     let mut module_path_resolver = ModulePathResolver::from_compile_options(
         options.source_filename.as_deref(),
         options.output_path.as_deref(),
@@ -1743,27 +1836,35 @@ pub fn compile_source_in_process(
         &possible_required_modules,
     );
 
+    let jsir_ms = t_jsir.elapsed().as_millis();
+
     // JS IR -> JS source
-    log::debug!("[compile_source_in_process] {} js-print start", module_name);
+    let t_js = std::time::Instant::now();
     let js =
-        print_deps_program_with_directives(&program, Some(&module_path_resolver), &file_directives, debug, jsx_preserve);
-    log::debug!("[compile_source_in_process] {} complete", module_name);
+        print_deps_program_with_directives(&program, Some(&module_path_resolver), &file_directives, options.debug, options.jsx_preserve);
+    let js_ms = t_js.elapsed().as_millis();
+
+    let total_ms = env_ms + tc_ms + raw_lambda_ms + jsir_ms + js_ms;
+    if total_ms > 100 {
+        eprintln!("[phases] {} env={}ms tc={}ms raw={}ms jsir={}ms js={}ms total={}ms",
+            module_name, env_ms, tc_ms, raw_lambda_ms, jsir_ms, js_ms, total_ms);
+    }
 
     // Register the module's published interface in the internal PersistentEnv
     // and extract the finalized PersStruct for the caller's registry.
+    // Always register regardless of has_interface, because the interface was
+    // typechecked in a separate PersistentEnv and THIS env doesn't have it.
     let mut internal_env = tctx
         .persistent_env
         .take()
         .unwrap_or_else(PersistentEnv::new);
 
-    if !has_interface {
-        internal_env.register_in_memory_signature(
-            module_name,
-            published_signature.clone(),
-            filename,
-            &type_ctx,
-        );
-    }
+    internal_env.register_in_memory_signature(
+        module_name,
+        published_signature.clone(),
+        filename,
+        &type_ctx,
+    );
 
     let (pers_struct, new_alias_rewrites) =
         internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);
@@ -1829,6 +1930,8 @@ pub fn typecheck_interface_in_process(
     // Extract the Signature (Vec<SignatureItem>) from the TypedSignature.
     let typed_module_type = crate::types::typedtree::ModuleType {
         mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature),
+        mty_type: crate::types::decl::ModuleType::MtySignature(vec![]),
+        mty_env: crate::types::typedtree::EnvRef(0),
         mty_loc: crate::parse_arena::LocIdx(0),
         mty_attributes: crate::parser::ast::Attributes::new(),
     };
@@ -1948,14 +2051,12 @@ pub fn typecheck_implementation_in_process(
         .take()
         .unwrap_or_else(PersistentEnv::new);
 
-    if !has_interface {
-        internal_env.register_in_memory_signature(
-            module_name,
-            published_signature.clone(),
-            filename,
-            &type_ctx,
-        );
-    }
+    internal_env.register_in_memory_signature(
+        module_name,
+        published_signature.clone(),
+        filename,
+        &type_ctx,
+    );
 
     let (pers_struct, new_alias_rewrites) =
         internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);

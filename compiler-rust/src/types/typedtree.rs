@@ -24,6 +24,7 @@ use crate::parser::ast::{
     OverrideFlag, PrivateFlag, RecFlag,
 };
 use crate::types::asttypes::ArgLabel as TypeArgLabel;
+use crate::types::decl::ModuleType as DeclModuleType;
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
 };
@@ -481,8 +482,8 @@ pub struct ModuleExpr {
     pub mod_desc: ModuleExprDesc,
     /// Module location.
     pub mod_loc: LocIdx,
-    /// Module type.
-    pub mod_type: ModuleType,
+    /// Semantic module type (`Types.module_type` in OCaml).
+    pub mod_type: DeclModuleType,
     /// Module environment.
     pub mod_env: EnvRef,
     /// Module attributes.
@@ -503,12 +504,12 @@ pub enum ModuleExprDesc {
     /// Constraint.
     Tmod_constraint(
         Box<ModuleExpr>,
-        ModuleType,
+        DeclModuleType,
         ModuleTypeConstraint,
         ModuleCoercion,
     ),
     /// Unpack.
-    Tmod_unpack(Expression, ModuleType),
+    Tmod_unpack(Expression, DeclModuleType),
 }
 
 /// Module type (matches OCaml's `Typedtree.module_type`).
@@ -516,6 +517,10 @@ pub enum ModuleExprDesc {
 pub struct ModuleType {
     /// Module type description.
     pub mty_desc: ModuleTypeDesc,
+    /// Semantic module type (`Types.module_type` in OCaml).
+    pub mty_type: DeclModuleType,
+    /// Module-type environment.
+    pub mty_env: EnvRef,
     /// Location.
     pub mty_loc: LocIdx,
     /// Attributes.
@@ -527,6 +532,8 @@ impl ModuleType {
     pub fn placeholder() -> Self {
         Self {
             mty_desc: ModuleTypeDesc::Tmty_placeholder,
+            mty_type: DeclModuleType::MtySignature(vec![]),
+            mty_env: EnvRef(0),
             mty_loc: LocIdx(0),
             mty_attributes: Attributes::new(),
         }
