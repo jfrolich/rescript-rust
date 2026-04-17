@@ -4636,6 +4636,22 @@ pub fn type_expect<'a>(
                 }
             }
 
+            // Check for Array.mapWithIndex / Array.forEachWithIndex on a comptime array.
+            if let Some((elem_pat_idx, index_pat_idx, coll_idx, body_idx)) =
+                as_comptime_loop_indexed(expr, tctx.arena)
+            {
+                let coll_expr = tctx.arena.get_expr(coll_idx);
+                if let Some(elements) =
+                    resolve_comptime_array(coll_expr, tctx.arena, &tctx.comptime_bindings)
+                {
+                    return type_comptime_loop_indexed(
+                        tctx, env, loc,
+                        elem_pat_idx, index_pat_idx, body_idx,
+                        &elements, expected_ty, &expr.pexp_attributes,
+                    );
+                }
+            }
+
             let typed_apply = type_application(
                 tctx,
                 env,
@@ -21817,6 +21833,55 @@ pub fn as_comptime_reduce(
     Some((acc_pat, elem_pat, coll_idx, init_idx, body))
 }
 
+/// Recognize `Array.mapWithIndex(coll, (elem, i) => body)` or
+/// `Array.forEachWithIndex(coll, (elem, i) => body)`. Returns the
+/// destructured pieces if matched, else None.
+pub fn as_comptime_loop_indexed(
+    expr: &ParsedExpression,
+    arena: &crate::parse_arena::ParseArena,
+) -> Option<(
+    crate::parse_arena::PatIdx,    // elem pattern
+    crate::parse_arena::PatIdx,    // index pattern
+    crate::parse_arena::ExprIdx,   // collection
+    crate::parse_arena::ExprIdx,   // body
+)> {
+    use crate::parser::ast::ExpressionDesc as ED;
+
+    let ED::Pexp_apply(inner) = &*expr.pexp_desc else { return None };
+    let crate::parser::ast::PexpApply { funct, args, .. } = &**inner;
+    let funct_expr = arena.get_expr(*funct);
+
+    let is_indexed = if let ED::Pexp_ident(lid) = &*funct_expr.pexp_desc {
+        let longident = arena.get_longident(lid.txt);
+        let last_name = arena.get_string(longident.last_idx());
+        if last_name != "mapWithIndex" && last_name != "forEachWithIndex" {
+            return None;
+        }
+        let parts: Vec<String> = longident.flatten_idx().iter()
+            .map(|idx| arena.get_string(*idx).to_string())
+            .collect();
+        parts.len() == 1 || (parts.len() == 2 && parts[0] == "Array")
+    } else {
+        false
+    };
+
+    if !is_indexed || args.len() != 2 {
+        return None;
+    }
+
+    let coll_idx = args[0].1;
+    let lambda_expr = arena.get_expr(args[1].1);
+
+    let ED::Pexp_fun(outer_fun) = &*lambda_expr.pexp_desc else { return None };
+    let elem_pat = outer_fun.lhs;
+    let inner_expr = arena.get_expr(outer_fun.rhs);
+    let ED::Pexp_fun(inner_fun) = &*inner_expr.pexp_desc else { return None };
+    let index_pat = inner_fun.lhs;
+    let body = inner_fun.rhs;
+
+    Some((elem_pat, index_pat, coll_idx, body))
+}
+
 /// Unroll a comptime `Array.reduce(coll, init, (acc, elem) => body)` into a
 /// nested chain of `let acc = body` bindings, threading the accumulator
 /// through each iteration. The collection elements are comptime-known, but
@@ -21982,6 +22047,122 @@ pub fn type_comptime_reduce(
         loc, acc_ty, env_ref,
         attributes.clone(),
     ))
+}
+
+/// Unroll `Array.mapWithIndex(coll, (elem, i) => body)` or
+/// `Array.forEachWithIndex(coll, (elem, i) => body)` over a comptime array.
+/// `elem` is bound as a comptime value (and as a runtime ident, like
+/// `Pexp_inline_for`); `i` is bound as a comptime int so references in the
+/// body get substituted with the constant.
+pub fn type_comptime_loop_indexed(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    elem_pat_idx: crate::parse_arena::PatIdx,
+    index_pat_idx: crate::parse_arena::PatIdx,
+    body_idx: crate::parse_arena::ExprIdx,
+    elements: &[crate::types::comptime::ComptimeValue],
+    expected_ty: TypeExprRef,
+    attributes: &Attributes,
+) -> TypeCoreResult<Expression> {
+    use crate::parser::ast::PatternDesc as PD;
+
+    let elem_pat = tctx.arena.get_pat(elem_pat_idx);
+    let elem_name = match &*elem_pat.ppat_desc {
+        PD::Ppat_var(name) => tctx.arena.get_string(name.txt).to_string(),
+        _ => "__indexed_elem".to_string(),
+    };
+    let index_pat = tctx.arena.get_pat(index_pat_idx);
+    let index_name = match &*index_pat.ppat_desc {
+        PD::Ppat_var(name) => tctx.arena.get_string(name.txt).to_string(),
+        _ => "__indexed_idx".to_string(),
+    };
+
+    let body_expr = tctx.arena.get_expr(body_idx);
+    let elem_result_ty = tctx.type_ctx.new_var(None);
+    let mut typed_iterations: Vec<Expression> = Vec::with_capacity(elements.len());
+
+    let prev_elem = tctx.comptime_bindings.get(&elem_name).cloned();
+    let prev_index = tctx.comptime_bindings.get(&index_name).cloned();
+
+    for (i, element) in elements.iter().enumerate() {
+        tctx.comptime_bindings.insert(elem_name.clone(), element.clone());
+        tctx.comptime_bindings.insert(
+            index_name.clone(),
+            crate::types::comptime::ComptimeValue::Int(i as i64),
+        );
+
+        // Bind elem as a runtime ident too (mirrors Pexp_inline_for) so the
+        // body can reference it in non-comptime positions.
+        let mut iter_env = env.clone();
+        let elem_ty = tctx.type_ctx.new_var(None);
+        let elem_id = tctx.type_ctx.create_ident(&elem_name);
+        iter_env.add_value(elem_id, crate::types::decl::ValueDescription {
+            val_type: elem_ty,
+            val_kind: crate::types::decl::ValueKind::ValReg,
+            val_loc: crate::location::Location::none(),
+            val_attributes: vec![],
+            val_path: None,
+        });
+
+        let result = type_expect(tctx, &iter_env, body_expr, elem_result_ty, None);
+
+        match &prev_elem {
+            Some(v) => { tctx.comptime_bindings.insert(elem_name.clone(), v.clone()); }
+            None => { tctx.comptime_bindings.remove(&elem_name); }
+        }
+        match &prev_index {
+            Some(v) => { tctx.comptime_bindings.insert(index_name.clone(), v.clone()); }
+            None => { tctx.comptime_bindings.remove(&index_name); }
+        }
+
+        typed_iterations.push(result?);
+    }
+
+    let ctx = tctx.type_ctx;
+    let env_ref = ctx.store_typed_env(env);
+    let expected_repr = ctx.repr(expected_ty);
+    let expected_desc = ctx.get_desc(expected_repr);
+    let is_array_context = matches!(&*expected_desc,
+        crate::types::type_expr::TypeDesc::Tconstr { path, .. }
+        if path.same(&crate::types::predef::path_array())
+    );
+
+    if is_array_context {
+        let array_ty = ctx.new_constr(crate::types::predef::path_array(), vec![elem_result_ty]);
+        crate::types::ctype::unify(ctx, &mut tctx.unify_state, array_ty, expected_ty)
+            .map_err(|e| TypeCoreError::Other(format!("indexed loop array type: {:?}", e)))?;
+        return Ok(Expression::new(
+            ExpressionDesc::Texp_array(typed_iterations),
+            loc, array_ty, env_ref, attributes.clone(),
+        ));
+    }
+
+    if typed_iterations.is_empty() {
+        let unit_ty = ctx.new_constr(crate::types::predef::path_unit(), vec![]);
+        let void_cstr = env.find_constructor("()")
+            .map_err(|_| TypeCoreError::Other("cannot find ()".into()))?
+            .clone();
+        return Ok(Expression::new(
+            ExpressionDesc::Texp_construct(
+                Located { txt: LidentIdx(0), loc: LocIdx::none() },
+                void_cstr, vec![],
+            ),
+            loc, unit_ty, env_ref, attributes.clone(),
+        ));
+    }
+    if typed_iterations.len() == 1 {
+        return Ok(typed_iterations.into_iter().next().unwrap());
+    }
+    let mut result = typed_iterations.pop().unwrap();
+    while let Some(prev) = typed_iterations.pop() {
+        let result_ty = result.exp_type;
+        result = Expression::new(
+            ExpressionDesc::Texp_sequence(Box::new(prev), Box::new(result)),
+            loc, result_ty, env_ref, Attributes::new(),
+        );
+    }
+    Ok(result)
 }
 
 /// Evaluate a type-builder expression to a TypeBuilderResult.

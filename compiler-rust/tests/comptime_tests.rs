@@ -434,6 +434,63 @@ let () = switch @typeInfo(user) {
 }
 
 #[test]
+fn comptime_array_for_each_with_index_unrolls() {
+    // Array.forEachWithIndex on a comptime array binds the index as a
+    // comptime int per iteration, so references like `i` get inlined.
+    let source = r#"
+type user = { name: string, age: int, email: string }
+
+let arr: array<int> = []
+
+let () = switch @typeInfo(user) {
+| Record({fields}) =>
+  fields->Array.forEachWithIndex((field, i) => {
+    Array.push(arr, i)
+    ignore(field.name)
+  })
+| _ => ()
+}
+"#;
+    let result = compile_with_stdlib(source, "array_for_each_with_index.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== ARRAY.FOREACHWITHINDEX ===\n{}\n=== END ===", output);
+            // Each iteration should have the constant index inlined.
+            assert!(output.contains("push(0)"), "Expected index 0:\n{output}");
+            assert!(output.contains("push(1)"), "Expected index 1:\n{output}");
+            assert!(output.contains("push(2)"), "Expected index 2:\n{output}");
+            assert!(!output.contains(".forEachWithIndex"),
+                "Should not have runtime .forEachWithIndex:\n{output}");
+        }
+        Err(e) => panic!("Array.forEachWithIndex should compile: {e}"),
+    }
+}
+
+#[test]
+fn comptime_array_map_with_index_unrolls() {
+    let source = r#"
+type pair = { a: string, b: string }
+
+let positions: array<int> = switch @typeInfo(pair) {
+| Record({fields}) => fields->Array.mapWithIndex((field, i) => {
+    ignore(field.name)
+    i
+  })
+| _ => []
+}
+"#;
+    let result = compile_with_stdlib(source, "array_map_with_index.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== ARRAY.MAPWITHINDEX ===\n{}\n=== END ===", output);
+            assert!(!output.contains(".mapWithIndex"),
+                "Should not have runtime .mapWithIndex:\n{output}");
+        }
+        Err(e) => panic!("Array.mapWithIndex should compile: {e}"),
+    }
+}
+
+#[test]
 fn comptime_array_reduce_unrolls() {
     // Array.reduce on a comptime array should unroll into a let-chain
     // threading the accumulator through each iteration.

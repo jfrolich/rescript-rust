@@ -54,10 +54,8 @@ let rec encode = (value): JSON.t => {
     constructors->Array.forEach(c => {
       if @hasTag(value, c.name) {
         let arr = [JSON.Encode.string(c.name)]
-        let idx = ref(0)
-        c.args->Array.forEach(argType => {
-          Array.push(arr, encode(@argAt(value, idx.contents, argType)))
-          idx := idx.contents + 1
+        c.args->Array.forEachWithIndex((argType, i) => {
+          Array.push(arr, encode(@argAt(value, i, argType)))
         })
         result := JSON.Encode.array(arr)
       }
