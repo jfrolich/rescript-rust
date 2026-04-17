@@ -13850,6 +13850,7 @@ fn move_same_name_export_alias_to_export_tail(
         || flattened[..index]
             .iter()
             .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+        || later_toplevel_initializer_mentions_ident(&flattened[index + 1..], target)
         || !flattened[index + 1..]
             .iter()
             .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
@@ -13881,6 +13882,7 @@ fn move_reused_same_name_export_binding_to_export_tail(
         || flattened[..index]
             .iter()
             .any(|stmt| statement_mentions_ident_anywhere(stmt, &reused))
+        || later_toplevel_initializer_mentions_ident(&flattened[index + 1..], &reused)
         || !flattened[index + 1..]
             .iter()
             .any(|stmt| statement_mentions_ident_anywhere(stmt, &reused))
@@ -13935,6 +13937,94 @@ fn direct_reused_same_name_export_alias_binding(
             }
             _ => None,
         })
+}
+
+fn later_toplevel_initializer_mentions_ident(block: &[Statement], target: &Ident) -> bool {
+    block.iter().any(|stmt| match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration { value: Some(value), .. }) => {
+            expression_mentions_ident_outside_nested_functions(value, target)
+        }
+        _ => false,
+    })
+}
+
+fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target: &Ident) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Var(VIdent::Id(ident)) => ident.same(target),
+        ExpressionDesc::Var(VIdent::Qualified(_, _))
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::RawJsCode(_) => false,
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::StaticIndex(inner, _, _)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::New(inner, None) => {
+            expression_mentions_ident_outside_nested_functions(inner, target)
+        }
+        ExpressionDesc::In(left, right)
+        | ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::FlatCall(left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            expression_mentions_ident_outside_nested_functions(left, target)
+                || expression_mentions_ident_outside_nested_functions(right, target)
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            expression_mentions_ident_outside_nested_functions(test, target)
+                || expression_mentions_ident_outside_nested_functions(consequent, target)
+                || expression_mentions_ident_outside_nested_functions(alternate, target)
+        }
+        ExpressionDesc::Call(func, args, _) => {
+            expression_mentions_ident_outside_nested_functions(func, target)
+                || args
+                    .iter()
+                    .any(|arg| expression_mentions_ident_outside_nested_functions(arg, target))
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            expression_mentions_ident_outside_nested_functions(tag, target)
+                || strings.iter().any(|expr| {
+                    expression_mentions_ident_outside_nested_functions(expr, target)
+                })
+                || values.iter().any(|expr| {
+                    expression_mentions_ident_outside_nested_functions(expr, target)
+                })
+        }
+        ExpressionDesc::New(func, Some(args)) => {
+            expression_mentions_ident_outside_nested_functions(func, target)
+                || args
+                    .iter()
+                    .any(|arg| expression_mentions_ident_outside_nested_functions(arg, target))
+        }
+        ExpressionDesc::Fun { .. } => false,
+        ExpressionDesc::Array(items, _) => items
+            .iter()
+            .any(|item| expression_mentions_ident_outside_nested_functions(item, target)),
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            expression_mentions_ident_outside_nested_functions(tag, target)
+                || items
+                    .iter()
+                    .any(|item| expression_mentions_ident_outside_nested_functions(item, target))
+        }
+        ExpressionDesc::Object(dup, props) => {
+            dup.as_deref().is_some_and(|dup| {
+                expression_mentions_ident_outside_nested_functions(dup, target)
+            }) || props.iter().any(|(_, value)| {
+                expression_mentions_ident_outside_nested_functions(value, target)
+            })
+        }
+    }
 }
 
 fn substitute_export_alias_use_in_statement(
@@ -17471,6 +17561,91 @@ mod tests {
                 assert_eq!(*property, LetKind::Alias);
             }
             other => panic!("expected the late export alias binding second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_keeps_same_name_export_alias_binding_used_by_later_top_level_initializer(
+    ) {
+        let mut compiler = LambdaCompiler::new();
+        let hash_utils = ModuleId {
+            id: Ident::create_persistent("Hash_utils"),
+            kind: Kind::Ml,
+            dynamic_import: false,
+        };
+        let belt_id = ModuleId {
+            id: Ident::create_persistent("Belt_Id"),
+            kind: Kind::Ml,
+            dynamic_import: false,
+        };
+        let int_hash = Ident::create_local("intHash");
+        let int_eq = Ident::create_local("intEq");
+        let y = Ident::create_local("Y");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: int_hash.clone(),
+                value: Some(Expression::qualified(
+                    hash_utils,
+                    Some("hash".to_string()),
+                )),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: y.clone(),
+                value: Some(Expression::call(
+                    Expression::qualified(belt_id, Some("hashable".to_string())),
+                    vec![Expression::var(int_hash.clone()), Expression::var(int_eq.clone())],
+                    CallInfo::default(),
+                )),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![int_hash.clone(), y.clone()],
+                values: vec![Expression::var(int_hash.clone()), Expression::var(y.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![int_hash.clone(), y.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected the alias binding plus the dependent top-level initializer");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&int_hash));
+            }
+            other => panic!("expected intHash to stay materialized, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Call(_, args, _),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&y));
+                let [hash_arg, eq_arg] = args.as_slice() else {
+                    panic!("expected the dependent initializer to keep two call arguments");
+                };
+                match &hash_arg.desc {
+                    ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&int_hash)),
+                    other => panic!("expected the first call arg to stay as intHash, got {other:?}"),
+                }
+                match &eq_arg.desc {
+                    ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&int_eq)),
+                    other => panic!("expected the second call arg to stay as intEq, got {other:?}"),
+                }
+            }
+            other => panic!("expected the Y initializer to stay intact, got {other:?}"),
         }
     }
 
@@ -21556,6 +21731,24 @@ mod tests {
                 && output.find("function url(prim) {").is_some()
                 && output.find("let X = {};").unwrap() < output.find("function url(prim) {").unwrap(),
             "expected ExternalShadow to keep earlier module/value bindings ahead of the @new wrapper, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn belt_hashmap_test_keeps_exported_hash_alias_materialized_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("belt_hashmap_test");
+        assert!(
+            output.contains("let intHash = Hash_utils.hash;")
+                && output.contains("let Y = Belt_Id.hashable(intHash, intEq);"),
+            "expected belt_hashmap_test to keep the exported hash alias materialized at its internal higher-order use site, got:\n{output}"
+        );
+        assert!(
+            !output.contains("Belt_Id.hashable(Hash_utils.hash, intEq)")
+                && output.find("let intHash = Hash_utils.hash;").is_some()
+                && output.find("let cmp = Primitive_int.compare;").is_some()
+                && output.find("let intHash = Hash_utils.hash;").unwrap()
+                    < output.find("let cmp = Primitive_int.compare;").unwrap(),
+            "unexpected inlined hash alias or late export-tail-only binding remained in belt_hashmap_test:\n{output}"
         );
     }
 

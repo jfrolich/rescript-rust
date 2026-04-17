@@ -69,6 +69,58 @@ reproduces a stable no-compile-error baseline in the current dirty worktree:
 
 Latest iteration on **2026-04-17**:
 
+- Active slice: keep exported module-field aliases materialized when a later
+  top-level initializer still depends on them as first-class values, which is
+  the checked-in `belt_hashmap_test` / `uncurried_cast` snapshot family rather
+  than the `gpr_3142_test` / `string_set` direct-call alias-tail family
+- Active backend focus stayed in **Phase 3** JS IR lowering / export metadata
+  from `PLAN.md`: the correction is still in
+  `compiler-rust/src/lambda/compile.rs` top-level export coercion, with the
+  companion preservation in `compiler-rust/src/lambda/simplify.rs`
+- OCaml / snapshot reference:
+  - checked-in snapshots such as
+    `tests/tests/src/belt_hashmap_test.mjs`, which keep
+    `let intHash = Hash_utils.hash;` ahead of
+    `let Y = Belt_Id.hashable(intHash, intEq);`
+  - `tests/tests/src/uncurried_cast.mjs`, which keeps
+    `let map = Belt_List.map;` materialized for the local module object while
+    ordinary internal call sites still use `Belt_List.map` directly
+- Rust change:
+  - taught JS-backend simplification to preserve exported module-field aliases
+    with non-export-payload internal uses, so the `belt_hashmap_test` lambda
+    slice keeps `Y` depending on `intHash`
+  - narrowed export-tail alias movement in
+    `coerce_toplevel_exports(...)` so Rust no longer erases an exported alias
+    when a later top-level initializer still directly depends on that binding;
+    nested function-body mentions are still allowed to inline like OCaml
+  - added focused regression coverage in
+    `compiler-rust/src/lambda/simplify.rs` and
+    `compiler-rust/src/lambda/compile.rs` for the `belt_hashmap_test` shape
+- Verified focused guards for this slice:
+  - `timeout 600 env RUSTFLAGS='-Awarnings' cargo test --manifest-path compiler-rust/Cargo.toml --release keeps_same_name_export_alias_binding_used_by_later_top_level_initializer -- --nocapture`
+  - `timeout 600 env RUSTFLAGS='-Awarnings' cargo test --manifest-path compiler-rust/Cargo.toml --release belt_hashmap_test_keeps_exported_hash_alias_materialized_like_snapshot -- --nocapture`
+  - `timeout 600 env RUSTFLAGS='-Awarnings' cargo test --manifest-path compiler-rust/Cargo.toml --release string_set_reuses_same_name_export_aliases_for_module_fields_like_snapshot -- --nocapture`
+  - `timeout 600 env RUSTFLAGS='-Awarnings' cargo test --manifest-path compiler-rust/Cargo.toml --release uncurried_cast_keeps_local_module_field_alias_binding_materialized_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 60 ./scripts/test_js_single.sh belt_hashmap_test --diff`
+  - `timeout 60 ./scripts/test_js_single.sh string_set --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/belt_hashmap_test.res` is exact again; Rust now keeps the
+    exported `intHash` alias ahead of `Y` and stops rewriting that
+    higher-order/top-level dependency to `Hash_utils.hash`
+  - `tests/tests/src/string_set.res` still differs only on the unrelated
+    `subset` loop temporary shape, confirming the alias-tail narrowing did not
+    regress the earlier direct-call/module-field family
+  - the verified correction is backend export-coercion / alias-preservation
+    behavior, not a printer rewrite
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **597 / 657** -> **597 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **60** -> **60** (**no change**)
+
+Latest iteration on **2026-04-17**:
+
 - Active slice: move export-only same-name alias bindings to the late export
   tail only when the existing binding is a real alias (`Var` / `StaticIndex`)
   with later internal uses, which is the checked-in `gpr_3142_test` /

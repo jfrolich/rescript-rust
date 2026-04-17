@@ -319,7 +319,11 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     let exits_simplified = simplify_static_exits_for_js_backend(lam);
     let flattened = deep_flatten_for_js_backend(&exits_simplified);
     let exports = collect_exported_idents(&flattened);
-    let preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
+    let mut preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
+    preserved_export_bindings.extend(collect_exported_module_field_alias_bindings(
+        &flattened,
+        &exports,
+    ));
     let preserved_export_payload_bindings =
         collect_exported_constant_payload_bindings(&flattened, &exports);
     let preserved_local_module_module_field_call_bindings =
@@ -5785,6 +5789,15 @@ fn collect_exported_apply_bindings(lam: &Lambda, exports: &HashSet<Ident>) -> Ha
     preserved
 }
 
+fn collect_exported_module_field_alias_bindings(
+    lam: &Lambda,
+    exports: &HashSet<Ident>,
+) -> HashSet<Ident> {
+    let mut preserved = HashSet::new();
+    collect_exported_module_field_alias_bindings_into(lam, exports, &mut preserved);
+    preserved
+}
+
 fn collect_exported_var_alias_bindings(lam: &Lambda, exports: &HashSet<Ident>) -> HashSet<Ident> {
     let mut preserved = HashSet::new();
     collect_exported_var_alias_bindings_into(lam, exports, &mut preserved);
@@ -6052,6 +6065,99 @@ fn collect_exported_apply_bindings_into(
         }
         Lambda::Lassign(_, value) => {
             collect_exported_apply_bindings_into(value, exports, preserved)
+        }
+    }
+}
+
+fn collect_exported_module_field_alias_bindings_into(
+    lam: &Lambda,
+    exports: &HashSet<Ident>,
+    preserved: &mut HashSet<Ident>,
+) {
+    match lam {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
+        Lambda::Lapply(apply) => {
+            collect_exported_module_field_alias_bindings_into(&apply.ap_func, exports, preserved);
+            for arg in &apply.ap_args {
+                collect_exported_module_field_alias_bindings_into(arg, exports, preserved);
+            }
+        }
+        Lambda::Lfunction(func) => {
+            collect_exported_module_field_alias_bindings_into(&func.body, exports, preserved)
+        }
+        Lambda::Llet(_, id, value, body) => {
+            if exports.contains(id)
+                && safe_aliasable_module_field_read(value)
+                && !used_only_in_module_export_payload(id, body)
+            {
+                preserved.insert(id.clone());
+            }
+            collect_exported_module_field_alias_bindings_into(value, exports, preserved);
+            collect_exported_module_field_alias_bindings_into(body, exports, preserved);
+        }
+        Lambda::Lletrec(bindings, body) => {
+            for (id, expr) in bindings {
+                if exports.contains(id)
+                    && safe_aliasable_module_field_read(expr)
+                    && !used_only_in_module_export_payload(id, body)
+                {
+                    preserved.insert(id.clone());
+                }
+                collect_exported_module_field_alias_bindings_into(expr, exports, preserved);
+            }
+            collect_exported_module_field_alias_bindings_into(body, exports, preserved);
+        }
+        Lambda::Lprim(info) => {
+            for arg in &info.args {
+                collect_exported_module_field_alias_bindings_into(arg, exports, preserved);
+            }
+        }
+        Lambda::Lswitch(scrutinee, switch) => {
+            collect_exported_module_field_alias_bindings_into(scrutinee, exports, preserved);
+            for (_, lam) in &switch.sw_consts {
+                collect_exported_module_field_alias_bindings_into(lam, exports, preserved);
+            }
+            for (_, lam) in &switch.sw_blocks {
+                collect_exported_module_field_alias_bindings_into(lam, exports, preserved);
+            }
+            if let Some(failaction) = &switch.sw_failaction {
+                collect_exported_module_field_alias_bindings_into(failaction, exports, preserved);
+            }
+        }
+        Lambda::LstringSwitch(scrutinee, cases, default) => {
+            collect_exported_module_field_alias_bindings_into(scrutinee, exports, preserved);
+            for (_, lam) in cases {
+                collect_exported_module_field_alias_bindings_into(lam, exports, preserved);
+            }
+            if let Some(default) = default {
+                collect_exported_module_field_alias_bindings_into(default, exports, preserved);
+            }
+        }
+        Lambda::LstaticRaise(_, args) => {
+            for arg in args {
+                collect_exported_module_field_alias_bindings_into(arg, exports, preserved);
+            }
+        }
+        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+            collect_exported_module_field_alias_bindings_into(body, exports, preserved);
+            collect_exported_module_field_alias_bindings_into(handler, exports, preserved);
+        }
+        Lambda::LifThenElse(cond, then_, else_) => {
+            collect_exported_module_field_alias_bindings_into(cond, exports, preserved);
+            collect_exported_module_field_alias_bindings_into(then_, exports, preserved);
+            collect_exported_module_field_alias_bindings_into(else_, exports, preserved);
+        }
+        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+            collect_exported_module_field_alias_bindings_into(first, exports, preserved);
+            collect_exported_module_field_alias_bindings_into(second, exports, preserved);
+        }
+        Lambda::Lfor(_, start, end, _, body) => {
+            collect_exported_module_field_alias_bindings_into(start, exports, preserved);
+            collect_exported_module_field_alias_bindings_into(end, exports, preserved);
+            collect_exported_module_field_alias_bindings_into(body, exports, preserved);
+        }
+        Lambda::Lassign(_, value) => {
+            collect_exported_module_field_alias_bindings_into(value, exports, preserved)
         }
     }
 }
@@ -10321,6 +10427,117 @@ mod tests {
         ));
 
         assert!(matches!(simplified, Lambda::Lvar(id) if id == value));
+    }
+
+    #[test]
+    fn preserves_exported_module_field_alias_bindings_with_internal_uses_like_belt_hashmap_test() {
+        let hash_utils = Ident::create_persistent("Hash_utils");
+        let belt_id = Ident::create_persistent("Belt_Id");
+        let int_hash = Ident::create_local("intHash");
+        let int_eq = Ident::create_local("intEq");
+        let hash_param = Ident::create_local("x");
+        let eq_left = Ident::create_local("x");
+        let eq_right = Ident::create_local("y");
+        let y = Ident::create_local("Y");
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            int_eq.clone(),
+            Lambda::prim(
+                Primitive::PjsFnMake(2),
+                vec![Lambda::function_(
+                    2,
+                    vec![eq_left.clone(), eq_right.clone()],
+                    Lambda::const_(Constant::JsTrue),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                int_hash.clone(),
+                Lambda::prim(
+                    Primitive::PjsFnMake(1),
+                    vec![Lambda::function_(
+                        1,
+                        vec![hash_param.clone()],
+                        Lambda::Lapply(Apply {
+                            ap_func: Box::new(Lambda::prim(
+                                Primitive::Pfield(
+                                    0,
+                                    FieldDbgInfo::Module {
+                                        name: "hash".to_string(),
+                                    },
+                                ),
+                                vec![Lambda::LglobalModule(hash_utils, false)],
+                                Location::none(),
+                            )),
+                            ap_args: vec![Lambda::var(hash_param.clone())],
+                            ap_info: ApInfo {
+                                loc: Location::none(),
+                                inlined: InlineAttribute::Default,
+                                status: ApplyStatus::Uncurry,
+                            },
+                            ap_transformed_jsx: false,
+                        }),
+                        FunctionAttribute::default(),
+                    )],
+                    Location::none(),
+                ),
+                Lambda::let_(
+                    LetKind::Strict,
+                    y.clone(),
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::prim(
+                            Primitive::Pfield(
+                                0,
+                                FieldDbgInfo::Module {
+                                    name: "hashable".to_string(),
+                                },
+                            ),
+                            vec![Lambda::LglobalModule(belt_id, false)],
+                            Location::none(),
+                        )),
+                        ap_args: vec![Lambda::var(int_hash.clone()), Lambda::var(int_eq.clone())],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    }),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::ModuleExport(vec![int_hash.clone(), y.clone()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(int_hash.clone()), Lambda::var(y.clone())],
+                        Location::none(),
+                    ),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let int_hash_value =
+            find_binding_value(&simplified, &int_hash).expect("expected intHash binding");
+        assert!(matches!(
+            int_hash_value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+                args,
+                ..
+            }) if name == "hash"
+                && matches!(args.as_slice(), [Lambda::LglobalModule(_, false)])
+        ), "expected the exported eta-wrapper to simplify to a module field alias: {simplified:?}");
+
+        let y_value = find_binding_value(&simplified, &y).expect("expected Y binding");
+        assert!(matches!(
+            y_value,
+            Lambda::Lapply(Apply { ap_args, .. })
+                if matches!(ap_args.as_slice(), [Lambda::Lvar(id), Lambda::Lvar(eq)] if id.same(&int_hash) && eq.same(&int_eq))
+        ), "expected Y to keep using the exported intHash alias internally: {simplified:?}");
     }
 
     #[test]
