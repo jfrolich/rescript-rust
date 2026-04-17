@@ -225,6 +225,37 @@ let y = describe(int, 42)
 // ============================================================================
 
 #[test]
+fn comptime_build_record_mirror() {
+    // @buildRecord + @recordField: build a record with the same fields
+    // as the source type (non-optional).
+    let source = r#"
+type user = { name: string, age: int }
+
+@comptime
+let userCopy =
+  switch @typeInfo(user) {
+  | Record({fields}) =>
+    @buildRecord(inline for field in fields {
+      @recordField({name: field.name, typ: field.typ})
+    })
+  | _ => @compileError("expected record")
+  }
+
+// userCopy is now a record type with fields {name: string, age: int}
+let u: userCopy = { name: "Alice", age: 30 }
+"#;
+    let result = compile_with_stdlib(source, "build_record_mirror.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== BUILD RECORD JS ===\n{}\n=== END ===", output);
+            assert!(output.contains("Alice"), "Expected Alice:\n{output}");
+            assert!(output.contains("30"), "Expected 30:\n{output}");
+        }
+        Err(e) => panic!("@buildRecord should compile: {e}"),
+    }
+}
+
+#[test]
 fn comptime_generic_keysof() {
     // Generic: @comptime let keysOf takes a type parameter, returns a type.
     // Each `@comptime let x = keysOf(T)` instantiates a specialized type.

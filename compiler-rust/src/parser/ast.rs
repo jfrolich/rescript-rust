@@ -679,6 +679,11 @@ pub enum ExpressionDesc {
     /// Type-level variant case descriptor: `@variantCase({name: "Name", as_?: "..."})`.
     /// Evaluates to a comptime record describing one constructor.
     Pexp_comptime_variant_case(ExprIdx),
+    /// Type-level record builder: `@buildRecord(arrayOfFields)`.
+    /// Produces a record TYPE declaration. Array contains @recordField({...}).
+    Pexp_comptime_build_record(ExprIdx),
+    /// Type-level record field descriptor: `@recordField({name, typ, optional?})`.
+    Pexp_comptime_record_field(ExprIdx),
 }
 
 /// A record field in an expression.

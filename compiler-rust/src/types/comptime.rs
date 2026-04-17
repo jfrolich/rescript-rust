@@ -182,6 +182,8 @@ pub fn make_monomorph_name(func_name: &str, type_key: &TypeInfo) -> String {
 pub enum TypeBuilderResult {
     /// A variant TypeKind with these constructors (no args).
     Variant(Vec<String>),
+    /// A record TypeKind with these fields.
+    Record(Vec<RecordFieldSpec>),
 }
 
 /// Description of a single variant case (from @variantCase).
@@ -189,6 +191,15 @@ pub enum TypeBuilderResult {
 pub struct VariantCaseSpec {
     pub name: String,
     // Future: pub as_: Option<String>, pub payload: Option<TypeInfo>, etc.
+}
+
+/// Description of a single record field (from @recordField).
+#[derive(Debug, Clone)]
+pub struct RecordFieldSpec {
+    pub name: String,
+    pub typ: TypeInfo,
+    pub optional: bool,
+    pub mutable_: bool,
 }
 
 // ── TypeInfo ────────────────────────────────────────────────────────────────
@@ -249,6 +260,45 @@ pub struct ConstructorInfo {
 }
 
 // ── build_type_info ─────────────────────────────────────────────────────────
+
+/// Convert a TypeInfo back to a TypeExprRef.
+/// Looks up user-defined types by name in the environment.
+pub fn type_info_to_type_expr<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    ti: &TypeInfo,
+) -> Option<TypeExprRef> {
+    match ti {
+        TypeInfo::Int => Some(ctx.new_constr(predef::path_int(), vec![])),
+        TypeInfo::Float => Some(ctx.new_constr(predef::path_float(), vec![])),
+        TypeInfo::String => Some(ctx.new_constr(predef::path_string(), vec![])),
+        TypeInfo::Bool => Some(ctx.new_constr(predef::path_bool(), vec![])),
+        TypeInfo::Unit => Some(ctx.new_constr(predef::path_unit(), vec![])),
+        TypeInfo::Char => Some(ctx.new_constr(predef::path_char(), vec![])),
+        TypeInfo::Bigint => Some(ctx.new_constr(predef::path_bigint(), vec![])),
+        TypeInfo::Array { element } => {
+            let e = type_info_to_type_expr(ctx, env, element)?;
+            Some(ctx.new_constr(predef::path_array(), vec![e]))
+        }
+        TypeInfo::Option { inner } => {
+            let e = type_info_to_type_expr(ctx, env, inner)?;
+            Some(ctx.new_constr(predef::path_option(), vec![e]))
+        }
+        TypeInfo::Record { name, .. } | TypeInfo::Variant { name, .. } => {
+            match env.find_type_with_id(name) {
+                Ok((id, _)) => Some(ctx.new_constr(Path::Pident(id.clone()), vec![])),
+                Err(_) => None,
+            }
+        }
+        TypeInfo::External { name } | TypeInfo::Opaque { name } => {
+            match env.find_type_with_id(name) {
+                Ok((id, _)) => Some(ctx.new_constr(Path::Pident(id.clone()), vec![])),
+                Err(_) => None,
+            }
+        }
+        _ => None,
+    }
+}
 
 /// Build a TypeInfo from a compiler type expression.
 ///

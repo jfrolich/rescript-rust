@@ -1041,6 +1041,18 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
                 expression(arena.get_expr(*e), arena),
             ])
         }
+        ExpressionDesc::Pexp_comptime_build_record(e) => {
+            Sexp::list(vec![
+                Sexp::atom("Pexp_comptime_build_record"),
+                expression(arena.get_expr(*e), arena),
+            ])
+        }
+        ExpressionDesc::Pexp_comptime_record_field(e) => {
+            Sexp::list(vec![
+                Sexp::atom("Pexp_comptime_record_field"),
+                expression(arena.get_expr(*e), arena),
+            ])
+        }
     };
     Sexp::list(vec![
         Sexp::atom("expression"),

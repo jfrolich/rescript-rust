@@ -1124,7 +1124,9 @@ impl<'a> Mapper<'a> {
             | current::ExpressionDesc::Pexp_comptime_record(_)
             | current::ExpressionDesc::Pexp_comptime_variant(_)
             | current::ExpressionDesc::Pexp_comptime_build_variant(_)
-            | current::ExpressionDesc::Pexp_comptime_variant_case(_) => {
+            | current::ExpressionDesc::Pexp_comptime_variant_case(_)
+            | current::ExpressionDesc::Pexp_comptime_build_record(_)
+            | current::ExpressionDesc::Pexp_comptime_record_field(_) => {
                 unreachable!("comptime builtins eliminated before mapping to pt0")
             }
         }

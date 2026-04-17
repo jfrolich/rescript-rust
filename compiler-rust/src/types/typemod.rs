@@ -8535,6 +8535,12 @@ pub fn type_structure<'a>(
                     str_env: crate::types::typedtree::EnvRef(0),
                 });
             }
+            Ok(crate::types::comptime::TypeBuilderResult::Record(_)) => {
+                // Deferred record emission not yet wired — use early-emit path
+                return Err(TypeModError::CoreError(crate::types::TypeCoreError::Other(
+                    "deferred @buildRecord emission not implemented — use top-level form".into(),
+                )));
+            }
             Err(e) => {
                 return Err(TypeModError::CoreError(e));
             }
@@ -8879,6 +8885,128 @@ fn type_structure_item<'a>(
                             typ_params: vec![],
                             typ_cstrs: vec![],
                             typ_kind: crate::types::typedtree::TypedTypeKind::Ttype_variant(typed_cds),
+                            typ_private: crate::parser::ast::PrivateFlag::Public,
+                            typ_manifest: None,
+                            typ_loc: LocIdx(0),
+                            typ_attributes: crate::parser::ast::Attributes::new(),
+                            typ_type: decl.clone(),
+                        };
+
+                        let sig_item = crate::types::decl::SignatureItem::SigType(
+                            type_id.clone(),
+                            decl,
+                            crate::types::decl::RecStatus::TrecNot,
+                        );
+
+                        return Ok((
+                            StructureItem {
+                                str_desc: StructureItemDesc::Tstr_type(RecFlag::Nonrecursive, vec![typed_decl]),
+                                str_loc: loc,
+                                str_env: EnvRef(0),
+                            },
+                            vec![sig_item],
+                            new_env,
+                        ));
+                    }
+                    crate::types::comptime::TypeBuilderResult::Record(field_specs) => {
+                        // Convert each RecordFieldSpec to a LabelDeclaration
+                        let mut labels = Vec::new();
+                        for fs in &field_specs {
+                            // Build a real TypeExprRef from the field's TypeInfo
+                            let field_ty = crate::types::comptime::type_info_to_type_expr(ctx, env, &fs.typ)
+                                .ok_or_else(|| TypeModError::CoreError(crate::types::TypeCoreError::Other(
+                                    format!("@recordField: could not resolve type for '{}'", fs.name)
+                                )))?;
+                            labels.push(crate::types::decl::LabelDeclaration {
+                                ld_id: ctx.create_ident(&fs.name),
+                                ld_mutable: if fs.mutable_ {
+                                    crate::types::MutableFlag::Mutable
+                                } else {
+                                    crate::types::MutableFlag::Immutable
+                                },
+                                ld_optional: fs.optional,
+                                ld_type: field_ty,
+                                ld_loc: crate::location::Location::none(),
+                                ld_attributes: vec![],
+                            });
+                        }
+
+                        let decl = crate::types::TypeDeclaration {
+                            type_params: vec![],
+                            type_arity: 0,
+                            type_kind: crate::types::TypeKind::TypeRecord(
+                                labels.clone(),
+                                crate::types::RecordRepresentation::RecordRegular,
+                            ),
+                            type_private: crate::types::asttypes::PrivateFlag::Public,
+                            type_manifest: None,
+                            type_variance: vec![],
+                            type_newtype_level: None,
+                            type_loc: crate::location::Location::none(),
+                            type_attributes: vec![],
+                            type_immediate: false,
+                            type_unboxed: crate::types::UnboxedStatus::default(),
+                            type_inlined_types: vec![],
+                            type_path: Some(crate::types::Path::pident(type_id.clone())),
+                        };
+
+                        let mut new_env = env.clone();
+                        new_env.add_type(type_id.clone(), decl.clone());
+                        ctx.register_type_decl(&name, decl.clone());
+                        if type_id.stamp() != 0 {
+                            ctx.register_type_decl_by_stamp(type_id.stamp(), decl.clone());
+                        }
+
+                        // Register labels so they can be referenced
+                        let type_path = crate::types::Path::pident(type_id.clone());
+                        let res_ty = ctx.new_constr(type_path.clone(), vec![]);
+                        for (pos, label) in labels.iter().enumerate() {
+                            let lbl_desc = crate::types::LabelDescription {
+                                lbl_name: label.ld_id.name().to_string(),
+                                lbl_res: res_ty,
+                                lbl_arg: label.ld_type,
+                                lbl_mut: label.ld_mutable.clone(),
+                                lbl_optional: label.ld_optional,
+                                lbl_pos: pos as i32,
+                                lbl_all: crate::types::LabelArrayRef(0),
+                                lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                                lbl_private: crate::types::asttypes::PrivateFlag::Public,
+                                lbl_loc: crate::location::Location::none(),
+                                lbl_attributes: vec![],
+                            };
+                            new_env.add_label(label.ld_id.clone(), lbl_desc);
+                        }
+
+                        // Build typed labels
+                        let mut typed_labels = Vec::new();
+                        for label in &labels {
+                            let parser_mutable = match &label.ld_mutable {
+                                crate::types::MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
+                                crate::types::MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
+                            };
+                            typed_labels.push(crate::types::typedtree::TypedLabelDeclaration {
+                                ld_id: label.ld_id.clone(),
+                                ld_name: crate::parse_arena::Located { txt: label.ld_id.name().to_string(), loc: LocIdx(0) },
+                                ld_mutable: parser_mutable,
+                                ld_optional: label.ld_optional,
+                                ld_type: crate::types::typedtree::TypedCoreType {
+                                    ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_var(None),
+                                    ctyp_loc: LocIdx(0),
+                                    ctyp_type: label.ld_type,
+                                    ctyp_env: crate::types::typedtree::EnvRef(0),
+                                    ctyp_attributes: crate::parser::ast::Attributes::new(),
+                                },
+                                ld_loc: LocIdx(0),
+                                ld_attributes: crate::parser::ast::Attributes::new(),
+                            });
+                        }
+
+                        let typed_decl = crate::types::typedtree::TypedTypeDeclaration {
+                            typ_id: type_id.clone(),
+                            typ_name: crate::parse_arena::Located { txt: name.clone(), loc: LocIdx(0) },
+                            typ_params: vec![],
+                            typ_cstrs: vec![],
+                            typ_kind: crate::types::typedtree::TypedTypeKind::Ttype_record(typed_labels),
                             typ_private: crate::parser::ast::PrivateFlag::Public,
                             typ_manifest: None,
                             typ_loc: LocIdx(0),

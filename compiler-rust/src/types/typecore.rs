@@ -5647,9 +5647,11 @@ pub fn type_expect<'a>(
                 crate::parser::ast::Attributes::new(),
             ))
         }
-        ED::Pexp_comptime_build_variant(_) | ED::Pexp_comptime_variant_case(_) => {
-            // @buildVariant and @variantCase are type-builder builtins.
-            // They only appear inside @comptime type declarations, evaluated
+        ED::Pexp_comptime_build_variant(_)
+        | ED::Pexp_comptime_variant_case(_)
+        | ED::Pexp_comptime_build_record(_)
+        | ED::Pexp_comptime_record_field(_) => {
+            // Type-builder builtins — only appear inside @comptime type declarations, evaluated
             // by evaluate_type_builder — they should not appear in normal
             // expression context.
             Err(super::TypeCoreError::Other(
@@ -10173,6 +10175,12 @@ fn collect_lident_idents_in_expression(
             collect_lident_idents_in_expression(arena, arena.get_expr(*e), out);
         }
         ED::Pexp_comptime_variant_case(e) => {
+            collect_lident_idents_in_expression(arena, arena.get_expr(*e), out);
+        }
+        ED::Pexp_comptime_build_record(e) => {
+            collect_lident_idents_in_expression(arena, arena.get_expr(*e), out);
+        }
+        ED::Pexp_comptime_record_field(e) => {
             collect_lident_idents_in_expression(arena, arena.get_expr(*e), out);
         }
     }
@@ -21257,7 +21265,7 @@ fn contains_build_variant_inside(
 ) -> bool {
     use crate::parser::ast::ExpressionDesc as ED;
     match &*expr.pexp_desc {
-        ED::Pexp_comptime_build_variant(_) => true,
+        ED::Pexp_comptime_build_variant(_) | ED::Pexp_comptime_build_record(_) => true,
         ED::Pexp_fun(inner) => {
             contains_build_variant_inside(arena.get_expr(inner.rhs), arena, registry)
         }
@@ -21317,6 +21325,12 @@ pub fn evaluate_type_builder(
             let cases = evaluate_variant_cases(tctx, env, inner_expr)?;
             let names: Vec<String> = cases.into_iter().map(|c| c.name).collect();
             Ok(TypeBuilderResult::Variant(names))
+        }
+        ED::Pexp_comptime_build_record(inner_idx) => {
+            // @buildRecord(arrayOrInlineFor) — collect fields, build record type
+            let inner_expr = tctx.arena.get_expr(*inner_idx);
+            let fields = evaluate_record_fields(tctx, env, inner_expr)?;
+            Ok(TypeBuilderResult::Record(fields))
         }
         ED::Pexp_match(match_inner) => {
             let (ref scrut_idx, ref cases) = **match_inner;
@@ -21546,6 +21560,129 @@ fn evaluate_single_variant_case(
     }
     Err(super::TypeCoreError::Other(
         "@variantCase: expected {name: \"...\"}".into(),
+    ))
+}
+
+/// Evaluate an expression producing a list of record field descriptors.
+fn evaluate_record_fields(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    expr: &ParsedExpression,
+) -> TypeCoreResult<Vec<crate::types::comptime::RecordFieldSpec>> {
+    use crate::parser::ast::ExpressionDesc as ED;
+
+    match &*expr.pexp_desc {
+        ED::Pexp_array(exprs) => {
+            let mut out = Vec::new();
+            for e_idx in exprs.iter() {
+                let e = tctx.arena.get_expr(*e_idx);
+                out.push(evaluate_single_record_field(tctx, env, e)?);
+            }
+            Ok(out)
+        }
+        ED::Pexp_inline_for(inner) => {
+            let (ref pat_idx, ref collection_idx, ref body_idx) = **inner;
+            let coll_expr = tctx.arena.get_expr(*collection_idx);
+            let comptime_array = match &*coll_expr.pexp_desc {
+                ED::Pexp_ident(lid) => {
+                    let longident = tctx.arena.get_longident(lid.txt);
+                    if longident.is_simple() {
+                        let vname = tctx.arena.get_string(longident.last_idx());
+                        match tctx.comptime_bindings.get(vname) {
+                            Some(crate::types::comptime::ComptimeValue::Array(elements)) => Some(elements.clone()),
+                            _ => None,
+                        }
+                    } else { None }
+                }
+                _ => None,
+            }.ok_or_else(|| super::TypeCoreError::Other(
+                "evaluate_record_fields: inline for collection must be comptime-known".into(),
+            ))?;
+
+            let pat = tctx.arena.get_pat(*pat_idx);
+            let var_name = match &*pat.ppat_desc {
+                crate::parser::ast::PatternDesc::Ppat_var(name_loc) => tctx.arena.get_string(name_loc.txt).to_string(),
+                _ => "__field".to_string(),
+            };
+            let body_expr = tctx.arena.get_expr(*body_idx);
+            let saved = tctx.comptime_bindings.clone();
+            let mut out = Vec::new();
+            for element in &comptime_array {
+                tctx.comptime_bindings.insert(var_name.clone(), element.clone());
+                out.push(evaluate_single_record_field(tctx, env, body_expr)?);
+            }
+            tctx.comptime_bindings = saved;
+            Ok(out)
+        }
+        _ => Ok(vec![evaluate_single_record_field(tctx, env, expr)?]),
+    }
+}
+
+/// Evaluate a single @recordField({name, typ, optional?, mutable_?}) expression.
+fn evaluate_single_record_field(
+    tctx: &mut TypeCheckContext<'_>,
+    _env: &Env,
+    expr: &ParsedExpression,
+) -> TypeCoreResult<crate::types::comptime::RecordFieldSpec> {
+    use crate::parser::ast::ExpressionDesc as ED;
+
+    let rec_idx = match &*expr.pexp_desc {
+        ED::Pexp_comptime_record_field(e) => *e,
+        _ => return Err(super::TypeCoreError::Other(
+            "evaluate_record_fields: expected @recordField({...})".into(),
+        )),
+    };
+
+    let rec_expr = tctx.arena.get_expr(rec_idx);
+    if let ED::Pexp_record(inner) = &*rec_expr.pexp_desc {
+        let (ref fields, _) = **inner;
+        let mut name = None;
+        let mut typ = None;
+        let mut optional = false;
+        let mut mutable_ = false;
+        for field in fields {
+            let fname = {
+                let longident = tctx.arena.get_longident(field.lid.txt);
+                tctx.arena.get_string(longident.last_idx()).to_string()
+            };
+            let val_expr = tctx.arena.get_expr(field.expr);
+            match fname.as_str() {
+                "name" => name = Some(evaluate_comptime_string(tctx, val_expr)?),
+                "typ" | "type" => {
+                    // Expect an expression that resolves to a comptime Type
+                    if let Some(ti) = resolve_comptime_type_arg(tctx, _env, val_expr) {
+                        typ = Some(ti);
+                    }
+                }
+                "optional" => {
+                    if let ED::Pexp_construct(lid, _) = &*val_expr.pexp_desc {
+                        let longident = tctx.arena.get_longident(lid.txt);
+                        let n = tctx.arena.get_string(longident.last_idx());
+                        if n == "true" { optional = true; }
+                    }
+                }
+                "mutable_" => {
+                    if let ED::Pexp_construct(lid, _) = &*val_expr.pexp_desc {
+                        let longident = tctx.arena.get_longident(lid.txt);
+                        let n = tctx.arena.get_string(longident.last_idx());
+                        if n == "true" { mutable_ = true; }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let name = name.ok_or_else(|| super::TypeCoreError::Other(
+            "@recordField: missing required 'name'".into(),
+        ))?;
+        let typ = typ.ok_or_else(|| super::TypeCoreError::Other(
+            "@recordField: missing required 'typ'".into(),
+        ))?;
+        return Ok(crate::types::comptime::RecordFieldSpec {
+            name, typ, optional, mutable_,
+        });
+    }
+    Err(super::TypeCoreError::Other(
+        "@recordField: expected {name: \"...\", typ: ..., optional?: bool}".into(),
     ))
 }
 

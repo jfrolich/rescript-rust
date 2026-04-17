@@ -592,7 +592,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         let is_comptime_builtin = p.lookahead(|p| {
             p.next(); // skip @
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "buildVariant" | "variantCase"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
                 _ => false,
             }
         });
@@ -4224,7 +4224,7 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
         let is_comptime_builtin = p.lookahead(|p| {
             p.next();
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "buildVariant" | "variantCase"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
                 _ => false,
             }
         });
@@ -6140,6 +6140,20 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             let rec_idx = p.arena_mut().push_expr(rec_expr);
             p.expect(Token::Rparen);
             ExpressionDesc::Pexp_comptime_variant_case(rec_idx)
+        }
+        "buildRecord" => {
+            // @buildRecord(arrayOrInlineForOfRecordFields) — produces a record TYPE
+            let fields_expr = parse_expr(p);
+            let fields_idx = p.arena_mut().push_expr(fields_expr);
+            p.expect(Token::Rparen);
+            ExpressionDesc::Pexp_comptime_build_record(fields_idx)
+        }
+        "recordField" => {
+            // @recordField({name, typ, optional?}) — describes one field
+            let rec_expr = parse_expr(p);
+            let rec_idx = p.arena_mut().push_expr(rec_expr);
+            p.expect(Token::Rparen);
+            ExpressionDesc::Pexp_comptime_record_field(rec_idx)
         }
         _ => {
             p.err(super::diagnostics::DiagnosticCategory::Message(

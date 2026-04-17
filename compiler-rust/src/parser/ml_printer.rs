@@ -2231,6 +2231,12 @@ fn print_expression_inner<W: Write>(
         ExpressionDesc::Pexp_comptime_variant_case(_) => {
             f.string("(* @variantCase(...) *)");
         }
+        ExpressionDesc::Pexp_comptime_build_record(_) => {
+            f.string("(* @buildRecord(...) *)");
+        }
+        ExpressionDesc::Pexp_comptime_record_field(_) => {
+            f.string("(* @recordField(...) *)");
+        }
     }
 }
 

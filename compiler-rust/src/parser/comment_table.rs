@@ -2535,7 +2535,9 @@ fn walk_expression(
                 t.attach_trailing(expr.pexp_loc, rest, arena);
             }
         }
-        ExpressionDesc::Pexp_comptime_variant_case(e) => {
+        ExpressionDesc::Pexp_comptime_variant_case(e)
+        | ExpressionDesc::Pexp_comptime_build_record(e)
+        | ExpressionDesc::Pexp_comptime_record_field(e) => {
             let (leading, trailing) = partition_leading_trailing(comments, expr.pexp_loc, arena);
             t.attach_leading(expr.pexp_loc, leading, arena);
             let inner_expr = arena.get_expr(*e).clone();

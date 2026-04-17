@@ -507,6 +507,14 @@ fn rewrite_expression(
             let new_e = rewrite_expr_idx(*e, arena, let_unwrap_enabled)?;
             ExpressionDesc::Pexp_comptime_variant_case(new_e)
         }
+        ExpressionDesc::Pexp_comptime_build_record(e) => {
+            let new_e = rewrite_expr_idx(*e, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_comptime_build_record(new_e)
+        }
+        ExpressionDesc::Pexp_comptime_record_field(e) => {
+            let new_e = rewrite_expr_idx(*e, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_comptime_record_field(new_e)
+        }
     };
 
     Ok(Expression {
