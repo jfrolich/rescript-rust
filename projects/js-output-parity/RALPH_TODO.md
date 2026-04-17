@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 590 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 67 output diffs
+**Status:** 592 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 65 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **590 / 657**
+- JS snapshot parity: **592 / 657**
 - Compile errors: **0**
-- Output diffs: **67**
+- Output diffs: **65**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,65 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **590 / 657**
+- JS snapshot parity: **592 / 657**
 - Compile errors: **0**
-- Output diffs: **67**
+- Output diffs: **65**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: keep exported bindings materialized across repeated JS-backend
+  simplification when they only collapse into plain aliases after module-field
+  flattening, so `test_simple_ref` keeps OCaml's declaration order instead of
+  dropping `not_real_escape` and reintroducing it as a trailing rebound export
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change stays in `compiler-rust/src/lambda/simplify.rs`
+- OCaml reference:
+  - `compiler/core/lam_pass_remove_alias.ml`, whose simplifier rewrites
+    specific alias-driven uses such as `Pfield` / `Lstringswitch` but does not
+    repeatedly erase already-materialized exported bindings into fresh trailing
+    export rebounds
+  - `compiler/core/lam_compile_main.ml`, where the repeated backend lambda
+    passes run before JS lowering, so the binding shape preserved after one
+    pass must survive the later passes as well
+  - checked-in diagnose dumps generated for `tests/tests/src/test_simple_ref`,
+    especially `test_simple_ref.lambda` and
+    `test_simple_ref.01.initial.jsx`, which show OCaml keeping
+    `let not_real_escape = a;` before `function real_escape` and `let u = h;`
+- Rust change:
+  - added `preserve_exported_simplified_var_alias_binding(...)` in
+    `compiler-rust/src/lambda/simplify.rs` so the first JS-backend simplify
+    pass keeps exported bindings whose original RHS was not already a plain
+    alias even if that pass collapses them to `Lvar(...)`
+  - carried those first-pass exported var aliases forward into the later
+    repeated simplify sweeps with
+    `collect_exported_var_alias_bindings(...)`, preventing the second/third
+    passes from deleting the just-preserved binding and forcing
+    `coerce_toplevel_exports(...)` to recreate it at the end of the module
+  - kept the earlier `gpr_5280` stringswitch cleanup intact; the new alias
+    preservation only applies to exported plain-var aliases that survive the
+    first backend pass
+- Verified focused guards for this slice:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh test_simple_ref --diff`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_5280_optimize_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_simple_ref.res` now matches its checked-in `.mjs`
+    snapshot exactly; Rust keeps `let not_real_escape = a;` in OCaml's
+    original declaration slot instead of recreating it after `let u = h;`
+  - earlier guard `tests/tests/src/gpr_5280_optimize_test.res` stayed exact
+    after the same simplify change, confirming the exported-alias preservation
+    did not reopen the stringswitch fix
+  - broader exact guard `tests/tests/src/ExternalShadow.res` also remained
+    exact after the same pass change
+  - `test_simple_ref` and `gpr_5280_optimize_test` are both gone from
+    `temp/rust-parity/diffs`; the current smallest remaining diffs now start
+    at `gpr_3770_test` and `update_record_test` (20 lines each)
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **590 / 657** -> **592 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **67** -> **65** (**-2**)
 
 Latest iteration on **2026-04-17**:
 
